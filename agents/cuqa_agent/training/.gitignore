@@ -2,3 +2,8 @@
 # Rebuild with fetch_mlcq_sources.py and build_dataset.py.
 data/
 __pycache__/
+
+# The DACOS method files are about 19 MB each; rebuild them with
+# export_preprocessed.py (the compressed source tables are committed).
+dataset/preprocessed/dacos/complex_method.csv
+dataset/preprocessed/dacos/long_parameter_list.csv

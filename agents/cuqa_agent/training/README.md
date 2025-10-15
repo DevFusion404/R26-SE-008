@@ -86,6 +86,7 @@ averages). Writes `results/combined_detector.md` and `.json`.
 | `build_dacos_dataset.py` | Builds the DACOS feature tables from the downloaded dumps |
 | `train_dacos.py` | DACOS model comparison, training, evaluation, export |
 | `evaluate_detectors.py` | The whole Java detector per mode on both test sets |
+| `export_preprocessed.py` | Writes `dataset/preprocessed/`: one CSV per smell for both models, with split and label (see its `DATA_DICTIONARY.md`) |
 | `dataset/dacos_*.csv.gz` | DACOS samples with features and labelled source |
 | `results/dacos/` | DACOS metrics, tables and figures (`python training/train_dacos.py --plots-only` redraws the figures without training) |
 | `results/combined_detector.md`, `combined_*.png` | Whole-detector results and figures per mode |
