@@ -1,0 +1,24 @@
+# ============================================================
+# R26-SE-008 — Python Requirements
+# CUQA Agent (Code Understanding & Quality Assessment)
+# ============================================================
+
+# ── Web Framework ────────────────────────────────────────────
+fastapi==0.115.6
+uvicorn[standard]==0.32.1
+
+# ── HTTP (GitHub repo download) ──────────────────────────────
+requests==2.32.3
+
+# ── Java AST Parsing ─────────────────────────────────────────
+javalang==0.13.0
+
+# ── Static Analysis (Python code smells) ─────────────────────
+pyflakes==3.2.0
+
+# ── File handling ─────────────────────────────────────────────
+python-multipart==0.0.18        # FastAPI file upload support
+
+# ── Utilities ────────────────────────────────────────────────
+pydantic==2.10.4
+typing-extensions==4.12.2
