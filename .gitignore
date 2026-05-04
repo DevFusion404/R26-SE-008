@@ -205,3 +205,46 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# ── Node.js / Frontend ────────────────────────────────────────
+node_modules/
+frontend/node_modules/
+
+# Vite build output & cache
+frontend/dist/
+frontend/.vite/
+dist/
+.vite/
+
+# npm / yarn / pnpm lock files (not needed for a research project)
+frontend/package-lock.json
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+
+# Vite temp & log files
+*.local
+vite.config.js.timestamp-*
+
+# ── Runtime-generated workspaces (CUQA Agent temp dirs) ──────
+# Extracted ZIP / cloned repos land in the OS temp dir, but
+# guard against any local temp folder accidentally committed.
+tmp/
+temp/
+cuqa_tmp/
+
+# ── OS artefacts ──────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── Editor artefacts ─────────────────────────────────────────
+.vscode/settings.json
+.idea/
+*.swp
+*.swo
+
+# ── Test artefacts ────────────────────────────────────────────
+htmlcov/
+.coverage
+coverage.xml

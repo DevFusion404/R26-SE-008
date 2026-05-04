@@ -1,0 +1,106 @@
+/* ================================================================
+   theme.css — R26-SE-008 Global Design Tokens
+   Shared across all agent dashboards in the project.
+   Import this file first in any frontend that is part of this pipeline.
+   ================================================================ */
+
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap');
+
+:root {
+  /* ── Base colours ──────────────────────────────────────── */
+  --bg-root:        #080d14;
+  --bg-base:        #0a0f1a;
+  --bg-sidebar:     #0c1220;
+  --bg-surface:     #0f1828;
+  --bg-card:        #111f30;
+  --bg-elevated:    #152234;
+  --bg-hover:       #1a2a3d;
+  --bg-input:       #0e1c2c;
+  --bg-overlay:     rgba(8, 13, 20, 0.85);
+
+  /* ── Accent — cyan teal (CUQA / primary) ──────────────── */
+  --accent:         #00d4e8;
+  --accent-dim:     #008fa0;
+  --accent-muted:   rgba(0, 212, 232, 0.12);
+  --accent-glow:    0 0 24px rgba(0, 212, 232, 0.25);
+  --accent-border:  rgba(0, 212, 232, 0.35);
+
+  /* ── Agent accent colours ──────────────────────────────── */
+  --color-cuqa:         #00d4e8;   /* CUQA — cyan */
+  --color-rdp:          #8b5cf6;   /* RDP — purple */
+  --color-transform:    #f59e0b;   /* Transformation — amber */
+  --color-orchestrate:  #10b981;   /* Orchestration — emerald */
+
+  /* ── Semantic colours ──────────────────────────────────── */
+  --color-critical: #ef4444;
+  --color-high:     #f97316;
+  --color-medium:   #eab308;
+  --color-low:      #3b82f6;
+  --color-ok:       #22c55e;
+  --color-info:     #00d4e8;
+
+  /* ── Text ──────────────────────────────────────────────── */
+  --text-primary:   #e2eaf4;
+  --text-secondary: #7a8fa8;
+  --text-muted:     #3d5166;
+  --text-accent:    #00d4e8;
+  --text-code:      #a5d6ff;
+
+  /* ── Borders ───────────────────────────────────────────── */
+  --border:         #1a2d42;
+  --border-light:   #243851;
+  --border-accent:  rgba(0, 212, 232, 0.4);
+
+  /* ── Shadows ───────────────────────────────────────────── */
+  --shadow-sm:   0 1px 4px rgba(0, 0, 0, 0.5);
+  --shadow-md:   0 4px 20px rgba(0, 0, 0, 0.6);
+  --shadow-lg:   0 8px 40px rgba(0, 0, 0, 0.7);
+  --shadow-card: 0 2px 12px rgba(0, 0, 0, 0.4);
+
+  /* ── Typography ────────────────────────────────────────── */
+  --font-body: 'Inter', system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', 'Fira Code', monospace;
+
+  --text-xs:   11px;
+  --text-sm:   12px;
+  --text-base: 13px;
+  --text-md:   14px;
+  --text-lg:   16px;
+  --text-xl:   20px;
+  --text-2xl:  24px;
+  --text-3xl:  32px;
+  --text-4xl:  40px;
+
+  /* ── Radii ─────────────────────────────────────────────── */
+  --r-xs:  4px;
+  --r-sm:  6px;
+  --r-md:  10px;
+  --r-lg:  14px;
+  --r-xl:  20px;
+  --r-full: 9999px;
+
+  /* ── Spacing ───────────────────────────────────────────── */
+  --sp-1:  4px;
+  --sp-2:  8px;
+  --sp-3:  12px;
+  --sp-4:  16px;
+  --sp-5:  20px;
+  --sp-6:  24px;
+  --sp-8:  32px;
+  --sp-10: 40px;
+  --sp-12: 48px;
+
+  /* ── Layout ────────────────────────────────────────────── */
+  --sidebar-width:     200px;
+  --topbar-height:     52px;
+
+  /* ── Transitions ───────────────────────────────────────── */
+  --transition-fast:   0.12s ease;
+  --transition-base:   0.2s ease;
+  --transition-slow:   0.35s ease;
+
+  /* ── Gradients ─────────────────────────────────────────── */
+  --gradient-accent: linear-gradient(135deg, #00d4e8 0%, #0066ff 100%);
+  --gradient-card:   linear-gradient(160deg, #111f30 0%, #0a1520 100%);
+  --gradient-hero:   linear-gradient(160deg, #0a0f1a 0%, #0a1520 60%, #071420 100%);
+}
