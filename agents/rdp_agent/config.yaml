@@ -1,0 +1,23 @@
+# RDP Agent Configuration
+# =======================
+# Adjust weights, severity ordering, and thresholds without code changes.
+
+# Scoring weights for candidate selection.
+# Formula: score = complexity_weight * (4 - complexity) + risk_weight * (4 - risk) + impact_weight * impact
+# The impact_prediction_weight controls how much the predicted quality-metric
+# impact bonus/penalty adjusts the final score.
+weights:
+  complexity_weight: 0.2
+  risk_weight: 0.4
+  impact_weight: 0.4
+  impact_prediction_weight: 0.3
+
+# Severity priority (higher number = higher priority during sequencing).
+severity_order:
+  critical: 4
+  high: 3
+  medium: 2
+  low: 1
+
+# Logging level: DEBUG, INFO, WARNING, ERROR, CRITICAL
+log_level: INFO
