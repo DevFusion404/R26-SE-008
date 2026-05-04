@@ -12,13 +12,17 @@ Usage:
 
 import json
 import os
+import sys
 
 from flask import Flask, render_template, request, jsonify
 
-from rdp_agent.models import QualityReport
-from rdp_agent.pipeline import RDPAgent
-from rdp_agent.config import load_config, setup_logging
-from rdp_agent.dependency_analyzer import SEVERITY_ORDER
+# Add parent directory to path so we can import src as a package
+sys.path.insert(0, os.path.dirname(__file__))
+
+from src.models import QualityReport
+from src.pipeline import RDPAgent
+from src.config import load_config, setup_logging
+from src.dependency_analyzer import SEVERITY_ORDER
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 16 * 1024 * 1024  # 16 MB max upload
