@@ -16,13 +16,13 @@ import sys
 
 from flask import Flask, render_template, request, jsonify
 
-# Add src directory to path
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
+# Add current directory to path so we can import src package
+sys.path.insert(0, os.path.dirname(__file__))
 
-from models import QualityReport
-from pipeline import RDPAgent
-from config import load_config, setup_logging
-from dependency_analyzer import SEVERITY_ORDER
+from src.models import QualityReport
+from src.pipeline import RDPAgent
+from src.config import load_config, setup_logging
+from src.dependency_analyzer import SEVERITY_ORDER
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 16 * 1024 * 1024  # 16 MB max upload
