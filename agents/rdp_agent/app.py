@@ -16,7 +16,7 @@ import sys
 
 from flask import Flask, render_template, request, jsonify
 
-# Add parent directory to path so we can import src as a package
+# Add current directory to path so we can import src package
 sys.path.insert(0, os.path.dirname(__file__))
 
 from src.models import QualityReport
