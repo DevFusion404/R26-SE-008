@@ -1,0 +1,50 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rdp-agent"
+version = "1.0.0"
+description = "Refactoring Decision & Planning Agent - A modular Python agent for analyzing code quality and generating refactoring plans"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+authors = [
+    {name = "IT4010 Team", email = "team@example.com"}
+]
+
+dependencies = [
+    "flask>=2.0.0",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=3.0",
+    "black>=22.0",
+    "flake8>=4.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/example/rdp-agent"
+Documentation = "https://example.com/docs/rdp-agent"
+
+[tool.setuptools]
+packages = ["rdp_agent"]
+
+[tool.setuptools.package-data]
+rdp_agent = ["templates/*", "static/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-v --cov=rdp_agent --cov-report=html"
+
+[tool.black]
+line-length = 100
+target-version = ['py310']
+
+[tool.isort]
+profile = "black"
+line_length = 100
