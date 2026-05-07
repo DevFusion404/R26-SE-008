@@ -115,6 +115,11 @@
                     <span class="ps-label">Impact Prediction</span>
                 </button>
                 <div class="pipeline-connector"></div>
+                <button class="pipeline-step" data-step="ml" id="ps-ml">
+                    <span class="ps-number">3c</span>
+                    <span class="ps-label">ML Scoring</span>
+                </button>
+                <div class="pipeline-connector"></div>
                 <button class="pipeline-step" data-step="dependencies" id="ps-dependencies">
                     <span class="ps-number">5-6</span>
                     <span class="ps-label">Dependency Analysis</span>
@@ -131,6 +136,7 @@
             <div class="pipeline-panel" id="panel-interpreter" hidden></div>
             <div class="pipeline-panel" id="panel-candidates" hidden></div>
             <div class="pipeline-panel" id="panel-impact" hidden></div>
+            <div class="pipeline-panel" id="panel-ml" hidden></div>
             <div class="pipeline-panel" id="panel-dependencies" hidden></div>
             <div class="pipeline-panel" id="panel-plan" hidden></div>
         </section>
@@ -440,6 +446,56 @@
             }
             impactHtml += '</div>';
             document.getElementById('panel-impact').innerHTML = impactHtml;
+
+            // === Panel 3c: ML Scoring ===
+            let mlHtml = `<div class="trace-section">
+                <h3 class="trace-title">Step 3c — ML Scoring (CodeBERT)</h3>
+                <p class="trace-desc">Uses CodeBERT embeddings to score candidate refactorings based on contextual suitability, quality improvement, and behavioral risk.</p>`;
+            if (trace.ml_prediction && trace.ml_prediction.length > 0) {
+                trace.ml_prediction.forEach(ml => {
+                    mlHtml += `
+                        <div class="trace-smell-block">
+                            <h4>
+                                <span class="severity-badge severity-medium">${ml.smell_type}</span>
+                                <code>${ml.smell_id}</code>
+                                — ML Available: ${ml.ml_available ? '<span class="status-pass">YES</span>' : '<span class="status-fail">NO</span>'}
+                            </h4>`;
+                    if (ml.ml_available && ml.predictions && ml.predictions.length > 0) {
+                        mlHtml += `
+                            <div class="trace-table-wrap">
+                                <table class="trace-table">
+                                    <thead>
+                                        <tr>
+                                            <th>Refactoring</th>
+                                            <th>Contextual Suitability</th>
+                                            <th>Quality Improvement</th>
+                                            <th>Behavioral Risk</th>
+                                            <th>Confidence</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        ${ml.predictions.map(p => `
+                                            <tr>
+                                                <td><strong>${p.refactoring}</strong></td>
+                                                <td><span class="metric-badge metric-good">${(p.contextual_suitability * 100).toFixed(1)}%</span></td>
+                                                <td><span class="metric-badge metric-good">${(p.quality_improvement * 100).toFixed(1)}%</span></td>
+                                                <td><span class="metric-badge ${p.behavioral_risk < 0.5 ? 'metric-good' : 'metric-bad'}">${(p.behavioral_risk * 100).toFixed(1)}%</span></td>
+                                                <td><span class="metric-badge metric-info">${(p.confidence * 100).toFixed(1)}%</span></td>
+                                            </tr>
+                                        `).join('')}
+                                    </tbody>
+                                </table>
+                            </div>`;
+                    } else {
+                        mlHtml += `<p class="trace-info">ML scoring not available or disabled for this smell.</p>`;
+                    }
+                    mlHtml += `</div>`;
+                });
+            } else {
+                mlHtml += `<p class="trace-info">No ML prediction data available.</p>`;
+            }
+            mlHtml += '</div>';
+            document.getElementById('panel-ml').innerHTML = mlHtml;
 
             // === Panel 5-6: Dependency Analysis ===
             const dep = trace.dependency_analysis;

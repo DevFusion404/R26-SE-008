@@ -33,6 +33,11 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "medium": 2,
         "low": 1,
     },
+    "ml_scoring": {
+        "enabled": True,
+        "model_name": "microsoft/codebert-base",
+        "ml_prediction_weight": 0.25,
+    },
     "log_level": "INFO",
 }
 
@@ -110,6 +115,11 @@ def load_config(config_path: Optional[str] = None) -> Dict[str, Any]:
             merged["severity_order"] = {
                 **defaults["severity_order"],
                 **user_config["severity_order"],
+            }
+        if "ml_scoring" in user_config:
+            merged["ml_scoring"] = {
+                **defaults["ml_scoring"],
+                **user_config["ml_scoring"],
             }
         return merged
 

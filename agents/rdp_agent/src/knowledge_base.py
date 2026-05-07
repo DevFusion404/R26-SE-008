@@ -226,6 +226,61 @@ DEFAULT_CATALOG: Dict[str, List[Dict[str, Any]]] = {
             "preconditions": [],
         },
     ],
+    "Magic Numbers": [
+        {
+            "name": "Extract Method",
+            "complexity": "low",
+            "risk": "low",
+            "impact": "medium",
+            "preconditions": ["has_magic_numbers"],
+        },
+        {
+            "name": "Introduce Constant",
+            "complexity": "low",
+            "risk": "low",
+            "impact": "high",
+            "preconditions": ["has_magic_numbers"],
+        },
+    ],
+    "Inappropriate Intimacy": [
+        {
+            "name": "Move Method",
+            "complexity": "medium",
+            "risk": "medium",
+            "impact": "high",
+            "preconditions": ["has_external_field_access"],
+        },
+        {
+            "name": "Extract Method",
+            "complexity": "low",
+            "risk": "low",
+            "impact": "medium",
+            "preconditions": ["has_code_block"],
+        },
+        {
+            "name": "Introduce Facade",
+            "complexity": "high",
+            "risk": "medium",
+            "impact": "high",
+            "preconditions": ["has_multiple_dependencies"],
+        },
+    ],
+    "Dead Code": [
+        {
+            "name": "Remove Dead Code",
+            "complexity": "low",
+            "risk": "low",
+            "impact": "low",
+            "preconditions": [],
+        },
+        {
+            "name": "Inline Class",
+            "complexity": "low",
+            "risk": "low",
+            "impact": "low",
+            "preconditions": ["has_thin_class"],
+        },
+    ],
 }
 
 

@@ -159,6 +159,20 @@ DEFAULT_PREDICTION_RULES: Dict[str, Dict[str, float]] = {
         "maintainability_gain": 0.05,
         "base_risk": 0.02,
     },
+    "Introduce Constant": {
+        "complexity_reduction_pct": 0.05,
+        "coupling_delta": 0.0,
+        "cohesion_delta": 1.0,
+        "maintainability_gain": 0.20,
+        "base_risk": 0.05,
+    },
+    "Introduce Facade": {
+        "complexity_reduction_pct": 0.15,
+        "coupling_delta": -5.0,
+        "cohesion_delta": 2.0,
+        "maintainability_gain": 0.25,
+        "base_risk": 0.20,
+    },
 }
 
 

@@ -231,6 +231,64 @@ class ImpactPrediction:
 
 
 # ---------------------------------------------------------------------------
+# MLPrediction
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class MLPrediction:
+    """ML-based prediction for a refactoring candidate.
+
+    Produced by the CodeBERT ML Scorer module as an additional
+    signal for the Decision Engine.  The scorer encodes the smell
+    context and refactoring candidate description into CodeBERT
+    embeddings and derives three scores plus a confidence value.
+
+    Attributes:
+        refactoring: Name of the refactoring technique.
+        smell_id: Identifier of the code smell being addressed.
+        contextual_suitability: How well the refactoring fits the
+            code context (0–1, higher is better).
+        quality_improvement: Predicted quality gain (0–1).
+        behavioral_risk: Predicted regression risk (0–1, lower is safer).
+        confidence: Model confidence in its predictions (0–1).
+        embedding_norm: L2 norm of the combined embedding (diagnostic).
+    """
+
+    refactoring: str
+    smell_id: str
+    contextual_suitability: float
+    quality_improvement: float
+    behavioral_risk: float
+    confidence: float
+    embedding_norm: float
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Serialize to a plain dictionary."""
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "MLPrediction":
+        """Deserialize from a dictionary.
+
+        Args:
+            data: Dictionary with MLPrediction fields.
+
+        Returns:
+            A new ``MLPrediction`` instance.
+        """
+        return cls(
+            refactoring=data["refactoring"],
+            smell_id=data["smell_id"],
+            contextual_suitability=data.get("contextual_suitability", 0.5),
+            quality_improvement=data.get("quality_improvement", 0.5),
+            behavioral_risk=data.get("behavioral_risk", 0.5),
+            confidence=data.get("confidence", 0.0),
+            embedding_norm=data.get("embedding_norm", 0.0),
+        )
+
+
+# ---------------------------------------------------------------------------
 # RefactoringPlan
 # ---------------------------------------------------------------------------
 

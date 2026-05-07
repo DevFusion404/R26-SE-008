@@ -27,7 +27,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, Optional
 
-from .models import CodeSmell, ImpactPrediction
+from .models import CodeSmell, ImpactPrediction, MLPrediction
 
 logger = logging.getLogger("rdp_agent.decision_engine")
 
@@ -172,4 +172,70 @@ class DecisionEngine:
             final_score,
         )
         return final_score
+
+    # ----- ML-aware scoring (CodeBERT integration) -----
+
+    @property
+    def ml_prediction_weight(self) -> float:
+        """Weight applied to the ML prediction bonus (default 0.25)."""
+        return self.weights.get("ml_prediction_weight", 0.25)
+
+    def score_candidate_with_ml(
+        self,
+        candidate: Dict[str, Any],
+        smell: CodeSmell,
+        impact: ImpactPrediction,
+        ml_prediction: MLPrediction,
+    ) -> float:
+        """Score a candidate using catalog ratings, predicted impact,
+        **and** CodeBERT ML predictions.
+
+        The final score is:
+
+            impact_score + ml_prediction_weight × ml_bonus
+
+        where ``ml_bonus`` aggregates the ML scorer's contextual
+        suitability, quality improvement, and behavioral risk, scaled
+        by the model's own confidence estimate.
+
+        Args:
+            candidate: Refactoring candidate dictionary.
+            smell: The code smell being addressed.
+            impact: Predicted impact from the :class:`ImpactPredictor`.
+            ml_prediction: ML-based prediction from the :class:`MLScorer`.
+
+        Returns:
+            Numeric score (higher is better).
+        """
+        # Start with the impact-aware score (base + impact bonus)
+        impact_score = self.score_candidate_with_impact(
+            candidate, smell, impact
+        )
+
+        # --- ML bonus ---
+        # Combine the three ML signals, weighted by confidence.
+        # contextual_suitability and quality_improvement are positive
+        # contributors; behavioral_risk is a penalty.
+        ml_raw = (
+            ml_prediction.contextual_suitability
+            + ml_prediction.quality_improvement
+            - ml_prediction.behavioral_risk
+        )
+        # Scale by model confidence (0 confidence → no ML effect)
+        ml_bonus = ml_raw * ml_prediction.confidence
+
+        final_score = impact_score + self.ml_prediction_weight * ml_bonus
+
+        logger.debug(
+            "ML-adjusted score for '%s': impact_score=%.2f "
+            "ml_raw=%.3f confidence=%.3f ml_bonus=%.3f → %.2f",
+            candidate.get("name", "?"),
+            impact_score,
+            ml_raw,
+            ml_prediction.confidence,
+            ml_bonus,
+            final_score,
+        )
+        return final_score
+
 
