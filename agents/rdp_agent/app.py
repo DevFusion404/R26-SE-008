@@ -69,6 +69,7 @@ def generate():
         agent = RDPAgent(
             weights=config.get("weights", {}),
             severity_order=config.get("severity_order", SEVERITY_ORDER),
+            ml_config=config.get("ml_scoring", {}),
         )
         result = agent.process_report_with_trace(report)
 
