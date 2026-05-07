@@ -6,11 +6,14 @@
 # Formula: score = complexity_weight * (4 - complexity) + risk_weight * (4 - risk) + impact_weight * impact
 # The impact_prediction_weight controls how much the predicted quality-metric
 # impact bonus/penalty adjusts the final score.
+# The ml_prediction_weight controls how much the CodeBERT ML scoring
+# bonus/penalty adjusts the final score.
 weights:
   complexity_weight: 0.2
   risk_weight: 0.4
   impact_weight: 0.4
   impact_prediction_weight: 0.3
+  ml_prediction_weight: 0.25
 
 # Severity priority (higher number = higher priority during sequencing).
 severity_order:
@@ -18,6 +21,13 @@ severity_order:
   high: 3
   medium: 2
   low: 1
+
+# ML-based scoring using CodeBERT embeddings.
+# Set enabled: false to disable ML scoring and use heuristics only.
+ml_scoring:
+  enabled: true
+  model_name: "microsoft/codebert-base"
+  ml_prediction_weight: 0.25
 
 # Logging level: DEBUG, INFO, WARNING, ERROR, CRITICAL
 log_level: INFO
