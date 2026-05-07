@@ -10,6 +10,7 @@ The pipeline follows the 8-step agent workflow:
     2. Map smells → techniques → :class:`RefactoringKnowledgeBase`
     3. Generate candidates → :class:`CandidateGenerator`
     3b. Predict impact → :class:`ImpactPredictor`
+    3c. ML scoring → :class:`MLScorer` (CodeBERT)
     4. Evaluate strategies → :class:`DecisionEngine`
     5. Analyze dependencies → :class:`DependencyAnalyzer`
     6. Determine order → :class:`DependencyAnalyzer`
@@ -30,6 +31,7 @@ from .candidate_generator import CandidateGenerator
 from .dependency_analyzer import DependencyAnalyzer, SEVERITY_ORDER
 from .plan_generator import PlanGenerator
 from .impact_predictor import ImpactPredictor
+from .ml_scorer import MLScorer
 from .config import load_config, setup_logging
 
 logger = logging.getLogger("rdp_agent.pipeline")
@@ -56,6 +58,10 @@ class RDPAgent:
         plan_generator: Plan generator (auto-built if not provided).
         impact_predictor: Impact predictor for estimating quality-metric
                           changes (auto-built if not provided).
+        ml_scorer: CodeBERT-based ML scorer for embedding-based prediction
+                   (auto-built if not provided and ML is enabled).
+        ml_config: ML scoring configuration dict with ``enabled``,
+                   ``model_name``, and ``ml_prediction_weight`` keys.
     """
 
     def __init__(
@@ -67,16 +73,31 @@ class RDPAgent:
         dependency_analyzer: Optional[DependencyAnalyzer] = None,
         plan_generator: Optional[PlanGenerator] = None,
         impact_predictor: Optional[ImpactPredictor] = None,
+        ml_scorer: Optional[MLScorer] = None,
         severity_order: Optional[Dict[str, int]] = None,
         weights: Optional[Dict[str, float]] = None,
+        ml_config: Optional[Dict[str, Any]] = None,
     ) -> None:
         # Core components — use defaults if not provided
         self.knowledge_base = knowledge_base or RefactoringKnowledgeBase()
         self.interpreter = interpreter or ProblemInterpreter()
         self.engine = engine or DecisionEngine(weights=weights)
 
-        # Impact prediction module (new step 3b)
+        # Impact prediction module (step 3b)
         self.impact_predictor = impact_predictor or ImpactPredictor()
+
+        # ML scoring module (step 3c — CodeBERT)
+        self._ml_config = ml_config or {}
+        ml_enabled = self._ml_config.get("enabled", True)
+        if ml_scorer is not None:
+            self.ml_scorer = ml_scorer
+        elif ml_enabled:
+            model_name = self._ml_config.get(
+                "model_name", "microsoft/codebert-base"
+            )
+            self.ml_scorer = MLScorer(model_name=model_name)
+        else:
+            self.ml_scorer = None
 
         # Composite components — auto-wire from core if not provided
         self.candidate_generator = candidate_generator or CandidateGenerator(
@@ -141,9 +162,16 @@ class RDPAgent:
             "problem_interpretation": [],
             "candidate_generation": [],
             "impact_prediction": [],
+            "ml_prediction": [],
             "dependency_analysis": {},
             "plan_generation": {},
         }
+
+        # Check ML scorer availability once
+        ml_available = (
+            self.ml_scorer is not None
+            and self.ml_scorer.is_available()
+        )
 
         # ----- Steps 1-4: For each smell, interpret + generate + predict + decide -----
         selections: List[Tuple[CodeSmell, Dict[str, Any]]] = []
@@ -197,7 +225,24 @@ class RDPAgent:
 
             trace["impact_prediction"].append(impact_trace)
 
-            # ----- Step 4: Score candidates using impact-aware scoring -----
+            # ----- Step 3c: ML scoring (CodeBERT) for viable candidates -----
+            ml_trace: Dict[str, Any] = {
+                "smell_id": smell.id,
+                "smell_type": smell.type,
+                "ml_available": ml_available,
+                "predictions": [],
+            }
+
+            ml_map: Dict[str, Any] = {}  # refactoring name → MLPrediction
+            if ml_available:
+                for c in viable_candidates:
+                    ml_pred = self.ml_scorer.predict(smell, c)
+                    ml_map[c["name"]] = ml_pred
+                    ml_trace["predictions"].append(ml_pred.to_dict())
+
+            trace["ml_prediction"].append(ml_trace)
+
+            # ----- Step 4: Score candidates using best available scoring -----
             for cd in candidate_details:
                 if cd["preconditions_met"]:
                     # Find the matching candidate dict for scoring
@@ -206,29 +251,49 @@ class RDPAgent:
                         None,
                     )
                     if matching_candidate and cd["name"] in impact_map:
-                        cd["score"] = round(
-                            self.engine.score_candidate_with_impact(
-                                matching_candidate,
-                                smell,
-                                impact_map[cd["name"]],
-                            ),
-                            2,
-                        )
+                        # Use ML-enhanced scoring if available
+                        if cd["name"] in ml_map and ml_map[cd["name"]].confidence > 0:
+                            cd["score"] = round(
+                                self.engine.score_candidate_with_ml(
+                                    matching_candidate,
+                                    smell,
+                                    impact_map[cd["name"]],
+                                    ml_map[cd["name"]],
+                                ),
+                                2,
+                            )
+                            cd["scoring_method"] = "ml_enhanced"
+                        else:
+                            cd["score"] = round(
+                                self.engine.score_candidate_with_impact(
+                                    matching_candidate,
+                                    smell,
+                                    impact_map[cd["name"]],
+                                ),
+                                2,
+                            )
+                            cd["scoring_method"] = "impact_aware"
                     else:
                         cd["score"] = round(
                             self.engine.score_candidate(matching_candidate or {}, smell),
                             2,
                         )
+                        cd["scoring_method"] = "base"
                 else:
                     cd["score"] = None
+                    cd["scoring_method"] = None
 
             smell_trace["candidates"] = candidate_details
 
-            # Select best using impact-aware scoring
+            # Select best using best available scoring
             if viable_candidates:
                 scored = []
                 for vc in viable_candidates:
-                    if vc["name"] in impact_map:
+                    if vc["name"] in impact_map and vc["name"] in ml_map and ml_map[vc["name"]].confidence > 0:
+                        s = self.engine.score_candidate_with_ml(
+                            vc, smell, impact_map[vc["name"]], ml_map[vc["name"]]
+                        )
+                    elif vc["name"] in impact_map:
                         s = self.engine.score_candidate_with_impact(
                             vc, smell, impact_map[vc["name"]]
                         )
@@ -240,9 +305,14 @@ class RDPAgent:
                 selections.append((smell, best))
                 smell_trace["selected"] = best["name"]
                 smell_trace["selected_score"] = round(best_score, 2)
+                smell_trace["scoring_method"] = (
+                    "ml_enhanced" if best["name"] in ml_map and ml_map[best["name"]].confidence > 0
+                    else "impact_aware"
+                )
             else:
                 smell_trace["selected"] = None
                 smell_trace["selected_score"] = None
+                smell_trace["scoring_method"] = None
 
             # Record precondition trace as Step 1
             trace["problem_interpretation"].append(
@@ -336,6 +406,7 @@ def generate_plan(
       2. Load configuration (optional).
       3. For each smell, select the best refactoring candidate.
       3b. Predict impact of each candidate on quality metrics.
+      3c. ML scoring via CodeBERT embeddings.
       4. Sequence the selected refactorings respecting dependencies.
       5. Build and save the ``RefactoringPlan`` as JSON.
 
@@ -363,6 +434,7 @@ def generate_plan(
     agent = RDPAgent(
         weights=config.get("weights", {}),
         severity_order=config.get("severity_order", SEVERITY_ORDER),
+        ml_config=config.get("ml_scoring", {}),
     )
     plan = agent.process_report(report)
 
@@ -398,8 +470,8 @@ def generate_plan_from_dict(
     agent = RDPAgent(
         weights=config.get("weights", {}),
         severity_order=config.get("severity_order", SEVERITY_ORDER),
+        ml_config=config.get("ml_scoring", {}),
     )
     plan = agent.process_report(report)
 
     return plan.to_dict()
-
