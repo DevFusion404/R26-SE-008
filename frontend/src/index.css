@@ -9,6 +9,7 @@
 
 html, body, #root {
   height: 100%;
+  width: 100%;  /* ← Add this line */
   background: var(--bg-root);
   color: var(--text-primary);
   font-family: var(--font-body);
@@ -729,15 +730,12 @@ body {
 }
 
 #root {
-  width: 1126px;
-  max-width: 100%;
-  margin: 0 auto;
-  text-align: center;
-  border-inline: 1px solid var(--border);
-  min-height: 100svh;
-  display: flex;
-  flex-direction: column;
+  width: 100vw;
+  height: 100vh;
+  margin: 0;
+  padding: 0;
   box-sizing: border-box;
+  display: contents;
 }
 
 h1,
