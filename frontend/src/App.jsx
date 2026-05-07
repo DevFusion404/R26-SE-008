@@ -10,6 +10,7 @@ import Overview        from './pages/Overview.jsx';
 import Dashboard       from './pages/Dashboard.jsx';
 import RepositoryInput from './pages/RepositoryInput.jsx';
 import CUQAAgentPage   from './pages/CUQAAgentPage.jsx';
+import RDPAgentPage    from './pages/RDPAgentPage.jsx';
 import Reports         from './pages/Reports.jsx';
 import Evaluation      from './pages/Evaluation.jsx';
 import Settings        from './pages/Settings.jsx';
@@ -105,6 +106,7 @@ export default function App() {
       case 'dashboard':   return <Dashboard />;
       case 'repository':  return <RepositoryInput onLoaded={handleRepoLoaded} />;
       case 'cuqa':        return <CUQAAgentPage repoLoaded={repoLoaded} repoMeta={repoMeta} />;
+      case 'rdp':         return <RDPAgentPage repoLoaded={repoLoaded} repoMeta={repoMeta} />;
       case 'reports':     return <Reports />;
       case 'evaluation':  return <Evaluation />;
       case 'settings':    return <Settings />;

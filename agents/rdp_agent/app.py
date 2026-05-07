@@ -15,6 +15,7 @@ import os
 import sys
 
 from flask import Flask, render_template, request, jsonify
+from flask_cors import CORS
 
 # Add current directory to path so we can import src package
 sys.path.insert(0, os.path.dirname(__file__))
@@ -26,6 +27,13 @@ from src.dependency_analyzer import SEVERITY_ORDER
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 16 * 1024 * 1024  # 16 MB max upload
+
+# Enable CORS for frontend communication
+CORS(app, resources={
+    r"/generate": {"origins": ["http://localhost:5173", "http://localhost:3000"]},
+    r"/health": {"origins": ["http://localhost:5173", "http://localhost:3000"]},
+    r"/config": {"origins": ["http://localhost:5173", "http://localhost:3000"]},
+})
 
 
 @app.route("/")
