@@ -44,6 +44,7 @@ from .models import (
     RefactoringStep,
     RefactoringPlan,
     ImpactPrediction,
+    MLPrediction,
 )
 
 # --- Knowledge Base ---
@@ -64,6 +65,9 @@ from .candidate_generator import CandidateGenerator
 
 # --- Impact Predictor ---
 from .impact_predictor import ImpactPredictor, DEFAULT_PREDICTION_RULES
+
+# --- ML Scorer (CodeBERT) ---
+from .ml_scorer import MLScorer
 
 # --- Dependency Analyzer ---
 from .dependency_analyzer import DependencyAnalyzer, SEVERITY_ORDER
@@ -120,12 +124,14 @@ __all__ = [
     "RefactoringStep",
     "RefactoringPlan",
     "ImpactPrediction",
+    "MLPrediction",
     # Components
     "RefactoringKnowledgeBase",
     "ProblemInterpreter",
     "DecisionEngine",
     "CandidateGenerator",
     "ImpactPredictor",
+    "MLScorer",
     "DependencyAnalyzer",
     "PlanGenerator",
     # Pipeline
