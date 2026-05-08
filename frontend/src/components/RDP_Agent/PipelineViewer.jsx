@@ -145,9 +145,9 @@ export default function PipelineViewer({ trace, id = 'pipeline-section' }) {
     if (!trace.candidate_generation || trace.candidate_generation.length === 0) {
       return (
         <div className="trace-section">
-          <h4 className="trace-subtitle">Candidate Generation & Scoring</h4>
+          <h4 className="trace-subtitle">Candidate Generation</h4>
           <p style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>
-            Retrieves candidates, filters by preconditions, scores using weighted formula, and selects best.
+            Retrieves candidates from the catalog and filters by preconditions. Scoring happens in the next stages.
           </p>
           <div style={{ fontSize: '12px', color: 'var(--text-secondary)', fontStyle: 'italic' }}>
             No candidate generation data available
@@ -158,9 +158,9 @@ export default function PipelineViewer({ trace, id = 'pipeline-section' }) {
 
     return (
       <div className="trace-section">
-        <h4 className="trace-subtitle">Candidate Generation & Scoring</h4>
+        <h4 className="trace-subtitle">Candidate Generation</h4>
         <p style={{ fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '12px' }}>
-          Retrieves candidates, filters by preconditions, scores using weighted formula, and selects best.
+          Retrieves candidates from the catalog and filters by preconditions. Scoring happens in the next stages.
         </p>
         <div style={{ display: 'grid', gap: '12px' }}>
           {trace.candidate_generation.map((cg, idx) => (
@@ -173,43 +173,76 @@ export default function PipelineViewer({ trace, id = 'pipeline-section' }) {
                 borderLeft: '3px solid rgba(139,92,246,0.3)',
               }}
             >
-              <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px', alignItems: 'center' }}>
-                <div style={{ fontSize: '12px', fontWeight: '600' }}>
-                  {cg.smell_type || cg.smell_id || `Smell ${idx}`}
-                </div>
-                <div style={{ fontSize: '11px', fontWeight: '600',
-                  color: cg.selected ? 'rgba(34,197,94,1)' : 'var(--text-secondary)' }}>
-                  {cg.selected ? '⭐ Selected' : '○ No selection'}
-                </div>
+              <div style={{ fontSize: '12px', fontWeight: '600', marginBottom: '8px' }}>
+                {cg.smell_type || cg.smell_id || `Smell ${idx}`}
               </div>
-              <div style={{ fontSize: '11px', color: 'var(--text-secondary)', marginBottom: '6px' }}>
-                Candidates from catalog: {cg.candidates_from_catalog || 0}
+              <div style={{ fontSize: '11px', color: 'var(--text-secondary)', marginBottom: '8px' }}>
+                Candidates from catalog: <span style={{ fontWeight: '600' }}>{cg.candidates_from_catalog || 0}</span>
               </div>
+
+              {/* Candidates with precondition status only (no scores) */}
+              {(cg.candidates || []).length > 0 && (
+                <div style={{ marginBottom: '8px' }}>
+                  <div style={{ fontSize: '11px', fontWeight: '500', color: 'rgba(139,92,246,0.8)', marginBottom: '4px' }}>
+                    Viable Candidates:
+                  </div>
+                  <div style={{ display: 'grid', gap: '3px' }}>
+                    {cg.candidates.map((c, ci) => (
+                      <div key={ci} style={{ fontSize: '10px', color: 'var(--text-secondary)',
+                        display: 'flex', gap: '6px', alignItems: 'center' }}>
+                        <span style={{ color: c.preconditions_met ? 'rgba(34,197,94,1)' : 'rgba(239,68,68,1)', fontWeight: '700' }}>
+                          {c.preconditions_met ? '✓' : '✗'}
+                        </span>
+                        <span>{c.name}</span>
+                        {c.complexity && <span style={{ fontSize: '9px', opacity: 0.6 }}>(complexity: {c.complexity})</span>}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Ranking & Selection (shown separately) */}
               {cg.selected && (
-                <div style={{ fontSize: '11px', fontWeight: '600', color: 'rgba(34,197,94,1)', marginBottom: '4px' }}>
-                  → {cg.selected}
-                  {cg.selected_score != null && (
-                    <span style={{ marginLeft: '8px', fontWeight: '400', color: 'var(--text-secondary)' }}>
-                      score: {cg.selected_score}
+                <div style={{
+                  marginTop: '12px',
+                  paddingTop: '12px',
+                  borderTop: '1px solid rgba(139,92,246,0.2)',
+                }}>
+                  <div style={{ fontSize: '11px', fontWeight: '500', color: 'rgba(139,92,246,0.8)', marginBottom: '4px' }}>
+                    Selected After Ranking:
+                  </div>
+                  <div style={{ fontSize: '12px', fontWeight: '600', color: 'rgba(34,197,94,1)' }}>
+                    ⭐ {cg.selected}
+                  </div>
+                  <div style={{ fontSize: '11px', color: 'var(--text-secondary)', marginTop: '4px' }}>
+                    Score: <span style={{ fontWeight: '600', color: 'rgba(139,92,246,1)' }}>
+                      {cg.selected_score ?? 'N/A'}
                     </span>
-                  )}
+                  </div>
                   {cg.scoring_method && (
-                    <span style={{ marginLeft: '6px', fontSize: '10px', opacity: 0.7 }}>({cg.scoring_method})</span>
+                    <div style={{ fontSize: '11px', color: 'var(--text-secondary)', marginTop: '4px' }}>
+                      Scoring Method: <span style={{
+                        fontWeight: '600',
+                        color: cg.scoring_method === 'ml_enhanced' ? 'rgba(168,85,247,1)' :
+                          cg.scoring_method === 'impact_aware' ? 'rgba(34,197,94,1)' : 'rgba(107,114,128,1)',
+                        padding: '2px 6px',
+                        background: cg.scoring_method === 'ml_enhanced' ? 'rgba(168,85,247,0.1)' :
+                          cg.scoring_method === 'impact_aware' ? 'rgba(34,197,94,0.1)' : 'rgba(107,114,128,0.1)',
+                        borderRadius: '3px',
+                        display: 'inline-block',
+                      }}>
+                        {cg.scoring_method === 'ml_enhanced' && '🤖 ML Enhanced'}
+                        {cg.scoring_method === 'impact_aware' && '📊 Impact-Aware'}
+                        {cg.scoring_method === 'base' && '📋 Base Heuristic'}
+                      </span>
+                    </div>
                   )}
                 </div>
               )}
-              {(cg.candidates || []).length > 0 && (
-                <div style={{ marginTop: '6px', display: 'grid', gap: '3px' }}>
-                  {cg.candidates.map((c, ci) => (
-                    <div key={ci} style={{ fontSize: '10px', color: 'var(--text-secondary)',
-                      display: 'flex', gap: '6px', alignItems: 'center' }}>
-                      <span style={{ color: c.preconditions_met ? 'rgba(34,197,94,1)' : 'rgba(239,68,68,1)' }}>
-                        {c.preconditions_met ? '✓' : '✗'}
-                      </span>
-                      <span>{c.name}</span>
-                      {c.score != null && <span style={{ opacity: 0.7 }}>({c.score})</span>}
-                    </div>
-                  ))}
+
+              {!cg.selected && (
+                <div style={{ fontSize: '11px', color: 'rgba(239,68,68,1)', fontStyle: 'italic', marginTop: '8px' }}>
+                  No candidate selected for this smell
                 </div>
               )}
             </div>
