@@ -11,6 +11,7 @@ import Dashboard       from './pages/Dashboard.jsx';
 import RepositoryInput from './pages/RepositoryInput.jsx';
 import CUQAAgentPage   from './pages/CUQAAgentPage.jsx';
 import RDPAgentPage    from './pages/RDPAgentPage.jsx';
+import DIWOAgentPage   from './pages/diwo/DIWOAgentPage.jsx';
 import Reports         from './pages/Reports.jsx';
 import Evaluation      from './pages/Evaluation.jsx';
 import Settings        from './pages/Settings.jsx';
@@ -25,7 +26,7 @@ const NAV_MAIN = [
   { id: 'cuqa',        icon: '🔍', label: 'CUQA Agent' },
   { id: 'rdp',         icon: '🧠', label: 'RDP Agent' },
   { id: 'transform',   icon: '⚡', label: 'Transformation Agent' },
-  { id: 'orchestrate', icon: '🎛', label: 'Orchestration Agent' },
+  { id: 'orchestrate', icon: '🎛', label: 'DIWO Agent' },
   { id: 'reports',     icon: '📋', label: 'Reports' },
   { id: 'evaluation',  icon: '🧪', label: 'Evaluation' },
   { id: 'settings',    icon: '⚙',  label: 'Settings' },
@@ -40,7 +41,6 @@ const NAV_BOTTOM = [
 const PLACEHOLDER_PAGES = {
   rdp: { icon: '🧠', title: 'RDP Agent', sub: 'Refactoring Decision & Planning', color: 'var(--color-rdp)' },
   transform: { icon: '⚡', title: 'Transformation Agent', sub: 'Safe Code Transformation & Validation', color: 'var(--color-transform)' },
-  orchestrate: { icon: '🎛️', title: 'Orchestration Agent', sub: 'Developer Interaction & Workflow', color: 'var(--color-orchestrate)' },
   docs:    { icon: '📖', title: 'Documentation', sub: 'Setup guides and API reference', color: 'var(--accent)' },
   support: { icon: '💬', title: 'Support', sub: 'Research team contact', color: 'var(--color-ok)' },
 };
@@ -107,6 +107,7 @@ export default function App() {
       case 'repository':  return <RepositoryInput onLoaded={handleRepoLoaded} />;
       case 'cuqa':        return <CUQAAgentPage repoLoaded={repoLoaded} repoMeta={repoMeta} />;
       case 'rdp':         return <RDPAgentPage repoLoaded={repoLoaded} repoMeta={repoMeta} />;
+      case 'orchestrate': return <DIWOAgentPage />;
       case 'reports':     return <Reports />;
       case 'evaluation':  return <Evaluation />;
       case 'settings':    return <Settings />;
