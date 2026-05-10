@@ -163,6 +163,7 @@ class RDPAgent:
             "candidate_generation": [],
             "impact_prediction": [],
             "ml_prediction": [],
+            "mcda_selection": [],
             "dependency_analysis": {},
             "plan_generation": {},
         }
@@ -173,7 +174,14 @@ class RDPAgent:
             and self.ml_scorer.is_available()
         )
 
-        # ----- Steps 1-4: For each smell, interpret + generate + predict + decide -----
+        # ----- STEP 1: Problem Interpretation -----
+        # Build structured understanding of all problems before generating candidates
+        problem_interpretation = self.interpreter.interpret_problems(
+            report.smells, report.target
+        )
+        trace["problem_interpretation"] = problem_interpretation.to_dict()
+
+        # ----- Steps 2-7: For each smell, generate + predict + decide -----
         selections: List[Tuple[CodeSmell, Dict[str, Any]]] = []
 
         for smell in report.smells:
@@ -242,7 +250,30 @@ class RDPAgent:
 
             trace["ml_prediction"].append(ml_trace)
 
-            # ----- Step 4: Score candidates using best available scoring -----
+            # ----- Step 4b: MCDA Scoring (Multi-Criteria Decision Making) -----
+            mcda_trace: Dict[str, Any] = {
+                "smell_id": smell.id,
+                "smell_type": smell.type,
+                "predictions": [],
+            }
+
+            mcda_map: Dict[str, Any] = {}  # refactoring name → MCDA scores
+            for c in viable_candidates:
+                # Use neutral dependency score (0.5) for now
+                # Can be enhanced with actual dependency graph analysis
+                dependency_score = 0.5
+                mcda_scores = self.engine.score_candidate_mcda(
+                    c, smell, dependency_score
+                )
+                mcda_map[c["name"]] = mcda_scores
+                mcda_trace["predictions"].append({
+                    "refactoring": c["name"],
+                    **mcda_scores
+                })
+
+            trace["mcda_selection"].append(mcda_trace)
+
+            # ----- Step 4: Score candidates using MCDA -----
             for cd in candidate_details:
                 if cd["preconditions_met"]:
                     # Find the matching candidate dict for scoring
@@ -285,51 +316,32 @@ class RDPAgent:
 
             smell_trace["candidates"] = candidate_details
 
-            # Select best using best available scoring
+            # Select best using MCDA scoring
             if viable_candidates:
                 scored = []
                 for vc in viable_candidates:
-                    if vc["name"] in impact_map and vc["name"] in ml_map and ml_map[vc["name"]].confidence > 0:
-                        s = self.engine.score_candidate_with_ml(
-                            vc, smell, impact_map[vc["name"]], ml_map[vc["name"]]
-                        )
-                    elif vc["name"] in impact_map:
-                        s = self.engine.score_candidate_with_impact(
-                            vc, smell, impact_map[vc["name"]]
-                        )
-                    else:
-                        s = self.engine.score_candidate(vc, smell)
-                    scored.append((s, vc))
-                scored.sort(key=lambda x: x[0], reverse=True)
-                best_score, best = scored[0]
-                selections.append((smell, best))
-                smell_trace["selected"] = best["name"]
-                smell_trace["selected_score"] = round(best_score, 2)
-                smell_trace["scoring_method"] = (
-                    "ml_enhanced" if best["name"] in ml_map and ml_map[best["name"]].confidence > 0
-                    else "impact_aware"
-                )
+                    if vc["name"] in mcda_map:
+                        # Use MCDA final score as primary criterion
+                        s = mcda_map[vc["name"]]["final_score"]
+                        scored.append((s, vc))
+                
+                if scored:
+                    scored.sort(key=lambda x: x[0], reverse=True)
+                    best_score, best = scored[0]
+                    selections.append((smell, best))
+                    smell_trace["selected"] = best["name"]
+                    smell_trace["selected_score"] = round(best_score, 3)
+                    smell_trace["scoring_method"] = "mcda"
+                    smell_trace["mcda_details"] = mcda_map.get(best["name"], {})
+                else:
+                    smell_trace["selected"] = None
+                    smell_trace["selected_score"] = None
+                    smell_trace["scoring_method"] = None
             else:
                 smell_trace["selected"] = None
                 smell_trace["selected_score"] = None
                 smell_trace["scoring_method"] = None
 
-            # Record precondition trace as Step 1
-            trace["problem_interpretation"].append(
-                {
-                    "smell_id": smell.id,
-                    "smell_type": smell.type,
-                    "severity": smell.severity,
-                    "preconditions_evaluated": [
-                        {
-                            "candidate": cd["name"],
-                            "preconditions": cd["preconditions"],
-                            "passed": cd["preconditions_met"],
-                        }
-                        for cd in candidate_details
-                    ],
-                }
-            )
             trace["candidate_generation"].append(smell_trace)
 
         logger.info(
