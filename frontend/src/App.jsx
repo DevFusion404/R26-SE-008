@@ -11,6 +11,7 @@ import Dashboard       from './pages/Dashboard.jsx';
 import RepositoryInput from './pages/RepositoryInput.jsx';
 import CUQAAgentPage   from './pages/CUQAAgentPage.jsx';
 import RDPAgentPage    from './pages/RDPAgentPage.jsx';
+import SCTVAAgentPage  from './pages/transform/SCTVAAgentPage.jsx';
 import DIWOAgentPage   from './pages/diwo/DIWOAgentPage.jsx';
 import Reports         from './pages/Reports.jsx';
 import Evaluation      from './pages/Evaluation.jsx';
@@ -107,6 +108,7 @@ export default function App() {
       case 'repository':  return <RepositoryInput onLoaded={handleRepoLoaded} />;
       case 'cuqa':        return <CUQAAgentPage repoLoaded={repoLoaded} repoMeta={repoMeta} />;
       case 'rdp':         return <RDPAgentPage repoLoaded={repoLoaded} repoMeta={repoMeta} />;
+      case 'transform':   return <SCTVAAgentPage />;
       case 'orchestrate': return <DIWOAgentPage />;
       case 'reports':     return <Reports />;
       case 'evaluation':  return <Evaluation />;
