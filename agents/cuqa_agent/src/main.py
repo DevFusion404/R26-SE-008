@@ -20,11 +20,16 @@ import zipfile
 import tempfile
 from pathlib import Path
 from typing import Optional
+from pydantic import BaseModel, HttpUrl
 
 import requests
 from fastapi import FastAPI, File, Form, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel, HttpUrl
+
+class GitHubRepoRequest(BaseModel):
+    url: HttpUrl  # Built-in validation for URLs
 
 # ---------------------------------------------------------------------------
 # Make sibling modules importable regardless of CWD
@@ -196,40 +201,34 @@ async def upload_zip(file: UploadFile = File(...)):
 # ── 2. GitHub Repo ───────────────────────────────────────────────────────────
 
 @app.post("/api/github-repo")
-def load_github_repo(payload: dict):
-    """
-    Clone a public GitHub repository and scan it.
-
-    Body: { "url": "https://github.com/owner/repo" }
-    """
-    url = payload.get("url", "").strip()
-    if not url:
-        raise HTTPException(400, "GitHub URL is required.")
-
-    # Normalise URL
-    if url.endswith("/"):
-        url = url[:-1]
-    if not url.startswith("https://github.com/"):
-        raise HTTPException(400, "Only public github.com URLs are supported.")
-
+def load_github_repo(request: GitHubRepoRequest):  # Use Pydantic model
+    url = str(request.url).rstrip('/')  # Normalize trailing slash
+    
+    # Remove .git suffix if present
+    if url.endswith('.git'):
+        url = url[:-4]
+    
+    # Validate GitHub domain
+    if "github.com" not in url:
+        raise HTTPException(400, "Only github.com URLs are supported.")
+    
+    repo_name = url.split("/")[-1]
+    
+    # Try multiple common branches
+    for branch in ["main", "master", "develop", "trunk"]:
+        zip_url = f"{url}/archive/refs/heads/{branch}.zip"
+        try:
+            response = requests.get(zip_url, timeout=30, allow_redirects=True)
+            if response.status_code == 200:
+                break
+        except requests.exceptions.RequestException:
+            continue
+    else:
+        raise HTTPException(502, f"Could not download '{repo_name}' from GitHub. Repo may be private or use non-standard branch names.")
+    
     # Clean previous workspace
     if _workspace["root"] and os.path.exists(_workspace["root"]):
         shutil.rmtree(_workspace["root"], ignore_errors=True)
-
-    # Convert to raw zip download URL (no git required)
-    # https://github.com/owner/repo  ->  https://github.com/owner/repo/archive/refs/heads/main.zip
-    repo_name = url.split("/")[-1]
-    zip_url = f"{url}/archive/refs/heads/main.zip"
-
-    try:
-        response = requests.get(zip_url, timeout=60, stream=True)
-        if response.status_code == 404:
-            # Try 'master' branch
-            zip_url = f"{url}/archive/refs/heads/master.zip"
-            response = requests.get(zip_url, timeout=60, stream=True)
-        response.raise_for_status()
-    except requests.exceptions.RequestException as exc:
-        raise HTTPException(502, f"Failed to fetch GitHub repo: {exc}")
 
     tmp_dir = tempfile.mkdtemp(prefix="cuqa_gh_")
     zip_path = os.path.join(tmp_dir, "repo.zip")
