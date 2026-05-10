@@ -238,4 +238,130 @@ class DecisionEngine:
         )
         return final_score
 
+    # ----- MCDA (Multi-Criteria Decision Making) Scoring -----
+
+    @property
+    def mcda_quality_weight(self) -> float:
+        """MCDA weight for quality/impact criterion (default 0.40)."""
+        return self.weights.get("mcda_quality_weight", 0.40)
+
+    @property
+    def mcda_complexity_weight(self) -> float:
+        """MCDA weight for complexity criterion (default 0.25)."""
+        return self.weights.get("mcda_complexity_weight", 0.25)
+
+    @property
+    def mcda_risk_weight(self) -> float:
+        """MCDA weight for risk criterion (default 0.20)."""
+        return self.weights.get("mcda_risk_weight", 0.20)
+
+    @property
+    def mcda_dependency_weight(self) -> float:
+        """MCDA weight for dependency criterion (default 0.15)."""
+        return self.weights.get("mcda_dependency_weight", 0.15)
+
+    def normalize_score(self, score: float, min_val: float = 1.0, max_val: float = 3.0) -> float:
+        """Normalize a score to 0-1 range.
+        
+        Args:
+            score: The raw score to normalize.
+            min_val: Minimum possible value (default 1).
+            max_val: Maximum possible value (default 3).
+            
+        Returns:
+            Normalized score in range [0, 1].
+        """
+        if max_val <= min_val:
+            return 0.5
+        return (score - min_val) / (max_val - min_val)
+
+    def score_candidate_mcda(
+        self,
+        candidate: Dict[str, Any],
+        smell: CodeSmell,
+        dependency_score: float = 0.5,
+    ) -> Dict[str, float]:
+        """Score a candidate using MCDA (Multi-Criteria Decision Making).
+        
+        Formula:
+            Final Score = (Quality × 0.40) + (Complexity × 0.25) + 
+                          (Risk × 0.20) + (Dependency × 0.15)
+        
+        All scores are normalized to 0-1 range where higher is better.
+
+        Args:
+            candidate: Refactoring candidate dictionary with ``complexity``,
+                       ``risk``, and ``impact`` fields.
+            smell: The code smell being addressed.
+            dependency_score: Dependency criterion score (0-1, higher is better).
+                             Default 0.5 (neutral).
+
+        Returns:
+            Dictionary with keys:
+                - ``quality``: Normalized quality/impact score (0-1)
+                - ``complexity``: Normalized complexity score (0-1, inverted)
+                - ``risk``: Normalized risk score (0-1, inverted)
+                - ``dependency``: Dependency criterion score (0-1)
+                - ``quality_weighted``: Quality × weight
+                - ``complexity_weighted``: Complexity × weight
+                - ``risk_weighted``: Risk × weight
+                - ``dependency_weighted``: Dependency × weight
+                - ``final_score``: Final MCDA score (0-1)
+        """
+        # Get raw scores (1-3 range)
+        complexity = RATING_MAP.get(
+            candidate.get("complexity", "medium"), 2
+        )
+        risk = RATING_MAP.get(candidate.get("risk", "medium"), 2)
+        impact = RATING_MAP.get(candidate.get("impact", "medium"), 2)
+
+        # Normalize to 0-1 range
+        # Quality: higher impact is better → direct normalization
+        quality_norm = self.normalize_score(impact, 1.0, 3.0)
+        
+        # Complexity: lower is better → invert (1=best, 3=worst)
+        complexity_norm = self.normalize_score(4 - complexity, 1.0, 3.0)
+        
+        # Risk: lower is better → invert (1=best, 3=worst)
+        risk_norm = self.normalize_score(4 - risk, 1.0, 3.0)
+        
+        # Dependency: use provided score (already 0-1)
+        dependency_norm = min(1.0, max(0.0, dependency_score))
+
+        # Apply weights
+        quality_weighted = quality_norm * self.mcda_quality_weight
+        complexity_weighted = complexity_norm * self.mcda_complexity_weight
+        risk_weighted = risk_norm * self.mcda_risk_weight
+        dependency_weighted = dependency_norm * self.mcda_dependency_weight
+
+        # Calculate final score
+        final_score = (
+            quality_weighted + complexity_weighted + 
+            risk_weighted + dependency_weighted
+        )
+
+        result = {
+            "quality": round(quality_norm, 3),
+            "complexity": round(complexity_norm, 3),
+            "risk": round(risk_norm, 3),
+            "dependency": round(dependency_norm, 3),
+            "quality_weighted": round(quality_weighted, 3),
+            "complexity_weighted": round(complexity_weighted, 3),
+            "risk_weighted": round(risk_weighted, 3),
+            "dependency_weighted": round(dependency_weighted, 3),
+            "final_score": round(final_score, 3),
+        }
+
+        logger.debug(
+            "MCDA score for '%s': quality=%.3f complexity=%.3f risk=%.3f "
+            "dependency=%.3f → final=%.3f",
+            candidate.get("name", "?"),
+            quality_norm,
+            complexity_norm,
+            risk_norm,
+            dependency_norm,
+            final_score,
+        )
+        return result
+
 

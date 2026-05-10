@@ -335,3 +335,166 @@ class RefactoringPlan:
             steps=steps,
             summary=data.get("summary", ""),
         )
+
+
+# ---------------------------------------------------------------------------
+# ProblemMetricsAnalysis
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class ProblemMetricsAnalysis:
+    """Detailed analysis of metrics for a detected code smell.
+
+    This represents Step 1 of the pipeline: interpreting the raw metrics
+    into a structured understanding of problem severity and characteristics.
+
+    Attributes:
+        smell_id: ID of the code smell being analyzed.
+        original_metrics: Raw metrics from the Code Understanding Agent.
+        severity_level: Classified severity: ``low``, ``medium``, ``high``, ``critical``.
+        severity_rationale: Explanation of how severity was determined.
+        metric_highlights: Dict of notable metrics and their implications.
+        risk_factors: List of risk factors contributing to severity.
+        problem_characteristics: Dict describing key problem characteristics.
+    """
+
+    smell_id: str
+    original_metrics: Dict[str, Any]
+    severity_level: str
+    severity_rationale: str
+    metric_highlights: Dict[str, Any] = field(default_factory=dict)
+    risk_factors: List[str] = field(default_factory=list)
+    problem_characteristics: Dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Serialize to a plain dictionary."""
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "ProblemMetricsAnalysis":
+        """Deserialize from a dictionary."""
+        return cls(
+            smell_id=data["smell_id"],
+            original_metrics=data.get("original_metrics", {}),
+            severity_level=data.get("severity_level", "medium"),
+            severity_rationale=data.get("severity_rationale", ""),
+            metric_highlights=data.get("metric_highlights", {}),
+            risk_factors=data.get("risk_factors", []),
+            problem_characteristics=data.get("problem_characteristics", {}),
+        )
+
+
+# ---------------------------------------------------------------------------
+# ProblemGroup
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class ProblemGroup:
+    """A group of related code smells sharing common type and severity.
+
+    Used to organize problems during interpretation for easier analysis
+    and decision-making.
+
+    Attributes:
+        group_id: Unique identifier for the group.
+        smell_type: Type of code smell (e.g., ``Long Method``).
+        severity_level: Common severity level for all smells in group.
+        smell_ids: List of CodeSmell IDs in this group.
+        count: Number of smells in the group.
+        description: Human-readable description of the group.
+        collective_metrics: Aggregated metrics across all smells.
+    """
+
+    group_id: str
+    smell_type: str
+    severity_level: str
+    smell_ids: List[str] = field(default_factory=list)
+    count: int = 0
+    description: str = ""
+    collective_metrics: Dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Serialize to a plain dictionary."""
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "ProblemGroup":
+        """Deserialize from a dictionary."""
+        return cls(
+            group_id=data["group_id"],
+            smell_type=data["smell_type"],
+            severity_level=data["severity_level"],
+            smell_ids=data.get("smell_ids", []),
+            count=data.get("count", 0),
+            description=data.get("description", ""),
+            collective_metrics=data.get("collective_metrics", {}),
+        )
+
+
+# ---------------------------------------------------------------------------
+# ProblemInterpretation
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class ProblemInterpretation:
+    """Complete interpretation of detected problems from the quality report.
+
+    This is the output of Step 1 of the pipeline: a structured,
+    analyzed understanding of all code smells ready for candidate generation.
+
+    Attributes:
+        target: File or module being analyzed.
+        total_smells: Total number of smells in the report.
+        metrics_analyses: List of ProblemMetricsAnalysis for each smell.
+        problem_groups: List of ProblemGroup for grouped analysis.
+        severity_summary: Dict with counts per severity level.
+        type_summary: Dict with counts per smell type.
+        critical_issues: List of critically severe problem descriptions.
+        recommendations: Preliminary recommendations before candidates.
+    """
+
+    target: str
+    total_smells: int
+    metrics_analyses: List[ProblemMetricsAnalysis] = field(default_factory=list)
+    problem_groups: List[ProblemGroup] = field(default_factory=list)
+    severity_summary: Dict[str, int] = field(default_factory=dict)
+    type_summary: Dict[str, int] = field(default_factory=dict)
+    critical_issues: List[str] = field(default_factory=list)
+    recommendations: List[str] = field(default_factory=list)
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Serialize to a plain dictionary."""
+        return {
+            "target": self.target,
+            "total_smells": self.total_smells,
+            "metrics_analyses": [m.to_dict() for m in self.metrics_analyses],
+            "problem_groups": [g.to_dict() for g in self.problem_groups],
+            "severity_summary": self.severity_summary,
+            "type_summary": self.type_summary,
+            "critical_issues": self.critical_issues,
+            "recommendations": self.recommendations,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "ProblemInterpretation":
+        """Deserialize from a dictionary."""
+        metrics_analyses = [
+            ProblemMetricsAnalysis.from_dict(m)
+            for m in data.get("metrics_analyses", [])
+        ]
+        problem_groups = [
+            ProblemGroup.from_dict(g) for g in data.get("problem_groups", [])
+        ]
+        return cls(
+            target=data["target"],
+            total_smells=data.get("total_smells", 0),
+            metrics_analyses=metrics_analyses,
+            problem_groups=problem_groups,
+            severity_summary=data.get("severity_summary", {}),
+            type_summary=data.get("type_summary", {}),
+            critical_issues=data.get("critical_issues", []),
+            recommendations=data.get("recommendations", []),
+        )
