@@ -1,0 +1,907 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+	<title>Safe Code Transformation Agent</title>
+	<meta name="description" content="Run safe refactoring with validated transformation output.">
+	<link rel="preconnect" href="https://fonts.googleapis.com">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+	<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+	<div class="bg-particles">
+		<div class="particle"></div>
+		<div class="particle"></div>
+		<div class="particle"></div>
+		<div class="particle"></div>
+		<div class="particle"></div>
+	</div>
+
+	<div class="container">
+		<header class="header">
+			<div class="logo">
+				<div class="logo-badge">S</div>
+				<div>
+					<h1>Transformation Agent</h1>
+					<p class="subtitle">Safe Code Transformation &amp; Validation</p>
+				</div>
+			</div>
+			<div class="header-meta">
+				<span class="meta-pill">Java</span>
+				<span class="meta-pill">Python</span>
+				<span class="meta-pill">Rollback aware</span>
+			</div>
+		</header>
+
+		<section class="card workspace-card">
+			<div class="workspace-header">
+				<div>
+					<h2>Refactoring Workspace</h2>
+					<p class="card-desc">Source code is loaded automatically from the source_code folder. Upload only the refactoring plan JSON.</p>
+				</div>
+				<div class="header-actions">
+					<button class="btn btn-secondary" id="reload-source-btn" type="button">Reload Source</button>
+					<button class="btn btn-ghost" id="clear-btn" type="button">Clear</button>
+				</div>
+			</div>
+
+			<form id="sctva-form" class="workspace-grid">
+				<div class="input-column">
+					<div class="field-row">
+						<label>
+							<span>Request ID</span>
+							<input id="request_id" name="request_id" type="text" placeholder="sctva_demo_001" />
+						</label>
+						<label>
+							<span>Language</span>
+							<select id="language" name="language">
+								<option value="java">Java</option>
+								<option value="python">Python</option>
+							</select>
+						</label>
+					</div>
+
+					<label>
+						<span>Source File</span>
+						<select id="source_file" name="source_file"></select>
+					</label>
+
+					<label>
+						<span>Loaded Source Code (auto from source_code folder)</span>
+						<textarea id="source_code" name="source_code" spellcheck="false"></textarea>
+					</label>
+
+					<div class="upload-zone" id="plan-dropzone">
+						<div class="drop-left">
+							<div class="drop-icon">UP</div>
+							<div>
+								<div class="drop-title">Upload refactoring plan JSON</div>
+								<div class="drop-sub">Drag &amp; drop or browse a .json file with a full request, refactoring_plan, or planner steps.</div>
+							</div>
+						</div>
+						<div class="drop-actions">
+							<label class="btn btn-primary" for="plan-file-input">Browse JSON</label>
+							<input type="file" id="plan-file-input" accept=".json" hidden>
+						</div>
+					</div>
+
+					<div class="file-name" id="plan-file-name">No plan file selected.</div>
+
+					<label>
+						<span>Refactoring Plan JSON</span>
+						<textarea id="refactoring_plan" name="refactoring_plan" spellcheck="false"></textarea>
+					</label>
+
+					<label>
+						<span>Execution Options JSON</span>
+						<textarea id="execution_options" name="execution_options" spellcheck="false">{"strict_mode":true,"enable_behavior_tests":true,"timeout_seconds":10,"require_compilation":false}</textarea>
+					</label>
+
+					<div class="actions">
+						<button class="btn btn-primary" id="run-btn" type="submit">Run Transformation</button>
+					</div>
+
+					<div id="error-box" class="alert alert-error" hidden></div>
+					<div id="status-box" class="alert alert-info" hidden></div>
+				</div>
+
+				<div class="summary-column">
+					<div class="summary-card">
+						<div class="summary-header">
+							<h3>Execution Summary</h3>
+							<span id="status-badge" class="status-pill neutral">Idle</span>
+						</div>
+						<div class="summary-grid">
+							<div class="summary-item"><span id="metric-success">--</span><small>Success</small></div>
+							<div class="summary-item"><span id="metric-rollback">--</span><small>Rollback</small></div>
+							<div class="summary-item"><span id="metric-confidence">--</span><small>Confidence</small></div>
+							<div class="summary-item"><span id="metric-language">--</span><small>Language</small></div>
+						</div>
+						<div id="validation-stack" class="validation-stack">
+							<div class="empty-note">Run the agent to see syntax, structural, and behavioral validation results.</div>
+						</div>
+					</div>
+
+					<div class="summary-card">
+						<h3>Safety Report</h3>
+						<div id="safety-report" class="report-list">
+							<div class="empty-note">Safety messages will appear here after execution.</div>
+						</div>
+					</div>
+				</div>
+			</form>
+		</section>
+
+		<section class="card output-card">
+			<div class="output-header">
+				<div>
+					<h2>Final Output (Diff Highlight)</h2>
+					<p class="card-desc">Only the transformed output is shown below with red/green change highlighting.</p>
+				</div>
+				<div class="header-actions">
+					<button class="btn btn-ghost" id="copy-code-btn" type="button">Copy Final Code</button>
+					<button class="btn btn-ghost" id="download-result-btn" type="button">Download Result JSON</button>
+				</div>
+			</div>
+
+			<div id="final-code" class="code-diff"></div>
+			<pre id="raw-response" class="json-output">{}</pre>
+		</section>
+	</div>
+
+	<script id="source-files-data" type="application/json">
+		{{ source_files | tojson }}
+	</script>
+	<script id="default-source-name-data" type="application/json">
+		{{ default_source_name | tojson }}
+	</script>
+
+	<script>
+		const SOURCE_FILES = JSON.parse(
+			document.getElementById('source-files-data').textContent || '{}'
+		);
+		const DEFAULT_SOURCE_NAME = JSON.parse(
+			document.getElementById('default-source-name-data').textContent || '""'
+		);
+
+		const form = document.getElementById('sctva-form');
+		const runBtn = document.getElementById('run-btn');
+		const clearBtn = document.getElementById('clear-btn');
+		const reloadBtn = document.getElementById('reload-source-btn');
+		const sourceSelect = document.getElementById('source_file');
+		const sourceCodeEl = document.getElementById('source_code');
+		const planFileInput = document.getElementById('plan-file-input');
+		const planFileName = document.getElementById('plan-file-name');
+		const planDropzone = document.getElementById('plan-dropzone');
+		const refactoringPlanEl = document.getElementById('refactoring_plan');
+		const executionOptionsEl = document.getElementById('execution_options');
+		const languageEl = document.getElementById('language');
+		const requestIdEl = document.getElementById('request_id');
+
+		const errorBox = document.getElementById('error-box');
+		const statusBox = document.getElementById('status-box');
+		const statusBadge = document.getElementById('status-badge');
+		const validationStack = document.getElementById('validation-stack');
+		const safetyReportEl = document.getElementById('safety-report');
+		const finalCodeEl = document.getElementById('final-code');
+		const rawResponseEl = document.getElementById('raw-response');
+		const copyCodeBtn = document.getElementById('copy-code-btn');
+		const downloadResultBtn = document.getElementById('download-result-btn');
+
+		const metricSuccess = document.getElementById('metric-success');
+		const metricRollback = document.getElementById('metric-rollback');
+		const metricConfidence = document.getElementById('metric-confidence');
+		const metricLanguage = document.getElementById('metric-language');
+
+		let currentSource = '';
+
+		populateSourceSelect();
+		loadSource(DEFAULT_SOURCE_NAME || sourceSelect.value);
+
+		reloadBtn.addEventListener('click', () => {
+			populateSourceSelect();
+			loadSource(sourceSelect.value);
+		});
+
+		sourceSelect.addEventListener('change', () => {
+			loadSource(sourceSelect.value);
+		});
+
+		planFileInput.addEventListener('change', handlePlanFile);
+
+		['dragenter', 'dragover'].forEach(evt => {
+			planDropzone.addEventListener(evt, e => {
+				e.preventDefault();
+				planDropzone.classList.add('drag-over');
+			});
+		});
+		['dragleave', 'drop'].forEach(evt => {
+			planDropzone.addEventListener(evt, e => {
+				e.preventDefault();
+				planDropzone.classList.remove('drag-over');
+			});
+		});
+		planDropzone.addEventListener('drop', e => {
+			const file = e.dataTransfer.files[0];
+			if (file) {
+				planFileInput.files = e.dataTransfer.files;
+				handlePlanFile();
+			}
+		});
+
+		form.addEventListener('submit', async (event) => {
+			event.preventDefault();
+			hideError();
+
+			let payload;
+			try {
+				payload = buildPayload();
+			} catch (error) {
+				showError(error.message);
+				return;
+			}
+
+			setBusy(true);
+			showStatus('Running transformation...', 'info');
+
+			try {
+				const response = await fetch('/sctva/execute', {
+					method: 'POST',
+					headers: { 'Content-Type': 'application/json' },
+					body: JSON.stringify(payload),
+				});
+
+				const data = await response.json();
+				if (!response.ok) {
+					throw new Error(data.error || 'Failed to execute transformation.');
+				}
+
+				renderResult(data, payload.source_code);
+				showStatus(data.rollback_occurred ? 'Execution completed with rollback.' : 'Execution completed successfully.', data.rollback_occurred ? 'warn' : 'success');
+			} catch (error) {
+				showError(error.message);
+				showStatus('Execution failed.', 'error');
+			} finally {
+				setBusy(false);
+			}
+		});
+
+		clearBtn.addEventListener('click', () => {
+			requestIdEl.value = '';
+			refactoringPlanEl.value = '';
+			currentSource = '';
+			sourceCodeEl.value = '';
+			planFileName.textContent = 'No plan file selected.';
+			finalCodeEl.innerHTML = '';
+			rawResponseEl.textContent = '{}';
+			metricSuccess.textContent = '--';
+			metricRollback.textContent = '--';
+			metricConfidence.textContent = '--';
+			metricLanguage.textContent = '--';
+			statusBadge.textContent = 'Idle';
+			statusBadge.className = 'status-pill neutral';
+			validationStack.innerHTML = '<div class="empty-note">Run the agent to see syntax, structural, and behavioral validation results.</div>';
+			safetyReportEl.innerHTML = '<div class="empty-note">Safety messages will appear here after execution.</div>';
+			hideError();
+			showStatus('', 'info');
+		});
+
+		copyCodeBtn.addEventListener('click', async () => {
+			const text = finalCodeEl.innerText || '';
+			await navigator.clipboard.writeText(text);
+			showStatus('Final output copied to clipboard.', 'success');
+		});
+
+		downloadResultBtn.addEventListener('click', () => {
+			const raw = rawResponseEl.textContent || '{}';
+			const blob = new Blob([raw], { type: 'application/json' });
+			const url = URL.createObjectURL(blob);
+			const link = document.createElement('a');
+			link.href = url;
+			link.download = 'sctva_result.json';
+			link.click();
+			URL.revokeObjectURL(url);
+		});
+
+		function populateSourceSelect() {
+			sourceSelect.innerHTML = '';
+			const entries = Object.keys(SOURCE_FILES || {});
+			if (entries.length === 0) {
+				const option = document.createElement('option');
+				option.value = '';
+				option.textContent = 'No source files found';
+				sourceSelect.appendChild(option);
+				sourceSelect.disabled = true;
+				sourceCodeEl.value = '';
+				return;
+			}
+
+			entries.forEach(name => {
+				const option = document.createElement('option');
+				option.value = name;
+				option.textContent = name;
+				sourceSelect.appendChild(option);
+			});
+			sourceSelect.disabled = false;
+			if (DEFAULT_SOURCE_NAME && entries.includes(DEFAULT_SOURCE_NAME)) {
+				sourceSelect.value = DEFAULT_SOURCE_NAME;
+			}
+		}
+
+		function loadSource(name) {
+			if (!name || !SOURCE_FILES[name]) {
+				sourceCodeEl.value = '';
+				currentSource = '';
+				return;
+			}
+			sourceCodeEl.value = SOURCE_FILES[name];
+			currentSource = SOURCE_FILES[name];
+			if (name.toLowerCase().endsWith('.py')) {
+				languageEl.value = 'python';
+			} else {
+				languageEl.value = 'java';
+			}
+		}
+
+		function handlePlanFile() {
+			const file = planFileInput.files[0];
+			if (!file) return;
+			planFileName.textContent = file.name;
+			const reader = new FileReader();
+			reader.onload = () => {
+				refactoringPlanEl.value = reader.result;
+			};
+			reader.readAsText(file);
+		}
+
+		function buildPayload() {
+			const requestId = requestIdEl.value.trim() || `sctva_${Date.now()}`;
+			const language = languageEl.value.trim().toLowerCase();
+			const sourceCode = sourceCodeEl.value;
+
+			if (!sourceCode.trim()) {
+				throw new Error('No source code loaded from source_code folder.');
+			}
+
+			let uploadedJson;
+			let executionOptions;
+
+			try {
+				uploadedJson = JSON.parse(refactoringPlanEl.value || '{}');
+			} catch (error) {
+				throw new Error(`Refactoring plan JSON is invalid: ${error.message}`);
+			}
+
+			const refactoringPlan = normalizeRefactoringPlan(uploadedJson, requestId);
+
+			try {
+				executionOptions = JSON.parse(executionOptionsEl.value || '{}');
+			} catch (error) {
+				throw new Error(`Execution options JSON is invalid: ${error.message}`);
+			}
+
+			return {
+				request_id: requestId,
+				language,
+				source_code: sourceCode,
+				refactoring_plan: refactoringPlan,
+				execution_options: executionOptions,
+			};
+		}
+
+		function normalizeRefactoringPlan(input, fallbackPlanId) {
+			const source = unwrapPlanPayload(input);
+			const planId = String(source.plan_id || source.planId || fallbackPlanId || `plan_${Date.now()}`).trim();
+			let actions = [];
+
+			if (Array.isArray(source.actions)) {
+				actions = source.actions.map(normalizeAction).filter(Boolean);
+			} else if (Array.isArray(source.steps)) {
+				actions = source.steps.map(normalizeStep).filter(Boolean);
+			}
+
+			if (!planId) {
+				throw new Error("Refactoring plan must include a plan_id.");
+			}
+			if (!Array.isArray(actions) || actions.length === 0) {
+				throw new Error("Refactoring plan must include a non-empty actions list or a convertible steps list.");
+			}
+
+			const behaviorTests = Array.isArray(source.behavior_tests)
+				? source.behavior_tests
+				: Array.isArray(source.behaviorTests)
+					? source.behaviorTests
+					: [];
+
+			const metadata = source.metadata && typeof source.metadata === 'object' && !Array.isArray(source.metadata)
+				? source.metadata
+				: {};
+
+			return {
+				plan_id: planId,
+				actions,
+				behavior_tests: behaviorTests,
+				metadata,
+			};
+		}
+
+		function unwrapPlanPayload(input) {
+			if (!input || typeof input !== 'object' || Array.isArray(input)) {
+				throw new Error('Refactoring plan JSON must be an object.');
+			}
+
+			if (input.refactoring_plan && typeof input.refactoring_plan === 'object') {
+				return input.refactoring_plan;
+			}
+
+			if (input.rdp_sample && typeof input.rdp_sample === 'object') {
+				return input.rdp_sample;
+			}
+
+			return input;
+		}
+
+		function normalizeAction(action) {
+			if (!action || typeof action !== 'object' || Array.isArray(action)) {
+				throw new Error('Each action must be an object.');
+			}
+			if (!action.action_type) {
+				throw new Error("Each action must include action_type.");
+			}
+
+			return {
+				action_type: String(action.action_type).trim().toLowerCase(),
+				parameters: isPlainObject(action.parameters) ? action.parameters : {},
+				source_step_id: action.source_step_id ?? null,
+				source_refactoring: action.source_refactoring ?? null,
+				warnings: Array.isArray(action.warnings) ? action.warnings.map(String) : [],
+			};
+		}
+
+		function normalizeStep(step) {
+			if (!step || typeof step !== 'object' || Array.isArray(step)) {
+				return null;
+			}
+
+			const refactoring = String(step.refactoring || '').trim().toLowerCase();
+			const params = isPlainObject(step.parameters) ? step.parameters : {};
+			const target = isPlainObject(step.target) ? step.target : {};
+
+			if (!refactoring) {
+				return null;
+			}
+
+			if ([
+				'rename method',
+				'rename variable',
+				'rename class',
+				'rename parameter',
+				'rename field',
+				'rename attribute',
+			].includes(refactoring)) {
+				const oldName = params.old_name || target.method || target.class;
+				const newName = params.new_name || params.renamed_to;
+				if (!oldName || !newName) return null;
+				return {
+					action_type: 'rename_symbol',
+					parameters: {
+						old_name: String(oldName),
+						new_name: sanitizeIdentifier(String(newName)),
+					},
+					source_step_id: step.step_id ?? null,
+					source_refactoring: step.refactoring ?? null,
+					warnings: [],
+				};
+			}
+
+			if (refactoring === 'extract method') {
+				const oldName = target.method || params.method;
+				if (!oldName) return null;
+				const newName = params.new_method_name || `${oldName}Core`;
+				return {
+					action_type: 'rename_symbol',
+					parameters: {
+						old_name: String(oldName),
+						new_name: sanitizeIdentifier(String(newName)),
+					},
+					source_step_id: step.step_id ?? null,
+					source_refactoring: step.refactoring ?? null,
+					warnings: [],
+				};
+			}
+
+			if (refactoring === 'extract class') {
+				const oldName = params.source_class || target.class;
+				if (!oldName) return null;
+				const newName = params.new_class_name || `${oldName}Extracted`;
+				return {
+					action_type: 'rename_symbol',
+					parameters: {
+						old_name: String(oldName),
+						new_name: sanitizeIdentifier(String(newName)),
+					},
+					source_step_id: step.step_id ?? null,
+					source_refactoring: step.refactoring ?? null,
+					warnings: [],
+				};
+			}
+
+			if (refactoring === 'move method') {
+				const oldName = params.method || target.method;
+				if (!oldName) return null;
+				const destination = params.destination_class;
+				const suffix = destination && String(destination).trim() !== '<inferred_target_class>'
+					? toPascalCase(String(destination))
+					: 'Moved';
+				return {
+					action_type: 'rename_symbol',
+					parameters: {
+						old_name: String(oldName),
+						new_name: sanitizeIdentifier(`${oldName}In${suffix}`),
+					},
+					source_step_id: step.step_id ?? null,
+					source_refactoring: step.refactoring ?? null,
+					warnings: [],
+				};
+			}
+
+			if (refactoring === 'replace conditional with polymorphism') {
+				const oldName = target.method || params.method;
+				if (!oldName) return null;
+				return {
+					action_type: 'rename_symbol',
+					parameters: {
+						old_name: String(oldName),
+						new_name: sanitizeIdentifier(`${oldName}Polymorphic`),
+					},
+					source_step_id: step.step_id ?? null,
+					source_refactoring: step.refactoring ?? null,
+					warnings: [],
+				};
+			}
+
+			if (refactoring === 'introduce parameter object') {
+				const oldName = params.method || target.method;
+				if (!oldName) return null;
+				const suffix = params.parameter_object_name ? toPascalCase(String(params.parameter_object_name)) : 'ParamObject';
+				return {
+					action_type: 'rename_symbol',
+					parameters: {
+						old_name: String(oldName),
+						new_name: sanitizeIdentifier(`${oldName}With${suffix}`),
+					},
+					source_step_id: step.step_id ?? null,
+					source_refactoring: step.refactoring ?? null,
+					warnings: [],
+				};
+			}
+
+			if ([
+				'hide delegate',
+				'replace data value with object',
+				'inline class',
+				'collapse hierarchy',
+				'pull up method',
+				'replace parameter with method call',
+			].includes(refactoring)) {
+				const oldName = target.method || target.class;
+				if (!oldName) return null;
+				return {
+					action_type: 'rename_symbol',
+					parameters: {
+						old_name: String(oldName),
+						new_name: sanitizeIdentifier(`${oldName}${toPascalCase(refactoring.replace(/ /g, '_'))}`),
+					},
+					source_step_id: step.step_id ?? null,
+					source_refactoring: step.refactoring ?? null,
+					warnings: [],
+				};
+			}
+
+			if (refactoring === 'extract constant' || refactoring === 'replace magic number with symbolic constant') {
+				if (!Object.prototype.hasOwnProperty.call(params, 'literal_value')) return null;
+				return {
+					action_type: 'extract_constant',
+					parameters: {
+						literal_value: params.literal_value,
+						constant_name: params.constant_name || 'EXTRACTED_CONSTANT',
+					},
+					source_step_id: step.step_id ?? null,
+					source_refactoring: step.refactoring ?? null,
+					warnings: [],
+				};
+			}
+
+			if (refactoring === 'replace literal' || refactoring === 'replace temp with query') {
+				if (!Object.prototype.hasOwnProperty.call(params, 'old_literal') || !Object.prototype.hasOwnProperty.call(params, 'new_literal')) return null;
+				return {
+					action_type: 'replace_literal',
+					parameters: {
+						old_literal: params.old_literal,
+						new_literal: params.new_literal,
+					},
+					source_step_id: step.step_id ?? null,
+					source_refactoring: step.refactoring ?? null,
+					warnings: [],
+				};
+			}
+
+			if (refactoring === 'inject syntax error') {
+				return {
+					action_type: 'inject_syntax_error',
+					parameters: {},
+					source_step_id: step.step_id ?? null,
+					source_refactoring: step.refactoring ?? null,
+					warnings: [],
+				};
+			}
+
+			if (refactoring.startsWith('fault injection')) {
+				const originalLogic = params.original_logic
+					|| params.old_logic
+					|| params.original_value
+					|| params.old_value
+					|| params.from_value
+					|| params.expected_value;
+				const faultyLogic = params.faulty_logic
+					|| params.new_logic
+					|| params.new_value
+					|| params.to_value
+					|| params.updated_value;
+				if (!originalLogic || faultyLogic === undefined || faultyLogic === null) {
+					return null;
+				}
+				return {
+					action_type: 'fault_injection',
+					parameters: {
+						original_logic: String(originalLogic),
+						faulty_logic: String(faultyLogic),
+						change_type: params.change_type ?? refactoring,
+						purpose: params.purpose ?? null,
+						target_class: target.class ?? null,
+						target_method: target.method ?? null,
+					},
+					source_step_id: step.step_id ?? null,
+					source_refactoring: step.refactoring ?? null,
+					warnings: [],
+				};
+			}
+
+			return {
+				action_type: 'noop',
+				parameters: {
+					reason: 'unsupported_refactoring',
+					refactoring,
+				},
+				source_step_id: step.step_id ?? null,
+				source_refactoring: step.refactoring ?? null,
+				warnings: [`Unsupported refactoring '${step.refactoring}' mapped to noop.`],
+			};
+		}
+
+		function sanitizeIdentifier(value) {
+			const cleaned = String(value).trim().replace(/[^A-Za-z0-9_]/g, '_');
+			if (!cleaned) {
+				return 'RenamedSymbol';
+			}
+			return /^[0-9]/.test(cleaned) ? `R_${cleaned}` : cleaned;
+		}
+
+		function toPascalCase(value) {
+			const parts = String(value)
+				.replace(/[^A-Za-z0-9]+/g, ' ')
+				.trim()
+				.split(/\s+/)
+				.filter(Boolean);
+			if (!parts.length) {
+				return 'Target';
+			}
+			return parts.map(part => part.charAt(0).toUpperCase() + part.slice(1)).join('');
+		}
+
+		function isPlainObject(value) {
+			return !!value && typeof value === 'object' && !Array.isArray(value);
+		}
+
+		function renderResult(data, originalSource) {
+			rawResponseEl.textContent = JSON.stringify(data, null, 2);
+			metricSuccess.textContent = data.success ? 'YES' : 'NO';
+			metricRollback.textContent = data.rollback_occurred ? 'YES' : 'NO';
+			metricConfidence.textContent = typeof data.confidence_score === 'number' ? data.confidence_score.toFixed(2) : '--';
+			metricLanguage.textContent = data.language || '--';
+			statusBadge.textContent = data.rollback_occurred ? 'Rolled Back' : 'Completed';
+			statusBadge.className = `status-pill ${data.rollback_occurred ? 'warn' : 'success'}`;
+
+			renderValidation(data.validation || {});
+			renderSafetyReport(data.safety_report || {});
+			renderDiff(originalSource, data.refactored_code || '');
+		}
+
+		function renderValidation(validation) {
+			const entries = [
+				['Syntax', validation.syntax],
+				['Structural', validation.structural],
+				['Behavioral', validation.behavioral],
+				['Invariant', validation.invariant],
+			];
+
+			validationStack.innerHTML = entries.map(([label, item]) => {
+				if (!item) {
+					return `<div class="validation-card"><strong>${label}</strong><span>No data</span></div>`;
+				}
+				const isBehavioral = label === 'Behavioral';
+				const isInvariant = label === 'Invariant';
+				const details = item.details || {};
+				const displayStatus = isBehavioral
+					? String(details.fingerprint_status || (item.passed ? 'passed' : 'failed'))
+					: isInvariant
+						? String(details.status || (item.passed ? 'passed' : 'failed'))
+						: '';
+				const displaySummary = isBehavioral
+					? String(details.fingerprint_summary || '')
+					: isInvariant
+						? String(details.summary || details.reason || item.message || '')
+						: '';
+				const preservedCount = isInvariant && Array.isArray(details.preserved_invariants)
+					? details.preserved_invariants.length
+					: 0;
+				const violatedCount = isInvariant && Array.isArray(details.violated_invariants)
+					? details.violated_invariants.length
+					: 0;
+				const totalCount = isBehavioral && details.total_tests !== undefined
+					? Number(details.total_tests)
+					: isInvariant
+						? preservedCount + violatedCount
+						: 0;
+				const passedCount = isBehavioral && details.passed_tests !== undefined
+					? Number(details.passed_tests)
+					: isInvariant
+						? preservedCount
+						: 0;
+				const displayTone = displayStatus === 'passed' ? 'success' : displayStatus === 'skipped' ? 'neutral' : 'warn';
+				const cardTone = displayStatus === 'skipped' ? 'neutral' : item.passed ? 'pass' : 'fail';
+				const displayLabel = isBehavioral ? 'Behavioral Fingerprint' : isInvariant ? 'Invariant Mining' : label;
+				const displayState = displayStatus ? displayStatus.toUpperCase() : (item.passed ? 'PASS' : 'FAIL');
+				const countText = isBehavioral && totalCount
+					? `${passedCount}/${totalCount} tests passed`
+					: isInvariant && totalCount
+						? `${passedCount}/${totalCount} invariants preserved`
+						: '';
+				const originalCountText = isInvariant && details.original_invariants
+					? `${Object.keys(details.original_invariants || {}).length} original groups`
+					: '';
+				const transformedCountText = isInvariant && details.transformed_invariants
+					? `${Object.keys(details.transformed_invariants || {}).length} transformed groups`
+					: '';
+
+				return `
+					<div class="validation-card ${cardTone}">
+						<div class="validation-top">
+							<strong>${displayLabel}</strong>
+							<span class="status-pill ${displayTone}">${displayState}</span>
+						</div>
+						<div class="validation-score">Score: ${typeof item.score === 'number' ? item.score.toFixed(2) : '--'}</div>
+						<div class="validation-message">${escapeHtml(item.message || '')}</div>
+						${isBehavioral || isInvariant ? `
+							<div class="validation-details">
+								<div class="validation-status-row">
+									<span class="status-pill ${displayTone}">${isBehavioral ? 'Fingerprint' : 'Invariant'} ${escapeHtml(displayState)}</span>
+									${countText ? `<span class="validation-count">${escapeHtml(countText)}</span>` : ''}
+								</div>
+								${displaySummary ? `<div class="validation-summary">${escapeHtml(displaySummary)}</div>` : ''}
+								${isInvariant ? `
+									<div class="validation-meta-grid">
+										${originalCountText ? `<div class="validation-meta-item"><span>Original</span><strong>${escapeHtml(originalCountText)}</strong></div>` : ''}
+										${transformedCountText ? `<div class="validation-meta-item"><span>Transformed</span><strong>${escapeHtml(transformedCountText)}</strong></div>` : ''}
+									</div>
+								` : ''}
+							</div>
+						` : ''}
+					</div>
+				`;
+			}).join('');
+		}
+
+		function renderSafetyReport(report) {
+			const messages = [];
+			if (report.summary) messages.push(`<li><strong>Summary:</strong> ${escapeHtml(report.summary)}</li>`);
+			if (report.rollback_reason) messages.push(`<li><strong>Rollback reason:</strong> ${escapeHtml(report.rollback_reason)}</li>`);
+			(report.risk_flags || []).forEach(flag => messages.push(`<li><strong>Risk:</strong> ${escapeHtml(flag)}</li>`));
+			(report.human_messages || []).forEach(message => messages.push(`<li>${escapeHtml(message)}</li>`));
+
+			safetyReportEl.innerHTML = messages.length
+				? `<ul class="report-list-inner">${messages.join('')}</ul>`
+				: '<div class="empty-note">No safety messages reported.</div>';
+		}
+
+		function renderDiff(original, updated) {
+			const diff = diffLines(original, updated);
+			const html = diff.map(item => {
+				const cls = item.type === 'add' ? 'diff-line add' : item.type === 'del' ? 'diff-line del' : 'diff-line';
+				const prefix = item.type === 'add' ? '+' : item.type === 'del' ? '-' : ' ';
+				return `<div class="${cls}"><span class="diff-prefix">${prefix}</span>${escapeHtml(item.text)}</div>`;
+			}).join('');
+			finalCodeEl.innerHTML = html || '<div class="empty-note">No output to display.</div>';
+		}
+
+		function diffLines(oldText, newText) {
+			const oldLines = oldText.split('\n');
+			const newLines = newText.split('\n');
+			const rows = oldLines.length;
+			const cols = newLines.length;
+			const dp = Array.from({ length: rows + 1 }, () => Array(cols + 1).fill(0));
+
+			for (let i = rows - 1; i >= 0; i -= 1) {
+				for (let j = cols - 1; j >= 0; j -= 1) {
+					if (oldLines[i] === newLines[j]) {
+						dp[i][j] = dp[i + 1][j + 1] + 1;
+					} else {
+						dp[i][j] = Math.max(dp[i + 1][j], dp[i][j + 1]);
+					}
+				}
+			}
+
+			const result = [];
+			let i = 0;
+			let j = 0;
+			while (i < rows && j < cols) {
+				if (oldLines[i] === newLines[j]) {
+					result.push({ type: 'same', text: oldLines[i] });
+					i += 1;
+					j += 1;
+				} else if (dp[i + 1][j] >= dp[i][j + 1]) {
+					result.push({ type: 'del', text: oldLines[i] });
+					i += 1;
+				} else {
+					result.push({ type: 'add', text: newLines[j] });
+					j += 1;
+				}
+			}
+			while (i < rows) {
+				result.push({ type: 'del', text: oldLines[i] });
+				i += 1;
+			}
+			while (j < cols) {
+				result.push({ type: 'add', text: newLines[j] });
+				j += 1;
+			}
+			return result;
+		}
+
+		function showError(message) {
+			errorBox.textContent = message;
+			errorBox.hidden = false;
+		}
+
+		function hideError() {
+			errorBox.hidden = true;
+			errorBox.textContent = '';
+		}
+
+		function showStatus(message, tone) {
+			if (!message) {
+				statusBox.hidden = true;
+				return;
+			}
+			statusBox.hidden = false;
+			statusBox.textContent = message;
+			statusBox.className = `alert alert-${tone}`;
+		}
+
+		function setBusy(isBusy) {
+			runBtn.disabled = isBusy;
+		}
+
+		function escapeHtml(value) {
+			return String(value)
+				.replaceAll('&', '&amp;')
+				.replaceAll('<', '&lt;')
+				.replaceAll('>', '&gt;')
+				.replaceAll('"', '&quot;')
+				.replaceAll("'", '&#39;');
+		}
+	</script>
+</body>
+</html>
