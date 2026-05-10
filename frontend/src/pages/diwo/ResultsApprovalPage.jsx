@@ -1,9 +1,10 @@
 import { useState } from "react";
-import { REFACTORED_CODE_SNIPPET, SCTVA_DATA } from "./data/diwoData";
+import { SCTVA_DATA } from "./data/diwoData";
 import { Badge, C, Card, Pill } from "./diwoTheme.jsx";
 
-export default function ResultsApprovalPage({ onRestart, onRollback }) {
+export default function ResultsApprovalPage({ onRestart, onRollback, onAccept, refactoredCode, diffRows = [], files = [] }) {
   const [tab, setTab] = useState("summary");
+  const [selectedFileIndex, setSelectedFileIndex] = useState(0);
   const confidence = SCTVA_DATA.confidence_score * 100;
   const comps = SCTVA_DATA.confidence_components;
 
@@ -104,14 +105,79 @@ export default function ResultsApprovalPage({ onRestart, onRollback }) {
       )}
 
       {tab === "code" && (
-        <div>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
-            <div style={{ fontSize: 12, color: C.textMuted }}>ECommerceSystem.java · {SCTVA_DATA.language.toUpperCase()} · 36,957 chars</div>
-            <Badge label="Refactored Output" color={C.accent} />
+        <div style={{ display: "flex", gap: 12 }}>
+          <div style={{ width: 260, maxHeight: 360, overflow: "auto", background: C.panel, border: `1px solid ${C.border}`, borderRadius: 8, padding: 8 }}>
+            <div style={{ fontSize: 12, color: C.textMuted, marginBottom: 8 }}>Files</div>
+            {(files && files.length > 0) ? (
+              files.map((f, idx) => (
+                <div key={f.path || idx} onClick={() => setSelectedFileIndex(idx)} style={{ padding: 10, borderRadius: 6, cursor: "pointer", background: selectedFileIndex === idx ? C.accent : "transparent", color: selectedFileIndex === idx ? "#000" : C.text, marginBottom: 6 }}>
+                  <div style={{ fontSize: 13, fontWeight: 700 }}>{f.path.split('/').pop()}</div>
+                  <div style={{ fontSize: 11, color: C.textMuted, marginTop: 4 }}>{f.path}</div>
+                </div>
+              ))
+            ) : (
+              <div style={{ color: C.textMuted }}>No file-level diffs available.</div>
+            )}
           </div>
-          <pre style={{ background: "#0a0c10", border: `1px solid ${C.border}`, borderRadius: 10, padding: "20px", overflowX: "auto", overflowY: "auto", maxHeight: 360, fontSize: 11.5, color: "#a8d8b9", fontFamily: "'Fira Code', 'Courier New', monospace", lineHeight: 1.7, margin: 0 }}>
-            {REFACTORED_CODE_SNIPPET}
-          </pre>
+
+          <div style={{ flex: 1 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+              <div style={{ fontSize: 12, color: C.textMuted }}>{(files && files[selectedFileIndex]) ? files[selectedFileIndex].path : `ECommerceSystem.java · ${SCTVA_DATA.language.toUpperCase()}`}</div>
+              <Badge label="Refactored Diff" color={C.accent} />
+            </div>
+
+            <div style={{ marginTop: 8 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8, fontSize: 11 }}>
+                <span style={{ color: "#ef4444", fontWeight: 700 }}>- Removed / Original</span>
+                <span style={{ color: "#3b82f6", fontWeight: 700 }}>+ Added / Refactored</span>
+              </div>
+              <div style={{
+                background: "#0b1020",
+                border: `1px solid ${C.border}`,
+                borderRadius: 10,
+                overflow: "auto",
+                maxHeight: 360,
+                fontFamily: "Fira Code, Courier New, monospace",
+                fontSize: 11,
+                lineHeight: 1.55,
+              }}>
+                {((files && files[selectedFileIndex]) ? (files[selectedFileIndex].diff_rows || []) : (diffRows || [])).map((row) => {
+                  const isBefore = row.kind === "before";
+                  const isAfter = row.kind === "after";
+                  return (
+                    <div
+                      key={row.key}
+                      style={{
+                        display: "grid",
+                        gridTemplateColumns: "56px 24px 1fr",
+                        gap: 0,
+                        padding: "2px 0",
+                        background: isBefore
+                          ? "rgba(239,68,68,0.12)"
+                          : isAfter
+                            ? "rgba(59,130,246,0.12)"
+                            : "transparent",
+                        borderBottom: "1px solid rgba(148,163,184,0.06)",
+                      }}
+                    >
+                      <span style={{ color: "#64748b", textAlign: "right", paddingRight: 8, userSelect: "none" }}>{row.lineNo}</span>
+                      <span style={{
+                        color: isBefore ? "#ef4444" : isAfter ? "#3b82f6" : "#94a3b8",
+                        textAlign: "center",
+                        userSelect: "none",
+                        fontWeight: 700,
+                      }}>{row.marker}</span>
+                      <span style={{
+                        whiteSpace: "pre",
+                        color: isBefore ? "#fecaca" : isAfter ? "#bfdbfe" : "#cbd5e1",
+                        padding: "0 10px 0 6px",
+                      }}>{row.text || " "}</span>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
         </div>
       )}
 
@@ -135,7 +201,7 @@ export default function ResultsApprovalPage({ onRestart, onRollback }) {
         <button onClick={onRestart} style={{ padding: "10px 20px", borderRadius: 8, fontWeight: 700, fontSize: 13, cursor: "pointer", background: `${C.info}15`, color: C.info, border: `1px solid ${C.info}30` }}>
           ↺ New Refactoring Session
         </button>
-        <button style={{ padding: "10px 24px", borderRadius: 8, fontWeight: 700, fontSize: 13, cursor: "pointer", background: C.accent, color: "#000", border: "none", boxShadow: `0 0 20px ${C.accentGlow}` }}>
+        <button onClick={() => onAccept && onAccept()} style={{ padding: "10px 24px", borderRadius: 8, fontWeight: 700, fontSize: 13, cursor: "pointer", background: C.accent, color: "#000", border: "none", boxShadow: `0 0 20px ${C.accentGlow}` }}>
           ✓ Accept & Commit Changes
         </button>
       </div>
