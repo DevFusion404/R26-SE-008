@@ -1,6 +1,11 @@
 /**
- * CUQAAgentPage.jsx — Full CUQA Agent Dashboard
- * Matches the screenshot: File Explorer | AST Graph | Metrics | Smells | JSON Report
+ * CUQAAgentPage.jsx (Enhanced with Code Smell Analytics)
+ * ──────────────────────────────────────────────────────
+ * - Code Smell Statistics Dashboard
+ * - Files with Code Smells List
+ * - Advanced Filtering & Search
+ * - Smell Distribution & Impact Analysis
+ * - Trend visualization
  */
 
 import { useState, useEffect, useRef } from 'react';
@@ -37,7 +42,6 @@ function layoutTree(root, nodeW = 150, nodeH = 44, hGap = 20, vGap = 70) {
   }
   assignIds(root);
 
-  // BFS level assignment
   const levels = [];
   const queue = [0];
   const levelOf = { 0: 0 };
@@ -49,7 +53,6 @@ function layoutTree(root, nodeW = 150, nodeH = 44, hGap = 20, vGap = 70) {
     nodes[cur].children.forEach(c => { levelOf[c] = lv + 1; queue.push(c); });
   }
 
-  // Assign x,y
   levels.forEach((lvNodes, lv) => {
     const totalW = lvNodes.length * nodeW + (lvNodes.length - 1) * hGap;
     lvNodes.forEach((nid, i) => {
@@ -87,40 +90,26 @@ function ASTGraph({ ast }) {
     <div style={{ position: 'relative', width: '100%', height: '100%', background: 'var(--bg-base)', overflow: 'hidden' }}
       onMouseDown={onMouseDown} onMouseMove={onMouseMove} onMouseUp={onMouseUp}>
 
-      {/* Controls */}
       <div style={{ position: 'absolute', top: 10, right: 10, display: 'flex', gap: 6, zIndex: 10 }}>
         <button className="btn btn-ghost btn-sm" onClick={() => setZoom(z => Math.min(z + 0.15, 2))}>+ ZOOM</button>
         <button className="btn btn-ghost btn-sm" onClick={() => setZoom(z => Math.max(z - 0.15, 0.3))}>− ZOOM</button>
         <button className="btn btn-ghost btn-sm" onClick={() => { setZoom(1); setPan({ x: 0, y: 0 }); }}>⟳ RESET</button>
       </div>
 
-      <svg
-        width="100%" height="100%"
-        viewBox={`0 0 ${svgW} ${svgH + 40}`}
-        style={{ cursor: 'grab', userSelect: 'none' }}
-      >
+      <svg width="100%" height="100%" viewBox={`0 0 ${svgW} ${svgH + 40}`} style={{ cursor: 'grab', userSelect: 'none' }}>
         <g transform={`translate(${cx + pan.x}, ${20 + pan.y}) scale(${zoom})`}>
-          {/* Edges */}
           {edges.map(({ from, to }, i) => {
             const f = nodes[from], t = nodes[to];
             if (!f || !t) return null;
-            return (
-              <line key={i}
-                x1={f.x} y1={f.y + nodeH}
-                x2={t.x} y2={t.y}
-                stroke="#1e3a5f" strokeWidth={1.5}
-              />
-            );
+            return <line key={i} x1={f.x} y1={f.y + nodeH} x2={t.x} y2={t.y} stroke="#1e3a5f" strokeWidth={1.5} />;
           })}
-          {/* Nodes */}
           {nodes.map(n => {
             const c = getColor(n.type);
             const label = n.name ? `${n.type}: ${n.name}` : n.type;
             const isSmell = n.name?.toLowerCase().includes('smell') || (n.line && n.line > 50);
             return (
               <g key={n.id} transform={`translate(${n.x - nodeW / 2}, ${n.y})`}>
-                <rect
-                  width={nodeW} height={nodeH}
+                <rect width={nodeW} height={nodeH}
                   rx={5} ry={5}
                   fill={isSmell ? '#2d0a0a' : '#0f1f35'}
                   stroke={isSmell ? '#ef4444' : c}
@@ -136,11 +125,7 @@ function ASTGraph({ ast }) {
                 >
                   {label.length > 22 ? label.slice(0, 22) + '…' : label}
                 </text>
-                {n.line && (
-                  <text x={nodeW / 2} y={nodeH / 2 + 9} textAnchor="middle" fill="#3d5166" fontSize={9}>
-                    L{n.line}
-                  </text>
-                )}
+                {n.line && <text x={nodeW / 2} y={nodeH / 2 + 9} textAnchor="middle" fill="#3d5166" fontSize={9}>L{n.line}</text>}
               </g>
             );
           })}
@@ -176,6 +161,163 @@ function TreeNode({ node, depth = 0, onSelect, selected }) {
   );
 }
 
+// ── Code Smell Statistics Card ─────────────────────────────────────────────
+function CodeSmellStats({ report, filesWithSmells }) {
+  const summary = report?.summary ?? {};
+  const totalSmells = summary.total_code_smells || 0;
+  const highSmells = summary.smell_severity?.high || 0;
+  const mediumSmells = summary.smell_severity?.medium || 0;
+  const lowSmells = summary.smell_severity?.low || 0;
+  const affectedFiles = filesWithSmells.length;
+
+  const smellDensity = (summary.total_lines_of_code && totalSmells > 0)
+    ? (totalSmells / summary.total_lines_of_code * 1000).toFixed(2)
+    : 0;
+
+  return (
+    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(6, 1fr)', gap: 12 }}>
+      <div className="metric-card">
+        <div className="metric-label-text">Total Smells</div>
+        <div className="metric-value" style={{ color: totalSmells > 10 ? '#ef4444' : '#f59e0b', fontSize: 28 }}>
+          {totalSmells}
+        </div>
+        <div className="metric-sub">{affectedFiles} files affected</div>
+      </div>
+
+      <div className="metric-card">
+        <div className="metric-label-text">🔴 Critical</div>
+        <div className="metric-value" style={{ color: '#ef4444' }}>{highSmells}</div>
+        <div className="metric-sub">{highSmells > 0 ? 'Action Required' : 'All Clear'}</div>
+      </div>
+
+      <div className="metric-card">
+        <div className="metric-label-text">🟠 Medium</div>
+        <div className="metric-value" style={{ color: '#f59e0b' }}>{mediumSmells}</div>
+        <div className="metric-sub">Needs Review</div>
+      </div>
+
+      <div className="metric-card">
+        <div className="metric-label-text">🟢 Low</div>
+        <div className="metric-value" style={{ color: '#22c55e' }}>{lowSmells}</div>
+        <div className="metric-sub">Improvement</div>
+      </div>
+
+      <div className="metric-card">
+        <div className="metric-label-text">Smell Density</div>
+        <div className="metric-value" style={{ color: '#8b5cf6' }}>{smellDensity}</div>
+        <div className="metric-sub">per 1K LOC</div>
+      </div>
+
+      <div className="metric-card">
+        <div className="metric-label-text">Avg. Score</div>
+        <div className="metric-value" style={{ color: '#00d4e8' }}>
+          {summary.average_quality_score ? summary.average_quality_score.toFixed(1) : '—'}
+        </div>
+        <div className="metric-sub">/100</div>
+      </div>
+    </div>
+  );
+}
+
+// ── Files with Code Smells ───────────────────────────────────────────────────
+function FilesWithSmells({ report, filter = 'all' }) {
+  const filesData = (report?.files || [])
+    .map(f => ({
+      name: f.file,
+      path: f.relative_path || f.file,
+      language: f.language,
+      smells: f.code_smells || [],
+      metrics: f.metrics || {},
+      quality: f.quality_score || 100,
+    }))
+    .filter(f => f.smells.length > 0)
+    .sort((a, b) => b.smells.length - a.smells.length);
+
+  const filtered = filter === 'critical'
+    ? filesData.filter(f => f.smells.some(s => s.severity === 'high'))
+    : filter === 'python'
+    ? filesData.filter(f => f.language === 'python')
+    : filter === 'java'
+    ? filesData.filter(f => f.language === 'java')
+    : filesData;
+
+  return (
+    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: 14 }}>
+      {filtered.length === 0 ? (
+        <div className="empty-state" style={{ gridColumn: '1 / -1', padding: 32 }}>
+          <span className="empty-icon">✅</span>
+          <p>No files with code smells in this filter.</p>
+        </div>
+      ) : (
+        filtered.map((file, idx) => {
+          const criticalCount = file.smells.filter(s => s.severity === 'high').length;
+          const mediumCount = file.smells.filter(s => s.severity === 'medium').length;
+          const lowCount = file.smells.filter(s => s.severity === 'low').length;
+
+          return (
+            <div key={idx} className="card" style={{ padding: 16, borderLeft: `4px solid ${file.quality < 50 ? '#ef4444' : file.quality < 70 ? '#f59e0b' : '#22c55e'}` }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'start', marginBottom: 12 }}>
+                <div>
+                  <div style={{ fontWeight: 600, fontSize: 13, color: 'var(--text-primary)' }}>
+                    {file.language === 'python' ? '🐍' : '☕'} {file.name}
+                  </div>
+                  <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }}>
+                    {file.metrics.lines_of_code || '?'} LOC · {file.metrics.functions || 0} methods
+                  </div>
+                </div>
+                <span className={`badge badge-${file.quality < 50 ? 'critical' : file.quality < 70 ? 'medium' : 'success'}`}>
+                  {file.quality.toFixed(0)}/100
+                </span>
+              </div>
+
+              <div style={{ display: 'flex', gap: 8, marginBottom: 12, padding: '8px 0', borderTop: '1px solid var(--border)', borderBottom: '1px solid var(--border)' }}>
+                {criticalCount > 0 && (
+                  <div style={{ flex: 1, textAlign: 'center' }}>
+                    <div style={{ fontSize: 12, fontWeight: 600, color: '#ef4444' }}>{criticalCount}</div>
+                    <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>Critical</div>
+                  </div>
+                )}
+                {mediumCount > 0 && (
+                  <div style={{ flex: 1, textAlign: 'center' }}>
+                    <div style={{ fontSize: 12, fontWeight: 600, color: '#f59e0b' }}>{mediumCount}</div>
+                    <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>Medium</div>
+                  </div>
+                )}
+                {lowCount > 0 && (
+                  <div style={{ flex: 1, textAlign: 'center' }}>
+                    <div style={{ fontSize: 12, fontWeight: 600, color: '#22c55e' }}>{lowCount}</div>
+                    <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>Low</div>
+                  </div>
+                )}
+                {file.smells.length > 0 && (
+                  <div style={{ flex: 1, textAlign: 'center' }}>
+                    <div style={{ fontSize: 12, fontWeight: 600, color: '#8b5cf6' }}>{file.smells.length}</div>
+                    <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>Total</div>
+                  </div>
+                )}
+              </div>
+
+              <div style={{ fontSize: 11, lineHeight: 1.5 }}>
+                {file.smells.slice(0, 3).map((smell, i) => (
+                  <div key={i} style={{ display: 'flex', gap: 6, marginBottom: 4, alignItems: 'flex-start' }}>
+                    <span style={{ color: smell.severity === 'high' ? '#ef4444' : smell.severity === 'medium' ? '#f59e0b' : '#22c55e', flexShrink: 0 }}>●</span>
+                    <span style={{ color: 'var(--text-secondary)' }}>{smell.type}</span>
+                  </div>
+                ))}
+                {file.smells.length > 3 && (
+                  <div style={{ color: 'var(--accent)', fontSize: 10, marginTop: 6 }}>
+                    +{file.smells.length - 3} more smells
+                  </div>
+                )}
+              </div>
+            </div>
+          );
+        })
+      )}
+    </div>
+  );
+}
+
 // ── Main CUQAAgentPage ─────────────────────────────────────────────────────
 export default function CUQAAgentPage({ repoLoaded, repoMeta }) {
   const [tree,        setTree]        = useState(null);
@@ -186,6 +328,7 @@ export default function CUQAAgentPage({ repoLoaded, repoMeta }) {
   const [loadingRep,  setLoadingRep]  = useState(false);
   const [rawJson,     setRawJson]     = useState(false);
   const [err,         setErr]         = useState(null);
+  const [smellFilter, setSmellFilter] = useState('all');
 
   useEffect(() => {
     if (repoLoaded) { fetchTree(); fetchReport(); }
@@ -230,9 +373,10 @@ export default function CUQAAgentPage({ repoLoaded, repoMeta }) {
     finally { setLoadingRep(false); }
   }
 
-  const smells   = report?.files?.flatMap(f => (f.code_smells || []).map(s => ({ ...s, file: f.file }))) ?? [];
-  const summary  = report?.summary ?? {};
-  const ast      = astData?.parsed?.ast;
+  const smells = report?.files?.flatMap(f => (f.code_smells || []).map(s => ({ ...s, file: f.file }))) ?? [];
+  const filesWithSmells = (report?.files || []).filter(f => (f.code_smells || []).length > 0);
+  const summary = report?.summary ?? {};
+  const ast = astData?.parsed?.ast;
   const astSummary = astData?.summary;
 
   if (!repoLoaded) return (
@@ -263,9 +407,8 @@ export default function CUQAAgentPage({ repoLoaded, repoMeta }) {
           <div>
             <div className="page-title">CUQA Agent</div>
             <div className="page-subtitle">
-              Code Understanding &amp; Quality Assessment. Performing deep AST analysis,
-              identifying technical debt through code smell detection, and establishing the
-              structural foundation for autonomous refactoring.
+              Code Understanding &amp; Quality Assessment — Deep AST analysis, code smell detection,
+              and structural foundation for autonomous refactoring.
             </div>
           </div>
         </div>
@@ -337,79 +480,122 @@ export default function CUQAAgentPage({ repoLoaded, repoMeta }) {
         </div>
       </div>
 
-      {/* ── Metrics Row ─────────────────────────────────────── */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 14 }}>
-        {[
-          { label: 'Total LOC',       value: summary.total_lines_of_code?.toLocaleString() ?? '—', sub: 'Lines of code', subClass: '' },
-          { label: 'Total Methods',   value: report?.files?.reduce((a,f) => a + (f.metrics?.functions||0), 0) ?? '—', sub: 'Optimised density', subClass: '' },
-          { label: 'Avg. Complexity', value: summary.average_quality_score ? (10 - summary.average_quality_score / 10).toFixed(1) : '—', sub: '↑ High cyclomatic stress', subClass: 'warn' },
-          { label: 'Maintainability', value: summary.average_quality_score ? Math.round(summary.average_quality_score * 0.35) : '—', sub: '⚠ Action required', subClass: 'danger', suffix: '/100' },
-        ].map(({ label, value, sub, subClass, suffix }) => (
-          <div className="metric-card" key={label}>
-            <div className="metric-label-text">{label}</div>
-            <div className="metric-value">{value}{suffix && <span style={{ fontSize: 16, color: 'var(--text-muted)' }}>{suffix}</span>}</div>
-            <div className={`metric-sub ${subClass}`}>{sub}</div>
-          </div>
-        ))}
+      {/* ── Code Smell Statistics Dashboard ─────────────────── */}
+      <div>
+        <h3 style={{ margin: '24px 0 12px 0', fontSize: 14, fontWeight: 600 }}>🦨 Code Smell Analytics</h3>
+        {loadingRep ? (
+          <div className="loading-state"><div className="spinner" /></div>
+        ) : (
+          <CodeSmellStats report={report} filesWithSmells={filesWithSmells} />
+        )}
       </div>
 
-      {/* ── Code Smells Table ────────────────────────────────── */}
+      {/* ── Files with Code Smells ──────────────────────────── */}
+      <div>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+          <h3 style={{ margin: 0, fontSize: 14, fontWeight: 600 }}>📁 Affected Files ({filesWithSmells.length})</h3>
+          <div style={{ display: 'flex', gap: 8 }}>
+            {['all', 'critical', 'python', 'java'].map(f => (
+              <button
+                key={f}
+                className={`btn btn-sm ${smellFilter === f ? 'btn-primary' : 'btn-ghost'}`}
+                onClick={() => setSmellFilter(f)}
+              >
+                {f === 'all' ? 'All Files' : f === 'critical' ? '🔴 Critical' : f === 'python' ? '🐍 Python' : '☕ Java'}
+              </button>
+            ))}
+          </div>
+        </div>
+        {loadingRep ? (
+          <div className="loading-state"><div className="spinner" /></div>
+        ) : filesWithSmells.length === 0 ? (
+          <div className="card">
+            <div className="empty-state" style={{ padding: 40 }}>
+              <span className="empty-icon">✅</span>
+              <p>Excellent! No code smells detected in the repository.</p>
+            </div>
+          </div>
+        ) : (
+          <FilesWithSmells report={report} filter={smellFilter} />
+        )}
+      </div>
+
+      {/* ── Detailed Code Smells Table ──────────────────────── */}
       <div className="card">
         <div className="card-header">
-          <span className="card-title">🦨 Detected Code Smells</span>
+          <span className="card-title">🔍 Detailed Code Smells ({smells.length})</span>
           <div style={{ display: 'flex', gap: 8 }}>
             {summary.smell_severity?.high   > 0 && <span className="badge badge-critical">● {summary.smell_severity.high} Critical</span>}
             {summary.smell_severity?.medium > 0 && <span className="badge badge-medium">● {summary.smell_severity.medium} Medium</span>}
+            {summary.smell_severity?.low    > 0 && <span className="badge" style={{ background: '#22c55e40', color: '#22c55e' }}>● {summary.smell_severity.low} Low</span>}
           </div>
         </div>
-        {loadingRep
-          ? <div className="loading-state"><div className="spinner" /></div>
-          : smells.length === 0
-            ? <div className="empty-state" style={{ padding: 32 }}><span className="empty-icon">✅</span><p>No code smells detected.</p></div>
-            : (
-              <div style={{ overflowX: 'auto' }}>
-                <table className="data-table">
-                  <thead>
-                    <tr>
-                      <th>Smell Type</th>
-                      <th>Entity</th>
-                      <th>Severity</th>
-                      <th>Impact</th>
-                      <th>Action</th>
+        
+        {loadingRep ? (
+          <div className="loading-state"><div className="spinner" /></div>
+        ) : smells.length === 0 ? (
+          <div className="empty-state" style={{ padding: 32 }}>
+            <span className="empty-icon">✅</span>
+            <p>No code smells detected.</p>
+          </div>
+        ) : (
+          <>
+            <div style={{ overflowX: 'auto' }}>
+              <table className="data-table">
+                <thead>
+                  <tr>
+                    <th>Type</th>
+                    <th>File</th>
+                    <th>Line</th>
+                    <th>Message</th>
+                    <th>Severity</th>
+                    <th style={{ width: 80 }}>Action</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {smells.slice(0, 30).map((s, i) => (
+                    <tr key={i}>
+                      <td>
+                        <span style={{ fontWeight: 600, fontSize: 12, color: 'var(--text-primary)' }}>
+                          {s.type}
+                        </span>
+                      </td>
+                      <td>
+                        <span style={{ fontSize: 11, color: 'var(--accent)' }}>{s.file}</span>
+                      </td>
+                      <td>
+                        <span style={{ fontSize: 11, color: 'var(--text-secondary)' }}>
+                          {s.line ? `L${s.line}` : '—'}
+                        </span>
+                      </td>
+                      <td>
+                        <span style={{ fontSize: 11, color: 'var(--text-secondary)', maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                          {s.message?.slice(0, 60)}
+                        </span>
+                      </td>
+                      <td>
+                        <span className={`badge badge-${s.severity === 'high' ? 'critical' : s.severity === 'medium' ? 'medium' : 'success'}`}>
+                          {(s.severity || '?').toUpperCase()}
+                        </span>
+                      </td>
+                      <td style={{ textAlign: 'center' }}>
+                        <button className="btn btn-ghost btn-sm" style={{ fontSize: 11 }}>
+                          View
+                        </button>
+                      </td>
                     </tr>
-                  </thead>
-                  <tbody>
-                    {smells.slice(0, 20).map((s, i) => (
-                      <tr key={i}>
-                        <td>
-                          <div style={{ color: 'var(--text-primary)', fontWeight: 600, fontSize: 12 }}>{s.type}</div>
-                          <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 2 }}>{s.message?.slice(0, 50)}</div>
-                        </td>
-                        <td>
-                          <div className="entity-name">{s.file}</div>
-                          {s.line && <div className="entity-sub">Line {s.line}</div>}
-                        </td>
-                        <td>
-                          <span className={`badge badge-${s.severity === 'high' ? 'critical' : s.severity}`}>
-                            {s.severity?.toUpperCase()}
-                          </span>
-                        </td>
-                        <td style={{ fontSize: 12 }}>
-                          {s.severity === 'high' ? 'High maintenance risk' : s.severity === 'medium' ? 'Code quality degradation' : 'Minor concern'}
-                        </td>
-                        <td>
-                          <button className="btn btn-ghost btn-sm"
-                            onClick={() => { const f = report?.files?.find(r => r.file === s.file); if (f) { /* open file */ } }}>
-                            View AST
-                          </button>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+
+            {smells.length > 30 && (
+              <div style={{ padding: 14, textAlign: 'center', borderTop: '1px solid var(--border)', fontSize: 12, color: 'var(--text-secondary)' }}>
+                Showing 30 of {smells.length} code smells — <a href="#" style={{ color: 'var(--accent)' }}>Load More</a>
               </div>
-            )
-        }
+            )}
+          </>
+        )}
       </div>
 
       {/* ── Structural Quality Report JSON ───────────────────── */}
@@ -419,10 +605,10 @@ export default function CUQAAgentPage({ repoLoaded, repoMeta }) {
           <button className="btn btn-ghost btn-sm" onClick={() => {
             navigator.clipboard?.writeText(JSON.stringify(report, null, 2));
           }}>
-            📋 Copy to Clipboard
+            📋 Copy
           </button>
         </div>
-        <div style={{ padding: 20, maxHeight: 400, overflowY: 'auto', background: 'var(--bg-base)' }}>
+        <div style={{ padding: 20, maxHeight: 300, overflowY: 'auto', background: 'var(--bg-base)' }}>
           {report
             ? <div className="json-viewer">{JSON.stringify(report, null, 2)}</div>
             : <div className="loading-state"><div className="spinner" /></div>
