@@ -80,6 +80,7 @@ export default function App() {
   const [repoMeta,   setRepoMeta]   = useState(null);
   const [backendOk,  setBackendOk]  = useState(null);
   const [search,     setSearch]     = useState('');
+  const [cuqaReport, setCuqaReport] = useState(null); // quality report from CUQA → RDP bridge
 
   // Check backend health on mount
   useEffect(() => {
@@ -94,6 +95,12 @@ export default function App() {
     setRepoMeta(data);
     // Auto-navigate to CUQA agent after load
     setTimeout(() => setPage('cuqa'), 400);
+  }
+
+  // Called from CUQAAgentPage when user clicks "Send to RDP Agent"
+  function handleSendToRdp(report) {
+    setCuqaReport(report);
+    setPage('rdp');
   }
 
   function navigate(id) {

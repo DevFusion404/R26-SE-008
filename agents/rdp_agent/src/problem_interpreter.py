@@ -156,6 +156,19 @@ class ProblemInterpreter:
             chain_len = metrics.get("chain_length", 0)
             return chain_len >= 3 if chain_len else True
 
+        # --- has_magic_numbers ---
+        # If the smell was detected as MagicNumber/Magic Numbers, the condition is met by definition
+        if precondition == "has_magic_numbers":
+            return True
+
+        # --- has_multiple_dependencies ---
+        # Heuristic: coupling metric or high number of imports implies multiple dependencies
+        if precondition == "has_multiple_dependencies":
+            coupling = metrics.get("coupling", None)
+            if coupling is not None:
+                return coupling >= 3
+            return True  # cannot evaluate → assume OK
+
         # Unknown precondition → pass by default
         logger.warning(
             "Unknown precondition '%s'; assuming satisfied.", precondition

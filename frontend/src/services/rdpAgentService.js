@@ -168,6 +168,7 @@ class RDPAgentService {
 
   /**
    * Client-side validation of quality report format
+   * Accepts both CUQA format { files: [...] } and native RDP format { target, smells: [...] }
    * @private
    * @param {object} report - Quality report
    * @returns {array} Array of error messages
@@ -175,22 +176,38 @@ class RDPAgentService {
   static _validateQualityReportFormat(report) {
     const errors = [];
 
-    // Check required fields
+    if (!report || typeof report !== 'object') {
+      errors.push('Report must be a JSON object');
+      return errors;
+    }
+
+    // --- CUQA format: { files: [{ file, code_smells, metrics }], summary } ---
+    if (Array.isArray(report.files)) {
+      const totalSmells = report.files.reduce(
+        (sum, f) => sum + (f.code_smells?.length || 0),
+        0
+      );
+      if (report.files.length === 0) {
+        errors.push('CUQA report has no files');
+      } else if (totalSmells === 0) {
+        errors.push('CUQA report has no code smells detected across all files');
+      }
+      // Valid CUQA format — backend will translate it
+      return errors;
+    }
+
+    // --- Native RDP format: { target, smells: [...] } ---
     if (!report.target) {
       errors.push('Missing required field: target (file/module name)');
     }
-
-    if (!report.smells || !Array.isArray(report.smells)) {
+    if (!Array.isArray(report.smells)) {
       errors.push('Missing required field: smells (array)');
     } else if (report.smells.length === 0) {
-      errors.push('Smells array is empty');
+      errors.push('Smells array is empty — nothing to plan');
     } else {
-      // Validate each smell
       report.smells.forEach((smell, index) => {
-        if (!smell.id) errors.push(`Smell ${index}: Missing field 'id'`);
-        if (!smell.type) errors.push(`Smell ${index}: Missing field 'type'`);
-        if (!smell.location) errors.push(`Smell ${index}: Missing field 'location'`);
-        if (!smell.metrics) errors.push(`Smell ${index}: Missing field 'metrics'`);
+        if (!smell.id)       errors.push(`Smell ${index}: Missing field 'id'`);
+        if (!smell.type)     errors.push(`Smell ${index}: Missing field 'type'`);
         if (!smell.severity) errors.push(`Smell ${index}: Missing field 'severity'`);
       });
     }
