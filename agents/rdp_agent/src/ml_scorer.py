@@ -133,16 +133,33 @@ class MLScorer:
         from transformers import AutoTokenizer, AutoModel  # type: ignore
 
         logger.info("Loading CodeBERT model '%s' …", self._model_name)
-        self._tokenizer = AutoTokenizer.from_pretrained(
-            self._model_name, 
-            use_safetensors=False, 
-            local_files_only=True
-        )
-        self._model = AutoModel.from_pretrained(
-            self._model_name, 
-            use_safetensors=False, 
-            local_files_only=True
-        )
+        try:
+            # Prefer local cache first to keep startup fast/offline-friendly.
+            self._tokenizer = AutoTokenizer.from_pretrained(
+                self._model_name,
+                use_safetensors=False,
+                local_files_only=True,
+            )
+            self._model = AutoModel.from_pretrained(
+                self._model_name,
+                use_safetensors=False,
+                local_files_only=True,
+            )
+        except Exception:
+            logger.info(
+                "Local CodeBERT cache not found; downloading '%s'.",
+                self._model_name,
+            )
+            self._tokenizer = AutoTokenizer.from_pretrained(
+                self._model_name,
+                use_safetensors=False,
+                local_files_only=False,
+            )
+            self._model = AutoModel.from_pretrained(
+                self._model_name,
+                use_safetensors=False,
+                local_files_only=False,
+            )
         self._model.eval()  # inference mode
         logger.info("CodeBERT model loaded successfully.")
 
