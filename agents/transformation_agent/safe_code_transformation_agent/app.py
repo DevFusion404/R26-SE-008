@@ -3,27 +3,10 @@
 from __future__ import annotations
 
 import os
-from pathlib import Path
 
 from flask import Flask, jsonify, render_template
 
 from sctva.integration.api import create_sctva_blueprint
-
-
-def _source_code_payload() -> dict:
-    source_dir = Path(__file__).resolve().parents[1] / "source_code"
-    files = {}
-    if source_dir.exists():
-        for path in sorted(source_dir.iterdir()):
-            if path.is_file() and path.suffix.lower() in {".java", ".py", ".txt"}:
-                files[path.name] = path.read_text(encoding="utf-8")
-
-    default_name = next(iter(files.keys()), "")
-    return {
-        "source_files": files,
-        "default_source_name": default_name,
-    }
-
 
 def create_app() -> Flask:
     app = Flask(__name__)
@@ -31,7 +14,7 @@ def create_app() -> Flask:
 
     @app.get("/")
     def index() -> str:
-        return render_template("index.html", **_source_code_payload())
+        return render_template("index.html")
 
     @app.get("/health")
     def health() -> tuple:

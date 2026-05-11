@@ -102,7 +102,7 @@ The same server also serves the UI at `http://localhost:8002/`.
 
 1. Start the SCTVA server with `python app.py` from this folder.
 2. Open `http://localhost:8002/` in your browser.
-3. Attach a `.java` or `.py` file, or click `Use Sample File` to load the bundled `OrderProcessor.java` sample.
+3. Browse for a local `.java` or `.py` file from your computer and load it into the source editor.
 4. Edit the refactoring plan if needed, then click `Run Transformation`.
 
 The UI shows the original code on the left, the transformed code on the right, and the change log / safety report below.
