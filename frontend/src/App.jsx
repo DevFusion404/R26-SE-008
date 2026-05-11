@@ -79,6 +79,7 @@ export default function App() {
   const [repoMeta,   setRepoMeta]   = useState(null);
   const [backendOk,  setBackendOk]  = useState(null);
   const [search,     setSearch]     = useState('');
+  const [cuqaReport, setCuqaReport] = useState(null); // quality report from CUQA → RDP bridge
 
   // Check backend health on mount
   useEffect(() => {
@@ -95,6 +96,12 @@ export default function App() {
     setTimeout(() => setPage('cuqa'), 400);
   }
 
+  // Called from CUQAAgentPage when user clicks "Send to RDP Agent"
+  function handleSendToRdp(report) {
+    setCuqaReport(report);
+    setPage('rdp');
+  }
+
   function navigate(id) {
     setPage(id);
   }
@@ -105,8 +112,8 @@ export default function App() {
       case 'overview':    return <Overview onNavigate={navigate} />;
       case 'dashboard':   return <Dashboard />;
       case 'repository':  return <RepositoryInput onLoaded={handleRepoLoaded} />;
-      case 'cuqa':        return <CUQAAgentPage repoLoaded={repoLoaded} repoMeta={repoMeta} />;
-      case 'rdp':         return <RDPAgentPage repoLoaded={repoLoaded} repoMeta={repoMeta} />;
+      case 'cuqa':        return <CUQAAgentPage repoLoaded={repoLoaded} repoMeta={repoMeta} onSendToRdp={handleSendToRdp} />;
+      case 'rdp':         return <RDPAgentPage repoLoaded={repoLoaded} repoMeta={repoMeta} preloadedReport={cuqaReport} onClearPreloaded={() => setCuqaReport(null)} />;
       case 'orchestrate': return <DIWOAgentPage />;
       case 'reports':     return <Reports />;
       case 'evaluation':  return <Evaluation />;
