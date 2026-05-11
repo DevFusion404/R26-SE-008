@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import AuditSidebar from "./AuditSidebar";
 import CodeSmellApprovalPage from "./CodeSmellApprovalPage";
 import RefactoringPlanApprovalPage from "./RefactoringPlanApprovalPage";
@@ -7,6 +7,7 @@ import TransformationApprovalPage from "./TransformationApprovalPage";
 import ComparisonView from "./ComparisonView.jsx";
 import { C, StepBar } from "./diwoTheme.jsx";
 import { CUQA_DATA } from "./data/diwoData.js";
+import DIWOAgentService from "../../services/diwoAgentService.js";
 
 const PHASE_TITLES = [
   "Code Smell Review",
@@ -26,40 +27,176 @@ const PHASE_DESCRIPTIONS = [
 
 export default function DIWOAgentPage() {
   const [phase, setPhase] = useState(0);
+  const [workflowId, setWorkflowId] = useState(null);
+  const [planData, setPlanData] = useState(null);
+  const [transformationData, setTransformationData] = useState(null);
+  const [metricsBeforeApi, setMetricsBeforeApi] = useState(null);
+  const [metricsAfterApi, setMetricsAfterApi] = useState(null);
+  const [backendBusy, setBackendBusy] = useState(false);
   const [auditLog, setAuditLog] = useState([
-    { time: new Date().toLocaleTimeString(), event: "Session initialized", type: "info" }
+    { id: `local-${Date.now()}`, time: new Date().toLocaleTimeString(), event: "Session initialized", type: "info" }
   ]);
   const [workflow, setWorkflow] = useState(null);
   const [compLoading, setCompLoading] = useState(false);
 
   const addLog = (event, type = "info") => {
-    setAuditLog(prev => [...prev, { time: new Date().toLocaleTimeString(), event, type }]);
+    setAuditLog(prev => [...prev, { id: `local-${Date.now()}-${Math.random()}`, time: new Date().toLocaleTimeString(), event, type }]);
   };
 
-  const handleSmellsSelected = (selected) => {
+  const buildBackendSmells = () => {
+    const smells = [];
+    CUQA_DATA.files.forEach((file, fileIdx) => {
+      (file.code_smells || []).forEach((smell, smellIdx) => {
+        smells.push({
+          id: `${file.relative_path}:${smell.line}:${smellIdx}`,
+          type: smell.type,
+          severity: smell.severity,
+          location: {
+            file: file.relative_path,
+            class: file.file?.replace(/\.[^.]+$/, "") || "UnknownClass",
+            method: null,
+            lines: [smell.line || 0, smell.line || 0],
+          },
+          metrics: {
+            lines_of_code: file.metrics?.lines_of_code || 0,
+            quality_score: file.quality_score || 0,
+          },
+          message: smell.message || "",
+          _file_idx: fileIdx,
+        });
+      });
+    });
+    return smells;
+  };
+
+  useEffect(() => {
+    const start = async () => {
+      try {
+        setBackendBusy(true);
+        const smells = buildBackendSmells();
+        const res = await DIWOAgentService.startWorkflow({
+          target: "ECommerceSystem.java",
+          language: "java",
+          smells,
+        });
+        setWorkflowId(res.workflow_id);
+        setMetricsBeforeApi(res.metrics_before || null);
+        addLog(`Backend workflow created: ${res.workflow_id}`, "success");
+      } catch (error) {
+        addLog(`Backend not connected. Using local mock flow. (${error.message})`, "warn");
+      } finally {
+        setBackendBusy(false);
+      }
+    };
+    start();
+  }, []);
+
+  const handleSmellsSelected = async (selected) => {
     addLog(`${selected.size} files forwarded to Refactoring Planning Agent`, "success");
-    setPhase(1);
+
+    if (!workflowId) {
+      setPhase(1);
+      return;
+    }
+
+    try {
+      setBackendBusy(true);
+      const selectedPaths = Array.from(selected);
+      const smells = buildBackendSmells();
+      const selectedIds = smells
+        .filter((s) => selectedPaths.includes(s.location.file))
+        .map((s) => s.id);
+
+      const res = await DIWOAgentService.selectSmells(workflowId, {
+        selected_ids: selectedIds,
+        feedback: { reason: "Selected in DIWO frontend" },
+      });
+
+      setPlanData(res.plan || null);
+      addLog(`Backend plan generated with ${res.plan?.summary?.total_steps || 0} steps`, "success");
+      setPhase(1);
+    } catch (error) {
+      addLog(`Failed to submit smell selection: ${error.message}`, "danger");
+    } finally {
+      setBackendBusy(false);
+    }
   };
 
-  const handlePlanApproved = ({ decisions, opinion }) => {
+  const handlePlanApproved = async ({ decisions, opinion }) => {
     const approved = Object.values(decisions).filter(d => d === "approve").length;
     const rejected = Object.values(decisions).filter(d => d === "reject").length;
     addLog(`Plan approved: ${approved} steps approved, ${rejected} rejected. Forwarding to Transformation Agent.`, "success");
     if (opinion) addLog(`Developer note recorded: "${opinion.slice(0, 60)}..."`, "info");
-    setPhase(2);
+
+    if (!workflowId || !planData) {
+      // Fallback to mock transformation
+      setTimeout(() => handleTransformComplete(), 500);
+      setPhase(2);
+      return;
+    }
+
+    try {
+      setBackendBusy(true);
+      const approvedSteps = (planData.steps || []).filter((s) => decisions[s.step_id] === "approve");
+
+      if (approvedSteps.length === 0) {
+        addLog("At least one step must be approved to continue.", "warn");
+        return;
+      }
+
+      // If some steps are rejected, modify the plan first
+      if (approvedSteps.length < (planData.steps || []).length) {
+        const modRes = await DIWOAgentService.submitPlanDecision(workflowId, {
+          decision: "modify",
+          modified_steps: approvedSteps,
+          feedback: { reason: opinion || "Developer adjusted plan" },
+        });
+        setPlanData(modRes.plan || planData);
+      }
+
+      // Approve the plan - backend will auto-trigger transformation
+      const approveRes = await DIWOAgentService.submitPlanDecision(workflowId, {
+        decision: "approve",
+        feedback: { reason: opinion || "Approved in DIWO frontend", rating: 5 },
+      });
+
+      // Store backend transformation data
+      setTransformationData({
+        refactored_code: approveRes.refactored_code || "",
+        diff_rows: approveRes.diff_rows || [],
+        files: approveRes.files || [],
+      });
+      setMetricsAfterApi(approveRes.metrics_after || null);
+      addLog("Backend transformation completed. Results ready for review.", "success");
+      setPhase(2);
+    } catch (error) {
+      addLog(`Failed to submit plan decision: ${error.message}`, "danger");
+      return;
+    } finally {
+      setBackendBusy(false);
+    }
   };
 
-  const handleTransformComplete = (transformData = {}) => {
+  const handleTransformComplete = (mockTransformData = {}) => {
     addLog("Safe Code Transformation Agent completed. Confidence: 100%", "success");
-    // build a lightweight workflow object for comparison view (mocked from CUQA_DATA)
-    const before = {
+    
+    // Use backend transformation data if available, otherwise use mock
+    const backendData = transformationData || {};
+    const transformData = {
+      refactored_code: backendData.refactored_code || mockTransformData.refactored_code || "",
+      diff_rows: backendData.diff_rows || mockTransformData.diff_rows || [],
+      files: backendData.files || mockTransformData.files || [],
+    };
+
+    // fallback mock metrics when backend is not available
+    const beforeFallback = {
       cyclomatic_complexity: 35,
       code_duplication_pct: 18,
       maintainability_index: 65,
       total_smells: CUQA_DATA.summary.total_code_smells,
       smell_breakdown: CUQA_DATA.summary.smell_severity,
     };
-    const after = {
+    const afterFallback = {
       cyclomatic_complexity: 24,
       code_duplication_pct: 9,
       maintainability_index: 82,
@@ -67,18 +204,34 @@ export default function DIWOAgentPage() {
       smell_breakdown: { high: Math.max(0, CUQA_DATA.summary.smell_severity.high - 6), medium: Math.max(0, (CUQA_DATA.summary.smell_severity.medium || 0) - 2), low: Math.max(0, (CUQA_DATA.summary.smell_severity.low || 0) - 24) },
       improvements: { complexity_reduced_by: 11, duplication_reduced_by: 9, maintainability_gained: 17 },
     };
+
+    const before = metricsBeforeApi || beforeFallback;
+    const after = metricsAfterApi || afterFallback;
+
     setWorkflow({
       metrics_before: before,
       metrics_after: after,
-      refactored_code: transformData.refactored_code || "",
-      diff_rows: transformData.diff_rows || [],
-      files: transformData.files || [],
+      refactored_code: transformData.refactored_code,
+      diff_rows: transformData.diff_rows,
+      files: transformData.files,
     });
     setPhase(3);
   };
 
-  const handleRollback = () => {
+  const handleRollback = async () => {
     addLog("Developer requested rollback. Reverting to pre-transformation state.", "danger");
+
+    if (workflowId) {
+      try {
+        await DIWOAgentService.submitTransformationDecision(workflowId, {
+          decision: "rollback",
+          feedback: { reason: "Rollback requested from frontend" },
+        });
+      } catch (error) {
+        addLog(`Backend rollback call failed: ${error.message}`, "warn");
+      }
+    }
+
     setPhase(1);
   };
 
@@ -111,8 +264,8 @@ export default function DIWOAgentPage() {
           </div>
 
           {phase === 0 && <CodeSmellApprovalPage onProceed={handleSmellsSelected} />}
-          {phase === 1 && <RefactoringPlanApprovalPage onApprove={handlePlanApproved} onFallback={() => { addLog("Developer fell back to Smell Review phase.", "warn"); setPhase(0); }} />}
-                  {phase === 2 && <TransformationApprovalPage onComplete={handleTransformComplete} />}
+          {phase === 1 && <RefactoringPlanApprovalPage planData={planData} onApprove={handlePlanApproved} onFallback={() => { addLog("Developer fell back to Smell Review phase.", "warn"); setPhase(0); }} />}
+                  {phase === 2 && <TransformationApprovalPage transformationData={transformationData} onComplete={handleTransformComplete} />}
                   {phase === 3 && <ResultsApprovalPage
                             onRestart={handleRestart}
                             onRollback={handleRollback}
@@ -121,14 +274,39 @@ export default function DIWOAgentPage() {
                             files={workflow?.files}
                             onAccept={() => {
                               addLog("Developer accepted changes. Showing comparison view.", "info");
+                              if (workflowId) {
+                                DIWOAgentService.submitTransformationDecision(workflowId, {
+                                  decision: "accept",
+                                  feedback: { reason: "Accepted from frontend", rating: 5 },
+                                }).catch((e) => addLog(`Backend accept call failed: ${e.message}`, "warn"));
+                              }
                               setPhase(4);
                             }}
                           />}
                   {phase === 4 && <ComparisonView
                     workflow={workflow}
                     auditLogs={auditLog}
-                    onComplete={(notes) => { addLog(`Comparison completed. Notes: ${notes ? notes.slice(0,80) : 'none'}`, 'success'); setPhase(0); }}
-                    onLoadLogs={() => addLog('Audit logs loaded in Comparison view.', 'info')}
+                    onComplete={(notes) => {
+                      if (workflowId) {
+                        DIWOAgentService.completeWorkflow(workflowId, { notes: notes || "" })
+                          .catch((e) => addLog(`Complete workflow call failed: ${e.message}`, "warn"));
+                      }
+                      addLog(`Comparison completed. Notes: ${notes ? notes.slice(0,80) : 'none'}`, 'success');
+                      setPhase(0);
+                    }}
+                    onLoadLogs={async () => {
+                      if (!workflowId) {
+                        addLog('Audit logs loaded in Comparison view.', 'info');
+                        return;
+                      }
+                      try {
+                        const logs = await DIWOAgentService.getAuditLogs(workflowId);
+                        setAuditLog(logs);
+                        addLog('Audit logs synced from backend.', 'success');
+                      } catch (e) {
+                        addLog(`Audit log sync failed: ${e.message}`, 'warn');
+                      }
+                    }}
                     loading={compLoading}
                   />}
         </div>

@@ -231,6 +231,9 @@ def plan_decision(wf_id):
     return jsonify({
         "status": "transformation",
         "transformation_result": tr,
+        "refactored_code": tr.get("refactored_code", ""),
+        "diff_rows": tr.get("diff_rows", []),
+        "files": tr.get("files", []),
         "metrics_after": metrics_after,
         "message": "Transformation applied. Please review results.",
     })

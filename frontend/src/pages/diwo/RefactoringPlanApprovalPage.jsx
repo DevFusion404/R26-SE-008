@@ -2,29 +2,30 @@ import { useState } from "react";
 import { PLAN_DATA } from "./data/diwoData";
 import { C, Card, Badge, Pill, impactColor, riskColor } from "./diwoTheme.jsx";
 
-export default function RefactoringPlanApprovalPage({ onApprove, onFallback }) {
+export default function RefactoringPlanApprovalPage({ onApprove, onFallback, planData }) {
   const [decisions, setDecisions] = useState({});
   const [opinion, setOpinion] = useState("");
   const [showOpinion, setShowOpinion] = useState(false);
   const [filter, setFilter] = useState("all");
 
   const decide = (id, val) => setDecisions(prev => ({ ...prev, [id]: val }));
-  const allApproved = PLAN_DATA.steps.length > 0 && PLAN_DATA.steps.every(step => decisions[step.step_id] === "approve");
+  const currentPlan = planData || PLAN_DATA;
+  const allApproved = currentPlan.steps.length > 0 && currentPlan.steps.every(step => decisions[step.step_id] === "approve");
 
   const toggleSelectAll = () => {
     if (allApproved) {
       setDecisions({});
       return;
     }
-    setDecisions(Object.fromEntries(PLAN_DATA.steps.map(step => [step.step_id, "approve"])));
+    setDecisions(Object.fromEntries(currentPlan.steps.map(step => [step.step_id, "approve"])));
   };
 
-  const steps = PLAN_DATA.steps;
+  const steps = currentPlan.steps;
   const filtered = filter === "all" ? steps : steps.filter(s => {
     if (filter === "approved") return decisions[s.step_id] === "approve";
     if (filter === "rejected") return decisions[s.step_id] === "reject";
     if (filter === "pending") return !decisions[s.step_id];
-    return s.impact === filter;
+    return (s.impact || s.expected_impact) === filter;
   });
 
   const approved = steps.filter(s => decisions[s.step_id] === "approve").length;
@@ -32,6 +33,9 @@ export default function RefactoringPlanApprovalPage({ onApprove, onFallback }) {
   const pending = steps.filter(s => !decisions[s.step_id]).length;
   const canProceed = approved > 0 && pending === 0;
   const refactoringTypes = [...new Set(steps.map(s => s.refactoring))];
+  const summaryText = typeof currentPlan.summary === "string"
+    ? currentPlan.summary
+    : `Total steps: ${currentPlan.summary?.total_steps || steps.length} · High impact: ${currentPlan.summary?.high_impact || 0}`;
 
   return (
     <div>
@@ -39,8 +43,8 @@ export default function RefactoringPlanApprovalPage({ onApprove, onFallback }) {
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: 12 }}>
           <div>
             <div style={{ fontSize: 11, color: C.textMuted, textTransform: "uppercase", letterSpacing: 1, marginBottom: 4 }}>Refactoring Planning Agent Output</div>
-            <div style={{ fontSize: 16, fontWeight: 700, color: C.text, marginBottom: 6 }}>{PLAN_DATA.plan_id}</div>
-            <div style={{ fontSize: 13, color: C.textSub, maxWidth: 620 }}>{PLAN_DATA.summary}</div>
+            <div style={{ fontSize: 16, fontWeight: 700, color: C.text, marginBottom: 6 }}>{currentPlan.plan_id}</div>
+            <div style={{ fontSize: 13, color: C.textSub, maxWidth: 620 }}>{summaryText}</div>
           </div>
           <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
             {refactoringTypes.map(t => <Badge key={t} label={t} color={C.info} />)}
@@ -88,7 +92,7 @@ export default function RefactoringPlanApprovalPage({ onApprove, onFallback }) {
                   <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", marginBottom: 6 }}>
                     <span style={{ fontSize: 11, color: C.textMuted, fontFamily: "monospace" }}>Step {step.step_id}</span>
                     <Badge label={step.refactoring} color={C.info} />
-                    <Pill label={`Impact: ${step.impact}`} color={impactColor(step.impact)} />
+                    <Pill label={`Impact: ${step.impact || step.expected_impact || "medium"}`} color={impactColor(step.impact || step.expected_impact || "medium")} />
                     <Pill label={`Risk: ${step.risk}`} color={riskColor(step.risk)} />
                   </div>
                   <div style={{ fontSize: 13, fontWeight: 600, color: C.text, marginBottom: 4 }}>

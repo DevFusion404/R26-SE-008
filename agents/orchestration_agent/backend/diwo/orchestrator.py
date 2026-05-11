@@ -133,7 +133,7 @@ def _build_parameters(refactoring, cls, method, lines, metrics):
 # In a real system this calls the Safe Code Transformation Agent over REST.
 # ─────────────────────────────────────────────────────────────────────────────
 
-def simulate_transformation(plan: dict, language: str) -> dict:
+def simulate_transformation(plan: dict, language: str, before_code: str = "") -> dict:
     steps = plan.get("steps", [])
     results = []
     all_passed = True
@@ -157,6 +157,16 @@ def simulate_transformation(plan: dict, language: str) -> dict:
             all_passed = False
 
     snapshot_id = f"snapshot_{uuid.uuid4().hex[:8]}"
+    
+    # Generate mock refactored code and diffs
+    after_code = before_code.replace("processor.calculateTotal", "processor.extracted_calculateTotal") if before_code else _generate_mock_refactored_code()
+    diff_rows = _generate_mock_diff_rows(before_code or _generate_mock_before_code(), after_code)
+    files = [{
+        "path": "ECommerceSystem.java",
+        "before": before_code or _generate_mock_before_code(),
+        "after": after_code,
+        "diff_rows": diff_rows,
+    }]
 
     return {
         "status": "success" if all_passed else "partial_failure",
@@ -168,7 +178,96 @@ def simulate_transformation(plan: dict, language: str) -> dict:
         "overall_passed": all_passed,
         "steps_passed": sum(1 for r in results if r["status"] == "passed"),
         "steps_failed": sum(1 for r in results if r["status"] == "failed"),
+        "refactored_code": after_code,
+        "diff_rows": diff_rows,
+        "files": files,
     }
+
+
+def _generate_mock_before_code():
+    return """public class ECommerceSystem {
+    public static void main(String[] args) {
+        Customer customer = new Customer(1, "Pasan", "pasan@example.com");
+        Order order = new Order(1001, customer);
+        order.items.add(new OrderItem("Laptop", 2, 1200.00));
+        order.items.add(new OrderItem("Mouse", 1, 30.00));
+
+        OrderProcessor processor = new OrderProcessor();
+        double total = processor.calculateTotal(order, "CARD", true, "PROMO10", "EXPRESS");
+        System.out.println("Order Total: " + total);
+    }
+}"""
+
+
+def _generate_mock_refactored_code():
+    return """public class ECommerceSystem {
+    public static void main(String[] args) {
+        Customer customer = new Customer(1, "Pasan", "pasan@example.com", "premium", "Colombo");
+        Order order = new Order(1001, customer);
+        order.items.add(new OrderItem("Laptop", 2, 1200.00));
+        order.items.add(new OrderItem("Mouse", 1, 30.00));
+
+        OrderProcessorHelper processor = new OrderProcessorHelper();
+        OrderParams params = new OrderParams("CARD", true, "PROMO10", "EXPRESS");
+        double total = processor.extracted_calculateTotal(order, params);
+        System.out.println("Order Total: " + total);
+    }
+}"""
+
+
+def _generate_mock_diff_rows(before: str, after: str):
+    """Generate a simple line-by-line diff for frontend display."""
+    before_lines = before.split('\n')
+    after_lines = after.split('\n')
+    diff_rows = []
+    key_counter = 0
+    
+    max_lines = max(len(before_lines), len(after_lines))
+    for i in range(max_lines):
+        if i < len(before_lines) and i < len(after_lines):
+            if before_lines[i] == after_lines[i]:
+                diff_rows.append({
+                    "key": f"same-{key_counter}",
+                    "lineNo": i + 1,
+                    "kind": "same",
+                    "marker": "  ",
+                    "text": before_lines[i],
+                })
+            else:
+                diff_rows.append({
+                    "key": f"before-{key_counter}",
+                    "lineNo": i + 1,
+                    "kind": "before",
+                    "marker": "- ",
+                    "text": before_lines[i],
+                })
+                key_counter += 1
+                diff_rows.append({
+                    "key": f"after-{key_counter}",
+                    "lineNo": i + 1,
+                    "kind": "after",
+                    "marker": "+ ",
+                    "text": after_lines[i],
+                })
+        elif i < len(before_lines):
+            diff_rows.append({
+                "key": f"before-{key_counter}",
+                "lineNo": i + 1,
+                "kind": "before",
+                "marker": "- ",
+                "text": before_lines[i],
+            })
+        else:
+            diff_rows.append({
+                "key": f"after-{key_counter}",
+                "lineNo": i + 1,
+                "kind": "after",
+                "marker": "+ ",
+                "text": after_lines[i],
+            })
+        key_counter += 1
+    
+    return diff_rows
 
 
 # ─────────────────────────────────────────────────────────────────────────────

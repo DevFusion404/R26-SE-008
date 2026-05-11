@@ -36,6 +36,16 @@ const API_CONFIG = {
     timeout: 90000, // 90 seconds for transformation
   },
 
+  // === DIWO Agent (Developer Interaction & Workflow Orchestration) ===
+  DIWO_AGENT: {
+    baseURL: import.meta.env.VITE_DIWO_API_URL || 'http://localhost:5001/api',
+    endpoints: {
+      workflows: '/workflows',
+      health: '/health',
+    },
+    timeout: 60000,
+  },
+
   // === Global Configuration ===
   GLOBAL: {
     defaultTimeout: 30000,

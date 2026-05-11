@@ -2,10 +2,13 @@ import { useEffect, useState } from "react";
 import { SCTVA_DATA } from "./data/diwoData";
 import { C } from "./diwoTheme.jsx";
 
-export default function TransformationApprovalPage({ onComplete }) {
+export default function TransformationApprovalPage({ onComplete, transformationData }) {
   const [progress, setProgress] = useState(0);
   const [stage, setStage] = useState(0);
 
+  // Use backend data if available, otherwise fall back to mock
+  const transformData = transformationData || {};
+  
   const BEFORE_CODE_SAMPLE = `public class ECommerceSystem {
     public static void main(String[] args) {
         Customer customer = new Customer(1, "Pasan", "pasan@example.com");
@@ -80,7 +83,14 @@ export default function TransformationApprovalPage({ onComplete }) {
 
   useEffect(() => {
     if (!done) return;
-    // create per-file diffs (mock multiple files)
+    
+    // If backend data is available, use it; otherwise use mock data
+    if (transformData.refactored_code && transformData.diff_rows && transformData.files) {
+      const timeout = setTimeout(() => onComplete(transformData), 800);
+      return () => clearTimeout(timeout);
+    }
+    
+    // Fall back to mock data generation
     const file1 = {
       path: "src/ECommerceSystem.java",
       before: BEFORE_CODE_SAMPLE,
@@ -103,7 +113,7 @@ export default function TransformationApprovalPage({ onComplete }) {
     };
     const timeout = setTimeout(() => onComplete(payload), 800);
     return () => clearTimeout(timeout);
-  }, [done, onComplete]);
+  }, [done, onComplete, transformData]);
 
   const validations = [
     { key: "Syntax", val: SCTVA_DATA.confidence_components.syntax_component, done: progress > 35 },

@@ -4,28 +4,33 @@ import {
   BarChart, Bar, XAxis, YAxis, Tooltip, Legend, ResponsiveContainer, Cell
 } from "recharts";
 
-function MetricBar({ label, before, after, unit = "", higherIsBetter = true }) {
+function MetricBar({ label, before, after, unit = "", higherIsBetter = true, cardStyle }) {
   const improved = higherIsBetter ? after > before : after < before;
   const pct = before > 0 ? Math.abs(((after - before) / before) * 100).toFixed(1) : 0;
-  const barBefore = Math.min(before, 100);
-  const barAfter = Math.min(after, 100);
+  
   return (
-    <div className="metric-bar-row">
-      <div className="metric-label">{label}</div>
-      <div className="metric-bars">
-        <div className="bar-group">
-          <span className="bar-tag before">Before</span>
-          <div className="bar-track"><div className="bar-fill before-fill" style={{ width: `${barBefore}%` }} /></div>
-          <span className="bar-value">{before}{unit}</span>
+    <div style={cardStyle}>
+      <div style={{ fontSize: 13, color: "#cbd5e1", fontWeight: 600, marginBottom: 12, letterSpacing: 0.3 }}>
+        {label}
+      </div>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+        <div>
+          <div style={{ fontSize: 11, color: "#94a3b8", marginBottom: 2 }}>Before</div>
+          <div style={{ fontSize: 18, fontWeight: 700, color: "#f97316" }}>{before}{unit}</div>
         </div>
-        <div className="bar-group">
-          <span className="bar-tag after">After</span>
-          <div className="bar-track"><div className="bar-fill after-fill" style={{ width: `${barAfter}%` }} /></div>
-          <span className="bar-value">{after}{unit}</span>
+        <div style={{ fontSize: 18, color: "#64748b", fontWeight: 300 }}>→</div>
+        <div>
+          <div style={{ fontSize: 11, color: "#94a3b8", marginBottom: 2 }}>After</div>
+          <div style={{ fontSize: 18, fontWeight: 700, color: "#22c55e" }}>{after}{unit}</div>
         </div>
       </div>
-      <div className={`metric-delta ${improved ? "improved" : "regressed"}`}>
-        {improved ? "▼" : "▲"} {pct}% {improved ? "improvement" : "increase"}
+      <div style={{
+        fontSize: 11,
+        fontWeight: 600,
+        color: improved ? "#86efac" : "#fca5a5",
+        letterSpacing: 0.2,
+      }}>
+        {improved ? "✓" : "•"} {pct}% {improved ? "improvement" : "increase"}
       </div>
     </div>
   );
@@ -61,6 +66,25 @@ export function ComparisonView({ workflow, auditLogs = [], onComplete, onLoadLog
     comparison: "Comparison", completed: "Completed", rolled_back: "Rolled Back",
   };
 
+  const KPI_CARD_BASE = {
+    borderRadius: 12,
+    border: "1px solid #1f2937",
+    background: "#0f172a",
+    padding: "14px 16px",
+    minHeight: 86,
+    display: "flex",
+    flexDirection: "column",
+    justifyContent: "center",
+    boxShadow: "0 6px 20px rgba(2,6,23,0.45)",
+  };
+
+  const kpiVariantStyle = (variant) => {
+    if (variant === "green") return { borderColor: "rgba(34,197,94,0.35)", background: "linear-gradient(180deg, rgba(34,197,94,0.14), rgba(15,23,42,0.95))", numColor: "#86efac" };
+    if (variant === "blue") return { borderColor: "rgba(59,130,246,0.35)", background: "linear-gradient(180deg, rgba(59,130,246,0.14), rgba(15,23,42,0.95))", numColor: "#93c5fd" };
+    if (variant === "purple") return { borderColor: "rgba(168,85,247,0.35)", background: "linear-gradient(180deg, rgba(168,85,247,0.14), rgba(15,23,42,0.95))", numColor: "#d8b4fe" };
+    return { borderColor: "rgba(249,115,22,0.35)", background: "linear-gradient(180deg, rgba(249,115,22,0.14), rgba(15,23,42,0.95))", numColor: "#fdba74" };
+  };
+
   const diffRows = workflow?.diff_rows || [];
   const files = workflow?.files || [];
   const [selectedFileIndex, setSelectedFileIndex] = useState(0);
@@ -80,31 +104,58 @@ export function ComparisonView({ workflow, auditLogs = [], onComplete, onLoadLog
         </div>
       </div>
 
-      <div className="kpi-row">
-        <div className="kpi-card green">
-          <div className="kpi-num">↓ {improvements.complexity_reduced_by || 0}</div>
-          <div className="kpi-label">Complexity Reduced</div>
+      <div className="kpi-row" style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 12, marginBottom: 18 }}>
+        <div className="kpi-card green" style={{ ...KPI_CARD_BASE, borderColor: kpiVariantStyle("green").borderColor, background: kpiVariantStyle("green").background }}>
+          <div className="kpi-num" style={{ fontSize: 26, fontWeight: 800, color: kpiVariantStyle("green").numColor, lineHeight: 1.1 }}>↓ {improvements.complexity_reduced_by || 0}</div>
+          <div className="kpi-label" style={{ fontSize: 12, color: "#cbd5e1", marginTop: 6, letterSpacing: 0.2 }}>Complexity Reduced</div>
         </div>
-        <div className="kpi-card blue">
-          <div className="kpi-num">↓ {improvements.duplication_reduced_by || 0}%</div>
-          <div className="kpi-label">Duplication Reduced</div>
+        <div className="kpi-card blue" style={{ ...KPI_CARD_BASE, borderColor: kpiVariantStyle("blue").borderColor, background: kpiVariantStyle("blue").background }}>
+          <div className="kpi-num" style={{ fontSize: 26, fontWeight: 800, color: kpiVariantStyle("blue").numColor, lineHeight: 1.1 }}>↓ {improvements.duplication_reduced_by || 0}%</div>
+          <div className="kpi-label" style={{ fontSize: 12, color: "#cbd5e1", marginTop: 6, letterSpacing: 0.2 }}>Duplication Reduced</div>
         </div>
-        <div className="kpi-card purple">
-          <div className="kpi-num">↑ {improvements.maintainability_gained || 0}</div>
-          <div className="kpi-label">Maintainability Gained</div>
+        <div className="kpi-card purple" style={{ ...KPI_CARD_BASE, borderColor: kpiVariantStyle("purple").borderColor, background: kpiVariantStyle("purple").background }}>
+          <div className="kpi-num" style={{ fontSize: 26, fontWeight: 800, color: kpiVariantStyle("purple").numColor, lineHeight: 1.1 }}>↑ {improvements.maintainability_gained || 0}</div>
+          <div className="kpi-label" style={{ fontSize: 12, color: "#cbd5e1", marginTop: 6, letterSpacing: 0.2 }}>Maintainability Gained</div>
         </div>
-        <div className="kpi-card orange">
-          <div className="kpi-num">{mb.total_smells || 0} → {ma.total_smells || 0}</div>
-          <div className="kpi-label">Smells Remaining</div>
+        <div className="kpi-card orange" style={{ ...KPI_CARD_BASE, borderColor: kpiVariantStyle("orange").borderColor, background: kpiVariantStyle("orange").background }}>
+          <div className="kpi-num" style={{ fontSize: 26, fontWeight: 800, color: kpiVariantStyle("orange").numColor, lineHeight: 1.1 }}>{mb.total_smells || 0} → {ma.total_smells || 0}</div>
+          <div className="kpi-label" style={{ fontSize: 12, color: "#cbd5e1", marginTop: 6, letterSpacing: 0.2 }}>Smells Remaining</div>
         </div>
       </div>
 
-      <div className="metrics-section">
+      <div className="metrics-section" style={{ marginBottom: 28 }}>
         <h2>Detailed Metrics</h2>
-        <MetricBar label="Cyclomatic Complexity" before={mb.cyclomatic_complexity||0} after={ma.cyclomatic_complexity||0} higherIsBetter={false} />
-        <MetricBar label="Code Duplication" before={mb.code_duplication_pct||0} after={ma.code_duplication_pct||0} unit="%" higherIsBetter={false} />
-        <MetricBar label="Maintainability Index" before={mb.maintainability_index||0} after={ma.maintainability_index||0} higherIsBetter={true} />
-        <MetricBar label="Total Smells" before={mb.total_smells||0} after={ma.total_smells||0} higherIsBetter={false} />
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: 12, marginTop: 12 }}>
+          <MetricBar 
+            label="Cyclomatic Complexity" 
+            before={mb.cyclomatic_complexity||0} 
+            after={ma.cyclomatic_complexity||0} 
+            higherIsBetter={false}
+            cardStyle={{ ...KPI_CARD_BASE, borderColor: kpiVariantStyle("orange").borderColor, background: kpiVariantStyle("orange").background }}
+          />
+          <MetricBar 
+            label="Code Duplication" 
+            before={mb.code_duplication_pct||0} 
+            after={ma.code_duplication_pct||0} 
+            unit="%" 
+            higherIsBetter={false}
+            cardStyle={{ ...KPI_CARD_BASE, borderColor: kpiVariantStyle("blue").borderColor, background: kpiVariantStyle("blue").background }}
+          />
+          <MetricBar 
+            label="Maintainability Index" 
+            before={mb.maintainability_index||0} 
+            after={ma.maintainability_index||0} 
+            higherIsBetter={true}
+            cardStyle={{ ...KPI_CARD_BASE, borderColor: kpiVariantStyle("green").borderColor, background: kpiVariantStyle("green").background }}
+          />
+          <MetricBar 
+            label="Total Smells" 
+            before={mb.total_smells||0} 
+            after={ma.total_smells||0} 
+            higherIsBetter={false}
+            cardStyle={{ ...KPI_CARD_BASE, borderColor: kpiVariantStyle("purple").borderColor, background: kpiVariantStyle("purple").background }}
+          />
+        </div>
       </div>
 
       <div className="charts-row">
