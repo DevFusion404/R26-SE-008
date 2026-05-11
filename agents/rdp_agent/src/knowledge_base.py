@@ -31,6 +31,7 @@ logger = logging.getLogger("rdp_agent.knowledge_base")
 #   name, complexity, risk, impact, preconditions.
 
 DEFAULT_CATALOG: Dict[str, List[Dict[str, Any]]] = {
+    # ---- Core catalog (language-agnostic) ----
     "Long Method": [
         {
             "name": "Extract Method",
@@ -136,7 +137,6 @@ DEFAULT_CATALOG: Dict[str, List[Dict[str, Any]]] = {
             "preconditions": ["has_type_checking"],
         },
     ],
-    # ---- Extended catalog (inspired by Martin Fowler) ----
     "Lazy Class": [
         {
             "name": "Inline Class",
@@ -228,18 +228,18 @@ DEFAULT_CATALOG: Dict[str, List[Dict[str, Any]]] = {
     ],
     "Magic Numbers": [
         {
-            "name": "Extract Method",
-            "complexity": "low",
-            "risk": "low",
-            "impact": "medium",
-            "preconditions": ["has_magic_numbers"],
-        },
-        {
             "name": "Introduce Constant",
             "complexity": "low",
             "risk": "low",
             "impact": "high",
-            "preconditions": ["has_magic_numbers"],
+            "preconditions": [],          # no preconditions — always applicable
+        },
+        {
+            "name": "Extract Method",
+            "complexity": "low",
+            "risk": "low",
+            "impact": "medium",
+            "preconditions": ["has_code_block"],
         },
     ],
     "Inappropriate Intimacy": [
@@ -281,7 +281,123 @@ DEFAULT_CATALOG: Dict[str, List[Dict[str, Any]]] = {
             "preconditions": ["has_thin_class"],
         },
     ],
+
+    # ---- Python-specific smell aliases ----
+    # CUQA emits "LongMethod" → mapped to "Long Method" in translation,
+    # but keep these as aliases in case any variant slips through.
+    "Long Function": [
+        {
+            "name": "Extract Method",
+            "complexity": "low",
+            "risk": "low",
+            "impact": "high",
+            "preconditions": [],
+        },
+        {
+            "name": "Replace Temp with Query",
+            "complexity": "medium",
+            "risk": "low",
+            "impact": "medium",
+            "preconditions": [],
+        },
+    ],
+    "Too Many Parameters": [
+        {
+            "name": "Introduce Parameter Object",
+            "complexity": "medium",
+            "risk": "low",
+            "impact": "high",
+            "preconditions": [],
+        },
+        {
+            "name": "Replace Parameter with Method Call",
+            "complexity": "low",
+            "risk": "low",
+            "impact": "medium",
+            "preconditions": [],
+        },
+    ],
+    "Large Class": [
+        {
+            "name": "Extract Class",
+            "complexity": "high",
+            "risk": "medium",
+            "impact": "high",
+            "preconditions": [],
+        },
+        {
+            "name": "Extract Subclass",
+            "complexity": "high",
+            "risk": "high",
+            "impact": "high",
+            "preconditions": [],
+        },
+    ],
+    # Bare except is a Python anti-pattern — treat as Dead Code / defensive smell
+    "Bare Except": [
+        {
+            "name": "Remove Dead Code",
+            "complexity": "low",
+            "risk": "low",
+            "impact": "medium",
+            "preconditions": [],
+        },
+        {
+            "name": "Extract Method",
+            "complexity": "low",
+            "risk": "low",
+            "impact": "medium",
+            "preconditions": [],
+        },
+    ],
+    "Exception Overreach": [
+        {
+            "name": "Remove Dead Code",
+            "complexity": "low",
+            "risk": "low",
+            "impact": "medium",
+            "preconditions": [],
+        },
+    ],
+    # Magic number alias (singular)
+    "Magic Number": [
+        {
+            "name": "Introduce Constant",
+            "complexity": "low",
+            "risk": "low",
+            "impact": "high",
+            "preconditions": [],
+        },
+    ],
+
+    # ---- Java-specific smell aliases ----
+    "Complex Method": [
+        {
+            "name": "Extract Method",
+            "complexity": "low",
+            "risk": "low",
+            "impact": "high",
+            "preconditions": [],
+        },
+        {
+            "name": "Replace Conditional with Polymorphism",
+            "complexity": "high",
+            "risk": "medium",
+            "impact": "high",
+            "preconditions": [],
+        },
+    ],
+    "Long Class": [
+        {
+            "name": "Extract Class",
+            "complexity": "high",
+            "risk": "medium",
+            "impact": "high",
+            "preconditions": [],
+        },
+    ],
 }
+
 
 
 # ---------------------------------------------------------------------------

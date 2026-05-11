@@ -3,7 +3,7 @@
  * Main page component integrating upload, pipeline trace, and results visualization
  */
 
-import { useState, useRef } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import RDPAgentService from '../services/rdpAgentService';
 import { formatApiError, retryApiCall } from '../utils/apiErrorHandler';
 import UploadSection from '../components/RDP_Agent/UploadSection';
@@ -12,13 +12,24 @@ import ResultsViewer from '../components/RDP_Agent/ResultsViewer';
 import ErrorAlert from '../components/RDP_Agent/ErrorAlert';
 import ErrorBoundary from '../components/common/ErrorBoundary';
 
-export default function RDPAgentPage({ repoLoaded, repoMeta }) {
+export default function RDPAgentPage({ repoLoaded, repoMeta, preloadedReport, onClearPreloaded }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [plan, setPlan] = useState(null);
   const [trace, setTrace] = useState(null);
   const [selectedFile, setSelectedFile] = useState(null);
+  const [cuqaBannerVisible, setCuqaBannerVisible] = useState(false);
   const fileInputRef = useRef(null);
+
+  /**
+   * When a preloaded report is piped in from CUQA, auto-generate the plan
+   */
+  useEffect(() => {
+    if (preloadedReport) {
+      setCuqaBannerVisible(true);
+      handleGeneratePlan(preloadedReport, null);
+    }
+  }, [preloadedReport]);
 
   /**
    * Handle file selection from upload
@@ -137,21 +148,91 @@ export default function RDPAgentPage({ repoLoaded, repoMeta }) {
           </div>
           <div>
             <div className="page-title">RDP Agent</div>
-            <div className="page-subtitle">Refactoring Decision & Planning</div>
+            <div className="page-subtitle">Refactoring Decision &amp; Planning</div>
           </div>
         </div>
       </div>
 
+      {/* CUQA pipeline banner — shown when report was piped from CUQA */}
+      {cuqaBannerVisible && preloadedReport && (
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 12,
+            padding: '12px 18px',
+            marginTop: 12,
+            background: 'linear-gradient(135deg, rgba(139,92,246,0.12), rgba(168,85,247,0.08))',
+            border: '1px solid rgba(139,92,246,0.35)',
+            borderRadius: 8,
+            fontSize: 13,
+          }}
+        >
+          <span style={{ fontSize: 18 }}>⚡</span>
+          <div style={{ flex: 1 }}>
+            <strong style={{ color: '#a78bfa' }}>Quality report piped from CUQA Agent</strong>
+            <span style={{ color: 'var(--text-secondary)', marginLeft: 8 }}>
+              — generating refactoring plan automatically…
+            </span>
+          </div>
+          <button
+            onClick={() => {
+              setCuqaBannerVisible(false);
+              onClearPreloaded?.();
+            }}
+            style={{
+              background: 'none',
+              border: 'none',
+              color: 'var(--text-muted)',
+              cursor: 'pointer',
+              fontSize: 16,
+              lineHeight: 1,
+            }}
+            title="Dismiss"
+          >
+            ✕
+          </button>
+        </div>
+      )}
+
       {/* Error Alert */}
       {error && <ErrorAlert message={error} onClose={() => setError(null)} />}
 
-      {/* Upload Section */}
-      <UploadSection
-        onFileSelect={handleFileSelect}
-        onSubmit={handleUploadSubmit}
-        loading={loading}
-        selectedFile={selectedFile}
-      />
+      {/* Upload Section — shown when no preloaded report or after dismissing banner */}
+      {!preloadedReport && (
+        <UploadSection
+          onFileSelect={handleFileSelect}
+          onSubmit={handleUploadSubmit}
+          loading={loading}
+          selectedFile={selectedFile}
+        />
+      )}
+
+      {/* Loading spinner while auto-generating from preloaded report */}
+      {loading && preloadedReport && (
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 14,
+            padding: '24px',
+            marginTop: 16,
+            background: 'var(--bg-card)',
+            border: '1px solid var(--border)',
+            borderRadius: 8,
+          }}
+        >
+          <div className="spinner" style={{ width: 28, height: 28, borderWidth: 3 }} />
+          <div>
+            <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--text-primary)' }}>
+              Generating refactoring plan…
+            </div>
+            <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginTop: 4 }}>
+              Running pipeline: interpretation → candidate generation → ML scoring → dependency analysis
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Pipeline Viewer */}
       {trace && (
@@ -174,3 +255,4 @@ export default function RDPAgentPage({ repoLoaded, repoMeta }) {
     </div>
   );
 }
+

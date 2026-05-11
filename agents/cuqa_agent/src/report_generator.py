@@ -22,53 +22,88 @@ except ImportError:
 # ---------------------------------------------------------------------------
 
 class _PythonSmellVisitor(pyast.NodeVisitor):
-    """Walk a Python AST and collect code smells."""
+    """Walk a Python AST and collect code smells with full entity context."""
 
     def __init__(self):
         self.smells: list[dict] = []
         self._class_stack: list[str] = []
+        self._func_stack: list[str] = []  # tracks enclosing function names
 
-    def _add(self, smell_type: str, message: str, line: int | None, severity: str = "medium"):
+    def _add(self, smell_type: str, message: str, line: int | None,
+             severity: str = "medium", entity: str | None = None):
+        """Append a smell dict — entity is always resolved."""
+        resolved = (
+            entity
+            or (self._func_stack[-1] if self._func_stack else None)
+            or (self._class_stack[-1] if self._class_stack else None)
+        )
         self.smells.append({
             "type": smell_type,
             "message": message,
             "line": line,
             "severity": severity,
+            "entity": resolved,
         })
 
-    # --- Long method ---
+    # --- Long method / Too many parameters ---
     def visit_FunctionDef(self, node: pyast.FunctionDef):
+        self._func_stack.append(node.name)
+
         body_lines = (node.end_lineno or node.lineno) - node.lineno
         if body_lines > 30:
-            self._add("LongMethod", f"Function '{node.name}' has {body_lines} lines (>30)", node.lineno, "high")
+            self._add(
+                "LongMethod",
+                f"Function '{node.name}' has {body_lines} lines (>30)",
+                node.lineno, "high", entity=node.name,
+            )
 
-        # Too many parameters
-        num_args = len(node.args.args)
-        if num_args > 5:
-            self._add("TooManyParameters", f"Function '{node.name}' has {num_args} parameters (>5)", node.lineno, "medium")
+        # Exclude self/cls from parameter count
+        real_args = [a for a in node.args.args if a.arg not in ("self", "cls")]
+        if len(real_args) > 5:
+            self._add(
+                "TooManyParameters",
+                f"Function '{node.name}' has {len(real_args)} parameters (>5)",
+                node.lineno, "medium", entity=node.name,
+            )
 
         self.generic_visit(node)
+        self._func_stack.pop()
 
     visit_AsyncFunctionDef = visit_FunctionDef
 
     # --- Large class ---
     def visit_ClassDef(self, node: pyast.ClassDef):
         self._class_stack.append(node.name)
-        method_count = sum(1 for n in pyast.walk(node) if isinstance(n, (pyast.FunctionDef, pyast.AsyncFunctionDef)))
+        method_count = sum(
+            1 for n in pyast.walk(node)
+            if isinstance(n, (pyast.FunctionDef, pyast.AsyncFunctionDef))
+        )
         if method_count > 15:
-            self._add("LargeClass", f"Class '{node.name}' has {method_count} methods (>15)", node.lineno, "high")
+            self._add(
+                "LargeClass",
+                f"Class '{node.name}' has {method_count} methods (>15)",
+                node.lineno, "high", entity=node.name,
+            )
         self.generic_visit(node)
         self._class_stack.pop()
 
-    # --- Magic numbers ---
+    # --- Magic numbers (entity resolved via stack) ---
     def visit_Constant(self, node: pyast.Constant):
         if isinstance(node.value, (int, float)) and node.value not in (0, 1, -1, 2, True, False):
-            self._add("MagicNumber", f"Magic number {node.value}", getattr(node, "lineno", None), "low")
+            self._add(
+                "MagicNumber",
+                f"Magic number {node.value}",
+                getattr(node, "lineno", None), "low",
+            )
 
-    # --- Bare except ---
+    # --- Bare except (entity resolved via stack) ---
     def visit_ExceptHandler(self, node: pyast.ExceptHandler):
         if node.type is None:
-            self._add("BareExcept", "Bare 'except:' clause catches all exceptions", node.lineno, "medium")
+            self._add(
+                "BareExcept",
+                "Bare 'except:' clause catches all exceptions",
+                node.lineno, "medium",
+            )
         self.generic_visit(node)
 
 
@@ -80,6 +115,8 @@ def _analyze_python_smells(source: str) -> list[dict]:
     visitor = _PythonSmellVisitor()
     visitor.visit(tree)
     return visitor.smells
+
+
 
 
 def _python_metrics(source: str, filename: str) -> dict:
@@ -126,6 +163,7 @@ def _analyze_java_smells(source: str) -> list[dict]:
                     "message": f"Method '{node.name}' has {len(params)} parameters (>5)",
                     "line": line,
                     "severity": "medium",
+                    "entity": node.name,        # ← method name
                 })
 
         if isinstance(node, (javalang.tree.ClassDeclaration, javalang.tree.InterfaceDeclaration)):
@@ -137,9 +175,11 @@ def _analyze_java_smells(source: str) -> list[dict]:
                     "message": f"Class '{node.name}' has {len(methods)} methods (>15)",
                     "line": line,
                     "severity": "high",
+                    "entity": node.name,        # ← class name
                 })
 
     return smells
+
 
 
 def _java_metrics(source: str, filename: str) -> dict:

@@ -27,10 +27,10 @@ const API_CONFIG = {
 
   // === Safe Transformation Agent ===
   TRANSFORMATION_AGENT: {
-    baseURL: import.meta.env.VITE_TRANSFORMATION_AGENT_API_URL || 'http://localhost:5002',
+    baseURL: import.meta.env.VITE_TRANSFORMATION_AGENT_API_URL || 'http://localhost:8002',
     endpoints: {
-      transform: '/transform',
-      validate: '/validate',
+      execute: '/sctva/execute',
+      executeFromRdp: '/sctva/execute_from_rdp',
       health: '/health',
     },
     timeout: 90000, // 90 seconds for transformation

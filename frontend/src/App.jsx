@@ -11,6 +11,7 @@ import Dashboard       from './pages/Dashboard.jsx';
 import RepositoryInput from './pages/RepositoryInput.jsx';
 import CUQAAgentPage   from './pages/CUQAAgentPage.jsx';
 import RDPAgentPage    from './pages/RDPAgentPage.jsx';
+import SCTVAAgentPage  from './pages/transform/SCTVAAgentPage.jsx';
 import DIWOAgentPage   from './pages/diwo/DIWOAgentPage.jsx';
 import Reports         from './pages/Reports.jsx';
 import Evaluation      from './pages/Evaluation.jsx';
@@ -79,6 +80,7 @@ export default function App() {
   const [repoMeta,   setRepoMeta]   = useState(null);
   const [backendOk,  setBackendOk]  = useState(null);
   const [search,     setSearch]     = useState('');
+  const [cuqaReport, setCuqaReport] = useState(null); // quality report from CUQA → RDP bridge
 
   // Check backend health on mount
   useEffect(() => {
@@ -95,6 +97,12 @@ export default function App() {
     setTimeout(() => setPage('cuqa'), 400);
   }
 
+  // Called from CUQAAgentPage when user clicks "Send to RDP Agent"
+  function handleSendToRdp(report) {
+    setCuqaReport(report);
+    setPage('rdp');
+  }
+
   function navigate(id) {
     setPage(id);
   }
@@ -107,6 +115,7 @@ export default function App() {
       case 'repository':  return <RepositoryInput onLoaded={handleRepoLoaded} />;
       case 'cuqa':        return <CUQAAgentPage repoLoaded={repoLoaded} repoMeta={repoMeta} />;
       case 'rdp':         return <RDPAgentPage repoLoaded={repoLoaded} repoMeta={repoMeta} />;
+      case 'transform':   return <SCTVAAgentPage />;
       case 'orchestrate': return <DIWOAgentPage />;
       case 'reports':     return <Reports />;
       case 'evaluation':  return <Evaluation />;
