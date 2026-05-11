@@ -55,15 +55,17 @@ class PlanGenerator:
         steps: List[RefactoringStep] = []
 
         for idx, (smell, candidate) in enumerate(ordered_selections, start=1):
+            # Build target dict — skip "unknown" or empty values
+            target_dict = {
+                k: v
+                for k, v in smell.location.items()
+                if k in ("class", "method") and v and v != "unknown"
+            }
             step = RefactoringStep(
                 step_id=idx,
                 smell_id=smell.id,
                 refactoring=candidate["name"],
-                target={
-                    k: v
-                    for k, v in smell.location.items()
-                    if k in ("class", "method")
-                },
+                target=target_dict,
                 parameters=self._build_parameters(candidate, smell),
                 explanation=self.generate_explanation(smell, candidate),
             )
@@ -159,9 +161,18 @@ class PlanGenerator:
         """
         cls = location.get("class", "")
         method = location.get("method", "")
+        # Treat "unknown" as absent — don't show it in explanations
+        if method in ("unknown", None):
+            method = ""
         if cls and method:
             return f"{cls}.{method}"
-        return cls or method or "unknown"
+        return cls or method or "(module level)"
+
+    @staticmethod
+    def _clean(location: Dict[str, Any], key: str, fallback: str = "") -> str:
+        """Get a location value, returning fallback if it is 'unknown' or empty."""
+        val = location.get(key, "")
+        return val if val and val != "unknown" else fallback
 
     @staticmethod
     def _build_parameters(
@@ -182,84 +193,98 @@ class PlanGenerator:
         name = candidate["name"]
         location = smell.location
 
+        def _loc(key: str, fallback: str = "") -> str:
+            """Return location[key] if meaningful, else fallback."""
+            val = location.get(key, "")
+            return val if val and val != "unknown" else fallback
+
         if name == "Extract Method":
             lines = location.get("lines", [])
             if isinstance(lines, list) and len(lines) == 2:
                 params["source_lines"] = lines
-            params["new_method_name"] = (
-                f"extracted_{location.get('method', 'block')}"
-            )
+            method = _loc("method")
+            params["new_method_name"] = f"extracted_{method}" if method else "extracted_block"
+
+        elif name == "Introduce Constant":
+            # Pull the magic number value from details if available
+            params["source_file"] = location.get("file", "")
+            params["source_line"] = location.get("lines", [None])[0]
+            if smell.details:
+                params["hint"] = smell.details
 
         elif name == "Move Method":
-            params["source_class"] = location.get("class", "")
-            params["method"] = location.get("method", "")
-            if smell.details:
-                params["destination_class"] = smell.details
-            else:
-                params["destination_class"] = "<inferred_target_class>"
+            params["source_class"] = _loc("class")
+            method = _loc("method")
+            if method:
+                params["method"] = method
+            params["destination_class"] = smell.details or "<inferred_target_class>"
 
         elif name == "Extract Class":
-            params["source_class"] = location.get("class", "")
-            params["new_class_name"] = (
-                f"{location.get('class', '')}Helper"
-            )
+            cls = _loc("class")
+            params["source_class"] = cls
+            params["new_class_name"] = f"{cls}Helper" if cls else "ExtractedClass"
 
         elif name == "Extract Subclass":
-            params["source_class"] = location.get("class", "")
-            params["new_subclass_name"] = (
-                f"{location.get('class', '')}Subtype"
-            )
+            cls = _loc("class")
+            params["source_class"] = cls
+            params["new_subclass_name"] = f"{cls}Subtype" if cls else "ExtractedSubtype"
 
         elif name == "Introduce Parameter Object":
-            params["method"] = location.get("method", "")
-            params["parameter_object_name"] = (
-                f"{location.get('method', '')}Params"
-            )
+            method = _loc("method")
+            params["method"] = method
+            params["parameter_object_name"] = f"{method}Params" if method else "ParamObject"
 
         elif name == "Replace Conditional with Polymorphism":
-            params["source_class"] = location.get("class", "")
-            params["method"] = location.get("method", "")
+            params["source_class"] = _loc("class")
+            method = _loc("method")
+            if method:
+                params["method"] = method
 
         elif name == "Pull Up Method":
-            params["source_class"] = location.get("class", "")
-            params["method"] = location.get("method", "")
-            params["target_class"] = location.get(
-                "parent_class", "<parent>"
-            )
+            params["source_class"] = _loc("class")
+            method = _loc("method")
+            if method:
+                params["method"] = method
+            params["target_class"] = location.get("parent_class", "<parent>")
 
         elif name == "Inline Class":
-            params["class_to_inline"] = location.get("class", "")
+            params["class_to_inline"] = _loc("class")
 
         elif name == "Replace Temp with Query":
-            params["method"] = location.get("method", "")
+            method = _loc("method")
+            if method:
+                params["method"] = method
 
         elif name == "Collapse Hierarchy":
-            params["source_class"] = location.get("class", "")
-            params["parent_class"] = location.get(
-                "parent_class", "<parent>"
-            )
+            params["source_class"] = _loc("class")
+            params["parent_class"] = location.get("parent_class", "<parent>")
 
         elif name == "Replace Data Value with Object":
-            params["source_class"] = location.get("class", "")
+            params["source_class"] = _loc("class")
 
         elif name == "Hide Delegate":
-            params["source_class"] = location.get("class", "")
+            params["source_class"] = _loc("class")
 
         elif name == "Remove Dead Code":
-            params["source_class"] = location.get("class", "")
-            params["method"] = location.get("method", "")
+            params["source_class"] = _loc("class")
+            method = _loc("method")
+            if method:
+                params["method"] = method
 
         elif name == "Rename Method":
-            params["source_class"] = location.get("class", "")
-            params["method"] = location.get("method", "")
-            params["new_name"] = (
-                f"descriptive_{location.get('method', 'method')}"
-            )
+            params["source_class"] = _loc("class")
+            method = _loc("method")
+            if method:
+                params["method"] = method
+                params["new_name"] = f"descriptive_{method}"
 
         elif name == "Replace Parameter with Method Call":
-            params["method"] = location.get("method", "")
+            method = _loc("method")
+            if method:
+                params["method"] = method
 
         return params
+
 
     @staticmethod
     def _build_summary(
