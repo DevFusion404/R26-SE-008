@@ -177,7 +177,7 @@ function TreeNode({ node, depth = 0, onSelect, selected }) {
 }
 
 // ── Main CUQAAgentPage ─────────────────────────────────────────────────────
-export default function CUQAAgentPage({ repoLoaded, repoMeta }) {
+export default function CUQAAgentPage({ repoLoaded, repoMeta, onSendToRdp }) {
   const [tree,        setTree]        = useState(null);
   const [selFile,     setSelFile]     = useState(null);
   const [astData,     setAstData]     = useState(null);
@@ -273,6 +273,26 @@ export default function CUQAAgentPage({ repoLoaded, repoMeta }) {
           <button className="btn btn-primary" onClick={() => { fetchTree(); fetchReport(); }}>
             ⟳ RUN ANALYSIS
           </button>
+          {report && onSendToRdp && (
+            <button
+              onClick={() => onSendToRdp(report)}
+              title="Send quality report to RDP Agent to generate a refactoring plan"
+              style={{
+                padding: '8px 16px',
+                background: 'linear-gradient(135deg, #8b5cf6, #a855f7)',
+                color: 'white',
+                border: 'none',
+                borderRadius: '6px',
+                fontSize: '13px',
+                fontWeight: 700,
+                cursor: 'pointer',
+                boxShadow: '0 0 18px rgba(139,92,246,0.5)',
+                letterSpacing: '0.3px',
+              }}
+            >
+              ⚡ Send to RDP Agent
+            </button>
+          )}
           <button className="btn btn-outline" onClick={() => {
             const blob = new Blob([JSON.stringify(report, null, 2)], { type: 'application/json' });
             const a = document.createElement('a'); a.href = URL.createObjectURL(blob);
@@ -416,11 +436,32 @@ export default function CUQAAgentPage({ repoLoaded, repoMeta }) {
       <div className="card">
         <div className="card-header">
           <span className="card-title">{'{ }'} Structural Quality Report (JSON)</span>
-          <button className="btn btn-ghost btn-sm" onClick={() => {
-            navigator.clipboard?.writeText(JSON.stringify(report, null, 2));
-          }}>
-            📋 Copy to Clipboard
-          </button>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <button className="btn btn-ghost btn-sm" onClick={() => {
+              navigator.clipboard?.writeText(JSON.stringify(report, null, 2));
+            }}>
+              📋 Copy to Clipboard
+            </button>
+            {report && onSendToRdp && (
+              <button
+                className="btn btn-sm"
+                style={{
+                  background: 'linear-gradient(135deg, #8b5cf6, #a855f7)',
+                  color: 'white',
+                  border: 'none',
+                  borderRadius: '6px',
+                  padding: '4px 14px',
+                  fontWeight: 600,
+                  fontSize: 12,
+                  cursor: 'pointer',
+                  boxShadow: '0 0 12px rgba(139,92,246,0.35)',
+                }}
+                onClick={() => onSendToRdp(report)}
+              >
+                ⚡ Send to RDP Agent
+              </button>
+            )}
+          </div>
         </div>
         <div style={{ padding: 20, maxHeight: 400, overflowY: 'auto', background: 'var(--bg-base)' }}>
           {report
