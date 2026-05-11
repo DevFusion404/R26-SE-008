@@ -1,27 +1,133 @@
 import { useMemo, useRef, useState } from 'react';
 import SCTVAAgentService from '../../services/sctvaAgentService';
+import transformBadge from '../../assets/transform-badge.svg';
 import './SCTVAAgentPage.css';
 
-const DEFAULT_TIMELINE = [
+const PIPELINE_STAGES = [
   {
-    status: 'completed',
-    label: 'Completed · Ready',
+    id: 'plan',
     title: 'Plan Intake',
-    description: 'Upload a refactoring plan to begin execution.',
+    description: 'Normalize the refactoring plan and actions.',
   },
   {
-    status: 'pending',
-    label: 'Pending',
-    title: 'Transformation',
-    description: 'Transformation steps will appear here.',
+    id: 'analyze',
+    title: 'Source Analysis',
+    description: 'Parse source and map language-specific operations.',
   },
   {
-    status: 'pending',
-    label: 'Pending',
-    title: 'Validation',
-    description: 'Syntax, structural, behavioral, and invariant checks.',
+    id: 'transform',
+    title: 'Apply Transformations',
+    description: 'Execute refactoring actions on the source files.',
+  },
+  {
+    id: 'syntax',
+    title: 'Syntax Validation',
+    description: 'Check parsing/compilation safety.',
+  },
+  {
+    id: 'structural',
+    title: 'Structural Validation',
+    description: 'Compare structural similarity and dependencies.',
+  },
+  {
+    id: 'behavioral',
+    title: 'Behavioral Validation',
+    description: 'Run behavioral fingerprints or static checks.',
+  },
+  {
+    id: 'invariant',
+    title: 'Invariant Mining',
+    description: 'Confirm invariants match across versions.',
+  },
+  {
+    id: 'finalize',
+    title: 'Finalize Output',
+    description: 'Accept the refactor or roll back safely.',
   },
 ];
+
+function pipelineLabel(status, stepNumber) {
+  const prefix = status === 'completed'
+    ? 'Completed'
+    : status === 'active'
+      ? 'In Progress'
+      : status === 'failed'
+        ? 'Failed'
+        : 'Pending';
+  return `${prefix} · Stage ${stepNumber}`;
+}
+
+function validationStageStatus(stepKey, validation, phase) {
+  if (phase !== 'done') return 'pending';
+
+  const step = validation?.[stepKey];
+  if (!step) return 'failed';
+
+  const details = step.details || {};
+  const reportedStatus = stepKey === 'behavioral'
+    ? String(details.fingerprint_status || '')
+    : stepKey === 'invariant'
+      ? String(details.status || '')
+      : '';
+
+  if (reportedStatus.toLowerCase() === 'skipped') return 'failed';
+
+  return step.passed ? 'completed' : 'failed';
+}
+
+function buildPipelineTimeline({
+  phase,
+  planLoaded,
+  planStepCount,
+  result,
+}) {
+  const validation = result?.validation || null;
+  const rollback = Boolean(result?.rollback_occurred);
+
+  return PIPELINE_STAGES.map((stage, index) => {
+    let status = 'pending';
+
+    if (stage.id === 'plan') {
+      status = planLoaded || phase !== 'idle' ? 'completed' : 'pending';
+    } else if (stage.id === 'analyze') {
+      status = phase === 'idle' ? 'pending' : 'completed';
+    } else if (stage.id === 'transform') {
+      status = phase === 'running' ? 'active' : phase === 'done' ? 'completed' : 'pending';
+    } else if (['syntax', 'structural', 'behavioral', 'invariant'].includes(stage.id)) {
+      status = validationStageStatus(stage.id, validation, phase);
+    } else if (stage.id === 'finalize') {
+      if (phase === 'done') {
+        status = rollback ? 'failed' : 'completed';
+      } else {
+        status = 'pending';
+      }
+    }
+
+    let description = stage.description;
+    if (stage.id === 'plan' && planLoaded && planStepCount > 0) {
+      description = `Loaded ${planStepCount} steps from the refactoring plan.`;
+    }
+    if (stage.id === 'finalize' && phase === 'done') {
+      description = rollback
+        ? 'Rollback executed due to failed validation.'
+        : 'Final output accepted after successful validation.';
+    }
+
+    return {
+      status,
+      label: pipelineLabel(status, index + 1),
+      title: stage.title,
+      description,
+    };
+  });
+}
+
+const DEFAULT_TIMELINE = buildPipelineTimeline({
+  phase: 'idle',
+  planLoaded: false,
+  planStepCount: 0,
+  result: null,
+});
 
 const DEFAULT_VALIDATION = [
   { label: 'Syntax Validation', state: 'neutral', text: 'Waiting for execution' },
@@ -201,6 +307,28 @@ function normalizeStep(step) {
     };
   }
 
+  if (refactoring === 'introduce constant') {
+    const literalValue = Object.prototype.hasOwnProperty.call(params, 'literal_value') ? params.literal_value : null;
+    const literalValues = Array.isArray(params.literal_values) ? params.literal_values : null;
+    if (literalValue === null && !literalValues && !params.hint) return null;
+    return {
+      action_type: 'introduce_constant',
+      parameters: {
+        literal_value: literalValue,
+        literal_values: literalValues,
+        constant_name: params.constant_name || 'EXTRACTED_CONSTANT',
+        hint: params.hint,
+        source_file: params.source_file,
+        source_line: params.source_line,
+        target_class: target.class || params.source_class,
+        target_method: target.method || params.method,
+      },
+      source_step_id: step.step_id ?? null,
+      source_refactoring: step.refactoring ?? null,
+      warnings: [],
+    };
+  }
+
   if (refactoring === 'replace literal' || refactoring === 'replace temp with query') {
     if (!Object.prototype.hasOwnProperty.call(params, 'old_literal') || !Object.prototype.hasOwnProperty.call(params, 'new_literal')) return null;
     return {
@@ -219,6 +347,21 @@ function normalizeStep(step) {
     return {
       action_type: 'inject_syntax_error',
       parameters: {},
+      source_step_id: step.step_id ?? null,
+      source_refactoring: step.refactoring ?? null,
+      warnings: [],
+    };
+  }
+
+  if (refactoring === 'remove dead code') {
+    const methodName = params.method || target.method;
+    if (!methodName) return null;
+    return {
+      action_type: 'remove_dead_code',
+      parameters: {
+        method: methodName,
+        class_name: target.class || params.source_class,
+      },
       source_step_id: step.step_id ?? null,
       source_refactoring: step.refactoring ?? null,
       warnings: [],
@@ -377,7 +520,7 @@ function ValidationChecklist({ validation }) {
             : (item.passed ? 'passed' : 'failed');
 
         const cls = status === 'passed' ? 'pass' : status === 'skipped' ? 'neutral' : 'fail';
-        const icon = status === 'passed' ? 'v' : status === 'skipped' ? 'o' : 'x';
+        const icon = status === 'passed' ? '' : status === 'skipped' ? 'o' : 'x';
 
         const message = label === 'Behavioral Preservation'
           ? (details.fingerprint_summary || item.message || '')
@@ -404,6 +547,10 @@ function ValidationChecklist({ validation }) {
 
 function buildSafetyMessages(report) {
   const messages = [];
+  const isNoiseMessage = (value) => {
+    const text = String(value || '').trim().toLowerCase();
+    return text === 'no replacements were applied.';
+  };
   if (report.summary) messages.push({ key: 'summary', title: 'Summary', text: String(report.summary) });
   if (report.rollback_reason) messages.push({ key: 'rollback_reason', title: 'Rollback reason', text: String(report.rollback_reason) });
   (report.risk_flags || []).forEach((flag, index) => messages.push({
@@ -411,11 +558,14 @@ function buildSafetyMessages(report) {
     title: 'Risk',
     text: String(flag),
   }));
-  (report.human_messages || []).forEach((message, index) => messages.push({
-    key: `message-${index}`,
-    title: null,
-    text: String(message),
-  }));
+  (report.human_messages || []).forEach((message, index) => {
+    if (isNoiseMessage(message)) return;
+    messages.push({
+      key: `message-${index}`,
+      title: null,
+      text: String(message),
+    });
+  });
   return messages;
 }
 
@@ -424,18 +574,37 @@ function chooseLanguageFromName(fileName) {
   return 'java';
 }
 
+function readFileAsText(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ''));
+    reader.onerror = () => reject(reader.error || new Error('Failed to read file.'));
+    reader.readAsText(file);
+  });
+}
+
+function summarizeSourceFiles(files) {
+  if (!files.length) return 'No source files selected.';
+  if (files.length === 1) return files[0].name;
+  return `${files.length} files selected.`;
+}
+
 export default function SCTVAAgentPage() {
   const sourceFileInputRef = useRef(null);
   const planFileInputRef = useRef(null);
 
   const [requestId, setRequestId] = useState('');
   const [language, setLanguage] = useState('java');
-  const [sourceCode, setSourceCode] = useState('');
+  const [sourceFiles, setSourceFiles] = useState([]);
+  const [activeFileName, setActiveFileName] = useState('');
+  const [fileResults, setFileResults] = useState([]);
   const [refactoringPlanText, setRefactoringPlanText] = useState('');
   const [executionOptionsText, setExecutionOptionsText] = useState(SCTVAAgentService.defaultExecutionOptionsJson);
 
-  const [sourceFileName, setSourceFileName] = useState('No source file selected.');
+  const [sourceFileName, setSourceFileName] = useState('No source files selected.');
   const [planFileName, setPlanFileName] = useState('No plan file selected.');
+  const [planLoaded, setPlanLoaded] = useState(false);
+  const [planStepCount, setPlanStepCount] = useState(0);
 
   const [isRunning, setIsRunning] = useState(false);
   const [errorMessage, setErrorMessage] = useState('');
@@ -443,7 +612,7 @@ export default function SCTVAAgentPage() {
   const [statusMessage, setStatusMessage] = useState('');
 
   const [timeline, setTimeline] = useState(DEFAULT_TIMELINE);
-  const [timelineCount, setTimelineCount] = useState('0 Steps');
+  const [timelineCount, setTimelineCount] = useState(`${PIPELINE_STAGES.length} Stages`);
 
   const [validation, setValidation] = useState(null);
   const [safetyMessages, setSafetyMessages] = useState([]);
@@ -457,7 +626,6 @@ export default function SCTVAAgentPage() {
   const [confidenceCopy, setConfidenceCopy] = useState('Model analysis will appear after execution.');
   const [confidenceScore, setConfidenceScore] = useState(0);
 
-  const [activeFileLabel, setActiveFileLabel] = useState('No file selected');
   const [additions, setAdditions] = useState(0);
   const [deletions, setDeletions] = useState(0);
 
@@ -489,6 +657,18 @@ export default function SCTVAAgentPage() {
     []
   );
 
+  const activeSource = sourceFiles.find(file => file.name === activeFileName) || sourceFiles[0];
+  const activeSourceName = activeSource ? activeSource.name : '';
+  const activeSourceCode = activeSource ? activeSource.code : '';
+  const activeFileDisplay = activeFileName || activeSourceName || 'No file selected';
+  const fileTabs = fileResults.length
+    ? fileResults.map(item => ({
+      name: item.file_name,
+      success: item.success,
+      rollback: item.rollback_occurred,
+    }))
+    : sourceFiles.map(file => ({ name: file.name }));
+
   function pushLog(level, message) {
     setLogs(prev => [...prev, { level, message }]);
   }
@@ -503,20 +683,42 @@ export default function SCTVAAgentPage() {
     setStatusTone('info');
   }
 
-  function handleSourceFile(file) {
-    if (!file) return;
+  function updateSourceFileContent(fileName, nextCode) {
+    if (!fileName) return;
+    setSourceFiles(prev => prev.map(file => (
+      file.name === fileName ? { ...file, code: nextCode } : file
+    )));
+  }
 
-    setSourceFileName(file.name);
-    setActiveFileLabel(file.name);
+  async function handleSourceFiles(fileList) {
+    if (!fileList || !fileList.length) return;
 
-    const reader = new FileReader();
-    reader.onload = () => {
-      const text = String(reader.result || '');
-      setSourceCode(text);
-      setLanguage(chooseLanguageFromName(file.name));
-      pushLog('INFO', `Loaded source file ${file.name} from your computer.`);
-    };
-    reader.readAsText(file);
+    try {
+      const files = Array.from(fileList);
+      const loaded = await Promise.all(
+        files.map(async file => ({
+          name: file.name,
+          language: chooseLanguageFromName(file.name),
+          code: await readFileAsText(file),
+        }))
+      );
+
+      setSourceFiles(loaded);
+      setSourceFileName(summarizeSourceFiles(loaded));
+      setActiveFileName(loaded[0]?.name || '');
+      setLanguage(loaded[0]?.language || 'java');
+      setFileResults([]);
+      setDiffRows([]);
+      setFinalCode('');
+      setRawResponse('{}');
+      setValidation(null);
+      setSafetyMessages([]);
+      setAdditions(0);
+      setDeletions(0);
+      pushLog('INFO', `Loaded ${loaded.length} source file${loaded.length === 1 ? '' : 's'} from your computer.`);
+    } catch (error) {
+      pushLog('ERROR', error.message || 'Failed to load source files.');
+    }
   }
 
   function handlePlanFile(file) {
@@ -541,31 +743,36 @@ export default function SCTVAAgentPage() {
   function renderPlanTimeline(plan) {
     const source = unwrapPlanPayload(plan);
     const steps = Array.isArray(source.steps) ? source.steps : Array.isArray(source.actions) ? source.actions : [];
-    const shown = steps.slice(0, 5);
-
-    setTimelineCount(`${steps.length} Steps`);
-
-    if (!shown.length) {
-      setTimeline(DEFAULT_TIMELINE);
-      return;
-    }
-
-    const mapped = shown.map((step, index) => ({
-      status: index === 0 ? 'completed' : index === 1 ? 'active' : 'pending',
-      label: `${index === 0 ? 'Completed' : index === 1 ? 'In Progress' : 'Pending'} · Step ${String(step.step_id ?? index + 1)}`,
-      title: step.refactoring || step.action_type || 'Transformation Step',
-      description: step.explanation || step.source_refactoring || 'Awaiting execution.',
+    setPlanLoaded(true);
+    setPlanStepCount(steps.length);
+    setTimelineCount(`${PIPELINE_STAGES.length} Stages`);
+    setTimeline(buildPipelineTimeline({
+      phase: 'ready',
+      planLoaded: true,
+      planStepCount: steps.length,
+      result: null,
     }));
+  }
 
-    setTimeline(mapped);
+  function renderPipelineTimeline({ phase, result, overridePlanLoaded, overridePlanStepCount } = {}) {
+    const effectivePlanLoaded = typeof overridePlanLoaded === 'boolean' ? overridePlanLoaded : planLoaded;
+    const effectivePlanSteps = Number.isFinite(overridePlanStepCount) ? overridePlanStepCount : planStepCount;
+
+    setTimelineCount(`${PIPELINE_STAGES.length} Stages`);
+    setTimeline(buildPipelineTimeline({
+      phase: phase || 'idle',
+      planLoaded: effectivePlanLoaded,
+      planStepCount: effectivePlanSteps,
+      result: result || null,
+    }));
   }
 
   function buildPayload() {
     const finalRequestId = requestId.trim() || `sctva_${Date.now()}`;
-    const languageValue = language.trim().toLowerCase();
+    const fallbackLanguage = language.trim().toLowerCase();
 
-    if (!sourceCode.trim()) {
-      throw new Error('No source code loaded from your computer.');
+    if (!sourceFiles.length) {
+      throw new Error('No source code files loaded from your computer.');
     }
 
     let uploadedJson;
@@ -587,14 +794,25 @@ export default function SCTVAAgentPage() {
 
     return {
       request_id: finalRequestId,
-      language: languageValue,
-      source_code: sourceCode,
+      language: (sourceFiles[0]?.language || fallbackLanguage || 'java').toLowerCase(),
+      source_code: sourceFiles[0]?.code || '',
+      source_files: sourceFiles.map(file => ({
+        file_name: file.name,
+        source_code: file.code,
+        language: file.language,
+      })),
       refactoring_plan: refactoringPlan,
       execution_options: executionOptions,
     };
   }
 
   function renderDiff(original, updated) {
+    if (!original && !updated) {
+      setAdditions(0);
+      setDeletions(0);
+      setDiffRows([]);
+      return;
+    }
     const diff = diffLines(original, updated);
     let add = 0;
     let del = 0;
@@ -610,34 +828,103 @@ export default function SCTVAAgentPage() {
   }
 
   function renderValidation(resultValidation) {
-    setValidation(resultValidation || {});
+    const normalized = resultValidation && Object.keys(resultValidation).length ? resultValidation : null;
+    setValidation(normalized);
   }
 
   function renderSafetyReport(report) {
     setSafetyMessages(buildSafetyMessages(report || {}));
   }
 
-  function renderResult(data, originalSource) {
-    setRawResponse(JSON.stringify(data, null, 2));
+  function applyActiveResult(result, originalSource) {
+    if (!result) {
+      setMetricSuccess('--');
+      setMetricRollback('--');
+      setMetricLanguage('--');
+      setMetricConfidence('--');
+      setConfidenceScore(0);
+      setConfidenceLabel('Idle');
+      setConfidenceCopy('Model analysis will appear after execution.');
+      renderValidation(null);
+      renderSafetyReport(null);
+      setFinalCode('');
+      renderDiff('', '');
+      renderPipelineTimeline({ phase: 'idle' });
+      return;
+    }
 
-    setMetricSuccess(data.success ? 'YES' : 'NO');
-    setMetricRollback(data.rollback_occurred ? 'YES' : 'NO');
-    setMetricLanguage(data.language || '--');
+    setMetricSuccess(result.success ? 'YES' : 'NO');
+    setMetricRollback(result.rollback_occurred ? 'YES' : 'NO');
+    setMetricLanguage(result.language || '--');
 
-    const score = typeof data.confidence_score === 'number' ? data.confidence_score : 0;
+    const score = typeof result.confidence_score === 'number' ? result.confidence_score : 0;
     setMetricConfidence(`${Math.round(score * 100)}%`);
     setConfidenceScore(Math.max(0, Math.min(100, score * 100)));
-    setConfidenceLabel(data.rollback_occurred ? 'Rolled Back' : score >= 0.8 ? 'Highly Safe' : score >= 0.6 ? 'Review' : 'Risky');
+    setConfidenceLabel(result.rollback_occurred ? 'Rolled Back' : score >= 0.8 ? 'Highly Safe' : score >= 0.6 ? 'Review' : 'Risky');
     setConfidenceCopy(
-      data.rollback_occurred
+      result.rollback_occurred
         ? 'Validation detected unsafe transformation and rollback was triggered.'
         : 'Model analysis shows structural and behavioral validation results.'
     );
 
-    renderValidation(data.validation || {});
-    renderSafetyReport(data.safety_report || {});
-    setFinalCode(String(data.refactored_code || ''));
-    renderDiff(originalSource, data.refactored_code || '');
+    renderValidation(result.validation || {});
+    renderSafetyReport(result.safety_report || {});
+    setFinalCode(String(result.refactored_code || ''));
+    renderDiff(originalSource || '', result.refactored_code || '');
+    renderPipelineTimeline({ phase: 'done', result });
+  }
+
+  function normalizeFileResults(data) {
+    if (Array.isArray(data.file_results) && data.file_results.length) {
+      return data.file_results.map((item, index) => ({
+        ...item,
+        file_name: item.file_name || sourceFiles[index]?.name || `file_${index + 1}`,
+      }));
+    }
+
+    return [{
+      file_name: sourceFiles[0]?.name || activeSourceName || 'source_code',
+      language: data.language,
+      success: data.success,
+      rollback_occurred: data.rollback_occurred,
+      confidence_score: data.confidence_score,
+      refactored_code: data.refactored_code,
+      validation: data.validation,
+      safety_report: data.safety_report,
+    }];
+  }
+
+  function renderResult(data) {
+    setRawResponse(JSON.stringify(data, null, 2));
+
+    const results = normalizeFileResults(data);
+    setFileResults(results);
+
+    const preferredName = activeFileName && results.some(item => item.file_name === activeFileName)
+      ? activeFileName
+      : results[0]?.file_name;
+
+    if (preferredName) {
+      setActiveFileName(preferredName);
+    }
+
+    const selected = results.find(item => item.file_name === preferredName) || results[0];
+    const originalSource = sourceFiles.find(file => file.name === selected?.file_name)?.code
+      || activeSourceCode
+      || '';
+
+    applyActiveResult(selected, originalSource);
+  }
+
+  function handleSelectFile(fileName) {
+    setActiveFileName(fileName);
+    const result = fileResults.find(item => item.file_name === fileName);
+    const originalSource = sourceFiles.find(file => file.name === fileName)?.code || '';
+    if (result) {
+      applyActiveResult(result, originalSource);
+    } else {
+      applyActiveResult(null, '');
+    }
   }
 
   async function handleSubmit(event) {
@@ -657,10 +944,11 @@ export default function SCTVAAgentPage() {
     showStatus('Running transformation...', 'info');
     pushLog('INFO', 'Targeting source for transformation...');
     pushLog('DEBUG', 'Applying refactoring plan and validation pipeline...');
+    renderPipelineTimeline({ phase: 'running', overridePlanLoaded: true });
 
     try {
       const data = await SCTVAAgentService.execute(payload);
-      renderResult(data, payload.source_code);
+      renderResult(data);
       const doneMessage = data.rollback_occurred ? 'Execution completed with rollback.' : 'Execution completed successfully.';
       showStatus(doneMessage, data.rollback_occurred ? 'warn' : 'success');
       pushLog(data.rollback_occurred ? 'WARN' : 'VALID', data.rollback_occurred ? 'Rollback triggered after validation.' : 'All safety checks completed.');
@@ -678,11 +966,15 @@ export default function SCTVAAgentPage() {
     if (sourceFileInputRef.current) sourceFileInputRef.current.value = '';
     if (planFileInputRef.current) planFileInputRef.current.value = '';
 
-    setSourceCode('');
+    setSourceFiles([]);
+    setActiveFileName('');
+    setFileResults([]);
     setRefactoringPlanText('');
     setExecutionOptionsText(SCTVAAgentService.defaultExecutionOptionsJson);
-    setSourceFileName('No source file selected.');
+    setSourceFileName('No source files selected.');
     setPlanFileName('No plan file selected.');
+    setPlanLoaded(false);
+    setPlanStepCount(0);
 
     setDiffRows([]);
     setRawResponse('{}');
@@ -696,10 +988,9 @@ export default function SCTVAAgentPage() {
     setConfidenceScore(0);
     setAdditions(0);
     setDeletions(0);
-    setActiveFileLabel('No file selected');
     setValidation(null);
     setTimeline(DEFAULT_TIMELINE);
-    setTimelineCount('0 Steps');
+    setTimelineCount(`${PIPELINE_STAGES.length} Stages`);
     setSafetyMessages([]);
     setLogs([]);
     pushLog('INFO', 'Workspace cleared.');
@@ -727,10 +1018,10 @@ export default function SCTVAAgentPage() {
   function onSourceDrop(event) {
     event.preventDefault();
     setSourceDragOver(false);
-    const file = event.dataTransfer.files?.[0];
-    if (file) {
-      if (sourceFileInputRef.current) sourceFileInputRef.current.files = event.dataTransfer.files;
-      handleSourceFile(file);
+    const files = event.dataTransfer.files;
+    if (files && files.length) {
+      if (sourceFileInputRef.current) sourceFileInputRef.current.files = files;
+      handleSourceFiles(files);
     }
   }
 
@@ -748,7 +1039,9 @@ export default function SCTVAAgentPage() {
     <div className="page-container sctva-page">
       <section className="sctva-hero">
         <div className="sctva-hero-left">
-          <div className="sctva-hero-icon">*</div>
+          <div className="sctva-hero-icon">
+            <img src={transformBadge} alt="Transformation and validation badge" />
+          </div>
           <div>
             <h1>Transformation Agent</h1>
             <p>
@@ -757,15 +1050,10 @@ export default function SCTVAAgentPage() {
             </p>
           </div>
         </div>
-
         <div className="sctva-hero-actions">
-          {/* <button className="sctva-btn sctva-btn-danger" type="button" onClick={handleClear}>
-            <span>R</span>
-            Rollback Changes
-          </button> */}
-          <button className="sctva-btn sctva-btn-primary" type="submit" form="sctva-form" disabled={isRunning}>
-            <span>^</span>
-            {isRunning ? 'Running...' : 'Run Transformation'}
+          <button className="sctva-btn sctva-btn-secondary" type="button" onClick={handleClear}>
+            <span></span>
+          Refresh
           </button>
         </div>
       </section>
@@ -806,8 +1094,8 @@ export default function SCTVAAgentPage() {
               onDrop={onSourceDrop}
             >
               <div>
-                <strong>Upload Source Code From PC</strong>
-                <p>Drag and drop a local source file here, or browse your computer.</p>
+                <strong>Upload Source Code Files</strong>
+                <p>Drag and drop multiple local source files here, or browse your computer.</p>
               </div>
               <label className="sctva-mini-btn" htmlFor="sctva-source-file-input">Browse File</label>
               <input
@@ -816,7 +1104,8 @@ export default function SCTVAAgentPage() {
                 type="file"
                 accept=".java,.py,.txt,.js,.ts,.cs,.cpp,.c,.h,.hpp"
                 hidden
-                onChange={e => handleSourceFile(e.target.files?.[0])}
+                multiple
+                onChange={e => handleSourceFiles(e.target.files)}
               />
             </div>
 
@@ -847,12 +1136,12 @@ export default function SCTVAAgentPage() {
             <div className="sctva-file-name">{planFileName}</div>
 
             <details className="sctva-toggle">
-              <summary>View / Edit Loaded Source Code</summary>
+              <summary>{`View / Edit Selected Source Code · ${activeFileDisplay}`}</summary>
               <textarea
                 className="sctva-textarea"
                 spellCheck="false"
-                value={sourceCode}
-                onChange={e => setSourceCode(e.target.value)}
+                value={activeSourceCode}
+                onChange={e => updateSourceFileContent(activeSourceName, e.target.value)}
               />
             </details>
 
@@ -878,6 +1167,13 @@ export default function SCTVAAgentPage() {
 
             {errorMessage ? <div className="sctva-alert sctva-alert-error">{errorMessage}</div> : null}
             {statusMessage ? <div className={`sctva-alert sctva-alert-${statusTone}`}>{statusMessage}</div> : null}
+          </div>
+
+          <div className="sctva-hero-actions" style={{ marginTop: 16 }}>
+            <button className="sctva-btn sctva-btn-primary" type="submit" disabled={isRunning}>
+              <span></span>
+              {isRunning ? 'Running...' : 'Run Transformation'}
+            </button>
           </div>
         </form>
       </section>
@@ -906,7 +1202,7 @@ export default function SCTVAAgentPage() {
         <div className="sctva-code-card">
           <div className="sctva-code-topbar">
             <div>
-              <span className="sctva-chip">{activeFileLabel}</span>
+              <span className="sctva-chip">{activeFileDisplay}</span>
               <span className="sctva-chip sctva-chip-muted">Diff Highlight</span>
             </div>
             <div className="sctva-diff-stats">
@@ -916,6 +1212,22 @@ export default function SCTVAAgentPage() {
               <span>{`${additions} Additions`}</span>
             </div>
           </div>
+
+          {fileTabs.length ? (
+            <div className="sctva-file-tabs">
+              {fileTabs.map(item => (
+                <button
+                  key={item.name}
+                  type="button"
+                  className={`sctva-file-tab ${item.name === activeFileName ? 'active' : ''} ${item.success === true ? 'pass' : item.success === false ? 'fail' : ''}`}
+                  onClick={() => handleSelectFile(item.name)}
+                >
+                  <span>{item.name}</span>
+                  {item.rollback ? <em>Rolled Back</em> : null}
+                </button>
+              ))}
+            </div>
+          ) : null}
 
           <div className="sctva-code-diff">
             {diffRows.length ? (
@@ -935,14 +1247,14 @@ export default function SCTVAAgentPage() {
         </div>
 
         <div className="sctva-validation-card">
-          <h2>Validation Checklist</h2>
+          <h2>{`Validation Checklist · ${activeFileDisplay}`}</h2>
           <div className="sctva-checklist">
             {validation ? <ValidationChecklist validation={validation} /> : renderDefaultChecklist}
           </div>
         </div>
 
         <div className="sctva-confidence-card">
-          <h2>Confidence Score</h2>
+          <h2>{`Confidence Score · ${activeFileDisplay}`}</h2>
 
           <div className="sctva-confidence-ring" style={{ ['--score']: `${confidenceScore}%` }}>
             <div className="sctva-ring-inner">
@@ -970,7 +1282,7 @@ export default function SCTVAAgentPage() {
         </div>
 
         <div className="sctva-report-card">
-          <h2>Safety Report</h2>
+          <h2>{`Safety Report · ${activeFileDisplay}`}</h2>
           <div className="sctva-report-list">
             {safetyMessages.length ? (
               <ul className="sctva-report-list-inner">
@@ -1012,7 +1324,7 @@ export default function SCTVAAgentPage() {
         <div className="sctva-raw-actions">
           <h2>Raw Response JSON</h2>
           <div>
-            <button className="sctva-mini-btn" type="button" onClick={handleCopyFinalCode}>Copy Final Code</button>
+            {/* <button className="sctva-mini-btn" type="button" onClick={handleCopyFinalCode}>Copy Final Code</button> */}
             <button className="sctva-mini-btn" type="button" style={{ marginLeft: 8 }} onClick={handleDownloadResult}>Download Result JSON</button>
           </div>
         </div>

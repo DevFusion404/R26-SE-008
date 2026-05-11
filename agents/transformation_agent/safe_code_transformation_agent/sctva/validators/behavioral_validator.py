@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import re
 import shutil
 import subprocess
@@ -22,13 +23,16 @@ from ..utils.metrics import normalized_count_similarity
 class BehavioralValidator:
     """Runs behavioral fingerprint validation for Python and Java.
 
-    Main fix:
-    If Java behavior_tests are missing, this validator now auto-generates
-    Java runtime probes from the refactoring plan actions. Therefore, the
-    original RDP refactoring-plan JSON structure does not need to change.
+    For Python:
+    - If explicit behavior_tests exist, runtime fingerprinting is used.
+    - If behavior_tests are missing, the validator runs safe static behavioral
+      fingerprints instead of executing arbitrary functions.
+    - This prevents timeout from ML imports, CSV loading, plotting, or file I/O.
     """
 
     AUTO_PROBE_LIMIT = 10
+    DEFAULT_PYTHON_TIMEOUT_SECONDS = 8
+    DEFAULT_JAVA_TIMEOUT_SECONDS = 8
 
     def validate(
         self,
@@ -67,6 +71,7 @@ class BehavioralValidator:
                 original_code=original_code,
                 transformed_code=transformed_code,
                 behavior_tests=behavior_tests,
+                actions=actions,
                 strict_mode=strict_mode,
             )
         else:
@@ -95,52 +100,63 @@ class BehavioralValidator:
         original_code: str,
         transformed_code: str,
         behavior_tests: List[Dict[str, Any]],
+        actions: Sequence[RefactoringAction],
         strict_mode: bool,
     ) -> tuple[bool, float, str, Dict[str, Any]]:
-        if not behavior_tests:
-            return (
-                True,
-                0.6,
-                "Python behavioral fingerprinting skipped because no behavior tests were provided.",
-                {
-                    "checks": ["missing_tests"],
-                    "failures": [],
-                    "warnings": ["No Python behavior_tests were provided."],
-                    "fingerprint_status": "skipped",
-                    "fingerprint_summary": "No Python behavior tests provided.",
-                },
+        runtime_tests = list(behavior_tests or [])
+
+        if not runtime_tests:
+            return self._validate_python_static_fingerprints(
+                original_code=original_code,
+                transformed_code=transformed_code,
+                actions=actions,
             )
 
-        runner = BehaviorFingerprintRunner()
+        runner = BehaviorFingerprintRunner(
+            default_timeout_seconds=self.DEFAULT_PYTHON_TIMEOUT_SECONDS
+        )
+
         fingerprints: List[Dict[str, Any]] = []
         failures: List[str] = []
+        warnings: List[str] = []
         passed_count = 0
 
-        for idx, test in enumerate(behavior_tests, start=1):
+        for idx, test in enumerate(runtime_tests, start=1):
             name = str(test.get("name", test.get("test_id", f"test_{idx}")))
-            timeout = test.get("timeout_seconds") or test.get("timeout") or 2
+            timeout = int(
+                test.get("timeout_seconds")
+                or test.get("timeout")
+                or self.DEFAULT_PYTHON_TIMEOUT_SECONDS
+            )
 
             try:
                 if "expression" in test:
+                    expression = str(test["expression"])
+
                     original_fp = runner.run_python_test(
                         original_code,
-                        {"expression": str(test["expression"])},
+                        {"expression": expression},
                         timeout=timeout,
                     )
 
                     transformed_fp = runner.run_python_test(
                         transformed_code,
-                        {"expression": str(test["expression"])},
+                        {"expression": expression},
                         timeout=timeout,
                     )
 
                     entry = {
                         "name": name,
-                        "expression": str(test["expression"]),
+                        "expression": expression,
                     }
 
                 else:
-                    fn_name = str(test.get("call") or test.get("target_method") or "")
+                    fn_name = str(
+                        test.get("call")
+                        or test.get("target_method")
+                        or test.get("method")
+                        or ""
+                    ).strip()
 
                     if not fn_name:
                         failures.append(f"{name}: missing call or target_method")
@@ -185,12 +201,23 @@ class BehavioralValidator:
                 if comparison.get("matched"):
                     passed_count += 1
                 else:
-                    failures.append(f"{name}: {comparison.get('reason')}")
+                    reason = comparison.get("reason", "fingerprint_mismatch")
+                    failures.append(f"{name}: {reason}")
+
+                    if reason in {
+                        "both_timed_out",
+                        "original_timed_out",
+                        "transformed_timed_out",
+                    }:
+                        warnings.append(
+                            f"{name}: timeout detected. Increase timeout_seconds "
+                            "or provide a smaller deterministic behavior test."
+                        )
 
             except Exception as exc:
                 failures.append(f"{name}: runtime error {exc}")
 
-        total = len(behavior_tests)
+        total = len(runtime_tests)
         passed = len(failures) == 0
         score = passed_count / total if total else 0.0
 
@@ -207,7 +234,7 @@ class BehavioralValidator:
                 "total_tests": total,
                 "passed_tests": passed_count,
                 "failures": failures,
-                "warnings": [],
+                "warnings": warnings,
                 "fingerprints": fingerprints,
                 "fingerprint_status": "passed" if passed else "failed",
                 "fingerprint_summary": (
@@ -215,6 +242,478 @@ class BehavioralValidator:
                 ),
             },
         )
+
+    def _validate_python_static_fingerprints(
+        self,
+        *,
+        original_code: str,
+        transformed_code: str,
+        actions: Sequence[RefactoringAction],
+    ) -> tuple[bool, float, str, Dict[str, Any]]:
+        """Safe no-runtime Python behavior preservation check.
+
+        This is used when the JSON plan has no explicit behavior_tests.
+        It does not import pandas/sklearn/matplotlib and does not execute project code.
+        Therefore, it avoids timeout but still produces fingerprints for invariant mining.
+        """
+
+        fingerprints: List[Dict[str, Any]] = []
+        failures: List[str] = []
+        warnings: List[str] = [
+            "No explicit Python behavior_tests were provided.",
+            "Used safe static behavioral fingerprints to avoid timeout from imports, file I/O, plotting, ML training, or external dataset loading.",
+        ]
+
+        original_summary = self._python_static_summary(original_code)
+        transformed_summary = self._python_static_summary(transformed_code)
+
+        signature_match = self._compare_python_signature_compatibility(
+            original_summary,
+            transformed_summary,
+            actions,
+        )
+
+        constant_check = self._check_python_introduced_constants(
+            transformed_code=transformed_code,
+            actions=actions,
+        )
+
+        unresolved_constant_check = self._check_unresolved_magic_constant_names(
+            transformed_code
+        )
+
+        checks = [
+            {
+                "name": "static_function_signature_fingerprint",
+                "matched": signature_match["matched"],
+                "reason": signature_match["reason"],
+                "original": signature_match["original"],
+                "transformed": signature_match["transformed"],
+            },
+            {
+                "name": "static_introduced_constant_fingerprint",
+                "matched": constant_check["matched"],
+                "reason": constant_check["reason"],
+                "original": constant_check["original"],
+                "transformed": constant_check["transformed"],
+            },
+            {
+                "name": "static_unresolved_constant_name_fingerprint",
+                "matched": unresolved_constant_check["matched"],
+                "reason": unresolved_constant_check["reason"],
+                "original": unresolved_constant_check["original"],
+                "transformed": unresolved_constant_check["transformed"],
+            },
+        ]
+
+        for check in checks:
+            original_fp = self._static_success_fingerprint(check["original"])
+            transformed_fp = self._static_success_fingerprint(check["transformed"])
+
+            comparison = {
+                "matched": bool(check["matched"]),
+                "reason": check["reason"],
+            }
+
+            fingerprints.append(
+                {
+                    "name": check["name"],
+                    "mode": "static_python_fingerprint",
+                    "original_fingerprint": original_fp,
+                    "transformed_fingerprint": transformed_fp,
+                    "comparison": comparison,
+                }
+            )
+
+            if not check["matched"]:
+                failures.append(f"{check['name']}: {check['reason']}")
+
+        total = len(fingerprints)
+        passed_count = total - len(failures)
+        passed = not failures
+        score = passed_count / total if total else 0.75
+
+        return (
+            passed,
+            score,
+            (
+                "Python static behavioral fingerprinting passed."
+                if passed
+                else f"Python static behavioral fingerprinting failed: {len(failures)} issue(s)."
+            ),
+            {
+                "checks": [
+                    "python_static_behavioral_fingerprinting",
+                    "function_signature_compatibility",
+                    "introduced_constant_value_preservation",
+                    "unresolved_constant_name_detection",
+                ],
+                "total_tests": total,
+                "passed_tests": passed_count,
+                "failures": failures,
+                "warnings": warnings,
+                "fingerprints": fingerprints,
+                "fingerprint_status": "passed" if passed else "failed",
+                "fingerprint_summary": (
+                    f"{passed_count}/{total} Python static behavioral fingerprint test(s) passed."
+                ),
+            },
+        )
+
+    @staticmethod
+    def _static_success_fingerprint(value: Any) -> Dict[str, Any]:
+        return {
+            "success": True,
+            "return_value_repr": repr(value),
+            "return_type": type(value).__name__,
+            "exception_type": None,
+            "exception_message_category": None,
+            "stdout": "",
+            "execution_time_ms": 0,
+            "timeout": False,
+            "runtime_error_details": None,
+        }
+
+    def _python_static_summary(self, source_code: str) -> Dict[str, Any]:
+        try:
+            tree = ast.parse(source_code)
+        except SyntaxError as exc:
+            return {
+                "parse_success": False,
+                "syntax_error": str(exc),
+                "functions": {},
+                "classes": {},
+                "module_constants": {},
+                "name_loads": [],
+                "name_stores": [],
+            }
+
+        functions: Dict[str, Dict[str, Any]] = {}
+        classes: Dict[str, List[str]] = {}
+        module_constants: Dict[str, Any] = {}
+        name_loads: List[str] = []
+        name_stores: List[str] = []
+
+        for node in tree.body:
+            if isinstance(node, ast.FunctionDef):
+                functions[node.name] = self._python_function_signature(node)
+
+            elif isinstance(node, ast.ClassDef):
+                class_methods = []
+                for body_node in node.body:
+                    if isinstance(body_node, ast.FunctionDef):
+                        class_methods.append(body_node.name)
+                classes[node.name] = sorted(class_methods)
+
+            elif isinstance(node, ast.Assign):
+                if len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+                    target_name = node.targets[0].id
+                    if target_name.isupper():
+                        literal_value = self._literal_value(node.value)
+                        if literal_value["literal"]:
+                            module_constants[target_name] = literal_value["value"]
+
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Name):
+                if isinstance(node.ctx, ast.Load):
+                    name_loads.append(node.id)
+                elif isinstance(node.ctx, ast.Store):
+                    name_stores.append(node.id)
+
+        return {
+            "parse_success": True,
+            "functions": functions,
+            "classes": classes,
+            "module_constants": module_constants,
+            "name_loads": sorted(set(name_loads)),
+            "name_stores": sorted(set(name_stores)),
+        }
+
+    @staticmethod
+    def _python_function_signature(node: ast.FunctionDef) -> Dict[str, Any]:
+        args = node.args
+
+        positional = [arg.arg for arg in args.args]
+        keyword_only = [arg.arg for arg in args.kwonlyargs]
+        defaults_count = len(args.defaults)
+        kw_defaults_count = len([d for d in args.kw_defaults if d is not None])
+
+        return {
+            "args": positional,
+            "keyword_only_args": keyword_only,
+            "defaults_count": defaults_count,
+            "kw_defaults_count": kw_defaults_count,
+            "has_vararg": args.vararg is not None,
+            "has_kwarg": args.kwarg is not None,
+            "returns": ast.unparse(node.returns) if node.returns else None,
+        }
+
+    @staticmethod
+    def _literal_value(node: ast.AST) -> Dict[str, Any]:
+        try:
+            value = ast.literal_eval(node)
+            if isinstance(value, (int, float, str, bool, type(None))):
+                return {"literal": True, "value": value}
+        except Exception:
+            pass
+
+        return {"literal": False, "value": None}
+
+    def _compare_python_signature_compatibility(
+        self,
+        original_summary: Dict[str, Any],
+        transformed_summary: Dict[str, Any],
+        actions: Sequence[RefactoringAction],
+    ) -> Dict[str, Any]:
+        if not original_summary.get("parse_success") or not transformed_summary.get("parse_success"):
+            return {
+                "matched": False,
+                "reason": "parse_failed",
+                "original": original_summary,
+                "transformed": transformed_summary,
+            }
+
+        expected_renames: Dict[str, str] = {}
+
+        for action in actions:
+            if getattr(action, "action_type", "") != "rename_symbol":
+                continue
+
+            old_name = str(action.parameters.get("old_name") or "").strip()
+            new_name = str(action.parameters.get("new_name") or "").strip()
+
+            if old_name and new_name:
+                expected_renames[old_name] = new_name
+
+        original_functions = dict(original_summary.get("functions", {}))
+        transformed_functions = dict(transformed_summary.get("functions", {}))
+
+        missing_functions = []
+        changed_signatures = []
+
+        for old_name, old_signature in original_functions.items():
+            expected_name = expected_renames.get(old_name, old_name)
+
+            if expected_name not in transformed_functions:
+                missing_functions.append(
+                    {
+                        "original_function": old_name,
+                        "expected_transformed_function": expected_name,
+                    }
+                )
+                continue
+
+            new_signature = transformed_functions[expected_name]
+
+            if old_signature != new_signature:
+                changed_signatures.append(
+                    {
+                        "function": old_name,
+                        "expected_name": expected_name,
+                        "original_signature": old_signature,
+                        "transformed_signature": new_signature,
+                    }
+                )
+
+        matched = not missing_functions and not changed_signatures
+
+        return {
+            "matched": matched,
+            "reason": (
+                "function_signatures_preserved"
+                if matched
+                else "function_signature_mismatch"
+            ),
+            "original": {
+                "function_count": len(original_functions),
+                "functions": original_functions,
+                "expected_renames": expected_renames,
+            },
+            "transformed": {
+                "function_count": len(transformed_functions),
+                "functions": transformed_functions,
+                "missing_functions": missing_functions,
+                "changed_signatures": changed_signatures,
+            },
+        }
+
+    def _check_python_introduced_constants(
+        self,
+        *,
+        transformed_code: str,
+        actions: Sequence[RefactoringAction],
+    ) -> Dict[str, Any]:
+        summary = self._python_static_summary(transformed_code)
+        module_constants = summary.get("module_constants", {})
+
+        expected_constants: List[Dict[str, Any]] = []
+
+        for action in actions:
+            if getattr(action, "action_type", "") != "introduce_constant":
+                continue
+
+            params = getattr(action, "parameters", {}) or {}
+
+            literal_value = (
+                params.get("literal_value")
+                if "literal_value" in params
+                else params.get("old_literal")
+            )
+
+            constant_name = str(
+                params.get("constant_name")
+                or params.get("new_name")
+                or self._constant_name_from_value(literal_value)
+            )
+
+            if literal_value is None:
+                continue
+
+            normalized_name = self._sanitize_constant_name(constant_name)
+
+            if normalized_name in {
+                "EXTRACTED_CONSTANT",
+                "MAGIC_CONSTANT",
+                "CONSTANT",
+                "VALUE_CONSTANT",
+            }:
+                normalized_name = self._constant_name_from_value(literal_value)
+
+            expected_constants.append(
+                {
+                    "name": normalized_name,
+                    "value": literal_value,
+                }
+            )
+
+        missing_or_wrong = []
+
+        for expected in expected_constants:
+            name = expected["name"]
+            value = expected["value"]
+
+            if name not in module_constants:
+                missing_or_wrong.append(
+                    {
+                        "constant": name,
+                        "expected_value": value,
+                        "actual_value": None,
+                        "reason": "constant_missing",
+                    }
+                )
+                continue
+
+            actual_value = module_constants[name]
+
+            if actual_value != value:
+                missing_or_wrong.append(
+                    {
+                        "constant": name,
+                        "expected_value": value,
+                        "actual_value": actual_value,
+                        "reason": "constant_value_mismatch",
+                    }
+                )
+
+        matched = not missing_or_wrong
+
+        return {
+            "matched": matched,
+            "reason": (
+                "introduced_constants_preserved"
+                if matched
+                else "introduced_constant_missing_or_wrong_value"
+            ),
+            "original": {
+                "expected_constants": expected_constants,
+            },
+            "transformed": {
+                "module_constants": module_constants,
+                "missing_or_wrong": missing_or_wrong,
+            },
+        }
+
+    def _check_unresolved_magic_constant_names(
+        self,
+        transformed_code: str,
+    ) -> Dict[str, Any]:
+        summary = self._python_static_summary(transformed_code)
+
+        if not summary.get("parse_success"):
+            return {
+                "matched": False,
+                "reason": "parse_failed",
+                "original": {},
+                "transformed": summary,
+            }
+
+        module_constants = set(summary.get("module_constants", {}).keys())
+        name_loads = set(summary.get("name_loads", []))
+
+        suspicious_loads = {
+            name
+            for name in name_loads
+            if (
+                name.startswith("MAGIC_")
+                or name == "EXTRACTED_CONSTANT"
+            )
+        }
+
+        unresolved = sorted(suspicious_loads - module_constants)
+
+        matched = not unresolved
+
+        return {
+            "matched": matched,
+            "reason": (
+                "no_unresolved_magic_constants"
+                if matched
+                else "unresolved_magic_constant_names"
+            ),
+            "original": {
+                "rule": "Every used MAGIC_* or EXTRACTED_CONSTANT name must be declared as a module constant.",
+            },
+            "transformed": {
+                "module_constants": sorted(module_constants),
+                "suspicious_loads": sorted(suspicious_loads),
+                "unresolved": unresolved,
+            },
+        }
+
+    @staticmethod
+    def _sanitize_constant_name(value: Any) -> str:
+        text = str(value or "").strip()
+        text = re.sub(r"[^A-Za-z0-9_]", "_", text)
+
+        if not text:
+            return "MAGIC_VALUE"
+
+        if text[0].isdigit():
+            text = f"N_{text}"
+
+        return text.upper()
+
+    def _constant_name_from_value(self, value: Any) -> str:
+        if isinstance(value, bool):
+            return f"MAGIC_BOOL_{str(value).upper()}"
+
+        if value is None:
+            return "MAGIC_NONE"
+
+        if isinstance(value, int):
+            if value < 0:
+                return f"MAGIC_NUMBER_NEG_{abs(value)}"
+            return f"MAGIC_NUMBER_{value}"
+
+        if isinstance(value, float):
+            text = str(value).replace("-", "NEG_").replace(".", "_")
+            return f"MAGIC_NUMBER_{self._sanitize_constant_name(text)}"
+
+        if isinstance(value, str):
+            short = value[:24]
+            return f"MAGIC_STRING_{self._sanitize_constant_name(short)}"
+
+        return "MAGIC_VALUE"
 
     def _validate_java(
         self,
@@ -281,33 +780,49 @@ class BehavioralValidator:
                     "Java runtime probe(s) were generated from the refactoring plan."
                 )
             else:
-                return (
-                    True,
-                    0.6,
-                    "Java behavioral fingerprinting skipped because no runnable methods could be inferred.",
-                    {
-                        "checks": checks,
-                        "failures": [],
-                        "warnings": warnings
-                        + [
-                            "No Java behavior_tests were provided and no suitable "
-                            "runtime probes could be inferred from the plan actions."
-                        ],
-                        "java_results": [
-                            {
-                                "name": f"java_probe_{idx}",
-                                "status": "skipped",
-                                "reason": "no_command_or_inference",
-                            }
-                            for idx, _ in enumerate(behavior_tests or [{"name": "java_probe_1"}], start=1)
-                        ],
-                        "return_similarity": round(return_similarity, 4),
-                        "fingerprint_status": "skipped",
-                        "fingerprint_summary": (
-                            "No Java runtime tests/harness available; fingerprinting skipped."
-                        ),
-                    },
+                source_tests = self._infer_java_runtime_tests_from_source(
+                    original_code=original_code,
+                    actions=actions,
                 )
+
+                if source_tests:
+                    runtime_tests = source_tests
+                    checks.append("auto_generated_java_runtime_probes")
+                    warnings.append(
+                        f"No behavior_tests were provided, so {len(source_tests)} "
+                        "Java runtime probe(s) were inferred from public methods in the source."
+                    )
+                else:
+                    return (
+                        True,
+                        0.6,
+                        "Java behavioral fingerprinting skipped because no runnable methods could be inferred.",
+                        {
+                            "checks": checks,
+                            "failures": [],
+                            "warnings": warnings
+                            + [
+                                "No Java behavior_tests were provided and no suitable "
+                                "runtime probes could be inferred from the plan actions or source."
+                            ],
+                            "java_results": [
+                                {
+                                    "name": f"java_probe_{idx}",
+                                    "status": "skipped",
+                                    "reason": "no_command_or_inference",
+                                }
+                                for idx, _ in enumerate(
+                                    behavior_tests or [{"name": "java_probe_1"}],
+                                    start=1,
+                                )
+                            ],
+                            "return_similarity": round(return_similarity, 4),
+                            "fingerprint_status": "skipped",
+                            "fingerprint_summary": (
+                                "No Java runtime tests/harness available; fingerprinting skipped."
+                            ),
+                        },
+                    )
 
         for idx, test in enumerate(runtime_tests, start=1):
             name = str(test.get("name") or test.get("test_id") or f"java_probe_{idx}")
@@ -341,9 +856,18 @@ class BehavioralValidator:
             ).strip()
 
             args = test.get("args", []) or []
-            timeout_seconds = int(test.get("timeout_seconds", test.get("timeout", 8)) or 8)
+            timeout_seconds = int(
+                test.get("timeout_seconds")
+                or test.get("timeout")
+                or self.DEFAULT_JAVA_TIMEOUT_SECONDS
+            )
 
-            if not original_class or not transformed_class or not original_method or not transformed_method:
+            if (
+                not original_class
+                or not transformed_class
+                or not original_method
+                or not transformed_method
+            ):
                 failures.append(f"{name}: missing Java target class or method")
                 java_results.append(
                     {
@@ -490,7 +1014,7 @@ class BehavioralValidator:
                         "transformed_target_class": target_class,
                         "transformed_target_method": target_method,
                         "args": [],
-                        "timeout_seconds": 8,
+                        "timeout_seconds": self.DEFAULT_JAVA_TIMEOUT_SECONDS,
                         "auto_generated": True,
                         "source_step_id": action.source_step_id,
                         "source_refactoring": action.source_refactoring,
@@ -544,7 +1068,7 @@ class BehavioralValidator:
                     "transformed_target_class": transformed_class,
                     "transformed_target_method": transformed_method,
                     "args": [],
-                    "timeout_seconds": 8,
+                    "timeout_seconds": self.DEFAULT_JAVA_TIMEOUT_SECONDS,
                     "auto_generated": True,
                     "source_step_id": action.source_step_id,
                     "source_refactoring": action.source_refactoring,
@@ -555,6 +1079,196 @@ class BehavioralValidator:
                 break
 
         return inferred
+
+    def _infer_java_runtime_tests_from_source(
+        self,
+        *,
+        original_code: str,
+        actions: Sequence[RefactoringAction],
+        class_renames: Dict[str, str] | None = None,
+    ) -> List[Dict[str, Any]]:
+        class_renames = class_renames or {}
+        inferred: List[Dict[str, Any]] = []
+
+        try:
+            class_name = self._extract_java_class_name(original_code)
+        except ValueError:
+            return []
+
+        if not class_renames:
+            class_names = set(self._extract_java_class_names(original_code))
+            for action in actions:
+                if action.action_type != "rename_symbol":
+                    continue
+                old_name = str(action.parameters.get("old_name") or "").strip()
+                new_name = str(action.parameters.get("new_name") or "").strip()
+                if old_name in class_names and new_name:
+                    class_renames[old_name] = new_name
+
+        transformed_class = class_renames.get(class_name, class_name)
+
+        method_candidates = self._extract_java_method_candidates(
+            original_code=original_code,
+            class_name=class_name,
+        )
+
+        for candidate in method_candidates:
+            method_name = candidate["name"]
+            param_types = candidate["param_types"]
+            if method_name == class_name:
+                continue
+
+            raw_args = [self._java_raw_arg_for_type(t) for t in param_types]
+
+            inferred.append(
+                {
+                    "name": f"auto_{class_name}_{method_name}_source",
+                    "original_target_class": class_name,
+                    "original_target_method": method_name,
+                    "transformed_target_class": transformed_class,
+                    "transformed_target_method": method_name,
+                    "args": raw_args,
+                    "timeout_seconds": self.DEFAULT_JAVA_TIMEOUT_SECONDS,
+                    "auto_generated": True,
+                }
+            )
+
+            if len(inferred) >= self.AUTO_PROBE_LIMIT:
+                break
+
+        return inferred
+
+    def _extract_java_method_candidates(
+        self,
+        *,
+        original_code: str,
+        class_name: str,
+    ) -> List[Dict[str, Any]]:
+        original_code = original_code.lstrip("\ufeff")
+
+        class_match = re.search(
+            rf"\bclass\s+{re.escape(class_name)}\b[^{{]*\{{",
+            original_code,
+        )
+
+        if not class_match:
+            return []
+
+        body_start = class_match.end() - 1
+        body_end = self._find_matching_brace(original_code, body_start)
+
+        if body_end == -1:
+            return []
+
+        class_body = original_code[body_start + 1 : body_end]
+
+        method_pattern = re.compile(
+            r"(?:public|protected|private)?\s*"
+            r"(?:static\s+)?"
+            r"(?:final\s+)?"
+            r"(?:synchronized\s+)?"
+            r"(?:native\s+)?"
+            r"(?:abstract\s+)?"
+            r"[\w<>\[\], ?]+\s+"
+            r"(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*"
+            r"\((?P<params>[^)]*)\)",
+            re.MULTILINE,
+        )
+
+        candidates: List[Dict[str, Any]] = []
+        seen: set[tuple[str, int]] = set()
+
+        for match in method_pattern.finditer(class_body):
+            method_name = match.group("name")
+            params_raw = match.group("params") or ""
+
+            param_list = self._split_java_params(params_raw)
+            param_types = [self._normalize_java_param_type(p) for p in param_list]
+            param_types = [p for p in param_types if p]
+
+            key = (method_name, len(param_types))
+            if key in seen:
+                continue
+            seen.add(key)
+
+            candidates.append(
+                {
+                    "name": method_name,
+                    "param_types": param_types,
+                }
+            )
+
+        return candidates
+
+    @staticmethod
+    def _split_java_params(params_raw: str) -> List[str]:
+        params_raw = params_raw.strip()
+
+        if not params_raw:
+            return []
+
+        parts: List[str] = []
+        current: List[str] = []
+        depth = 0
+
+        for ch in params_raw:
+            if ch == "<":
+                depth += 1
+            elif ch == ">":
+                depth = max(depth - 1, 0)
+            elif ch == "," and depth == 0:
+                part = "".join(current).strip()
+                if part:
+                    parts.append(part)
+                current = []
+                continue
+
+            current.append(ch)
+
+        tail = "".join(current).strip()
+        if tail:
+            parts.append(tail)
+
+        return parts
+
+    @staticmethod
+    def _normalize_java_param_type(param: str) -> str:
+        tokens = [t for t in re.split(r"\s+", param.strip()) if t]
+        tokens = [t for t in tokens if not t.startswith("@")]  # drop annotations
+        tokens = [t for t in tokens if t != "final"]
+
+        if not tokens:
+            return ""
+
+        if len(tokens) == 1:
+            return tokens[0]
+
+        return " ".join(tokens[:-1])
+
+    @staticmethod
+    def _java_raw_arg_for_type(type_name: str) -> str:
+        base = type_name.strip()
+        base = re.sub(r"<.*?>", "", base)
+        base = base.replace("...", "").replace("[]", "")
+        base = base.replace("java.lang.", "")
+        base = base.strip()
+
+        lower = base.lower()
+
+        if lower in {"boolean", "bool", "boolean"}:
+            return "false"
+        if lower in {"int", "integer", "short", "byte"}:
+            return "0"
+        if lower in {"long"}:
+            return "0"
+        if lower in {"double", "float"}:
+            return "0.0"
+        if lower in {"char", "character"}:
+            return "a"
+        if base == "String" or lower.endswith("string"):
+            return "sample"
+
+        return ""
 
     @staticmethod
     def _extract_java_class_names(source_code: str) -> List[str]:
@@ -589,6 +1303,11 @@ class BehavioralValidator:
             raise ValueError("Could not determine Java class name from source.")
 
         return match.group(1)
+
+    @staticmethod
+    def _extract_java_package(source_code: str) -> str | None:
+        match = re.search(r"^\s*package\s+([A-Za-z0-9_.]+)\s*;", source_code, re.MULTILINE)
+        return match.group(1) if match else None
 
     def _find_java_method_owner(self, source_code: str, method_name: str) -> str | None:
         source_code = source_code.lstrip("\ufeff")
@@ -664,6 +1383,10 @@ class BehavioralValidator:
 
         source_code = source_code.lstrip("\ufeff")
         class_name = self._extract_java_class_name(source_code)
+        package_name = self._extract_java_package(source_code)
+        target_class_name = target_class
+        if package_name and "." not in target_class_name:
+            target_class_name = f"{package_name}.{target_class_name}"
         args = args or []
 
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -676,7 +1399,7 @@ class BehavioralValidator:
 
             harness_path.write_text(
                 self._build_java_runtime_probe_harness(
-                    target_class=target_class,
+                    target_class=target_class_name,
                     target_method=target_method,
                     args=args,
                 ),
@@ -707,18 +1430,97 @@ class BehavioralValidator:
                 }
 
             if compile_proc.returncode != 0:
-                return {
-                    "success": False,
-                    "return_value_repr": None,
-                    "return_type": None,
-                    "exception_type": "CompilationError",
-                    "exception_message_category": "javac_failed",
-                    "stdout": compile_proc.stdout,
-                    "stderr": compile_proc.stderr,
-                    "execution_time_ms": int((time.perf_counter() - started) * 1000),
-                    "timeout": False,
-                    "runtime_error_details": compile_proc.stderr,
-                }
+                missing_symbols = re.findall(
+                    r"symbol:\s+class\s+([A-Za-z_][A-Za-z0-9_]*)",
+                    compile_proc.stderr or "",
+                )
+                missing_symbols = sorted(set(missing_symbols))
+
+                if missing_symbols:
+                    stub_paths: List[Path] = []
+                    for symbol in missing_symbols:
+                        if symbol == class_name:
+                            continue
+                        package_dir = temp_path
+                        package_decl = ""
+                        if package_name:
+                            package_dir = temp_path / package_name.replace(".", "/")
+                            package_dir.mkdir(parents=True, exist_ok=True)
+                            package_decl = f"package {package_name};\n\n"
+
+                        stub_path = package_dir / f"{symbol}.java"
+                        if not stub_path.exists():
+                            stub_path.write_text(
+                                (
+                                    f"{package_decl}public class {symbol} {{\n"
+                                    f"    public {symbol}() {{}}\n"
+                                    f"    public {symbol}(Object... args) {{}}\n"
+                                    f"}}\n"
+                                ),
+                                encoding="utf-8",
+                            )
+                        stub_paths.append(stub_path)
+
+                    if stub_paths:
+                        compile_args = [
+                            javac_exe,
+                            source_path.name,
+                            harness_path.name,
+                        ]
+                        compile_args.extend(
+                            str(path.relative_to(temp_path)).replace("\\", "/")
+                            for path in stub_paths
+                        )
+
+                        compile_proc = subprocess.run(
+                            compile_args,
+                            cwd=temp_path,
+                            capture_output=True,
+                            text=True,
+                            timeout=timeout_seconds,
+                        )
+
+                        if compile_proc.returncode == 0:
+                            pass
+                        else:
+                            return {
+                                "success": False,
+                                "return_value_repr": None,
+                                "return_type": None,
+                                "exception_type": "CompilationError",
+                                "exception_message_category": "javac_failed",
+                                "stdout": compile_proc.stdout,
+                                "stderr": compile_proc.stderr,
+                                "execution_time_ms": int((time.perf_counter() - started) * 1000),
+                                "timeout": False,
+                                "runtime_error_details": compile_proc.stderr,
+                            }
+                    else:
+                        return {
+                            "success": False,
+                            "return_value_repr": None,
+                            "return_type": None,
+                            "exception_type": "CompilationError",
+                            "exception_message_category": "javac_failed",
+                            "stdout": compile_proc.stdout,
+                            "stderr": compile_proc.stderr,
+                            "execution_time_ms": int((time.perf_counter() - started) * 1000),
+                            "timeout": False,
+                            "runtime_error_details": compile_proc.stderr,
+                        }
+                else:
+                    return {
+                        "success": False,
+                        "return_value_repr": None,
+                        "return_type": None,
+                        "exception_type": "CompilationError",
+                        "exception_message_category": "javac_failed",
+                        "stdout": compile_proc.stdout,
+                        "stderr": compile_proc.stderr,
+                        "execution_time_ms": int((time.perf_counter() - started) * 1000),
+                        "timeout": False,
+                        "runtime_error_details": compile_proc.stderr,
+                    }
 
             try:
                 run_proc = subprocess.run(
@@ -907,6 +1709,14 @@ public class JavaRuntimeProbeHarness {{
             return Integer.parseInt(raw);
         }}
 
+        if (type == short.class || type == Short.class) {{
+            return Short.parseShort(raw);
+        }}
+
+        if (type == byte.class || type == Byte.class) {{
+            return Byte.parseByte(raw);
+        }}
+
         if (type == long.class || type == Long.class) {{
             return Long.parseLong(raw);
         }}
@@ -919,15 +1729,22 @@ public class JavaRuntimeProbeHarness {{
             return Float.parseFloat(raw);
         }}
 
+        if (type == char.class || type == Character.class) {{
+            return raw.isEmpty() ? '\\0' : raw.charAt(0);
+        }}
+
         return defaultValue(type);
     }}
 
     private static Object defaultValue(Class<?> type) {{
         if (type == boolean.class || type == Boolean.class) return false;
         if (type == int.class || type == Integer.class) return 0;
+        if (type == short.class || type == Short.class) return (short)0;
+        if (type == byte.class || type == Byte.class) return (byte)0;
         if (type == long.class || type == Long.class) return 0L;
         if (type == double.class || type == Double.class) return 0.0d;
         if (type == float.class || type == Float.class) return 0.0f;
+        if (type == char.class || type == Character.class) return '\\0';
         if (type == String.class) return "";
 
         String simpleName = type.getSimpleName();

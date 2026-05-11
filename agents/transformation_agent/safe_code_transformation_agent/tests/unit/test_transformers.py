@@ -1,16 +1,17 @@
-from sctva.transformers import java_transformers, python_ast_transformers
+from agents.transformation_agent.safe_code_transformation_agent.sctva.transformers import python_transformers
+from sctva.transformers import java_transformers
 
 
 def test_python_extract_constant_replaces_literals():
     source = "def value():\n    return 10\n"
-    transformed, count = python_ast_transformers.apply_extract_constant(source, 10, "BASE")
+    transformed, count = python_transformers.apply_extract_constant(source, 10, "BASE")
     assert count >= 1
     assert "BASE" in transformed
 
 
 def test_python_rename_symbol_changes_function_name():
     source = "def calc(x):\n    return x + 1\n"
-    transformed, count = python_ast_transformers.apply_rename_symbol(source, "calc", "calculate")
+    transformed, count = python_transformers.apply_rename_symbol(source, "calc", "calculate")
     assert count >= 1
     assert "def calculate" in transformed
 
@@ -38,6 +39,6 @@ def test_java_fault_injection_replaces_return_logic():
 
 def test_python_fault_injection_replaces_return_logic():
     source = "def x(total):\n    return total\n"
-    transformed, count = python_ast_transformers.apply_fault_injection(source, "return total", "return total + 1")
+    transformed, count = python_transformers.apply_fault_injection(source, "return total", "return total + 1")
     assert count == 1
     assert "return total + 1" in transformed

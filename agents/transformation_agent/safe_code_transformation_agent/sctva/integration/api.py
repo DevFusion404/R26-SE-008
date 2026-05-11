@@ -40,13 +40,10 @@ def _extract_java_public_type_name(source_code: str) -> Optional[str]:
     return match.group(1)
 
 
-def _save_execution_artifacts(result: Dict[str, Any]) -> Dict[str, str]:
+def _save_execution_artifacts(result: Dict[str, Any]) -> Dict[str, Any]:
     results = _results_dir()
-    language = str(result.get("language", "")).strip().lower()
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")
     stem = f"refactored_code_{stamp}"
-    refactored_code_text = str(result.get("refactored_code", ""))
-    refactored_code_text = refactored_code_text.lstrip("\ufeff")
 
     result_json_path = results / f"{stem}.result.json"
     result_json_path.write_text(
@@ -54,13 +51,44 @@ def _save_execution_artifacts(result: Dict[str, Any]) -> Dict[str, str]:
         encoding="utf-8",
     )
 
-    artifact_paths: Dict[str, str] = {
+    artifact_paths: Dict[str, Any] = {
         "results_folder": str(results),
         "result_json": str(result_json_path),
     }
 
+    file_results = result.get("file_results")
+    if isinstance(file_results, list) and file_results:
+        artifact_paths["file_artifacts"] = []
+        for idx, file_result in enumerate(file_results, start=1):
+            artifact_paths["file_artifacts"].append(
+                _save_artifacts_for_file(results, stem, file_result, idx)
+            )
+        return artifact_paths
+
+    artifact_paths.update(_save_artifacts_for_file(results, stem, result, 1))
+    return artifact_paths
+
+
+def _save_artifacts_for_file(
+    results: Path,
+    stem: str,
+    file_result: Dict[str, Any],
+    index: int,
+) -> Dict[str, str]:
+    language = str(file_result.get("language", "")).strip().lower()
+    file_name = str(file_result.get("file_name") or f"file_{index}").strip()
+    file_label = _sanitize_name(Path(file_name).stem or file_name)
+    file_stem = f"{stem}_{file_label}"
+
+    refactored_code_text = str(file_result.get("refactored_code", ""))
+    refactored_code_text = refactored_code_text.lstrip("\ufeff")
+
+    artifact_paths: Dict[str, str] = {
+        "file_name": file_name,
+    }
+
     if language == "python":
-        refactored_code_path = results / f"{stem}.refactored.py"
+        refactored_code_path = results / f"{file_stem}.refactored.py"
         refactored_code_path.write_text(
             refactored_code_text,
             encoding="utf-8",
@@ -70,7 +98,7 @@ def _save_execution_artifacts(result: Dict[str, Any]) -> Dict[str, str]:
     # Java: save only compile-ready file where class name matches file name.
     elif language == "java":
         public_type_name = _extract_java_public_type_name(refactored_code_text)
-        compile_ready_dir = results / f"{stem}.compile_ready"
+        compile_ready_dir = results / f"{file_stem}.compile_ready"
         compile_ready_dir.mkdir(parents=True, exist_ok=True)
         class_name = public_type_name or "RefactoredOutput"
         compile_ready_path = compile_ready_dir / f"{class_name}.java"
