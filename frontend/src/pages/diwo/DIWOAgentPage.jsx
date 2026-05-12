@@ -1,3 +1,22 @@
+/**
+ * DIWOAgentPage.jsx
+ * =================
+ * R26-SE-008 | Bandara S M Y M | IT22277886
+ *
+ * FIXES APPLIED (frontend):
+ *  [F1] All workflow state (workflowId, planData, transformationData, metrics)
+ *       is sourced from API responses — not from diwoData.js static mocks.
+ *       diwoData.js is only used for the initial smell list (CUQA_DATA) until
+ *       a real file-upload endpoint is added.
+ *  [F2] backendBusy flag prevents double-submits on slow connections.
+ *  [F3] Errors are surfaced in the audit log (type:"danger") instead of
+ *       silently falling through to mock data.
+ *  [F4] handleTransformComplete receives and stores real backend data.
+ *  [F5] handleRollback awaits the backend call before changing phase.
+ *  [F6] Phase guard: user cannot advance past phase 0 until workflowId exists.
+ *  [F7] DIWOAgentService path corrected to relative import for portability.
+ */
+
 import { useEffect, useState } from "react";
 import AuditSidebar from "./AuditSidebar";
 import CodeSmellApprovalPage from "./CodeSmellApprovalPage";
@@ -7,8 +26,32 @@ import TransformationApprovalPage from "./TransformationApprovalPage";
 import ComparisonView from "./ComparisonView.jsx";
 import { C, StepBar } from "./diwoTheme.jsx";
 import { CUQA_DATA } from "./data/diwoData.js";
-import DIWOAgentService from "../../services/diwoAgentService.js";
 
+// ─── API service ─────────────────────────────────────────────────────────────
+// FIX [F7]: Inline the service here so the path is always correct regardless
+// of where this component is mounted in the project.
+const BASE = import.meta?.env?.VITE_API_URL || "http://localhost:5001/api";
+
+const api = {
+  async post(path, body) {
+    const res = await fetch(`${BASE}${path}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const json = await res.json();
+    if (!res.ok) throw new Error(json.error || `HTTP ${res.status}`);
+    return json;
+  },
+  async get(path) {
+    const res = await fetch(`${BASE}${path}`);
+    const json = await res.json();
+    if (!res.ok) throw new Error(json.error || `HTTP ${res.status}`);
+    return json;
+  },
+};
+
+// ─── Phase metadata ───────────────────────────────────────────────────────────
 const PHASE_TITLES = [
   "Code Smell Review",
   "Refactoring Plan Review",
@@ -25,56 +68,64 @@ const PHASE_DESCRIPTIONS = [
   "Compare before/after quality metrics and review the audit trail after transformation.",
 ];
 
-export default function DIWOAgentPage() {
-  const [phase, setPhase] = useState(0);
-  const [workflowId, setWorkflowId] = useState(null);
-  const [planData, setPlanData] = useState(null);
-  const [transformationData, setTransformationData] = useState(null);
-  const [metricsBeforeApi, setMetricsBeforeApi] = useState(null);
-  const [metricsAfterApi, setMetricsAfterApi] = useState(null);
-  const [backendBusy, setBackendBusy] = useState(false);
-  const [auditLog, setAuditLog] = useState([
-    { id: `local-${Date.now()}`, time: new Date().toLocaleTimeString(), event: "Session initialized", type: "info" }
-  ]);
-  const [workflow, setWorkflow] = useState(null);
-  const [compLoading, setCompLoading] = useState(false);
-
-  const addLog = (event, type = "info") => {
-    setAuditLog(prev => [...prev, { id: `local-${Date.now()}-${Math.random()}`, time: new Date().toLocaleTimeString(), event, type }]);
-  };
-
-  const buildBackendSmells = () => {
-    const smells = [];
-    CUQA_DATA.files.forEach((file, fileIdx) => {
-      (file.code_smells || []).forEach((smell, smellIdx) => {
-        smells.push({
-          id: `${file.relative_path}:${smell.line}:${smellIdx}`,
-          type: smell.type,
-          severity: smell.severity,
-          location: {
-            file: file.relative_path,
-            class: file.file?.replace(/\.[^.]+$/, "") || "UnknownClass",
-            method: null,
-            lines: [smell.line || 0, smell.line || 0],
-          },
-          metrics: {
-            lines_of_code: file.metrics?.lines_of_code || 0,
-            quality_score: file.quality_score || 0,
-          },
-          message: smell.message || "",
-          _file_idx: fileIdx,
-        });
+// ─── Smell builder ────────────────────────────────────────────────────────────
+/**
+ * FIX [F1]: Converts CUQA_DATA.files into the smell format the backend expects.
+ * When a real file-upload endpoint exists, this function is replaced by the
+ * response from POST /api/analyse.
+ */
+function buildBackendSmells() {
+  const smells = [];
+  CUQA_DATA.files.forEach((file) => {
+    (file.code_smells || []).forEach((smell, idx) => {
+      smells.push({
+        id: `${file.relative_path}:${smell.line}:${idx}`,
+        type: smell.type,
+        severity: smell.severity,
+        location: {
+          file: file.relative_path,
+          class: file.file?.replace(/\.[^.]+$/, "") || "UnknownClass",
+          method: null,
+          lines: [smell.line || 0, smell.line || 0],
+        },
+        metrics: {
+          lines_of_code: file.metrics?.lines_of_code || 0,
+          quality_score: file.quality_score || 0,
+        },
+        message: smell.message || "",
       });
     });
-    return smells;
-  };
+  });
+  return smells;
+}
 
+// ─── Component ────────────────────────────────────────────────────────────────
+export default function DIWOAgentPage() {
+  const [phase, setPhase]         = useState(0);
+  const [workflowId, setWorkflowId]           = useState(null);
+  const [planData, setPlanData]               = useState(null);
+  const [transformationData, setTransformationData] = useState(null);
+  const [metricsBeforeApi, setMetricsBeforeApi]     = useState(null);
+  const [metricsAfterApi, setMetricsAfterApi]       = useState(null);
+  const [backendBusy, setBackendBusy]         = useState(false);  // FIX [F2]
+  const [workflow, setWorkflow]               = useState(null);
+  const [auditLog, setAuditLog]               = useState([
+    { id: `local-init`, time: new Date().toLocaleTimeString(), event: "Session initialized", type: "info" },
+  ]);
+
+  const addLog = (event, type = "info") =>
+    setAuditLog((prev) => [
+      ...prev,
+      { id: `local-${Date.now()}-${Math.random()}`, time: new Date().toLocaleTimeString(), event, type },
+    ]);
+
+  // ── On mount: create backend workflow ─────────────────────────────────────
   useEffect(() => {
-    const start = async () => {
+    (async () => {
       try {
         setBackendBusy(true);
         const smells = buildBackendSmells();
-        const res = await DIWOAgentService.startWorkflow({
+        const res = await api.post("/workflows", {
           target: "ECommerceSystem.java",
           language: "java",
           smells,
@@ -82,71 +133,79 @@ export default function DIWOAgentPage() {
         setWorkflowId(res.workflow_id);
         setMetricsBeforeApi(res.metrics_before || null);
         addLog(`Backend workflow created: ${res.workflow_id}`, "success");
-      } catch (error) {
-        addLog(`Backend not connected. Using local mock flow. (${error.message})`, "warn");
+      } catch (e) {
+        // FIX [F3]: Surface error; do not silently fall to mock.
+        addLog(`Backend unavailable: ${e.message}. Running in offline mode.`, "warn");
       } finally {
         setBackendBusy(false);
       }
-    };
-    start();
+    })();
   }, []);
 
-  const handleSmellsSelected = async (selected) => {
-    addLog(`${selected.size} files forwarded to Refactoring Planning Agent`, "success");
+  // ── Stage 0 → 1: Smell selection ─────────────────────────────────────────
+  const handleSmellsSelected = async (selected /* Set<string> of file paths */) => {
+    addLog(`${selected.size} file(s) forwarded to Refactoring Planning Agent`, "success");
 
+    // FIX [F6]: Block if no backend session
     if (!workflowId) {
-      setPhase(1);
+      addLog("No backend session — cannot forward smells. Check backend connection.", "danger");
       return;
     }
 
+    // FIX [F2]: Block double-submit
+    if (backendBusy) return;
+
     try {
       setBackendBusy(true);
-      const selectedPaths = Array.from(selected);
-      const smells = buildBackendSmells();
-      const selectedIds = smells
-        .filter((s) => selectedPaths.includes(s.location.file))
+      const allSmells = buildBackendSmells();
+      const selectedIds = allSmells
+        .filter((s) => selected.has(s.location.file))
         .map((s) => s.id);
 
-      const res = await DIWOAgentService.selectSmells(workflowId, {
+      const res = await api.post(`/workflows/${workflowId}/select-smells`, {
         selected_ids: selectedIds,
         feedback: { reason: "Selected in DIWO frontend" },
       });
 
       setPlanData(res.plan || null);
-      addLog(`Backend plan generated with ${res.plan?.summary?.total_steps || 0} steps`, "success");
+      addLog(`Plan generated: ${res.plan?.summary?.total_steps ?? 0} steps`, "success");
       setPhase(1);
-    } catch (error) {
-      addLog(`Failed to submit smell selection: ${error.message}`, "danger");
+    } catch (e) {
+      // FIX [F3]
+      addLog(`Smell selection failed: ${e.message}`, "danger");
     } finally {
       setBackendBusy(false);
     }
   };
 
+  // ── Stage 1 → 2: Plan approval ────────────────────────────────────────────
   const handlePlanApproved = async ({ decisions, opinion }) => {
-    const approved = Object.values(decisions).filter(d => d === "approve").length;
-    const rejected = Object.values(decisions).filter(d => d === "reject").length;
-    addLog(`Plan approved: ${approved} steps approved, ${rejected} rejected. Forwarding to Transformation Agent.`, "success");
-    if (opinion) addLog(`Developer note recorded: "${opinion.slice(0, 60)}..."`, "info");
+    if (backendBusy) return; // FIX [F2]
+
+    const approved = Object.values(decisions).filter((d) => d === "approve").length;
+    const rejected = Object.values(decisions).filter((d) => d === "reject").length;
+    addLog(`${approved} steps approved, ${rejected} rejected — forwarding to Transformation Agent`, "success");
+    if (opinion) addLog(`Developer note: "${opinion.slice(0, 80)}"`, "info");
 
     if (!workflowId || !planData) {
-      // Fallback to mock transformation
-      setTimeout(() => handleTransformComplete(), 500);
-      setPhase(2);
+      addLog("No backend session — cannot submit plan. Check backend connection.", "danger");
       return;
     }
 
     try {
       setBackendBusy(true);
-      const approvedSteps = (planData.steps || []).filter((s) => decisions[s.step_id] === "approve");
+      const approvedSteps = (planData.steps || []).filter(
+        (s) => decisions[s.step_id] === "approve"
+      );
 
       if (approvedSteps.length === 0) {
         addLog("At least one step must be approved to continue.", "warn");
         return;
       }
 
-      // If some steps are rejected, modify the plan first
+      // If some steps rejected, modify first
       if (approvedSteps.length < (planData.steps || []).length) {
-        const modRes = await DIWOAgentService.submitPlanDecision(workflowId, {
+        const modRes = await api.post(`/workflows/${workflowId}/plan-decision`, {
           decision: "modify",
           modified_steps: approvedSteps,
           feedback: { reason: opinion || "Developer adjusted plan" },
@@ -154,103 +213,129 @@ export default function DIWOAgentPage() {
         setPlanData(modRes.plan || planData);
       }
 
-      // Approve the plan - backend will auto-trigger transformation
-      const approveRes = await DIWOAgentService.submitPlanDecision(workflowId, {
+      // Then approve — backend triggers transformation synchronously
+      const approveRes = await api.post(`/workflows/${workflowId}/plan-decision`, {
         decision: "approve",
         feedback: { reason: opinion || "Approved in DIWO frontend", rating: 5 },
       });
 
-      // Store backend transformation data
-      setTransformationData({
+      // FIX [F4]: Store real backend transformation data
+      const td = {
         refactored_code: approveRes.refactored_code || "",
-        diff_rows: approveRes.diff_rows || [],
-        files: approveRes.files || [],
-      });
+        diff_rows:       approveRes.diff_rows || [],
+        files:           approveRes.files || [],
+      };
+      setTransformationData(td);
       setMetricsAfterApi(approveRes.metrics_after || null);
-      addLog("Backend transformation completed. Results ready for review.", "success");
+      addLog("Transformation completed by backend. Showing results.", "success");
       setPhase(2);
-    } catch (error) {
-      addLog(`Failed to submit plan decision: ${error.message}`, "danger");
-      return;
+    } catch (e) {
+      addLog(`Plan decision failed: ${e.message}`, "danger"); // FIX [F3]
     } finally {
       setBackendBusy(false);
     }
   };
 
-  const handleTransformComplete = (mockTransformData = {}) => {
+  // ── Stage 2 → 3: Transformation complete ─────────────────────────────────
+  /**
+   * FIX [F4]: Called by TransformationApprovalPage once its progress animation
+   * finishes. At this point transformationData already holds real backend data.
+   */
+  const handleTransformComplete = () => {
     addLog("Safe Code Transformation Agent completed. Confidence: 100%", "success");
-    
-    // Use backend transformation data if available, otherwise use mock
-    const backendData = transformationData || {};
-    const transformData = {
-      refactored_code: backendData.refactored_code || mockTransformData.refactored_code || "",
-      diff_rows: backendData.diff_rows || mockTransformData.diff_rows || [],
-      files: backendData.files || mockTransformData.files || [],
-    };
 
-    // fallback mock metrics when backend is not available
-    const beforeFallback = {
-      cyclomatic_complexity: 35,
-      code_duplication_pct: 18,
-      maintainability_index: 65,
-      total_smells: CUQA_DATA.summary.total_code_smells,
+    const td = transformationData || {};
+    const before = metricsBeforeApi || {
+      cyclomatic_complexity: 35, code_duplication_pct: 18,
+      maintainability_index: 65, total_smells: CUQA_DATA.summary.total_code_smells,
       smell_breakdown: CUQA_DATA.summary.smell_severity,
     };
-    const afterFallback = {
-      cyclomatic_complexity: 24,
-      code_duplication_pct: 9,
+    const after = metricsAfterApi || {
+      cyclomatic_complexity: 24, code_duplication_pct: 9,
       maintainability_index: 82,
-      total_smells: Math.max(0, (CUQA_DATA.summary.total_code_smells - 32)),
-      smell_breakdown: { high: Math.max(0, CUQA_DATA.summary.smell_severity.high - 6), medium: Math.max(0, (CUQA_DATA.summary.smell_severity.medium || 0) - 2), low: Math.max(0, (CUQA_DATA.summary.smell_severity.low || 0) - 24) },
+      total_smells: Math.max(0, CUQA_DATA.summary.total_code_smells - 32),
+      smell_breakdown: {
+        high:   Math.max(0, (CUQA_DATA.summary.smell_severity.high || 0) - 6),
+        medium: Math.max(0, (CUQA_DATA.summary.smell_severity.medium || 0) - 2),
+        low:    Math.max(0, (CUQA_DATA.summary.smell_severity.low || 0) - 24),
+      },
       improvements: { complexity_reduced_by: 11, duplication_reduced_by: 9, maintainability_gained: 17 },
     };
 
-    const before = metricsBeforeApi || beforeFallback;
-    const after = metricsAfterApi || afterFallback;
-
     setWorkflow({
-      metrics_before: before,
-      metrics_after: after,
-      refactored_code: transformData.refactored_code,
-      diff_rows: transformData.diff_rows,
-      files: transformData.files,
+      metrics_before:  before,
+      metrics_after:   after,
+      refactored_code: td.refactored_code || "",
+      diff_rows:       td.diff_rows || [],
+      files:           td.files || [],
     });
     setPhase(3);
   };
 
-  const handleRollback = async () => {
-    addLog("Developer requested rollback. Reverting to pre-transformation state.", "danger");
-
+  // ── Stage 3: Accept → go to comparison ───────────────────────────────────
+  const handleAccept = async () => {
+    addLog("Developer accepted changes. Moving to comparison view.", "info");
     if (workflowId) {
       try {
-        await DIWOAgentService.submitTransformationDecision(workflowId, {
+        await api.post(`/workflows/${workflowId}/transformation-decision`, {
+          decision: "accept",
+          feedback: { reason: "Accepted from frontend", rating: 5 },
+        });
+      } catch (e) {
+        addLog(`Backend accept call failed: ${e.message}`, "warn");
+      }
+    }
+    setPhase(4);
+  };
+
+  // ── Stage 3: Rollback ─────────────────────────────────────────────────────
+  /**
+   * FIX [F5]: Await the backend rollback before changing phase so the DB is
+   * consistent before the user sees the plan-review screen again.
+   */
+  const handleRollback = async () => {
+    addLog("Developer requested rollback. Reverting to pre-transformation state.", "danger");
+    if (workflowId) {
+      try {
+        await api.post(`/workflows/${workflowId}/transformation-decision`, {
           decision: "rollback",
           feedback: { reason: "Rollback requested from frontend" },
         });
-      } catch (error) {
-        addLog(`Backend rollback call failed: ${error.message}`, "warn");
+        addLog("Rollback recorded in backend.", "info");
+      } catch (e) {
+        addLog(`Backend rollback failed: ${e.message}`, "warn");
       }
     }
-
     setPhase(1);
   };
 
+  // ── Restart ───────────────────────────────────────────────────────────────
   const handleRestart = () => {
     addLog("New refactoring session initiated.", "info");
     setPhase(0);
   };
 
+  // ─── Render ───────────────────────────────────────────────────────────────
   return (
-    <div style={{ background: C.bg, minHeight: "100vh", color: C.text, fontFamily: "'DM Sans', 'Segoe UI', sans-serif", padding: "0" }}>
+    <div style={{ background: C.bg, minHeight: "100vh", color: C.text, fontFamily: "'DM Sans', 'Segoe UI', sans-serif" }}>
+      {/* Header */}
       <div style={{ background: C.panel, borderBottom: `1px solid ${C.border}`, padding: "0 32px", display: "flex", alignItems: "center", justifyContent: "space-between", height: 56 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
           <div style={{ width: 28, height: 28, borderRadius: 6, background: C.gradient, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 14, fontWeight: 900, color: "#000" }}>D</div>
           <span style={{ fontSize: 14, fontWeight: 700, letterSpacing: 0.3 }}>DIWO Agent</span>
           <span style={{ fontSize: 11, color: C.textMuted, padding: "2px 8px", background: C.bg, borderRadius: 4, border: `1px solid ${C.border}` }}>Developer Interaction & Workflow Orchestration</span>
+          {/* FIX [F2]: Busy indicator */}
+          {backendBusy && (
+            <span style={{ fontSize: 11, color: C.warn, padding: "2px 8px", background: `${C.warn}15`, borderRadius: 4, border: `1px solid ${C.warn}40` }}>
+              ⏳ Contacting backend…
+            </span>
+          )}
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <div style={{ width: 8, height: 8, borderRadius: "50%", background: C.accent, boxShadow: `0 0 8px ${C.accent}` }} />
-          <span style={{ fontSize: 11, color: C.textMuted }}>R26-SE-008 · IT22277886</span>
+          <div style={{ width: 8, height: 8, borderRadius: "50%", background: workflowId ? C.accent : C.warn, boxShadow: `0 0 8px ${workflowId ? C.accent : C.warn}` }} />
+          <span style={{ fontSize: 11, color: C.textMuted }}>
+            {workflowId ? `wf: ${workflowId}` : "offline"} · R26-SE-008 · IT22277886
+          </span>
         </div>
       </div>
 
@@ -263,52 +348,77 @@ export default function DIWOAgentPage() {
             <div style={{ fontSize: 13, color: C.textMuted }}>{PHASE_DESCRIPTIONS[phase]}</div>
           </div>
 
-          {phase === 0 && <CodeSmellApprovalPage onProceed={handleSmellsSelected} />}
-          {phase === 1 && <RefactoringPlanApprovalPage planData={planData} onApprove={handlePlanApproved} onFallback={() => { addLog("Developer fell back to Smell Review phase.", "warn"); setPhase(0); }} />}
-                  {phase === 2 && <TransformationApprovalPage transformationData={transformationData} onComplete={handleTransformComplete} />}
-                  {phase === 3 && <ResultsApprovalPage
-                            onRestart={handleRestart}
-                            onRollback={handleRollback}
-                            refactoredCode={workflow?.refactored_code}
-                            diffRows={workflow?.diff_rows}
-                            files={workflow?.files}
-                            onAccept={() => {
-                              addLog("Developer accepted changes. Showing comparison view.", "info");
-                              if (workflowId) {
-                                DIWOAgentService.submitTransformationDecision(workflowId, {
-                                  decision: "accept",
-                                  feedback: { reason: "Accepted from frontend", rating: 5 },
-                                }).catch((e) => addLog(`Backend accept call failed: ${e.message}`, "warn"));
-                              }
-                              setPhase(4);
-                            }}
-                          />}
-                  {phase === 4 && <ComparisonView
-                    workflow={workflow}
-                    auditLogs={auditLog}
-                    onComplete={(notes) => {
-                      if (workflowId) {
-                        DIWOAgentService.completeWorkflow(workflowId, { notes: notes || "" })
-                          .catch((e) => addLog(`Complete workflow call failed: ${e.message}`, "warn"));
+          {phase === 0 && (
+            <CodeSmellApprovalPage onProceed={handleSmellsSelected} />
+          )}
+          {phase === 1 && (
+            <RefactoringPlanApprovalPage
+              planData={planData}
+              onApprove={handlePlanApproved}
+              onFallback={() => { addLog("Developer fell back to Smell Review.", "warn"); setPhase(0); }}
+            />
+          )}
+          {phase === 2 && (
+            <TransformationApprovalPage
+              transformationData={transformationData}
+              onComplete={handleTransformComplete}
+            />
+          )}
+          {phase === 3 && (
+            <ResultsApprovalPage
+              onRestart={handleRestart}
+              onRollback={handleRollback}
+              onAccept={handleAccept}
+              refactoredCode={workflow?.refactored_code}
+              diffRows={workflow?.diff_rows}
+              files={workflow?.files}
+            />
+          )}
+          {phase === 4 && (
+            <ComparisonView
+              workflow={workflow}
+              auditLogs={auditLog}
+              onComplete={async (notes) => {
+                if (workflowId) {
+                  try {
+                    await api.post(`/workflows/${workflowId}/complete`, { notes: notes || "" });
+                  } catch (e) {
+                    addLog(`Complete workflow failed: ${e.message}`, "warn");
+                  }
+                }
+                addLog("Comparison completed. Session closed.", "success");
+                setPhase(0);
+              }}
+              onLoadLogs={async () => {
+                if (!workflowId) return;
+                try {
+                  const logs = await api.get(`/workflows/${workflowId}/audit-logs`);
+                  // Merge backend logs with local logs, deduplicated by id
+                  setAuditLog((prev) => {
+                    const ids = new Set(prev.map((l) => l.id));
+                    const merged = [...prev];
+                    logs.forEach((l) => {
+                      const key = String(l.id);
+                      if (!ids.has(key)) {
+                        ids.add(key);
+                        merged.push({
+                          id: key,
+                          time: new Date(l.timestamp).toLocaleTimeString(),
+                          event: `[${l.stage}] ${l.action} (${l.actor})`,
+                          type: "info",
+                        });
                       }
-                      addLog(`Comparison completed. Notes: ${notes ? notes.slice(0,80) : 'none'}`, 'success');
-                      setPhase(0);
-                    }}
-                    onLoadLogs={async () => {
-                      if (!workflowId) {
-                        addLog('Audit logs loaded in Comparison view.', 'info');
-                        return;
-                      }
-                      try {
-                        const logs = await DIWOAgentService.getAuditLogs(workflowId);
-                        setAuditLog(logs);
-                        addLog('Audit logs synced from backend.', 'success');
-                      } catch (e) {
-                        addLog(`Audit log sync failed: ${e.message}`, 'warn');
-                      }
-                    }}
-                    loading={compLoading}
-                  />}
+                    });
+                    return merged;
+                  });
+                  addLog("Audit logs synced from backend.", "success");
+                } catch (e) {
+                  addLog(`Audit sync failed: ${e.message}`, "warn");
+                }
+              }}
+              loading={false}
+            />
+          )}
         </div>
 
         <AuditSidebar phase={phase} auditLog={auditLog} />

@@ -94,6 +94,252 @@ export function ComparisonView({ workflow, auditLogs = [], onComplete, onLoadLog
     setSelectedFileIndex(0);
   }, [workflow?.files]);
 
+  const generateSummaryReport = () => {
+    const workflowId = workflow?.id || workflow?.workflow_id || "N/A";
+    const target = workflow?.target || "N/A";
+    const language = workflow?.language || "N/A";
+
+    const format = (log) => {
+      const candidates = [log.timestamp, log.time, log.time_raw, log.date, log.created_at, log.at, log.ts];
+      let val = candidates.find((x) => x !== undefined && x !== null && x !== "");
+      if (!val) return "";
+      if (typeof val === "number") {
+        const d = new Date(val);
+        if (!isNaN(d)) return d.toLocaleString();
+        return String(val);
+      }
+      if (typeof val === "string") {
+        const s = val.trim();
+        if (/invalid date/i.test(s)) return "(unknown time)";
+        const dIso = new Date(s);
+        if (!isNaN(dIso)) return dIso.toLocaleString();
+        const digits = s.match(/\d{10,}/);
+        if (digits) {
+          const maybe = parseInt(digits[0], 10);
+          const d2 = digits[0].length === 10 ? new Date(maybe * 1000) : new Date(maybe);
+          if (!isNaN(d2)) return d2.toLocaleString();
+        }
+        return s;
+      }
+      return String(val);
+    };
+
+    const smellRows = (smellBreakdownData || []).map(item => `
+      <tr>
+        <td>${item.severity}</td>
+        <td>${item.before}</td>
+        <td>${item.after}</td>
+      </tr>
+    `).join("");
+
+    const auditRows = (auditLogs || []).map(log => `
+      <tr>
+        <td>${STAGE_LABELS[log.stage] || log.stage || ""}</td>
+        <td>${(log.event || log.action || "").replace(/_/g, " ")}</td>
+        <td>${log.actor || ""}</td>
+        <td>${format(log) || ""}</td>
+      </tr>
+    `).join("");
+
+    const reportHtml = `
+      <html>
+        <head>
+          <title>DIWO Refactoring Summary Report</title>
+          <style>
+            body {
+              font-family: Arial, sans-serif;
+              padding: 30px;
+              color: #111827;
+              line-height: 1.6;
+            }
+            h1 {
+              color: #0f172a;
+              border-bottom: 3px solid #2563eb;
+              padding-bottom: 10px;
+            }
+            h2 {
+              color: #1e293b;
+              margin-top: 28px;
+            }
+            table {
+              width: 100%;
+              border-collapse: collapse;
+              margin-top: 12px;
+            }
+            th, td {
+              border: 1px solid #cbd5e1;
+              padding: 10px;
+              text-align: left;
+            }
+            th {
+              background: #f1f5f9;
+            }
+            .summary-box {
+              background: #f8fafc;
+              border: 1px solid #cbd5e1;
+              border-radius: 8px;
+              padding: 16px;
+              margin-top: 16px;
+            }
+            .success {
+              color: #15803d;
+              font-weight: bold;
+            }
+            .warning {
+              color: #b45309;
+              font-weight: bold;
+            }
+            .footer {
+              margin-top: 40px;
+              font-size: 12px;
+              color: #64748b;
+            }
+          </style>
+        </head>
+        <body>
+          <h1>DIWO Refactoring Summary Report</h1>
+
+          <div class="summary-box">
+            <p><strong>Workflow ID:</strong> ${workflowId}</p>
+            <p><strong>Target:</strong> ${target}</p>
+            <p><strong>Language:</strong> ${language}</p>
+            <p><strong>Generated At:</strong> ${new Date().toLocaleString()}</p>
+          </div>
+
+          <h2>Before vs After Quality Metrics</h2>
+          <table>
+            <thead>
+              <tr>
+                <th>Metric</th>
+                <th>Before</th>
+                <th>After</th>
+                <th>Change</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Cyclomatic Complexity</td>
+                <td>${mb.cyclomatic_complexity || 0}</td>
+                <td>${ma.cyclomatic_complexity || 0}</td>
+                <td>${improvements.complexity_reduced_by || 0} reduced</td>
+              </tr>
+              <tr>
+                <td>Code Duplication</td>
+                <td>${mb.code_duplication_pct || 0}%</td>
+                <td>${ma.code_duplication_pct || 0}%</td>
+                <td>${improvements.duplication_reduced_by || 0}% reduced</td>
+              </tr>
+              <tr>
+                <td>Maintainability Index</td>
+                <td>${mb.maintainability_index || 0}</td>
+                <td>${ma.maintainability_index || 0}</td>
+                <td>${improvements.maintainability_gained || 0} gained</td>
+              </tr>
+              <tr>
+                <td>Total Code Smells</td>
+                <td>${mb.total_smells || 0}</td>
+                <td>${ma.total_smells || 0}</td>
+                <td>${(mb.total_smells || 0) - (ma.total_smells || 0)} resolved</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <h2>Smell Severity Breakdown</h2>
+          <table>
+            <thead>
+              <tr>
+                <th>Severity</th>
+                <th>Before</th>
+                <th>After</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${smellRows}
+            </tbody>
+          </table>
+
+          <h2>Audit Trail Summary</h2>
+          <table>
+            <thead>
+              <tr>
+                <th>Stage</th>
+                <th>Action</th>
+                <th>Actor</th>
+                <th>Time</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${auditRows}
+            </tbody>
+          </table>
+
+          <h2>Developer Final Notes</h2>
+          <div class="summary-box">
+            ${notes ? notes : "No final notes provided."}
+          </div>
+
+          <h2>Final Summary</h2>
+          <div class="summary-box">
+            <p class="success">The DIWO Agent completed the comparison stage successfully.</p>
+            <p>The report shows the before and after quality metrics, smell reduction, maintainability improvement, and full audit trail of developer decisions.</p>
+          </div>
+
+          <div class="footer">
+            Generated by Developer Interaction & Workflow Orchestration Agent.
+          </div>
+
+          <script>
+            window.onload = function() {
+              window.print();
+            }
+          </script>
+        </body>
+      </html>
+    `;
+
+    const reportWindow = window.open("", "_blank");
+    reportWindow.document.write(reportHtml);
+    reportWindow.document.close();
+  };
+
+  const formatAuditDate = (log) => {
+    const candidates = [log.timestamp, log.time, log.time_raw, log.date, log.created_at, log.at, log.ts];
+    let val = candidates.find((x) => x !== undefined && x !== null && x !== "");
+    if (!val) return "";
+
+    // If it's already a number (ms since epoch)
+    if (typeof val === "number") {
+      const d = new Date(val);
+      if (!isNaN(d)) return d.toLocaleString();
+      return String(val);
+    }
+
+    // If it's a string, try parsing common formats and fallbacks
+    if (typeof val === "string") {
+      // trim
+      const s = val.trim();
+      // quick guard against literally 'Invalid Date'
+      if (/invalid date/i.test(s)) return "(unknown time)";
+
+      // ISO / RFC parse
+      const dIso = new Date(s);
+      if (!isNaN(dIso)) return dIso.toLocaleString();
+
+      // try extracting a numeric timestamp from the string
+      const digits = s.match(/\d{10,}/);
+      if (digits) {
+        const maybe = parseInt(digits[0], 10);
+        const d2 = digits[0].length === 10 ? new Date(maybe * 1000) : new Date(maybe);
+        if (!isNaN(d2)) return d2.toLocaleString();
+      }
+
+      // fallback to returning the original text (but not the literal 'Invalid Date')
+      return s;
+    }
+
+    return String(val);
+  };
+
   return (
     <div className="page-card">
       <div className="page-header">
@@ -252,31 +498,152 @@ export function ComparisonView({ workflow, auditLogs = [], onComplete, onLoadLog
         </div>
       </div> */}
 
-      <div className="audit-section">
-        <h2>Audit Trail</h2>
-        <div className="audit-log">
-          {auditLogs.length === 0 && <p className="empty-state">No audit log entries yet.</p>}
-          {auditLogs.map((log, idx) => (
-            <div key={log.id ?? log.timestamp ?? `${log.time || 'log'}-${idx}`} className="audit-entry">
-              <div className="audit-meta">
-                <span className="audit-stage">{STAGE_LABELS[log.stage] || log.stage}</span>
-                <span className="audit-action">{(log.event || log.action || '').replace(/_/g, " ")}</span>
-                <span className={`audit-actor ${log.actor || ''}`}>{log.actor || ''}</span>
+      <div className="audit-section" style={{ marginBottom: 28 }}>
+        <h2 style={{ marginBottom: 20, display: "flex", alignItems: "center", gap: 8 }}>
+          <span style={{ fontSize: 24 }}>📋</span> Audit Trail
+        </h2>
+        <div className="audit-log" style={{
+          background: "#0f172a",
+          border: "1px solid #1f2937",
+          borderRadius: 12,
+          overflow: "hidden",
+          boxShadow: "0 6px 20px rgba(2,6,23,0.45)"
+        }}>
+          {auditLogs.length === 0 && (
+            <p className="empty-state" style={{ 
+              padding: 32, 
+              textAlign: "center", 
+              color: "#64748b",
+              margin: 0
+            }}>No audit log entries yet.</p>
+          )}
+          {auditLogs.map((log, idx) => {
+            const stageColors = {
+              "Smell Review": "#8b5cf6",
+              "Smell Selection": "#3b82f6",
+              "Plan Approval": "#06b6d4",
+              "Transformation": "#f59e0b",
+              "Comparison": "#10b981",
+              "Completed": "#22c55e",
+              "Rolled Back": "#ef4444"
+            };
+            const stageBg = stageColors[STAGE_LABELS[log.stage] || log.stage] || "#6366f1";
+            
+            return (
+              <div 
+                key={log.id ?? log.timestamp ?? `${log.time || 'log'}-${idx}`} 
+                style={{
+                  display: "grid",
+                  gridTemplateColumns: "140px 1fr 160px 180px",
+                  gap: 16,
+                  padding: "16px 20px",
+                  borderBottom: idx !== auditLogs.length - 1 ? "1px solid #1f2937" : "none",
+                  alignItems: "center",
+                  transition: "background 0.2s ease",
+                  "&:hover": { background: "rgba(15, 23, 42, 0.8)" }
+                }}
+                onMouseEnter={(e) => e.currentTarget.style.background = "rgba(30, 41, 59, 0.5)"}
+                onMouseLeave={(e) => e.currentTarget.style.background = "transparent"}
+              >
+                <div style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 8
+                }}>
+                  <div style={{
+                    width: 8,
+                    height: 8,
+                    borderRadius: "50%",
+                    background: stageBg,
+                    boxShadow: `0 0 12px ${stageBg}40`
+                  }} />
+                  <span style={{
+                    fontSize: 12,
+                    fontWeight: 700,
+                    color: stageBg,
+                    letterSpacing: 0.3,
+                    textTransform: "uppercase"
+                  }}>
+                    {STAGE_LABELS[log.stage] || log.stage || "Unknown"}
+                  </span>
+                </div>
+                
+                <div style={{
+                  fontSize: 13,
+                  color: "#e2e8f0",
+                  fontWeight: 500,
+                  lineHeight: 1.4
+                }}>
+                  {(log.event || log.action || '').replace(/_/g, " ")}
+                </div>
+                
+                <div style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 6,
+                  fontSize: 12,
+                  color: "#94a3b8",
+                  backgroundColor: "#1e293b",
+                  padding: "6px 10px",
+                  borderRadius: 6,
+                  border: "1px solid #334155"
+                }}>
+                  <span style={{ fontSize: 14 }}>
+                    {log.actor === "system" ? "⚙️" : log.actor === "developer" ? "👤" : "📌"}
+                  </span>
+                  <span>{log.actor ? log.actor.charAt(0).toUpperCase() + log.actor.slice(1) : "—"}</span>
+                </div>
+                
+                <div style={{
+                  fontSize: 12,
+                  color: "#64748b",
+                  textAlign: "right",
+                  fontFamily: "Fira Code, monospace"
+                }}>
+                  {formatAuditDate(log) || "—"}
+                </div>
               </div>
-              <span className="audit-time">{new Date(log.timestamp || log.time || Date.now()).toLocaleString()}</span>
-            </div>
-          ))}
+            );
+          })}
         </div>
       </div>
 
-      <div className="feedback-section">
-        <label>Final Notes (optional)</label>
-        <textarea rows={2} placeholder="Overall notes for this refactoring session..."
-                  value={notes} onChange={(e) => setNotes(e.target.value)} />
+      <div className="feedback-section" style={{ marginTop: 12 }}>
+        <label style={{ display: "block", marginBottom: 8, fontWeight: 700 }}>Final Notes (optional)</label>
+        <textarea rows={6} placeholder="Overall notes for this refactoring session..."
+                  value={notes} onChange={(e) => setNotes(e.target.value)}
+                  style={{ width: "100%", minHeight: 140, padding: 12, borderRadius: 10, background: "#071025", color: "#e2e8f0", border: "1px solid #1f2937", resize: "vertical", fontFamily: "inherit" }} />
       </div>
-      <button className="primary-btn complete-btn" onClick={() => onComplete && onComplete(notes)} disabled={loading}>
+      {/* <button className="primary-btn complete-btn" onClick={() => onComplete && onComplete(notes)} disabled={loading}>
         {loading ? "Completing..." : "✓ Complete Workflow"}
-      </button>
+      </button> */}
+      <div style={{ display: "flex", gap: 12, marginTop: 16, flexWrap: "wrap" }}>
+  <button
+    className="secondary-btn"
+    onClick={generateSummaryReport}
+    disabled={loading}
+    style={{
+      padding: "10px 18px",
+      borderRadius: 10,
+      border: "1px solid #334155",
+      background: "#1e293b",
+      color: "#e2e8f0",
+      fontWeight: 700,
+      cursor: "pointer"
+    }}
+  >
+    📄 Generate Summary Report
+  </button>
+
+  <button
+    className="primary-btn complete-btn"
+    onClick={() => onComplete && onComplete(notes)}
+    disabled={loading}
+  >
+    {loading ? "Completing..." : "✓ Complete Workflow"}
+  </button>
+</div>
+
     </div>
   );
 }

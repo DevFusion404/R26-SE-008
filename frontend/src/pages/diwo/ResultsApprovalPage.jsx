@@ -2,9 +2,13 @@ import { useState } from "react";
 import { SCTVA_DATA } from "./data/diwoData";
 import { Badge, C, Card, Pill } from "./diwoTheme.jsx";
 
-export default function ResultsApprovalPage({ onRestart, onRollback, onAccept, refactoredCode, diffRows = [], files = [] }) {
+export default function ResultsApprovalPage({ onRestart, onRollback, onAccept, refactoredCode, diffRows = [], files = [], repositoryPath = "" }) {
   const [tab, setTab] = useState("summary");
   const [selectedFileIndex, setSelectedFileIndex] = useState(0);
+  const [showActionChoice, setShowActionChoice] = useState(false);
+  const [branchName, setBranchName] = useState("refactoring/diwo-changes");
+  const [repoPath, setRepoPath] = useState(repositoryPath || "");
+  const [isProcessing, setIsProcessing] = useState(false);
   const confidence = SCTVA_DATA.confidence_score * 100;
   const comps = SCTVA_DATA.confidence_components;
 
@@ -23,6 +27,119 @@ export default function ResultsApprovalPage({ onRestart, onRollback, onAccept, r
     { label: "Total Refactoring Actions", before: 0, after: 39, unit: "applied", positive: true },
     { label: "Confidence Score", before: "-", after: "100%", unit: "", positive: true },
   ];
+
+  // Save text content to a local file via browser download
+  const saveTextFile = (filename, content) => {
+    try {
+      const blob = new Blob([content], { type: "text/plain;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1500);
+    } catch (e) {
+      // graceful fallback: log
+      // eslint-disable-next-line no-console
+      console.error("Failed to save file", e);
+    }
+  };
+
+  const handleAcceptAndDownload = () => {
+    // If we have file objects, save each 'after' version; otherwise save single refactoredCode
+    const toSave = (files && files.length > 0)
+      ? files
+      : refactoredCode
+        ? [{ path: `refactored_code.${(SCTVA_DATA.language || "txt").toLowerCase()}`, after: refactoredCode }]
+        : [];
+
+    if (toSave.length === 0) {
+      saveTextFile("diwo_refactored.txt", "");
+    } else {
+      toSave.forEach((f, i) => {
+        const filename = f.path ? f.path.split("/").pop() : `refactored_${i + 1}.txt`;
+        const content = f.after || f.refactored_code || refactoredCode || "";
+        saveTextFile(filename, content);
+      });
+
+      // Save a small metadata file for convenience
+      const meta = {
+        savedAt: new Date().toISOString(),
+        count: toSave.length,
+        files: toSave.map((f) => f.path || null),
+      };
+      saveTextFile("diwo_refactored_metadata.json", JSON.stringify(meta, null, 2));
+    }
+
+    setShowActionChoice(false);
+    if (onAccept) onAccept();
+  };
+
+  const handlePushToGitHub = async () => {
+    if (!branchName.trim()) {
+      alert("Please enter a branch name");
+      return;
+    }
+
+    if (!repoPath || repoPath.trim() === "") {
+      alert("Repository path is required. Please provide the path to your Git repository.");
+      return;
+    }
+
+    setIsProcessing(true);
+    try {
+      const payload = {
+        files: (files && files.length > 0)
+          ? files
+          : refactoredCode
+            ? [{ path: `refactored_code.${(SCTVA_DATA.language || "txt").toLowerCase()}`, after: refactoredCode }]
+            : [],
+        branch_name: branchName,
+        repository_path: repoPath.trim(),
+      };
+
+      const response = await fetch("/api/diwo/apply-and-push", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+
+      if (!response.ok) {
+        let errorMessage = `Backend error: ${response.statusText}`;
+        try {
+          const errorData = await response.json();
+          errorMessage = errorData.error || errorMessage;
+        } catch {
+          // Response is not JSON (e.g., 404 HTML), use status message
+          errorMessage = `HTTP ${response.status}: ${response.statusText}`;
+        }
+        throw new Error(errorMessage);
+      }
+
+      const result = await response.json();
+      const staged = result.staged_files || [];
+      const repoOpened = result.github_desktop_opened ? '\n\nGitHub Desktop should be opening now.' : '';
+      let message = `✓ Branch '${branchName}' created and files applied to repository:\n${result.repository}${repoOpened}\n\n`;
+      if (staged.length > 0) {
+        const stagedList = staged.map(s => ' - ' + s).join('\n');
+        message += `Staged files (${staged.length}):\n` + stagedList + '\n\nPlease review and commit in GitHub Desktop.';
+      } else {
+        message += 'No staged files were detected. Check repository path and file paths.';
+      }
+      alert(message);
+      
+      setShowActionChoice(false);
+      if (onAccept) onAccept();
+    } catch (error) {
+      // eslint-disable-next-line no-console
+      console.error("Failed to push to GitHub:", error);
+      alert(`Error: ${error.message}`);
+    } finally {
+      setIsProcessing(false);
+    }
+  };
 
   return (
     <div>
@@ -201,10 +318,149 @@ export default function ResultsApprovalPage({ onRestart, onRollback, onAccept, r
         <button onClick={onRestart} style={{ padding: "10px 20px", borderRadius: 8, fontWeight: 700, fontSize: 13, cursor: "pointer", background: `${C.info}15`, color: C.info, border: `1px solid ${C.info}30` }}>
           ↺ New Refactoring Session
         </button>
-        <button onClick={() => onAccept && onAccept()} style={{ padding: "10px 24px", borderRadius: 8, fontWeight: 700, fontSize: 13, cursor: "pointer", background: C.accent, color: "#000", border: "none", boxShadow: `0 0 20px ${C.accentGlow}` }}>
+        <button onClick={() => setShowActionChoice(true)} style={{ padding: "10px 24px", borderRadius: 8, fontWeight: 700, fontSize: 13, cursor: "pointer", background: C.accent, color: "#000", border: "none", boxShadow: `0 0 20px ${C.accentGlow}` }}>
           ✓ Accept & Commit Changes
         </button>
       </div>
+
+      {showActionChoice && (
+        <div style={{
+          position: "fixed",
+          top: 0,
+          left: 0,
+          right: 0,
+          bottom: 0,
+          background: "rgba(0,0,0,0.5)",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          zIndex: 1000,
+        }}>
+          <div style={{
+            background: C.bg,
+            border: `1px solid ${C.border}`,
+            borderRadius: 12,
+            padding: 24,
+            maxWidth: 480,
+            boxShadow: "0 20px 60px rgba(0,0,0,0.3)",
+          }}>
+            <h2 style={{ marginTop: 0, color: C.text, marginBottom: 12 }}>How would you like to proceed?</h2>
+            <p style={{ color: C.textSub, marginBottom: 20 }}>Choose how to save and manage your approved refactored code.</p>
+
+            <div style={{ display: "flex", flexDirection: "column", gap: 12, marginBottom: 16 }}>
+              {/* Download Option */}
+              <div onClick={() => handleAcceptAndDownload()} style={{
+                background: C.panel,
+                border: `2px solid ${C.border}`,
+                borderRadius: 8,
+                padding: 16,
+                cursor: "pointer",
+                transition: "all 0.2s",
+              }} onMouseEnter={(e) => e.currentTarget.style.borderColor = C.accent} onMouseLeave={(e) => e.currentTarget.style.borderColor = C.border}>
+                <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                  <div style={{ fontSize: 24 }}>💾</div>
+                  <div style={{ flex: 1 }}>
+                    <div style={{ fontWeight: 700, color: C.text, marginBottom: 4 }}>Download to Local Device</div>
+                    <div style={{ fontSize: 12, color: C.textMuted }}>Save refactored files to your downloads folder. You manage the repository yourself.</div>
+                  </div>
+                </div>
+              </div>
+
+              {/* GitHub Desktop Option */}
+              <div style={{
+                background: C.panel,
+                border: `2px solid ${C.border}`,
+                borderRadius: 8,
+                padding: 16,
+              }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 12 }}>
+                  <div style={{ fontSize: 24 }}>🚀</div>
+                  <div style={{ flex: 1 }}>
+                    <div style={{ fontWeight: 700, color: C.text }}>Push to GitHub</div>
+                    <div style={{ fontSize: 12, color: C.textMuted }}>Create a branch and open GitHub Desktop for review & commit.</div>
+                  </div>
+                </div>
+                <div style={{ marginBottom: 10 }}>
+                  <label style={{ fontSize: 12, color: C.textMuted, display: "block", marginBottom: 4 }}>Repository Path</label>
+                  <input
+                    type="text"
+                    value={repoPath}
+                    onChange={(e) => setRepoPath(e.target.value)}
+                    placeholder="C:\\Users\\YourUser\\path\\to\\repo"
+                    style={{
+                      width: "100%",
+                      padding: "8px 12px",
+                      borderRadius: 6,
+                      background: C.bg,
+                      border: `1px solid ${C.border}`,
+                      color: C.text,
+                      fontSize: 12,
+                      marginBottom: 10,
+                      boxSizing: "border-box",
+                    }}
+                  />
+                </div>
+                <div style={{ marginBottom: 10 }}>
+                  <label style={{ fontSize: 12, color: C.textMuted, display: "block", marginBottom: 4 }}>Branch Name</label>
+                  <input
+                    type="text"
+                    value={branchName}
+                    onChange={(e) => setBranchName(e.target.value)}
+                    placeholder="e.g., refactoring/diwo-changes"
+                    style={{
+                      width: "100%",
+                      padding: "8px 12px",
+                      borderRadius: 6,
+                      background: C.bg,
+                      border: `1px solid ${C.border}`,
+                      color: C.text,
+                      fontSize: 12,
+                      marginBottom: 10,
+                      boxSizing: "border-box",
+                    }}
+                  />
+                </div>
+                <button
+                  onClick={handlePushToGitHub}
+                  disabled={isProcessing}
+                  style={{
+                    width: "100%",
+                    padding: "8px 12px",
+                    borderRadius: 6,
+                    background: C.accent,
+                    color: "#000",
+                    border: "none",
+                    fontWeight: 700,
+                    fontSize: 12,
+                    cursor: isProcessing ? "not-allowed" : "pointer",
+                    opacity: isProcessing ? 0.6 : 1,
+                  }}
+                >
+                  {isProcessing ? "Processing..." : "✓ Create Branch & Open GitHub Desktop"}
+                </button>
+              </div>
+
+              {/* Cancel Button */}
+              <button
+                onClick={() => setShowActionChoice(false)}
+                style={{
+                  width: "100%",
+                  padding: "8px 12px",
+                  borderRadius: 6,
+                  background: C.border,
+                  color: C.text,
+                  border: "none",
+                  fontWeight: 700,
+                  fontSize: 12,
+                  cursor: "pointer",
+                }}
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
