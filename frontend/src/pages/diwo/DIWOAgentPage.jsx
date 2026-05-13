@@ -103,6 +103,7 @@ function buildBackendSmells() {
 export default function DIWOAgentPage() {
   const [phase, setPhase]         = useState(0);
   const [workflowId, setWorkflowId]           = useState(null);
+  const [workflowLanguage, setWorkflowLanguage] = useState("java");
   const [planData, setPlanData]               = useState(null);
   const [transformationData, setTransformationData] = useState(null);
   const [metricsBeforeApi, setMetricsBeforeApi]     = useState(null);
@@ -131,6 +132,7 @@ export default function DIWOAgentPage() {
           smells,
         });
         setWorkflowId(res.workflow_id);
+        setWorkflowLanguage("java");
         setMetricsBeforeApi(res.metrics_before || null);
         addLog(`Backend workflow created: ${res.workflow_id}`, "success");
       } catch (e) {
@@ -143,8 +145,60 @@ export default function DIWOAgentPage() {
   }, []);
 
   // ── Stage 0 → 1: Smell selection ─────────────────────────────────────────
-  const handleSmellsSelected = async (selected /* Set<string> of file paths */) => {
-    addLog(`${selected.size} file(s) forwarded to Refactoring Planning Agent`, "success");
+  const handleSmellsSelected = async (selection) => {
+    if (selection && selection.updated_report) {
+      // The report-only endpoint does not mutate workflow stage.
+      // Persist the same selection through /select-smells so stage becomes plan_approval.
+      if (!workflowId) {
+        addLog("No backend session — cannot persist smell selection.", "danger");
+        return;
+      }
+      if (backendBusy) return;
+
+      try {
+        setBackendBusy(true);
+        const report = selection.updated_report;
+        const selectedIds = report?.summary?.selected_smell_ids || [];
+        const selectedFiles = (report?.files || []).map((f) => f.relative_path).filter(Boolean);
+        const selectedSmells = (report?.files || []).flatMap((f) =>
+          (f.code_smells || []).map((smell) => ({
+            file: f.relative_path,
+            type: smell.type,
+            line: smell.line,
+            severity: smell.severity,
+            message: smell.message,
+          }))
+        );
+
+        const res = await api.post(`/workflows/${workflowId}/select-smells`, {
+          selected_ids: selectedIds,
+          selected_files: selectedFiles,
+          selected_smells: selectedSmells,
+          feedback: { reason: "Selected in DIWO frontend" },
+        });
+
+        addLog(`${report.summary?.selected_count ?? 0} file(s) approved; selection persisted.`, "success");
+        setPlanData(res.plan || selection.plan || null);
+        setWorkflow((prev) => ({
+          ...(prev || {}),
+          updated_report: res.updated_report || report,
+          planning_input: res.planning_input || selection.planning_input || null,
+          smell_selection_summary: {
+            total_smells: (res.updated_report?.summary?.total_code_smells) || (report?.summary?.total_code_smells) || 0,
+            selected_count: res.selected_count || (report?.summary?.selected_count) || 0,
+            excluded_count: res.excluded_count || 0,
+          },
+        }));
+        setPhase(1);
+      } catch (e) {
+        addLog(`Smell selection failed: ${e.message}`, "danger");
+      } finally {
+        setBackendBusy(false);
+      }
+      return;
+    }
+
+    addLog(`${selection.size} file(s) forwarded to Refactoring Planning Agent`, "success");
 
     // FIX [F6]: Block if no backend session
     if (!workflowId) {
@@ -159,15 +213,26 @@ export default function DIWOAgentPage() {
       setBackendBusy(true);
       const allSmells = buildBackendSmells();
       const selectedIds = allSmells
-        .filter((s) => selected.has(s.location.file))
+        .filter((s) => selection.has(s.location.file))
         .map((s) => s.id);
+      const selectedFiles = Array.from(selection);
 
       const res = await api.post(`/workflows/${workflowId}/select-smells`, {
         selected_ids: selectedIds,
+        selected_files: selectedFiles,
         feedback: { reason: "Selected in DIWO frontend" },
       });
-
       setPlanData(res.plan || null);
+      setWorkflow((prev) => ({
+        ...(prev || {}),
+        updated_report: res.updated_report || prev?.updated_report,
+        planning_input: res.planning_input || prev?.planning_input,
+        smell_selection_summary: {
+          total_smells: (res.updated_report?.summary?.total_code_smells) || 0,
+          selected_count: res.selected_count || 0,
+          excluded_count: res.excluded_count || 0,
+        },
+      }));
       addLog(`Plan generated: ${res.plan?.summary?.total_steps ?? 0} steps`, "success");
       setPhase(1);
     } catch (e) {
@@ -179,6 +244,28 @@ export default function DIWOAgentPage() {
   };
 
   // ── Stage 1 → 2: Plan approval ────────────────────────────────────────────
+  const handlePlanDecisionChange = async ({ decisions, preferences }) => {
+    if (!workflowId || !planData || backendBusy) return;
+
+    try {
+      setBackendBusy(true);
+      const res = await api.post(`/workflows/${workflowId}/plan-preference-update`, {
+        decisions,
+        preferences,
+      });
+
+      const updatedPlan = res.updated_planning_report || null;
+      if (updatedPlan) {
+        setPlanData(updatedPlan);
+        addLog("Updated plan regenerated from developer preferences.", "info");
+      }
+    } catch (e) {
+      addLog(`Plan preference update failed: ${e.message}`, "warn");
+    } finally {
+      setBackendBusy(false);
+    }
+  };
+
   const handlePlanApproved = async ({ decisions, opinion }) => {
     if (backendBusy) return; // FIX [F2]
 
@@ -228,6 +315,18 @@ export default function DIWOAgentPage() {
       setTransformationData(td);
       setMetricsAfterApi(approveRes.metrics_after || null);
       addLog("Transformation completed by backend. Showing results.", "success");
+      // store plan approval summary for reporting
+      setWorkflow((prev) => ({
+        ...(prev || {}),
+        plan_approval_summary: {
+          total_steps: (planData?.steps || []).length || 0,
+          approved_count: approved,
+          rejected_count: rejected,
+        },
+        // also store transformation files temporarily
+        files: approveRes.files || td.files || [],
+      }));
+
       setPhase(2);
     } catch (e) {
       addLog(`Plan decision failed: ${e.message}`, "danger"); // FIX [F3]
@@ -273,18 +372,32 @@ export default function DIWOAgentPage() {
   };
 
   // ── Stage 3: Accept → go to comparison ───────────────────────────────────
-  const handleAccept = async () => {
+  const handleAccept = async (payload = {}) => {
+    const acceptedEntries = Array.isArray(payload.acceptedFiles) ? payload.acceptedFiles : [];
+    const accepted_paths = acceptedEntries.map((f) => f.path || f.relative_path || f.file || f);
+    const allFiles = (workflow?.files && workflow.files.length > 0) ? workflow.files : (transformationData?.files || []);
+    const all_paths = allFiles.map((f) => f.path || f.relative_path || f.file || f);
+    const rejected_paths = all_paths.filter((p) => !accepted_paths.includes(p));
+
     addLog("Developer accepted changes. Moving to comparison view.", "info");
     if (workflowId) {
       try {
         await api.post(`/workflows/${workflowId}/transformation-decision`, {
           decision: "accept",
+          accepted_files: accepted_paths,
           feedback: { reason: "Accepted from frontend", rating: 5 },
         });
       } catch (e) {
         addLog(`Backend accept call failed: ${e.message}`, "warn");
       }
     }
+
+    setWorkflow((prev) => ({
+      ...(prev || {}),
+      accepted_files: accepted_paths,
+      rejected_files: rejected_paths,
+    }));
+
     setPhase(4);
   };
 
@@ -349,11 +462,16 @@ export default function DIWOAgentPage() {
           </div>
 
           {phase === 0 && (
-            <CodeSmellApprovalPage onProceed={handleSmellsSelected} />
+            <CodeSmellApprovalPage
+              workflowId={workflowId}
+              onProceed={handleSmellsSelected}
+              reportData={workflow?.updated_report || null}
+            />
           )}
           {phase === 1 && (
             <RefactoringPlanApprovalPage
               planData={planData}
+              onDecisionChange={handlePlanDecisionChange}
               onApprove={handlePlanApproved}
               onFallback={() => { addLog("Developer fell back to Smell Review.", "warn"); setPhase(0); }}
             />
@@ -376,7 +494,9 @@ export default function DIWOAgentPage() {
           )}
           {phase === 4 && (
             <ComparisonView
-              workflow={workflow}
+                workflow={workflow}
+                workflowId={workflowId}
+                language={workflowLanguage}
               auditLogs={auditLog}
               onComplete={async (notes) => {
                 if (workflowId) {

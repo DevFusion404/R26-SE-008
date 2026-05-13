@@ -36,6 +36,7 @@ from db.database import (
 from diwo.orchestrator import (
     generate_refactoring_plan, simulate_transformation,
     compute_metrics_before, compute_metrics_after, next_stage,
+    generate_updated_plan_report,
 )
 
 diwo_bp = Blueprint("diwo", __name__)
@@ -64,6 +65,116 @@ def _require_stage(wf: dict, expected: str):
             " Reload the page to sync your session."
         )
     return None
+
+
+def _build_report_from_smells(smells: list, repo_name: str, selected_ids=None):
+    """Build a cquaAgent.json-style report, keeping all files and filtering smells.
+
+    If selected_ids is provided, smells not in selected_ids are excluded from each
+    file's code_smells list, but the file itself remains in the report.
+    """
+    selected_ids = set(selected_ids or [])
+    file_map = {}
+    file_order = []
+    severity_totals = {"high": 0, "medium": 0, "low": 0}
+
+    for smell in smells:
+        loc = smell.get("location", {}) or {}
+        file_path = loc.get("file") or smell.get("relative_path") or "unknown"
+        metrics = smell.get("metrics", {}) or {}
+
+        if file_path not in file_map:
+            quality_score = metrics.get("quality_score", smell.get("quality_score", 0))
+            file_map[file_path] = {
+                "file": Path(file_path).name,
+                "language": smell.get("language") or (file_path.split(".")[-1] or "unknown").lower(),
+                "metrics": {
+                    "filename": Path(file_path).name,
+                    "lines_of_code": metrics.get("lines_of_code", 0),
+                    "blank_lines": metrics.get("blank_lines", 0),
+                    "comment_lines": metrics.get("comment_lines", 0),
+                    "functions": metrics.get("functions", 0),
+                    "classes": metrics.get("classes", 0),
+                },
+                "code_smells": [],
+                "smell_summary": {"high": 0, "medium": 0, "low": 0},
+                "quality_score": quality_score,
+                "relative_path": file_path,
+            }
+            file_order.append(file_path)
+
+        smell_id = smell.get("id")
+        include_smell = not selected_ids or smell_id in selected_ids
+        if not include_smell:
+            continue
+
+        severity = (smell.get("severity") or "low").lower()
+        if severity not in ("high", "medium", "low"):
+            severity = "low"
+
+        line = smell.get("line")
+        if line is None:
+            line = (loc.get("lines") or [0, 0])[0]
+
+        file_map[file_path]["code_smells"].append({
+            "type": smell.get("type"),
+            "message": smell.get("message", ""),
+            "line": line,
+            "severity": severity,
+        })
+        file_map[file_path]["smell_summary"][severity] += 1
+        severity_totals[severity] += 1
+
+    files = [file_map[path] for path in file_order]
+    total_loc = sum(f["metrics"]["lines_of_code"] for f in files)
+    total_smells = sum(severity_totals.values())
+    avg_quality = (sum(f["quality_score"] for f in files) / max(len(files), 1)) if files else 0
+
+    return {
+        "summary": {
+            "files_analyzed": len(files),
+            "total_lines_of_code": total_loc,
+            "total_code_smells": total_smells,
+            "smell_severity": severity_totals,
+            "average_quality_score": round(avg_quality, 2),
+        },
+        "files": files,
+        "repo_name": repo_name,
+    }
+
+
+def _resolve_selected_ids(all_smells: list, selected_files: list, selected_smells: list):
+    ids = []
+
+    if selected_files:
+        ids.extend([
+            smell["id"]
+            for smell in all_smells
+            if smell.get("location", {}).get("file") in selected_files
+        ])
+
+    if selected_smells:
+        key_map = {}
+        for smell in all_smells:
+            loc = smell.get("location", {}) or {}
+            key = (
+                loc.get("file"),
+                smell.get("type"),
+                (loc.get("lines") or [0, 0])[0],
+            )
+            key_map[key] = smell.get("id")
+
+        for s in selected_smells:
+            file_path = s.get("file") or s.get("relative_path") or s.get("path")
+            key = (
+                file_path,
+                s.get("type"),
+                s.get("line") or 0,
+            )
+            if key in key_map:
+                ids.append(key_map[key])
+
+    return list(dict.fromkeys(ids))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -142,6 +253,8 @@ def get_wf(wf_id):
         "updated_at":            wf["updated_at"],
         "smells":                _parse_json_field(wf, "smells_json"),
         "selected_smells":       _parse_json_field(wf, "selected_smells_json"),
+        "updated_smells":        _parse_json_field(wf, "updated_smells_json"),
+        "planning_input":        _parse_json_field(wf, "planning_input_json"),
         "plan":                  _parse_json_field(wf, "plan_json"),
         "transformation_result": _parse_json_field(wf, "transformation_result_json"),
         "metrics_before":        _parse_json_field(wf, "metrics_before_json"),
@@ -152,6 +265,121 @@ def get_wf(wf_id):
 # ─────────────────────────────────────────────────────────────────────────────
 # Stage 2 – Smell Selection
 # ─────────────────────────────────────────────────────────────────────────────
+
+def _build_smell_selection_payload(wf, selected_ids, selected_files=None):
+    """Build the updated smell report and planning input without mutating the DB."""
+    all_smells = _parse_json_field(wf, "smells_json") or []
+    selected = [s for s in all_smells if s["id"] in selected_ids]
+    excluded = [s for s in all_smells if s["id"] not in selected_ids]
+
+    updated_smells = []
+    for s in all_smells:
+        upd = dict(s)
+        upd["selected"] = s["id"] in selected_ids
+        if upd["selected"]:
+            upd["selected_at"] = now_iso()
+        updated_smells.append(upd)
+
+    updated_report = _build_report_from_smells(all_smells, wf.get("target"), selected_ids=selected_ids)
+    updated_report["workflow_id"] = wf.get("id")
+    updated_report["generated_at"] = now_iso()
+
+    planning_input = {
+        "workflow_id": wf.get("id"),
+        "target": wf.get("target"),
+        "language": wf.get("language"),
+        "updated_smells": updated_smells,
+        "selected_smells": selected,
+        "generated_at": now_iso(),
+    }
+
+    return {
+        "all_smells": all_smells,
+        "selected": selected,
+        "excluded": excluded,
+        "updated_smells": updated_smells,
+        "updated_report": updated_report,
+        "planning_input": planning_input,
+    }
+
+
+@diwo_bp.route("/workflows/<wf_id>/smell-selection-pass", methods=["POST"])
+def smell_selection_pass(wf_id):
+    """Return the updated code smell JSON without advancing the workflow."""
+    wf = get_workflow(wf_id)
+    if not wf:
+        return _err("Workflow not found.", 404)
+
+    data = request.get_json(force=True, silent=True) or {}
+
+    selected_ids = data.get("selected_ids") or []
+    selected_files = data.get("selected_files") or data.get("selected_file_paths") or []
+    selected_smells = data.get("selected_smells") or []
+
+    if selected_ids and not isinstance(selected_ids, list):
+        return _err("'selected_ids' must be a list of smell ID strings.")
+    if selected_files and not isinstance(selected_files, list):
+        return _err("'selected_files' must be a list of file paths if provided.")
+    if selected_smells and not isinstance(selected_smells, list):
+        return _err("'selected_smells' must be a list if provided.")
+
+    if not selected_ids:
+        selected_ids = _resolve_selected_ids(
+            _parse_json_field(wf, "smells_json") or [],
+            selected_files,
+            selected_smells,
+        )
+
+    if not selected_ids:
+        return _err("No smell IDs could be resolved from the selection. Send 'selected_ids', 'selected_files', or 'selected_smells'.")
+
+    payload = _build_smell_selection_payload(wf, selected_ids, selected_files)
+    payload["plan"] = generate_refactoring_plan(payload["selected"], wf["target"])
+    payload["status"] = "plan_approval"
+    return jsonify(payload)
+
+
+@diwo_bp.route("/workflows/<wf_id>/save-updated-report", methods=["POST"])
+def save_updated_report(wf_id):
+    """Save the updated code smell report to disk as a JSON file."""
+    wf = get_workflow(wf_id)
+    if not wf:
+        return _err("Workflow not found.", 404)
+
+    data = request.get_json(force=True, silent=True) or {}
+    updated_report = data.get("updated_report")
+    
+    if not updated_report:
+        return _err("'updated_report' object is required in request body.", 400)
+    if not isinstance(updated_report, dict):
+        return _err("'updated_report' must be a JSON object.", 400)
+
+    try:
+        # Create reports directory if it doesn't exist
+        backend_dir = Path(__file__).parent.parent
+        reports_dir = backend_dir / "reports"
+        reports_dir.mkdir(parents=True, exist_ok=True)
+
+        # Generate filename with workflow ID and timestamp
+        timestamp = now_iso().replace(":", "-").replace(".", "-")
+        filename = f"updated_report_{wf_id}_{timestamp}.json"
+        file_path = reports_dir / filename
+
+        # Write the report to disk
+        with open(file_path, "w", encoding="utf-8") as f:
+            json.dump(updated_report, f, indent=2)
+
+        return jsonify({
+            "status": "success",
+            "message": f"Report saved successfully",
+            "file_path": str(file_path),
+            "file_name": filename,
+            "workflow_id": wf_id,
+        }), 200
+
+    except Exception as e:
+        return _err(f"Failed to save report: {str(e)}", 500)
+
 
 @diwo_bp.route("/workflows/<wf_id>/select-smells", methods=["POST"])
 def select_smells(wf_id):
@@ -171,18 +399,44 @@ def select_smells(wf_id):
 
     data = request.get_json(force=True, silent=True) or {}
 
-    # FIX [14]: Validate selected_ids
+    # FIX [14]: Validate selected_ids, but also allow selected file paths as a fallback.
     selected_ids = data.get("selected_ids")
-    if not selected_ids or not isinstance(selected_ids, list):
-        return _err("'selected_ids' must be a non-empty list of smell ID strings.")
-    if not all(isinstance(sid, str) for sid in selected_ids):
-        return _err("Each element of 'selected_ids' must be a string.")
+    selected_files = data.get("selected_files") or data.get("selected_file_paths") or []
+    selected_smells = data.get("selected_smells") or []
+
+    if selected_ids is not None:
+        if not isinstance(selected_ids, list):
+            return _err("'selected_ids' must be a list of smell ID strings.")
+        if not all(isinstance(sid, str) for sid in selected_ids):
+            return _err("Each element of 'selected_ids' must be a string.")
+    else:
+        selected_ids = []
+
+    if selected_files and not isinstance(selected_files, list):
+        return _err("'selected_files' must be a list of file paths if provided.")
+
+    if selected_smells and not isinstance(selected_smells, list):
+        return _err("'selected_smells' must be a list if provided.")
+
+    # If no smell IDs were sent, derive them from selected files or smell details.
+    if not selected_ids:
+        selected_ids = _resolve_selected_ids(
+            _parse_json_field(wf, "smells_json") or [],
+            selected_files,
+            selected_smells,
+        )
+
+    if not selected_ids:
+        return _err("No smell IDs could be resolved from the selection. Send 'selected_ids', 'selected_files', or 'selected_smells'.")
 
     feedback = data.get("feedback", {})
 
-    all_smells = _parse_json_field(wf, "smells_json") or []
-    selected   = [s for s in all_smells if s["id"] in selected_ids]
-    excluded   = [s for s in all_smells if s["id"] not in selected_ids]
+    payload = _build_smell_selection_payload(wf, selected_ids, selected_files)
+    all_smells = payload["all_smells"]
+    selected = payload["selected"]
+    excluded = payload["excluded"]
+    updated_smells = payload["updated_smells"]
+    planning_input = payload["planning_input"]
 
     if not selected:
         return _err("None of the provided selected_ids matched known smells in this workflow.")
@@ -198,7 +452,7 @@ def select_smells(wf_id):
                       reason=feedback.get("reason", "Developer choice"),
                       accepted=False)
 
-    # Auto-generate plan and advance to plan_approval
+    # Generate the refactoring plan (still useful as a quick local plan preview)
     plan = generate_refactoring_plan(selected, wf["target"])
     update_workflow(wf_id, status="plan_approval", plan_json=json.dumps(plan))
     log_event(wf_id, "plan_approval", "plan_generated",
@@ -210,6 +464,10 @@ def select_smells(wf_id):
         "selected_count":  len(selected),
         "excluded_count":  len(excluded),
         "plan":            plan,
+        "selected_ids":    selected_ids,
+        "selected_files":   selected_files,
+        "updated_report":   payload["updated_report"],
+        "planning_input":   planning_input,
         "message":         "Refactoring plan generated. Please review and approve.",
     })
 
@@ -217,6 +475,61 @@ def select_smells(wf_id):
 # ─────────────────────────────────────────────────────────────────────────────
 # Stage 3 – Plan Approval
 # ─────────────────────────────────────────────────────────────────────────────
+
+@diwo_bp.route("/workflows/<wf_id>/plan-preference-update", methods=["POST"])
+def plan_preference_update(wf_id):
+    """
+    Regenerate the planning report based on developer decisions/preferences.
+    Body: {
+      decisions: {"1": "approve", "2": "reject", ...},
+      preferences?: {
+        risk_tolerance?: "conservative"|"balanced"|"aggressive",
+        impact_focus?: "low"|"medium"|"high",
+        preferred_refactorings?: [str]
+      }
+    }
+    """
+    wf = get_workflow(wf_id)
+    if not wf:
+        return _err("Workflow not found.", 404)
+
+    err = _require_stage(wf, "plan_approval")
+    if err:
+        return err
+
+    data = request.get_json(force=True, silent=True) or {}
+    decisions = data.get("decisions") or {}
+    preferences = data.get("preferences") or {}
+
+    if not isinstance(decisions, dict):
+        return _err("'decisions' must be an object keyed by step_id.")
+    if not isinstance(preferences, dict):
+        return _err("'preferences' must be an object.")
+
+    current_plan = _parse_json_field(wf, "plan_json") or {}
+    if not current_plan or not isinstance(current_plan.get("steps"), list):
+        return _err("No plan found for this workflow.", 400)
+
+    updated_plan = generate_updated_plan_report(current_plan, decisions, preferences)
+
+    update_workflow(wf_id, plan_json=json.dumps(updated_plan))
+    log_event(
+        wf_id,
+        "plan_approval",
+        "plan_regenerated_by_preferences",
+        {
+            "decisions_count": len(decisions),
+            "risk_tolerance": preferences.get("risk_tolerance", "balanced"),
+            "impact_focus": preferences.get("impact_focus", "high"),
+            "steps_after": len(updated_plan.get("steps", [])),
+        },
+    )
+
+    return jsonify({
+        "status": "plan_approval",
+        "message": "Updated planning report generated using developer preferences.",
+        "updated_planning_report": updated_plan,
+    })
 
 @diwo_bp.route("/workflows/<wf_id>/plan-decision", methods=["POST"])
 def plan_decision(wf_id):

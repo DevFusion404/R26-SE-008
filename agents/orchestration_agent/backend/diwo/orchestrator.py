@@ -16,6 +16,7 @@ Transitions are gated: each stage requires an explicit developer action.
 import uuid
 import json
 import random
+from typing import Optional
 from datetime import datetime, timezone
 
 
@@ -126,6 +127,94 @@ def _build_parameters(refactoring, cls, method, lines, metrics):
     if refactoring == "Introduce Parameter Object":
         return {"method": method, "parameter_object_name": f"{method}Params"}
     return {"target_class": cls, "target_method": method}
+
+
+def generate_updated_plan_report(plan: dict, decisions: Optional[dict] = None, preferences: Optional[dict] = None) -> dict:
+    """
+    Re-rank and filter a plan using developer step decisions + preferences.
+    This is used for live plan updates while the developer is reviewing steps.
+    """
+    base_steps = list(plan.get("steps", []))
+    decisions = decisions or {}
+    preferences = preferences or {}
+
+    preferred_refactorings = set(preferences.get("preferred_refactorings", []))
+    risk_tolerance = str(preferences.get("risk_tolerance", "balanced")).lower()
+    impact_focus = str(preferences.get("impact_focus", "high")).lower()
+
+    impact_weight = {"low": 1, "medium": 2, "high": 3}
+    risk_weight_balanced = {"low": 3, "medium": 2, "high": 1}
+    risk_weight_aggressive = {"low": 1, "medium": 2, "high": 3}
+    risk_weight_conservative = {"low": 4, "medium": 2, "high": 0}
+
+    if risk_tolerance == "aggressive":
+        risk_weight = risk_weight_aggressive
+    elif risk_tolerance == "conservative":
+        risk_weight = risk_weight_conservative
+    else:
+        risk_weight = risk_weight_balanced
+
+    def step_score(step: dict) -> int:
+        decision = decisions.get(str(step.get("step_id"))) or decisions.get(step.get("step_id"))
+        expected_impact = str(step.get("impact") or step.get("expected_impact") or "medium").lower()
+        risk = str(step.get("risk") or "medium").lower()
+
+        score = 0
+        score += impact_weight.get(expected_impact, 2) * 4
+        score += risk_weight.get(risk, 2) * 2
+
+        if impact_focus == expected_impact:
+            score += 3
+        if preferred_refactorings and step.get("refactoring") in preferred_refactorings:
+            score += 4
+
+        if decision == "approve":
+            score += 10
+        elif decision == "reject":
+            score -= 50
+
+        return score
+
+    accepted_steps = [
+        s for s in base_steps
+        if (decisions.get(str(s.get("step_id"))) or decisions.get(s.get("step_id"))) != "reject"
+    ]
+
+    ranked = sorted(accepted_steps, key=step_score, reverse=True)
+
+    remapped_steps = []
+    for idx, step in enumerate(ranked, start=1):
+        new_step = dict(step)
+        new_step["step_id"] = idx
+        remapped_steps.append(new_step)
+
+    plan_id = plan.get("plan_id", f"plan_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}")
+    updated_plan_id = f"{plan_id}_updated"
+
+    summary_meta = {
+        "total_steps": len(remapped_steps),
+        "approved_count": sum(1 for d in decisions.values() if d == "approve"),
+        "rejected_count": sum(1 for d in decisions.values() if d == "reject"),
+        "risk_tolerance": risk_tolerance,
+        "impact_focus": impact_focus,
+        "preferred_refactorings": sorted(preferred_refactorings),
+    }
+
+    summary_text = (
+        f"{summary_meta['total_steps']}-step updated plan generated from developer preferences. "
+        f"Approved: {summary_meta['approved_count']}, Rejected: {summary_meta['rejected_count']}, "
+        f"Risk tolerance: {summary_meta['risk_tolerance']}, Impact focus: {summary_meta['impact_focus']}."
+    )
+
+    return {
+        "plan_id": updated_plan_id,
+        "target": plan.get("target"),
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "steps": remapped_steps,
+        "summary": summary_text,
+        "summary_meta": summary_meta,
+        "user_preferences": preferences,
+    }
 
 
 # ─────────────────────────────────────────────────────────────────────────────

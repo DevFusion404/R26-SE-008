@@ -1,0 +1,1165 @@
+{
+  "all_smells": [
+    {
+      "id": "django/__init__.py:3:0",
+      "location": {
+        "class": "__init__",
+        "file": "django/__init__.py",
+        "lines": [
+          3,
+          3
+        ],
+        "method": null
+      },
+      "message": "Magic number 6",
+      "metrics": {
+        "lines_of_code": 24,
+        "quality_score": 99
+      },
+      "severity": "low",
+      "type": "MagicNumber"
+    },
+    {
+      "id": "django/apps/config.py:16:0",
+      "location": {
+        "class": "config",
+        "file": "django/apps/config.py",
+        "lines": [
+          16,
+          16
+        ],
+        "method": null
+      },
+      "message": "Function '__init__' has 40 lines (>30)",
+      "metrics": {
+        "lines_of_code": 274,
+        "quality_score": 94
+      },
+      "severity": "high",
+      "type": "LongMethod"
+    },
+    {
+      "id": "django/apps/config.py:100:1",
+      "location": {
+        "class": "config",
+        "file": "django/apps/config.py",
+        "lines": [
+          100,
+          100
+        ],
+        "method": null
+      },
+      "message": "Function 'create' has 122 lines (>30)",
+      "metrics": {
+        "lines_of_code": 274,
+        "quality_score": 94
+      },
+      "severity": "high",
+      "type": "LongMethod"
+    },
+    {
+      "id": "django/apps/registry.py:13:0",
+      "location": {
+        "class": "registry",
+        "file": "django/apps/registry.py",
+        "lines": [
+          13,
+          13
+        ],
+        "method": null
+      },
+      "message": "Class 'Apps' has 21 methods (>15)",
+      "metrics": {
+        "lines_of_code": 438,
+        "quality_score": 92
+      },
+      "severity": "high",
+      "type": "LargeClass"
+    },
+    {
+      "id": "django/apps/registry.py:20:1",
+      "location": {
+        "class": "registry",
+        "file": "django/apps/registry.py",
+        "lines": [
+          20,
+          20
+        ],
+        "method": null
+      },
+      "message": "Function '__init__' has 39 lines (>30)",
+      "metrics": {
+        "lines_of_code": 438,
+        "quality_score": 92
+      },
+      "severity": "high",
+      "type": "LongMethod"
+    },
+    {
+      "id": "django/conf/base.py:45:0",
+      "location": {
+        "class": "base",
+        "file": "django/conf/base.py",
+        "lines": [
+          45,
+          45
+        ],
+        "method": null
+      },
+      "message": "Magic number 100",
+      "metrics": {
+        "lines_of_code": 189,
+        "quality_score": 97
+      },
+      "severity": "low",
+      "type": "MagicNumber"
+    },
+    {
+      "id": "django/conf/base.py:78:1",
+      "location": {
+        "class": "base",
+        "file": "django/conf/base.py",
+        "lines": [
+          78,
+          78
+        ],
+        "method": null
+      },
+      "message": "Magic number 255",
+      "metrics": {
+        "lines_of_code": 189,
+        "quality_score": 97
+      },
+      "severity": "low",
+      "type": "MagicNumber"
+    },
+    {
+      "id": "django/core/checks.py:22:0",
+      "location": {
+        "class": "checks",
+        "file": "django/core/checks.py",
+        "lines": [
+          22,
+          22
+        ],
+        "method": null
+      },
+      "message": "Function 'check_settings' has 65 lines (>30)",
+      "metrics": {
+        "lines_of_code": 312,
+        "quality_score": 93
+      },
+      "severity": "high",
+      "type": "LongMethod"
+    },
+    {
+      "id": "django/core/checks.py:88:1",
+      "location": {
+        "class": "checks",
+        "file": "django/core/checks.py",
+        "lines": [
+          88,
+          88
+        ],
+        "method": null
+      },
+      "message": "Duplicated block detected",
+      "metrics": {
+        "lines_of_code": 312,
+        "quality_score": 93
+      },
+      "severity": "low",
+      "type": "DuplicateCode"
+    },
+    {
+      "id": "django/core/handlers.py:33:0",
+      "location": {
+        "class": "handlers",
+        "file": "django/core/handlers.py",
+        "lines": [
+          33,
+          33
+        ],
+        "method": null
+      },
+      "message": "Magic number 404",
+      "metrics": {
+        "lines_of_code": 201,
+        "quality_score": 97
+      },
+      "severity": "low",
+      "type": "MagicNumber"
+    },
+    {
+      "id": "django/core/handlers.py:55:1",
+      "location": {
+        "class": "handlers",
+        "file": "django/core/handlers.py",
+        "lines": [
+          55,
+          55
+        ],
+        "method": null
+      },
+      "message": "Magic number 500",
+      "metrics": {
+        "lines_of_code": 201,
+        "quality_score": 97
+      },
+      "severity": "low",
+      "type": "MagicNumber"
+    },
+    {
+      "id": "django/utils/utils.py:67:0",
+      "location": {
+        "class": "utils",
+        "file": "django/utils/utils.py",
+        "lines": [
+          67,
+          67
+        ],
+        "method": null
+      },
+      "message": "Function 'parse_request' has 48 lines (>30)",
+      "metrics": {
+        "lines_of_code": 156,
+        "quality_score": 95
+      },
+      "severity": "high",
+      "type": "LongMethod"
+    }
+  ],
+  "excluded": [
+    {
+      "id": "django/apps/registry.py:13:0",
+      "location": {
+        "class": "registry",
+        "file": "django/apps/registry.py",
+        "lines": [
+          13,
+          13
+        ],
+        "method": null
+      },
+      "message": "Class 'Apps' has 21 methods (>15)",
+      "metrics": {
+        "lines_of_code": 438,
+        "quality_score": 92
+      },
+      "severity": "high",
+      "type": "LargeClass"
+    },
+    {
+      "id": "django/apps/registry.py:20:1",
+      "location": {
+        "class": "registry",
+        "file": "django/apps/registry.py",
+        "lines": [
+          20,
+          20
+        ],
+        "method": null
+      },
+      "message": "Function '__init__' has 39 lines (>30)",
+      "metrics": {
+        "lines_of_code": 438,
+        "quality_score": 92
+      },
+      "severity": "high",
+      "type": "LongMethod"
+    },
+    {
+      "id": "django/conf/base.py:45:0",
+      "location": {
+        "class": "base",
+        "file": "django/conf/base.py",
+        "lines": [
+          45,
+          45
+        ],
+        "method": null
+      },
+      "message": "Magic number 100",
+      "metrics": {
+        "lines_of_code": 189,
+        "quality_score": 97
+      },
+      "severity": "low",
+      "type": "MagicNumber"
+    },
+    {
+      "id": "django/conf/base.py:78:1",
+      "location": {
+        "class": "base",
+        "file": "django/conf/base.py",
+        "lines": [
+          78,
+          78
+        ],
+        "method": null
+      },
+      "message": "Magic number 255",
+      "metrics": {
+        "lines_of_code": 189,
+        "quality_score": 97
+      },
+      "severity": "low",
+      "type": "MagicNumber"
+    },
+    {
+      "id": "django/core/checks.py:22:0",
+      "location": {
+        "class": "checks",
+        "file": "django/core/checks.py",
+        "lines": [
+          22,
+          22
+        ],
+        "method": null
+      },
+      "message": "Function 'check_settings' has 65 lines (>30)",
+      "metrics": {
+        "lines_of_code": 312,
+        "quality_score": 93
+      },
+      "severity": "high",
+      "type": "LongMethod"
+    },
+    {
+      "id": "django/core/checks.py:88:1",
+      "location": {
+        "class": "checks",
+        "file": "django/core/checks.py",
+        "lines": [
+          88,
+          88
+        ],
+        "method": null
+      },
+      "message": "Duplicated block detected",
+      "metrics": {
+        "lines_of_code": 312,
+        "quality_score": 93
+      },
+      "severity": "low",
+      "type": "DuplicateCode"
+    },
+    {
+      "id": "django/core/handlers.py:33:0",
+      "location": {
+        "class": "handlers",
+        "file": "django/core/handlers.py",
+        "lines": [
+          33,
+          33
+        ],
+        "method": null
+      },
+      "message": "Magic number 404",
+      "metrics": {
+        "lines_of_code": 201,
+        "quality_score": 97
+      },
+      "severity": "low",
+      "type": "MagicNumber"
+    },
+    {
+      "id": "django/core/handlers.py:55:1",
+      "location": {
+        "class": "handlers",
+        "file": "django/core/handlers.py",
+        "lines": [
+          55,
+          55
+        ],
+        "method": null
+      },
+      "message": "Magic number 500",
+      "metrics": {
+        "lines_of_code": 201,
+        "quality_score": 97
+      },
+      "severity": "low",
+      "type": "MagicNumber"
+    },
+    {
+      "id": "django/utils/utils.py:67:0",
+      "location": {
+        "class": "utils",
+        "file": "django/utils/utils.py",
+        "lines": [
+          67,
+          67
+        ],
+        "method": null
+      },
+      "message": "Function 'parse_request' has 48 lines (>30)",
+      "metrics": {
+        "lines_of_code": 156,
+        "quality_score": 95
+      },
+      "severity": "high",
+      "type": "LongMethod"
+    }
+  ],
+  "plan": {
+    "generated_at": "2026-05-12T05:09:05.635653+00:00",
+    "plan_id": "plan_20260512_050905",
+    "steps": [
+      {
+        "expected_impact": "low",
+        "explanation": "Apply Rename Method on __init__.N/A to resolve 'MagicNumber' smell. Expected low impact with low risk. Affected lines: 3\u20133.",
+        "parameters": {
+          "target_class": "__init__",
+          "target_method": "N/A"
+        },
+        "refactoring": "Rename Method",
+        "risk": "low",
+        "smell_id": "django/__init__.py:3:0",
+        "smell_type": "MagicNumber",
+        "step_id": 1,
+        "target": {
+          "class": "__init__",
+          "method": "N/A"
+        }
+      },
+      {
+        "expected_impact": "low",
+        "explanation": "Apply Rename Method on config.N/A to resolve 'LongMethod' smell. Expected low impact with low risk. Affected lines: 16\u201316.",
+        "parameters": {
+          "target_class": "config",
+          "target_method": "N/A"
+        },
+        "refactoring": "Rename Method",
+        "risk": "low",
+        "smell_id": "django/apps/config.py:16:0",
+        "smell_type": "LongMethod",
+        "step_id": 2,
+        "target": {
+          "class": "config",
+          "method": "N/A"
+        }
+      },
+      {
+        "expected_impact": "low",
+        "explanation": "Apply Rename Method on config.N/A to resolve 'LongMethod' smell. Expected low impact with low risk. Affected lines: 100\u2013100.",
+        "parameters": {
+          "target_class": "config",
+          "target_method": "N/A"
+        },
+        "refactoring": "Rename Method",
+        "risk": "low",
+        "smell_id": "django/apps/config.py:100:1",
+        "smell_type": "LongMethod",
+        "step_id": 3,
+        "target": {
+          "class": "config",
+          "method": "N/A"
+        }
+      }
+    ],
+    "summary": {
+      "high_impact": 0,
+      "risks": {
+        "high": 0,
+        "low": 3,
+        "medium": 0
+      },
+      "total_steps": 3
+    },
+    "target": "ECommerceSystem.java"
+  },
+  "planning_input": {
+    "generated_at": "2026-05-12T05:09:05.635653+00:00",
+    "language": "java",
+    "selected_smells": [
+      {
+        "id": "django/__init__.py:3:0",
+        "location": {
+          "class": "__init__",
+          "file": "django/__init__.py",
+          "lines": [
+            3,
+            3
+          ],
+          "method": null
+        },
+        "message": "Magic number 6",
+        "metrics": {
+          "lines_of_code": 24,
+          "quality_score": 99
+        },
+        "severity": "low",
+        "type": "MagicNumber"
+      },
+      {
+        "id": "django/apps/config.py:16:0",
+        "location": {
+          "class": "config",
+          "file": "django/apps/config.py",
+          "lines": [
+            16,
+            16
+          ],
+          "method": null
+        },
+        "message": "Function '__init__' has 40 lines (>30)",
+        "metrics": {
+          "lines_of_code": 274,
+          "quality_score": 94
+        },
+        "severity": "high",
+        "type": "LongMethod"
+      },
+      {
+        "id": "django/apps/config.py:100:1",
+        "location": {
+          "class": "config",
+          "file": "django/apps/config.py",
+          "lines": [
+            100,
+            100
+          ],
+          "method": null
+        },
+        "message": "Function 'create' has 122 lines (>30)",
+        "metrics": {
+          "lines_of_code": 274,
+          "quality_score": 94
+        },
+        "severity": "high",
+        "type": "LongMethod"
+      }
+    ],
+    "target": "ECommerceSystem.java",
+    "updated_smells": [
+      {
+        "id": "django/__init__.py:3:0",
+        "location": {
+          "class": "__init__",
+          "file": "django/__init__.py",
+          "lines": [
+            3,
+            3
+          ],
+          "method": null
+        },
+        "message": "Magic number 6",
+        "metrics": {
+          "lines_of_code": 24,
+          "quality_score": 99
+        },
+        "selected": true,
+        "selected_at": "2026-05-12T05:09:05.634653+00:00",
+        "severity": "low",
+        "type": "MagicNumber"
+      },
+      {
+        "id": "django/apps/config.py:16:0",
+        "location": {
+          "class": "config",
+          "file": "django/apps/config.py",
+          "lines": [
+            16,
+            16
+          ],
+          "method": null
+        },
+        "message": "Function '__init__' has 40 lines (>30)",
+        "metrics": {
+          "lines_of_code": 274,
+          "quality_score": 94
+        },
+        "selected": true,
+        "selected_at": "2026-05-12T05:09:05.634653+00:00",
+        "severity": "high",
+        "type": "LongMethod"
+      },
+      {
+        "id": "django/apps/config.py:100:1",
+        "location": {
+          "class": "config",
+          "file": "django/apps/config.py",
+          "lines": [
+            100,
+            100
+          ],
+          "method": null
+        },
+        "message": "Function 'create' has 122 lines (>30)",
+        "metrics": {
+          "lines_of_code": 274,
+          "quality_score": 94
+        },
+        "selected": true,
+        "selected_at": "2026-05-12T05:09:05.634653+00:00",
+        "severity": "high",
+        "type": "LongMethod"
+      },
+      {
+        "id": "django/apps/registry.py:13:0",
+        "location": {
+          "class": "registry",
+          "file": "django/apps/registry.py",
+          "lines": [
+            13,
+            13
+          ],
+          "method": null
+        },
+        "message": "Class 'Apps' has 21 methods (>15)",
+        "metrics": {
+          "lines_of_code": 438,
+          "quality_score": 92
+        },
+        "selected": false,
+        "severity": "high",
+        "type": "LargeClass"
+      },
+      {
+        "id": "django/apps/registry.py:20:1",
+        "location": {
+          "class": "registry",
+          "file": "django/apps/registry.py",
+          "lines": [
+            20,
+            20
+          ],
+          "method": null
+        },
+        "message": "Function '__init__' has 39 lines (>30)",
+        "metrics": {
+          "lines_of_code": 438,
+          "quality_score": 92
+        },
+        "selected": false,
+        "severity": "high",
+        "type": "LongMethod"
+      },
+      {
+        "id": "django/conf/base.py:45:0",
+        "location": {
+          "class": "base",
+          "file": "django/conf/base.py",
+          "lines": [
+            45,
+            45
+          ],
+          "method": null
+        },
+        "message": "Magic number 100",
+        "metrics": {
+          "lines_of_code": 189,
+          "quality_score": 97
+        },
+        "selected": false,
+        "severity": "low",
+        "type": "MagicNumber"
+      },
+      {
+        "id": "django/conf/base.py:78:1",
+        "location": {
+          "class": "base",
+          "file": "django/conf/base.py",
+          "lines": [
+            78,
+            78
+          ],
+          "method": null
+        },
+        "message": "Magic number 255",
+        "metrics": {
+          "lines_of_code": 189,
+          "quality_score": 97
+        },
+        "selected": false,
+        "severity": "low",
+        "type": "MagicNumber"
+      },
+      {
+        "id": "django/core/checks.py:22:0",
+        "location": {
+          "class": "checks",
+          "file": "django/core/checks.py",
+          "lines": [
+            22,
+            22
+          ],
+          "method": null
+        },
+        "message": "Function 'check_settings' has 65 lines (>30)",
+        "metrics": {
+          "lines_of_code": 312,
+          "quality_score": 93
+        },
+        "selected": false,
+        "severity": "high",
+        "type": "LongMethod"
+      },
+      {
+        "id": "django/core/checks.py:88:1",
+        "location": {
+          "class": "checks",
+          "file": "django/core/checks.py",
+          "lines": [
+            88,
+            88
+          ],
+          "method": null
+        },
+        "message": "Duplicated block detected",
+        "metrics": {
+          "lines_of_code": 312,
+          "quality_score": 93
+        },
+        "selected": false,
+        "severity": "low",
+        "type": "DuplicateCode"
+      },
+      {
+        "id": "django/core/handlers.py:33:0",
+        "location": {
+          "class": "handlers",
+          "file": "django/core/handlers.py",
+          "lines": [
+            33,
+            33
+          ],
+          "method": null
+        },
+        "message": "Magic number 404",
+        "metrics": {
+          "lines_of_code": 201,
+          "quality_score": 97
+        },
+        "selected": false,
+        "severity": "low",
+        "type": "MagicNumber"
+      },
+      {
+        "id": "django/core/handlers.py:55:1",
+        "location": {
+          "class": "handlers",
+          "file": "django/core/handlers.py",
+          "lines": [
+            55,
+            55
+          ],
+          "method": null
+        },
+        "message": "Magic number 500",
+        "metrics": {
+          "lines_of_code": 201,
+          "quality_score": 97
+        },
+        "selected": false,
+        "severity": "low",
+        "type": "MagicNumber"
+      },
+      {
+        "id": "django/utils/utils.py:67:0",
+        "location": {
+          "class": "utils",
+          "file": "django/utils/utils.py",
+          "lines": [
+            67,
+            67
+          ],
+          "method": null
+        },
+        "message": "Function 'parse_request' has 48 lines (>30)",
+        "metrics": {
+          "lines_of_code": 156,
+          "quality_score": 95
+        },
+        "selected": false,
+        "severity": "high",
+        "type": "LongMethod"
+      }
+    ],
+    "workflow_id": "wf_e189bbcf93"
+  },
+  "selected": [
+    {
+      "id": "django/__init__.py:3:0",
+      "location": {
+        "class": "__init__",
+        "file": "django/__init__.py",
+        "lines": [
+          3,
+          3
+        ],
+        "method": null
+      },
+      "message": "Magic number 6",
+      "metrics": {
+        "lines_of_code": 24,
+        "quality_score": 99
+      },
+      "severity": "low",
+      "type": "MagicNumber"
+    },
+    {
+      "id": "django/apps/config.py:16:0",
+      "location": {
+        "class": "config",
+        "file": "django/apps/config.py",
+        "lines": [
+          16,
+          16
+        ],
+        "method": null
+      },
+      "message": "Function '__init__' has 40 lines (>30)",
+      "metrics": {
+        "lines_of_code": 274,
+        "quality_score": 94
+      },
+      "severity": "high",
+      "type": "LongMethod"
+    },
+    {
+      "id": "django/apps/config.py:100:1",
+      "location": {
+        "class": "config",
+        "file": "django/apps/config.py",
+        "lines": [
+          100,
+          100
+        ],
+        "method": null
+      },
+      "message": "Function 'create' has 122 lines (>30)",
+      "metrics": {
+        "lines_of_code": 274,
+        "quality_score": 94
+      },
+      "severity": "high",
+      "type": "LongMethod"
+    }
+  ],
+  "status": "plan_approval",
+  "updated_report": {
+    "files": [
+      {
+        "code_smells": [
+          {
+            "line": 3,
+            "message": "Magic number 6",
+            "severity": "low",
+            "type": "MagicNumber"
+          }
+        ],
+        "file": "__init__.py",
+        "language": "py",
+        "metrics": {
+          "blank_lines": 0,
+          "classes": 0,
+          "comment_lines": 0,
+          "filename": "__init__.py",
+          "functions": 0,
+          "lines_of_code": 24
+        },
+        "quality_score": 99,
+        "relative_path": "django/__init__.py",
+        "smell_summary": {
+          "high": 0,
+          "low": 1,
+          "medium": 0
+        }
+      },
+      {
+        "code_smells": [
+          {
+            "line": 16,
+            "message": "Function '__init__' has 40 lines (>30)",
+            "severity": "high",
+            "type": "LongMethod"
+          },
+          {
+            "line": 100,
+            "message": "Function 'create' has 122 lines (>30)",
+            "severity": "high",
+            "type": "LongMethod"
+          }
+        ],
+        "file": "config.py",
+        "language": "py",
+        "metrics": {
+          "blank_lines": 0,
+          "classes": 0,
+          "comment_lines": 0,
+          "filename": "config.py",
+          "functions": 0,
+          "lines_of_code": 274
+        },
+        "quality_score": 94,
+        "relative_path": "django/apps/config.py",
+        "smell_summary": {
+          "high": 2,
+          "low": 0,
+          "medium": 0
+        }
+      }
+    ],
+    "generated_at": "2026-05-12T05:09:05.635653+00:00",
+    "repo_name": "ECommerceSystem.java",
+    "summary": {
+      "average_quality_score": 96.5,
+      "files_analyzed": 2,
+      "smell_severity": {
+        "high": 2,
+        "low": 1,
+        "medium": 0
+      },
+      "total_code_smells": 3,
+      "total_lines_of_code": 298
+    },
+    "workflow_id": "wf_e189bbcf93"
+  },
+  "updated_smells": [
+    {
+      "id": "django/__init__.py:3:0",
+      "location": {
+        "class": "__init__",
+        "file": "django/__init__.py",
+        "lines": [
+          3,
+          3
+        ],
+        "method": null
+      },
+      "message": "Magic number 6",
+      "metrics": {
+        "lines_of_code": 24,
+        "quality_score": 99
+      },
+      "selected": true,
+      "selected_at": "2026-05-12T05:09:05.634653+00:00",
+      "severity": "low",
+      "type": "MagicNumber"
+    },
+    {
+      "id": "django/apps/config.py:16:0",
+      "location": {
+        "class": "config",
+        "file": "django/apps/config.py",
+        "lines": [
+          16,
+          16
+        ],
+        "method": null
+      },
+      "message": "Function '__init__' has 40 lines (>30)",
+      "metrics": {
+        "lines_of_code": 274,
+        "quality_score": 94
+      },
+      "selected": true,
+      "selected_at": "2026-05-12T05:09:05.634653+00:00",
+      "severity": "high",
+      "type": "LongMethod"
+    },
+    {
+      "id": "django/apps/config.py:100:1",
+      "location": {
+        "class": "config",
+        "file": "django/apps/config.py",
+        "lines": [
+          100,
+          100
+        ],
+        "method": null
+      },
+      "message": "Function 'create' has 122 lines (>30)",
+      "metrics": {
+        "lines_of_code": 274,
+        "quality_score": 94
+      },
+      "selected": true,
+      "selected_at": "2026-05-12T05:09:05.634653+00:00",
+      "severity": "high",
+      "type": "LongMethod"
+    },
+    {
+      "id": "django/apps/registry.py:13:0",
+      "location": {
+        "class": "registry",
+        "file": "django/apps/registry.py",
+        "lines": [
+          13,
+          13
+        ],
+        "method": null
+      },
+      "message": "Class 'Apps' has 21 methods (>15)",
+      "metrics": {
+        "lines_of_code": 438,
+        "quality_score": 92
+      },
+      "selected": false,
+      "severity": "high",
+      "type": "LargeClass"
+    },
+    {
+      "id": "django/apps/registry.py:20:1",
+      "location": {
+        "class": "registry",
+        "file": "django/apps/registry.py",
+        "lines": [
+          20,
+          20
+        ],
+        "method": null
+      },
+      "message": "Function '__init__' has 39 lines (>30)",
+      "metrics": {
+        "lines_of_code": 438,
+        "quality_score": 92
+      },
+      "selected": false,
+      "severity": "high",
+      "type": "LongMethod"
+    },
+    {
+      "id": "django/conf/base.py:45:0",
+      "location": {
+        "class": "base",
+        "file": "django/conf/base.py",
+        "lines": [
+          45,
+          45
+        ],
+        "method": null
+      },
+      "message": "Magic number 100",
+      "metrics": {
+        "lines_of_code": 189,
+        "quality_score": 97
+      },
+      "selected": false,
+      "severity": "low",
+      "type": "MagicNumber"
+    },
+    {
+      "id": "django/conf/base.py:78:1",
+      "location": {
+        "class": "base",
+        "file": "django/conf/base.py",
+        "lines": [
+          78,
+          78
+        ],
+        "method": null
+      },
+      "message": "Magic number 255",
+      "metrics": {
+        "lines_of_code": 189,
+        "quality_score": 97
+      },
+      "selected": false,
+      "severity": "low",
+      "type": "MagicNumber"
+    },
+    {
+      "id": "django/core/checks.py:22:0",
+      "location": {
+        "class": "checks",
+        "file": "django/core/checks.py",
+        "lines": [
+          22,
+          22
+        ],
+        "method": null
+      },
+      "message": "Function 'check_settings' has 65 lines (>30)",
+      "metrics": {
+        "lines_of_code": 312,
+        "quality_score": 93
+      },
+      "selected": false,
+      "severity": "high",
+      "type": "LongMethod"
+    },
+    {
+      "id": "django/core/checks.py:88:1",
+      "location": {
+        "class": "checks",
+        "file": "django/core/checks.py",
+        "lines": [
+          88,
+          88
+        ],
+        "method": null
+      },
+      "message": "Duplicated block detected",
+      "metrics": {
+        "lines_of_code": 312,
+        "quality_score": 93
+      },
+      "selected": false,
+      "severity": "low",
+      "type": "DuplicateCode"
+    },
+    {
+      "id": "django/core/handlers.py:33:0",
+      "location": {
+        "class": "handlers",
+        "file": "django/core/handlers.py",
+        "lines": [
+          33,
+          33
+        ],
+        "method": null
+      },
+      "message": "Magic number 404",
+      "metrics": {
+        "lines_of_code": 201,
+        "quality_score": 97
+      },
+      "selected": false,
+      "severity": "low",
+      "type": "MagicNumber"
+    },
+    {
+      "id": "django/core/handlers.py:55:1",
+      "location": {
+        "class": "handlers",
+        "file": "django/core/handlers.py",
+        "lines": [
+          55,
+          55
+        ],
+        "method": null
+      },
+      "message": "Magic number 500",
+      "metrics": {
+        "lines_of_code": 201,
+        "quality_score": 97
+      },
+      "selected": false,
+      "severity": "low",
+      "type": "MagicNumber"
+    },
+    {
+      "id": "django/utils/utils.py:67:0",
+      "location": {
+        "class": "utils",
+        "file": "django/utils/utils.py",
+        "lines": [
+          67,
+          67
+        ],
+        "method": null
+      },
+      "message": "Function 'parse_request' has 48 lines (>30)",
+      "metrics": {
+        "lines_of_code": 156,
+        "quality_score": 95
+      },
+      "selected": false,
+      "severity": "high",
+      "type": "LongMethod"
+    }
+  ]
+}

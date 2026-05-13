@@ -5,6 +5,7 @@ import { Badge, C, Card, Pill } from "./diwoTheme.jsx";
 export default function ResultsApprovalPage({ onRestart, onRollback, onAccept, refactoredCode, diffRows = [], files = [], repositoryPath = "" }) {
   const [tab, setTab] = useState("summary");
   const [selectedFileIndex, setSelectedFileIndex] = useState(0);
+  const [acceptedFiles, setAcceptedFiles] = useState(() => new Set());
   const [showActionChoice, setShowActionChoice] = useState(false);
   const [branchName, setBranchName] = useState("refactoring/diwo-changes");
   const [repoPath, setRepoPath] = useState(repositoryPath || "");
@@ -28,6 +29,26 @@ export default function ResultsApprovalPage({ onRestart, onRollback, onAccept, r
     { label: "Confidence Score", before: "-", after: "100%", unit: "", positive: true },
   ];
 
+  const fileEntries = (files && files.length > 0)
+    ? files
+    : refactoredCode
+      ? [{ path: `refactored_code.${(SCTVA_DATA.language || "txt").toLowerCase()}`, after: refactoredCode }]
+      : [];
+
+  const getFileKey = (fileEntry, idx) => fileEntry.path || fileEntry.file || `file-${idx}`;
+
+  const acceptedFileEntries = fileEntries.filter((fileEntry, idx) => acceptedFiles.has(getFileKey(fileEntry, idx)));
+
+  const toggleAcceptedFile = (fileEntry, idx) => {
+    const fileKey = getFileKey(fileEntry, idx);
+    setAcceptedFiles((prev) => {
+      const next = new Set(prev);
+      if (next.has(fileKey)) next.delete(fileKey);
+      else next.add(fileKey);
+      return next;
+    });
+  };
+
   // Save text content to a local file via browser download
   const saveTextFile = (filename, content) => {
     try {
@@ -48,15 +69,10 @@ export default function ResultsApprovalPage({ onRestart, onRollback, onAccept, r
   };
 
   const handleAcceptAndDownload = () => {
-    // If we have file objects, save each 'after' version; otherwise save single refactoredCode
-    const toSave = (files && files.length > 0)
-      ? files
-      : refactoredCode
-        ? [{ path: `refactored_code.${(SCTVA_DATA.language || "txt").toLowerCase()}`, after: refactoredCode }]
-        : [];
+    const toSave = acceptedFileEntries;
 
     if (toSave.length === 0) {
-      saveTextFile("diwo_refactored.txt", "");
+      alert("Select at least one accepted file before downloading.");
     } else {
       toSave.forEach((f, i) => {
         const filename = f.path ? f.path.split("/").pop() : `refactored_${i + 1}.txt`;
@@ -74,7 +90,7 @@ export default function ResultsApprovalPage({ onRestart, onRollback, onAccept, r
     }
 
     setShowActionChoice(false);
-    if (onAccept) onAccept();
+    if (onAccept) onAccept({ acceptedFiles: toSave });
   };
 
   const handlePushToGitHub = async () => {
@@ -90,12 +106,13 @@ export default function ResultsApprovalPage({ onRestart, onRollback, onAccept, r
 
     setIsProcessing(true);
     try {
+      if (acceptedFileEntries.length === 0) {
+        alert("Select at least one accepted file before sharing to GitHub Desktop.");
+        return;
+      }
+
       const payload = {
-        files: (files && files.length > 0)
-          ? files
-          : refactoredCode
-            ? [{ path: `refactored_code.${(SCTVA_DATA.language || "txt").toLowerCase()}`, after: refactoredCode }]
-            : [],
+        files: acceptedFileEntries,
         branch_name: branchName,
         repository_path: repoPath.trim(),
       };
@@ -131,7 +148,7 @@ export default function ResultsApprovalPage({ onRestart, onRollback, onAccept, r
       alert(message);
       
       setShowActionChoice(false);
-      if (onAccept) onAccept();
+      if (onAccept) onAccept({ acceptedFiles: acceptedFileEntries, githubResult: result });
     } catch (error) {
       // eslint-disable-next-line no-console
       console.error("Failed to push to GitHub:", error);
@@ -225,13 +242,36 @@ export default function ResultsApprovalPage({ onRestart, onRollback, onAccept, r
         <div style={{ display: "flex", gap: 12 }}>
           <div style={{ width: 260, maxHeight: 360, overflow: "auto", background: C.panel, border: `1px solid ${C.border}`, borderRadius: 8, padding: 8 }}>
             <div style={{ fontSize: 12, color: C.textMuted, marginBottom: 8 }}>Files</div>
-            {(files && files.length > 0) ? (
-              files.map((f, idx) => (
-                <div key={f.path || idx} onClick={() => setSelectedFileIndex(idx)} style={{ padding: 10, borderRadius: 6, cursor: "pointer", background: selectedFileIndex === idx ? C.accent : "transparent", color: selectedFileIndex === idx ? "#000" : C.text, marginBottom: 6 }}>
-                  <div style={{ fontSize: 13, fontWeight: 700 }}>{f.path.split('/').pop()}</div>
-                  <div style={{ fontSize: 11, color: C.textMuted, marginTop: 4 }}>{f.path}</div>
+            {fileEntries.length > 0 ? (
+              fileEntries.map((f, idx) => {
+                const fileKey = getFileKey(f, idx);
+                const isAccepted = acceptedFiles.has(fileKey);
+                return (
+                <div key={fileKey} style={{ padding: 10, borderRadius: 6, cursor: "pointer", background: selectedFileIndex === idx ? C.accent : "transparent", color: selectedFileIndex === idx ? "#000" : C.text, marginBottom: 6, border: `1px solid ${isAccepted ? C.accent : C.border}` }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", gap: 8, alignItems: "start" }}>
+                    <div onClick={() => setSelectedFileIndex(idx)} style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontSize: 13, fontWeight: 700 }}>{(f.path || f.file || `file-${idx}`).split('/').pop()}</div>
+                      <div style={{ fontSize: 11, color: C.textMuted, marginTop: 4, wordBreak: "break-all" }}>{f.path || f.file || `file-${idx}`}</div>
+                    </div>
+                    <button
+                      onClick={(e) => { e.stopPropagation(); toggleAcceptedFile(f, idx); }}
+                      style={{
+                        padding: "5px 10px",
+                        borderRadius: 6,
+                        cursor: "pointer",
+                        border: `1px solid ${isAccepted ? C.accent : C.border}`,
+                        background: isAccepted ? C.accent : C.bg,
+                        color: isAccepted ? "#000" : C.textMuted,
+                        fontSize: 11,
+                        fontWeight: 700,
+                      }}
+                    >
+                      {isAccepted ? "Accepted" : "Accept"}
+                    </button>
+                  </div>
                 </div>
-              ))
+                );
+              })
             ) : (
               <div style={{ color: C.textMuted }}>No file-level diffs available.</div>
             )}
@@ -239,7 +279,7 @@ export default function ResultsApprovalPage({ onRestart, onRollback, onAccept, r
 
           <div style={{ flex: 1 }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
-              <div style={{ fontSize: 12, color: C.textMuted }}>{(files && files[selectedFileIndex]) ? files[selectedFileIndex].path : `ECommerceSystem.java · ${SCTVA_DATA.language.toUpperCase()}`}</div>
+              <div style={{ fontSize: 12, color: C.textMuted }}>{fileEntries[selectedFileIndex] ? (fileEntries[selectedFileIndex].path || fileEntries[selectedFileIndex].file) : `ECommerceSystem.java · ${SCTVA_DATA.language.toUpperCase()}`}</div>
               <Badge label="Refactored Diff" color={C.accent} />
             </div>
 
@@ -258,7 +298,7 @@ export default function ResultsApprovalPage({ onRestart, onRollback, onAccept, r
                 fontSize: 11,
                 lineHeight: 1.55,
               }}>
-                {((files && files[selectedFileIndex]) ? (files[selectedFileIndex].diff_rows || []) : (diffRows || [])).map((row) => {
+                {((fileEntries[selectedFileIndex]) ? (fileEntries[selectedFileIndex].diff_rows || []) : (diffRows || [])).map((row) => {
                   const isBefore = row.kind === "before";
                   const isAfter = row.kind === "after";
                   return (
@@ -311,7 +351,11 @@ export default function ResultsApprovalPage({ onRestart, onRollback, onAccept, r
         </div>
       )}
 
-      <div style={{ display: "flex", gap: 12, marginTop: 24, justifyContent: "flex-end", flexWrap: "wrap" }}>
+      <div style={{ display: "flex", gap: 12, marginTop: 24, justifyContent: "space-between", alignItems: "center", flexWrap: "wrap" }}>
+        <div style={{ fontSize: 12, color: C.textSub }}>
+          Accepted files: <span style={{ color: C.accent, fontWeight: 700 }}>{acceptedFileEntries.length}</span> / {fileEntries.length}
+        </div>
+        <div style={{ display: "flex", gap: 12, flexWrap: "wrap", justifyContent: "flex-end" }}>
         <button onClick={onRollback} style={{ padding: "10px 20px", borderRadius: 8, fontWeight: 700, fontSize: 13, cursor: "pointer", background: `${C.danger}15`, color: C.danger, border: `1px solid ${C.danger}30` }}>
           ↩ Request Rollback
         </button>
@@ -321,6 +365,7 @@ export default function ResultsApprovalPage({ onRestart, onRollback, onAccept, r
         <button onClick={() => setShowActionChoice(true)} style={{ padding: "10px 24px", borderRadius: 8, fontWeight: 700, fontSize: 13, cursor: "pointer", background: C.accent, color: "#000", border: "none", boxShadow: `0 0 20px ${C.accentGlow}` }}>
           ✓ Accept & Commit Changes
         </button>
+        </div>
       </div>
 
       {showActionChoice && (

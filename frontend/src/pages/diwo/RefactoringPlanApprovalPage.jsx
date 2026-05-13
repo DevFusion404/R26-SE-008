@@ -2,13 +2,25 @@ import { useState } from "react";
 import { PLAN_DATA } from "./data/diwoData";
 import { C, Card, Badge, Pill, impactColor, riskColor } from "./diwoTheme.jsx";
 
-export default function RefactoringPlanApprovalPage({ onApprove, onFallback, planData }) {
+export default function RefactoringPlanApprovalPage({ onApprove, onFallback, planData, onDecisionChange }) {
   const [decisions, setDecisions] = useState({});
   const [opinion, setOpinion] = useState("");
   const [showOpinion, setShowOpinion] = useState(false);
   const [filter, setFilter] = useState("all");
+  const [riskTolerance, setRiskTolerance] = useState("balanced");
+  const [impactFocus, setImpactFocus] = useState("high");
 
-  const decide = (id, val) => setDecisions(prev => ({ ...prev, [id]: val }));
+  const decide = (id, val) => setDecisions(prev => {
+    const next = { ...prev, [id]: val };
+    onDecisionChange?.({
+      decisions: next,
+      preferences: {
+        risk_tolerance: riskTolerance,
+        impact_focus: impactFocus,
+      },
+    });
+    return next;
+  });
   const currentPlan = planData || PLAN_DATA;
   const allApproved = currentPlan.steps.length > 0 && currentPlan.steps.every(step => decisions[step.step_id] === "approve");
 
@@ -78,6 +90,20 @@ export default function RefactoringPlanApprovalPage({ onApprove, onFallback, pla
         }}>
           {allApproved ? "Deselect All" : "Select All"}
         </button>
+        <select value={riskTolerance} onChange={(e) => setRiskTolerance(e.target.value)} style={{
+          padding: "5px 10px", borderRadius: 8, fontSize: 11, background: C.panel, color: C.text, border: `1px solid ${C.border}`,
+        }}>
+          <option value="conservative">Risk: Conservative</option>
+          <option value="balanced">Risk: Balanced</option>
+          <option value="aggressive">Risk: Aggressive</option>
+        </select>
+        <select value={impactFocus} onChange={(e) => setImpactFocus(e.target.value)} style={{
+          padding: "5px 10px", borderRadius: 8, fontSize: 11, background: C.panel, color: C.text, border: `1px solid ${C.border}`,
+        }}>
+          <option value="high">Impact: High</option>
+          <option value="medium">Impact: Medium</option>
+          <option value="low">Impact: Low</option>
+        </select>
       </div>
 
       <div style={{ display: "flex", flexDirection: "column", gap: 10, maxHeight: 400, overflowY: "auto", paddingRight: 4 }}>

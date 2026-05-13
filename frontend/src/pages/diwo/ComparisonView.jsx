@@ -36,7 +36,7 @@ function MetricBar({ label, before, after, unit = "", higherIsBetter = true, car
   );
 }
 
-export function ComparisonView({ workflow, auditLogs = [], onComplete, onLoadLogs, loading }) {
+export function ComparisonView({ workflow, workflowId: propWorkflowId, language: propLanguage, auditLogs = [], onComplete, onLoadLogs, loading }) {
   const [notes, setNotes] = useState("");
   const mb = workflow?.metrics_before || {};
   const ma = workflow?.metrics_after || {};
@@ -52,10 +52,15 @@ export function ComparisonView({ workflow, auditLogs = [], onComplete, onLoadLog
     { metric: "Smells",         before: (mb.total_smells||0)*5,            after: (ma.total_smells||0)*5 },
   ];
 
-  const smellBreakdownData = Object.keys(mb.smell_breakdown || {}).map((sev) => ({
+  const smellBreakdownKeys = Array.from(new Set([
+    ...(mb.smell_breakdown ? Object.keys(mb.smell_breakdown) : []),
+    ...(ma.smell_breakdown ? Object.keys(ma.smell_breakdown) : []),
+  ]));
+
+  const smellBreakdownData = smellBreakdownKeys.map((sev) => ({
     severity: sev,
-    before: mb.smell_breakdown[sev] || 0,
-    after: (ma.smell_breakdown || {})[sev] || 0,
+    before: Number((mb.smell_breakdown || {})[sev] || 0),
+    after: Number((ma.smell_breakdown || {})[sev] || 0),
   }));
 
   const improvements = ma.improvements || {};
@@ -95,9 +100,9 @@ export function ComparisonView({ workflow, auditLogs = [], onComplete, onLoadLog
   }, [workflow?.files]);
 
   const generateSummaryReport = () => {
-    const workflowId = workflow?.id || workflow?.workflow_id || "N/A";
+    const workflowId = propWorkflowId || workflow?.id || workflow?.workflow_id || "N/A";
     const target = workflow?.target || "N/A";
-    const language = workflow?.language || "N/A";
+    const language = propLanguage || workflow?.language || "N/A";
 
     const format = (log) => {
       const candidates = [log.timestamp, log.time, log.time_raw, log.date, log.created_at, log.at, log.ts];
@@ -140,6 +145,17 @@ export function ComparisonView({ workflow, auditLogs = [], onComplete, onLoadLog
         <td>${format(log) || ""}</td>
       </tr>
     `).join("");
+
+    const smellSummary = workflow?.smell_selection_summary || (workflow?.updated_report?.summary && {
+      total_smells: workflow.updated_report.summary.total_code_smells || 0,
+      selected_count: workflow.updated_report.summary.selected_count || 0,
+      excluded_count: 0,
+    }) || { total_smells: 0, selected_count: 0, excluded_count: 0 };
+
+    const planSummary = workflow?.plan_approval_summary || { total_steps: 0, approved_count: 0, rejected_count: 0 };
+
+    const acceptedFilesList = (workflow?.accepted_files || []).map(p => `<li>${p}</li>`).join("") || "<li>None</li>";
+    const rejectedFilesList = (workflow?.rejected_files || []).map(p => `<li>${p}</li>`).join("") || "<li>None</li>";
 
     const reportHtml = `
       <html>
@@ -257,6 +273,21 @@ export function ComparisonView({ workflow, auditLogs = [], onComplete, onLoadLog
               ${smellRows}
             </tbody>
           </table>
+
+          <h2>Selection & Approval Summary</h2>
+          <div class="summary-box">
+            <p><strong>Smells forwarded:</strong> ${smellSummary.selected_count} of ${smellSummary.total_smells} (excluded: ${smellSummary.excluded_count})</p>
+            <p><strong>Plan steps approved:</strong> ${planSummary.approved_count || 0} of ${planSummary.total_steps || 0} (rejected: ${planSummary.rejected_count || 0})</p>
+            <p><strong>Files accepted for commit:</strong> ${(workflow?.accepted_files || []).length || 0}</p>
+          </div>
+
+          <h2>Accepted / Rejected Files</h2>
+          <div class="summary-box">
+            <div style="display:flex;gap:24px">
+              <div style="flex:1"><h3>Accepted</h3><ul>${acceptedFilesList}</ul></div>
+              <div style="flex:1"><h3>Rejected</h3><ul>${rejectedFilesList}</ul></div>
+            </div>
+          </div>
 
           <h2>Audit Trail Summary</h2>
           <table>
