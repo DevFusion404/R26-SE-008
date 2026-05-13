@@ -2,9 +2,60 @@ import { useEffect, useState } from "react";
 import { SCTVA_DATA } from "./data/diwoData";
 import { C } from "./diwoTheme.jsx";
 
-export default function TransformationApprovalPage({ onComplete }) {
+export default function TransformationApprovalPage({ onComplete, transformationData }) {
   const [progress, setProgress] = useState(0);
   const [stage, setStage] = useState(0);
+
+  // Use backend data if available, otherwise fall back to mock
+  const transformData = transformationData || {};
+  
+  const BEFORE_CODE_SAMPLE = `public class ECommerceSystem {
+    public static void main(String[] args) {
+        Customer customer = new Customer(1, "Pasan", "pasan@example.com");
+        Order order = new Order(1001, customer);
+        order.items.add(new OrderItem("Laptop", 2, 1200.00));
+        order.items.add(new OrderItem("Mouse", 1, 30.00));
+
+        OrderProcessor processor = new OrderProcessor();
+        double total = processor.calculateTotal(order, "CARD", true, "PROMO10", "EXPRESS");
+        System.out.println("Order Total: " + total);
+    }
+}`;
+
+  const AFTER_CODE_SAMPLE = `public class ECommerceSystem {
+    public static void main(String[] args) {
+        Customer customer = new Customer(1, "Pasan", "pasan@example.com", "premium", "Colombo");
+        Order order = new Order(1001, customer);
+        order.items.add(new OrderItem("Laptop", 2, 1200.00));
+        order.items.add(new OrderItem("Mouse", 1, 30.00));
+
+        OrderProcessorHelper processor = new OrderProcessorHelper();
+        OrderParams params = new OrderParams("CARD", true, "PROMO10", "EXPRESS");
+        double total = processor.extracted_calculateTotal(order, params);
+        System.out.println("Order Total: " + total);
+    }
+}`;
+
+  const buildDiffRows = (beforeCode, afterCode) => {
+    const beforeLines = String(beforeCode || "").split("\n");
+    const afterLines = String(afterCode || "").split("\n");
+    const max = Math.max(beforeLines.length, afterLines.length);
+    const rows = [];
+
+    for (let i = 0; i < max; i += 1) {
+      const b = beforeLines[i] ?? "";
+      const a = afterLines[i] ?? "";
+
+      if (b === a) {
+        rows.push({ key: `same-${i}`, kind: "same", lineNo: i + 1, text: a, marker: " " });
+      } else {
+        if (b !== "") rows.push({ key: `before-${i}`, kind: "before", lineNo: i + 1, text: b, marker: "-" });
+        if (a !== "") rows.push({ key: `after-${i}`, kind: "after", lineNo: i + 1, text: a, marker: "+" });
+      }
+    }
+
+    return rows;
+  };
 
   const stages = [
     { label: "Initializing Safe Transformation Agent", detail: "Loading SCTVA environment..." },
@@ -32,9 +83,37 @@ export default function TransformationApprovalPage({ onComplete }) {
 
   useEffect(() => {
     if (!done) return;
-    const timeout = setTimeout(onComplete, 800);
+    
+    // If backend data is available, use it; otherwise use mock data
+    if (transformData.refactored_code && transformData.diff_rows && transformData.files) {
+      const timeout = setTimeout(() => onComplete(transformData), 800);
+      return () => clearTimeout(timeout);
+    }
+    
+    // Fall back to mock data generation
+    const file1 = {
+      path: "src/ECommerceSystem.java",
+      before: BEFORE_CODE_SAMPLE,
+      after: AFTER_CODE_SAMPLE,
+      diff_rows: buildDiffRows(BEFORE_CODE_SAMPLE, AFTER_CODE_SAMPLE),
+    };
+    const BEFORE_2 = `class Helper {\n  void doThing() {\n    System.out.println("v1");\n  }\n}`;
+    const AFTER_2 = `class Helper {\n  void doThing() {\n    System.out.println("v2 - updated");\n  }\n}`;
+    const file2 = {
+      path: "src/utils/Helper.java",
+      before: BEFORE_2,
+      after: AFTER_2,
+      diff_rows: buildDiffRows(BEFORE_2, AFTER_2),
+    };
+
+    const payload = {
+      refactored_code: AFTER_CODE_SAMPLE,
+      diff_rows: buildDiffRows(BEFORE_CODE_SAMPLE, AFTER_CODE_SAMPLE),
+      files: [file1, file2],
+    };
+    const timeout = setTimeout(() => onComplete(payload), 800);
     return () => clearTimeout(timeout);
-  }, [done, onComplete]);
+  }, [done, onComplete, transformData]);
 
   const validations = [
     { key: "Syntax", val: SCTVA_DATA.confidence_components.syntax_component, done: progress > 35 },

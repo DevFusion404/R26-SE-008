@@ -2,11 +2,15 @@ import { useState } from "react";
 import { CUQA_DATA } from "./data/diwoData";
 import { C, Card, Badge, severityColor } from "./diwoTheme.jsx";
 
-export default function CodeSmellApprovalPage({ onProceed }) {
+const BASE = import.meta?.env?.VITE_API_URL || "http://localhost:5001/api";
+
+export default function CodeSmellApprovalPage({ onProceed, workflowId, reportData }) {
   const [selected, setSelected] = useState(new Set());
   const [filter, setFilter] = useState("all");
   const [search, setSearch] = useState("");
-  const filesWithSmells = CUQA_DATA.files.filter(f => f.code_smells.length > 0);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const sourceReport = reportData || CUQA_DATA;
+  const filesWithSmells = (sourceReport.files || []).filter(f => (f.code_smells || []).length > 0);
 
   const filtered = filesWithSmells.filter(f => {
     const matchSev = filter === "all" || f.code_smells.some(s => s.severity === filter);
@@ -25,17 +29,68 @@ export default function CodeSmellApprovalPage({ onProceed }) {
   const selectAll = () => setSelected(new Set(filtered.map(f => f.relative_path)));
   const clearAll = () => setSelected(new Set());
 
-  const selectedSmells = filesWithSmells.filter(f => selected.has(f.relative_path)).flatMap(f => f.code_smells);
+  const selectedFiles = Array.from(selected);
+  const selectedSmells = filesWithSmells
+    .filter(f => selected.has(f.relative_path))
+    .flatMap(f => (f.code_smells || []).map(smell => ({
+      file: f.relative_path,
+      type: smell.type,
+      line: smell.line,
+      severity: smell.severity,
+      message: smell.message,
+    })));
   const highCount = selectedSmells.filter(s => s.severity === "high").length;
+
+  const handleApproveSelection = async () => {
+    if (selected.size === 0 || isSubmitting) return;
+
+    if (!workflowId) {
+      onProceed?.({ selected_files: selectedFiles, selected_smells: selectedSmells });
+      return;
+    }
+
+    setIsSubmitting(true);
+    try {
+      const response = await fetch(`${BASE}/workflows/${workflowId}/smell-selection-pass`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          selected_files: selectedFiles,
+          selected_smells: selectedSmells,
+          feedback: { reason: "Selected in CodeSmellApprovalPage" },
+        }),
+      });
+
+      if (!response.ok) {
+        let message = `HTTP ${response.status}: ${response.statusText}`;
+        try {
+          const errorData = await response.json();
+          message = errorData.error || message;
+        } catch {
+          /* keep fallback message */
+        }
+        throw new Error(message);
+      }
+
+      const report = await response.json();
+      onProceed?.(report);
+    } catch (error) {
+      // eslint-disable-next-line no-console
+      console.error("Smell approval failed:", error);
+      alert(error.message);
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
 
   return (
     <div>
       <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 12, marginBottom: 24 }}>
         {[
-          { label: "Files Analyzed", val: CUQA_DATA.summary.files_analyzed, color: C.accent },
-          { label: "Total Smells", val: CUQA_DATA.summary.total_code_smells, color: C.warn },
-          { label: "High Severity", val: CUQA_DATA.summary.smell_severity.high, color: C.danger },
-          { label: "Avg Quality", val: `${CUQA_DATA.summary.average_quality_score}%`, color: C.accent },
+          { label: "Files Analyzed", val: sourceReport.summary?.files_analyzed || 0, color: C.accent },
+          { label: "Total Smells", val: sourceReport.summary?.total_code_smells || 0, color: C.warn },
+          { label: "High Severity", val: sourceReport.summary?.smell_severity?.high || 0, color: C.danger },
+          { label: "Avg Quality", val: `${sourceReport.summary?.average_quality_score || 0}%`, color: C.accent },
         ].map(({ label, val, color }) => (
           <Card key={label} style={{ textAlign: "center", padding: "16px" }}>
             <div style={{ fontSize: 28, fontWeight: 800, color, fontFamily: "monospace" }}>{val}</div>
@@ -64,7 +119,7 @@ export default function CodeSmellApprovalPage({ onProceed }) {
       <div style={{ display: "flex", flexDirection: "column", gap: 10, maxHeight: 420, overflowY: "auto", paddingRight: 4 }}>
         {filtered.map(f => {
           const isSelected = selected.has(f.relative_path);
-          const hasHigh = f.code_smells.some(s => s.severity === "high");
+          const hasHigh = (f.code_smells || []).some(s => s.severity === "high");
           return (
             <div key={f.relative_path} onClick={() => toggleFile(f.relative_path)} style={{
               background: isSelected ? `${C.accent}0d` : C.panel,
@@ -89,7 +144,7 @@ export default function CodeSmellApprovalPage({ onProceed }) {
                   <div style={{ display: "flex", gap: 16, marginTop: 6, flexWrap: "wrap" }}>
                     <span style={{ fontSize: 11, color: C.textMuted }}>{f.metrics.lines_of_code} LOC</span>
                     <span style={{ fontSize: 11, color: C.textMuted }}>{f.metrics.functions} functions</span>
-                    <span style={{ fontSize: 11, color: C.warn }}>{f.code_smells.length} smell{f.code_smells.length > 1 ? "s" : ""}</span>
+                    <span style={{ fontSize: 11, color: C.warn }}>{(f.code_smells || []).length} smell{(f.code_smells || []).length > 1 ? "s" : ""}</span>
                     <span style={{ fontSize: 11, color: f.quality_score >= 95 ? C.accent : C.warn }}>Quality: {f.quality_score}%</span>
                   </div>
                 </div>
@@ -97,7 +152,7 @@ export default function CodeSmellApprovalPage({ onProceed }) {
               {isSelected && (
                 <div style={{ marginTop: 12, paddingTop: 12, borderTop: `1px solid ${C.borderAcc}` }}>
                   <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
-                    {f.code_smells.map((smell, idx) => (
+                    {(f.code_smells || []).map((smell, idx) => (
                       <div key={idx} style={{ background: `${severityColor(smell.severity)}10`, border: `1px solid ${severityColor(smell.severity)}30`, borderRadius: 6, padding: "4px 10px", display: "flex", alignItems: "center", gap: 6 }}>
                         <div style={{ width: 6, height: 6, borderRadius: "50%", background: severityColor(smell.severity) }} />
                         <span style={{ fontSize: 11, color: C.textSub }}>{smell.type}</span>
@@ -124,12 +179,12 @@ export default function CodeSmellApprovalPage({ onProceed }) {
             <span style={{ fontSize: 13, color: C.textMuted }}>Select files with code smells to proceed to the Refactoring Plan Agent</span>
           )}
         </div>
-        <button onClick={() => selected.size > 0 && onProceed(selected)} disabled={selected.size === 0} style={{
+        <button onClick={handleApproveSelection} disabled={selected.size === 0 || isSubmitting} style={{
           padding: "10px 24px", borderRadius: 8, fontWeight: 700, fontSize: 13, cursor: selected.size > 0 ? "pointer" : "not-allowed",
           background: selected.size > 0 ? C.accent : C.border, color: selected.size > 0 ? "#000" : C.textMuted, border: "none",
           boxShadow: selected.size > 0 ? `0 0 20px ${C.accentGlow}` : "none", transition: "all 0.2s"
         }}>
-          Forward to Refactoring Plan Agent →
+          {isSubmitting ? "Generating report..." : "Approve Selected Smells →"}
         </button>
       </div>
     </div>
