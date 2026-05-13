@@ -33,6 +33,12 @@
   font-size: 24px;
 }
 
+.sctva-hero-icon img {
+  width: 34px;
+  height: 34px;
+  display: block;
+}
+
 .sctva-hero h1 {
   font-size: 34px;
   line-height: 1.1;
@@ -51,6 +57,7 @@
   display: flex;
   align-items: center;
   gap: 12px;
+  justify-content: flex-end;
 }
 
 .sctva-btn {
@@ -89,6 +96,13 @@
 .sctva-btn-danger {
   background: linear-gradient(135deg, #b91c1c, #7f1010);
   box-shadow: 0 12px 26px rgba(185, 28, 28, 0.2);
+}
+
+.sctva-btn-secondary {
+  background: rgba(59, 130, 246, 0.12);
+  color: #bfdbfe;
+  border: 1px solid rgba(96, 165, 250, 0.35);
+  box-shadow: none;
 }
 
 .sctva-card,
@@ -342,6 +356,11 @@
   box-shadow: 0 0 0 4px rgba(59, 130, 246, 0.16);
 }
 
+.sctva-timeline-item.failed .sctva-timeline-dot {
+  background: #ef4444;
+  box-shadow: 0 0 0 4px rgba(239, 68, 68, 0.16);
+}
+
 .sctva-timeline-item span {
   color: #60a5fa;
   font-size: 10px;
@@ -351,6 +370,10 @@
 
 .sctva-timeline-item.pending span {
   color: #475569;
+}
+
+.sctva-timeline-item.failed span {
+  color: #fca5a5;
 }
 
 .sctva-timeline-item strong {
@@ -364,6 +387,10 @@
   color: #475569;
 }
 
+.sctva-timeline-item.failed strong {
+  color: #fecaca;
+}
+
 .sctva-timeline-item p {
   margin-top: 4px;
   color: #91a0b8;
@@ -373,6 +400,10 @@
 
 .sctva-timeline-item.pending p {
   color: #3d4a5d;
+}
+
+.sctva-timeline-item.failed p {
+  color: #f8b4b4;
 }
 
 .sctva-code-card {
@@ -388,6 +419,59 @@
   padding: 0 16px;
   border-bottom: 1px solid rgba(110, 139, 180, 0.14);
   background: rgba(8, 17, 31, 0.6);
+}
+
+.sctva-file-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 10px 16px;
+  border-bottom: 1px solid rgba(110, 139, 180, 0.12);
+  background: rgba(6, 12, 22, 0.6);
+}
+
+.sctva-file-tab {
+  border: 1px solid rgba(110, 139, 180, 0.2);
+  background: rgba(8, 17, 31, 0.65);
+  color: #cbd5e1;
+  border-radius: 999px;
+  padding: 6px 12px;
+  font-size: 11px;
+  font-weight: 700;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  transition: 0.2s ease;
+}
+
+.sctva-file-tab:hover {
+  border-color: rgba(96, 165, 250, 0.5);
+  color: #e2e8f0;
+}
+
+.sctva-file-tab.active {
+  border-color: rgba(96, 165, 250, 0.7);
+  color: #dbeafe;
+  box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.15);
+}
+
+.sctva-file-tab.pass {
+  border-color: rgba(34, 197, 94, 0.4);
+  color: #bbf7d0;
+}
+
+.sctva-file-tab.fail {
+  border-color: rgba(239, 68, 68, 0.45);
+  color: #fecaca;
+}
+
+.sctva-file-tab em {
+  font-style: normal;
+  font-size: 9px;
+  letter-spacing: 0.03em;
+  color: #fca5a5;
+  text-transform: uppercase;
 }
 
 .sctva-chip {
@@ -509,8 +593,8 @@
 }
 
 .sctva-check-item.pass .sctva-check-icon {
-  background: rgba(34, 197, 94, 0.18);
-  color: #4ade80;
+  background: rgb(44, 114, 70);
+  color: #89efae;
 }
 
 .sctva-check-item.fail .sctva-check-icon {

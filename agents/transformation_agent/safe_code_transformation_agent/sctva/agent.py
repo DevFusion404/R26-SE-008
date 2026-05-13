@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict
+from typing import Any, Dict, List
 
-from .contracts import ContractValidationError, SCTVARequestContract
+from .contracts import ContractValidationError, SCTVARequestContract, SourceFileContract
 from .models import SCTVAResult
 from .reporting.safety_reporter import SafetyReporter
 from .rollback.rollback_manager import RollbackManager
@@ -36,29 +36,83 @@ class SafeCodeTransformationValidationAgent:
 
     def execute_request(self, request: SCTVARequestContract) -> Dict[str, Any]:
         """Execute validated request contract."""
+        file_entries = self._collect_source_files(request)
+
+        file_results: List[Dict[str, Any]] = []
+        for file_entry in file_entries:
+            file_result = self._execute_single_file(
+                request=request,
+                file_entry=file_entry,
+            )
+            file_results.append(file_result)
+
+        if not file_results:
+            raise ContractValidationError("No source files were provided for execution.")
+
+        if len(file_results) == 1:
+            return file_results[0]
+
+        language_summary = self._summarize_languages(file_results)
+        success = all(result.get("success") for result in file_results)
+        rollback_occurred = any(result.get("rollback_occurred") for result in file_results)
+        confidence_scores = [
+            result.get("confidence_score")
+            for result in file_results
+            if isinstance(result.get("confidence_score"), (int, float))
+        ]
+        avg_confidence = sum(confidence_scores) / len(confidence_scores) if confidence_scores else 0.0
+
+        return {
+            "request_id": request.request_id,
+            "language": language_summary,
+            "success": success,
+            "rollback_occurred": rollback_occurred,
+            "confidence_score": round(max(0.0, min(1.0, avg_confidence)), 4),
+            "file_results": file_results,
+        }
+
+    def _collect_source_files(self, request: SCTVARequestContract) -> List[SourceFileContract]:
+        if request.source_files:
+            return request.source_files
+        return [
+            SourceFileContract(
+                file_name="source_code",
+                source_code=request.source_code,
+                language=request.language,
+            )
+        ]
+
+    def _execute_single_file(
+        self,
+        *,
+        request: SCTVARequestContract,
+        file_entry: SourceFileContract,
+    ) -> Dict[str, Any]:
+        language = (file_entry.language or request.language).strip().lower()
+
         transformed_code, transformation_log, transform_warnings = self.transformer.apply_actions(
-            language=request.language,
-            source_code=request.source_code,
+            language=language,
+            source_code=file_entry.source_code,
             actions=request.refactoring_plan.actions,
             strict_mode=request.execution_options.strict_mode,
         )
 
         syntax_step = self.syntax_validator.validate(
-            language=request.language,
+            language=language,
             source_code=transformed_code,
             require_compilation=request.execution_options.require_compilation,
             timeout_seconds=request.execution_options.timeout_seconds,
         )
 
         structural_step = self.structural_validator.validate(
-            language=request.language,
-            original_code=request.source_code,
+            language=language,
+            original_code=file_entry.source_code,
             transformed_code=transformed_code,
         )
 
         behavioral_step = self.behavioral_validator.validate(
-            language=request.language,
-            original_code=request.source_code,
+            language=language,
+            original_code=file_entry.source_code,
             transformed_code=transformed_code,
             behavior_tests=request.refactoring_plan.behavior_tests,
             enable_behavior_tests=request.execution_options.enable_behavior_tests,
@@ -67,7 +121,7 @@ class SafeCodeTransformationValidationAgent:
         )
 
         invariant_step = self.invariant_miner.mine(
-            language=request.language,
+            language=language,
             behavioral_step=behavioral_step,
             actions=request.refactoring_plan.actions,
             strict_mode=request.execution_options.strict_mode,
@@ -78,7 +132,7 @@ class SafeCodeTransformationValidationAgent:
             rollback_on_behavior_failure=request.execution_options.rollback_on_behavior_failure,
         )
 
-        final_code = request.source_code if rollback_occurred else transformed_code
+        final_code = file_entry.source_code if rollback_occurred else transformed_code
 
         confidence_score, confidence_details = self.scorer.score(
             syntax=syntax_step,
@@ -111,7 +165,7 @@ class SafeCodeTransformationValidationAgent:
 
         result = SCTVAResult(
             request_id=request.request_id,
-            language=request.language,
+            language=language,
             success=success,
             rollback_occurred=rollback_occurred,
             confidence_score=confidence_score,
@@ -123,8 +177,22 @@ class SafeCodeTransformationValidationAgent:
             safety_report=safety_report,
         ).to_dict()
 
+        result["file_name"] = file_entry.file_name
         result["confidence_components"] = confidence_details
         return result
+
+    @staticmethod
+    def _summarize_languages(file_results: List[Dict[str, Any]]) -> str:
+        languages = {
+            str(result.get("language", "")).strip().lower()
+            for result in file_results
+            if result.get("language")
+        }
+        if not languages:
+            return "unknown"
+        if len(languages) == 1:
+            return next(iter(languages))
+        return "mixed"
 
 
 __all__ = ["SafeCodeTransformationValidationAgent", "ContractValidationError"]

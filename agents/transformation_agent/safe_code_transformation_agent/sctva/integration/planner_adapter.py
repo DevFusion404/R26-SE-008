@@ -376,6 +376,45 @@ class PlannerAdapter:
                 },
             }
 
+        elif ref_key == "introduce constant":
+            literal_value = params.get("literal_value") if "literal_value" in params else None
+            literal_values = params.get("literal_values") if isinstance(params.get("literal_values"), list) else None
+            hint = params.get("hint")
+
+            if literal_value is None and not literal_values and not hint:
+                raise PlannerAdapterError(
+                    "introduce constant mapping requires literal_value, literal_values, or hint"
+                )
+
+            action = {
+                "action_type": "introduce_constant",
+                "parameters": {
+                    "literal_value": literal_value,
+                    "literal_values": literal_values,
+                    "constant_name": params.get("constant_name", "EXTRACTED_CONSTANT"),
+                    "hint": hint,
+                    "source_file": params.get("source_file"),
+                    "source_line": params.get("source_line"),
+                    "target_class": target.get("class") or params.get("source_class"),
+                    "target_method": target.get("method") or params.get("method"),
+                },
+            }
+
+        elif ref_key == "remove dead code":
+            method = params.get("method") or target.get("method")
+            if not method:
+                raise PlannerAdapterError(
+                    "remove dead code mapping requires parameters.method or target.method"
+                )
+
+            action = {
+                "action_type": "remove_dead_code",
+                "parameters": {
+                    "method": str(method),
+                    "class_name": target.get("class") or params.get("source_class"),
+                },
+            }
+
         elif ref_key in {
             "replace literal",
             "replace temp with query",

@@ -198,16 +198,22 @@ class PlanGenerator:
             val = location.get(key, "")
             return val if val and val != "unknown" else fallback
 
+        # Add source_file to all refactoring types (always include filename for traceability)
+        source_file = location.get("file", "")
+        if source_file and source_file != "unknown":
+            params["source_file"] = source_file
+
         if name == "Extract Method":
             lines = location.get("lines", [])
             if isinstance(lines, list) and len(lines) == 2:
                 params["source_lines"] = lines
+            elif isinstance(lines, list) and len(lines) >= 1:
+                params["source_line"] = lines[0]
             method = _loc("method")
             params["new_method_name"] = f"extracted_{method}" if method else "extracted_block"
 
         elif name == "Introduce Constant":
             # Pull the magic number value from details if available
-            params["source_file"] = location.get("file", "")
             params["source_line"] = location.get("lines", [None])[0]
             if smell.details:
                 params["hint"] = smell.details

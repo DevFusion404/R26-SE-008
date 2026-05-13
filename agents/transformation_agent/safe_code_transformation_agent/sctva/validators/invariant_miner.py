@@ -114,6 +114,7 @@ class InvariantMiner:
                         "original_fingerprint": item.get("original_fingerprint"),
                         "transformed_fingerprint": item.get("transformed_fingerprint"),
                         "comparison": item.get("comparison") or {},
+                        "mode": item.get("mode") or "",
                     }
                 )
 
@@ -122,7 +123,48 @@ class InvariantMiner:
                 "No Python paired fingerprints were available for invariant mining."
             )
 
+        if any(pair.get("mode") == "static_python_fingerprint" for pair in pairs):
+            return self._mine_static_python(pairs)
+
         return self._mine_from_pairs(pairs, language_label="Python")
+
+    def _mine_static_python(self, pairs: List[Dict[str, Any]]) -> Dict[str, Any]:
+        invariants: List[Dict[str, Any]] = []
+        preserved: List[Dict[str, Any]] = []
+        violations: List[Dict[str, Any]] = []
+
+        for pair in pairs:
+            comparison = pair.get("comparison") or {}
+            matched = bool(comparison.get("matched", True))
+            reason = comparison.get("reason") or "static_fingerprint_match"
+
+            self._append(
+                invariants,
+                preserved,
+                violations,
+                name=f"static_fingerprint::{pair.get('name', 'python_case')}",
+                ok=matched,
+                critical=True,
+                reason=reason,
+                original=pair.get("original_fingerprint"),
+                transformed=pair.get("transformed_fingerprint"),
+            )
+
+        summary = (
+            "Python static invariants preserved."
+            if not violations
+            else f"Python static invariant violations detected: {len(violations)}."
+        )
+
+        return self._finalize(
+            mode="static",
+            message=summary,
+            original_summary={"mode": "static_python_fingerprint"},
+            transformed_summary={"mode": "static_python_fingerprint"},
+            invariants=invariants,
+            preserved=preserved,
+            violations=violations,
+        )
 
     def _mine_java(self, details: Dict[str, Any]) -> Dict[str, Any]:
         pairs: List[Dict[str, Any]] = []
