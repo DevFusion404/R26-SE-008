@@ -8,7 +8,7 @@
 
 import { useState, useEffect } from 'react';
 
-const API = 'http://localhost:8001';
+const API = 'http://localhost:8080';
 
 const LANG_ICON = { python: '🐍', java: '☕', directory: '📁', file: '📄' };
 

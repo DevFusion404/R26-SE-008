@@ -10,17 +10,24 @@
 
 import { useState, useEffect, useRef } from 'react';
 
-const API = 'http://localhost:8001';
+const API = 'http://localhost:8080';
 
 // ── Node colours by type ───────────────────────────────────────────────────
 const NODE_COLOR = {
+  // Java
   CompilationUnit:'#00d4e8', ClassDeclaration:'#00d4e8', ClassOrInterfaceDeclaration:'#00d4e8',
   MethodDeclaration:'#8b5cf6', ConstructorDeclaration:'#8b5cf6',
-  FieldDeclaration:'#3b82f6',  ImportDeclaration:'#374151',
+  FieldDeclaration:'#3b82f6', ImportDeclaration:'#374151',
   PackageDeclaration:'#374151', Parameter:'#22c55e',
+  // Python
   Module:'#00d4e8', FunctionDef:'#8b5cf6', AsyncFunctionDef:'#8b5cf6',
   ClassDef:'#00d4e8', Import:'#374151', ImportFrom:'#374151',
   Assign:'#3b82f6', Return:'#ef4444', If:'#f59e0b', For:'#f59e0b',
+  // C
+  TranslationUnit:'#00d4e8', FunctionDefinition:'#8b5cf6',
+  IncludeDirective:'#374151', declaration:'#3b82f6',
+  function_declarator:'#a855f7', pointer_declarator:'#a855f7',
+  identifier:'#22c55e', preproc_include:'#374151',
 };
 const getColor = t => NODE_COLOR[t] || '#1e3a4f';
 
@@ -135,12 +142,23 @@ function ASTGraph({ ast }) {
   );
 }
 
+// ── Language icon helper ────────────────────────────────────────────────────
+function langIcon(language, filename) {
+  if (language === 'python') return '🐍';
+  if (language === 'java')   return '☕';
+  if (language === 'c') {
+    const ext = filename?.split('.').pop()?.toLowerCase();
+    return ext === 'h' ? '🔩' : '⚙️';
+  }
+  return '📄';
+}
+
 // ── File Tree node ─────────────────────────────────────────────────────────
 function TreeNode({ node, depth = 0, onSelect, selected }) {
   const [open, setOpen] = useState(depth < 2);
   const isDir  = node.type === 'directory';
   const isSel  = node.path === selected;
-  const icon   = isDir ? (open ? '📂' : '📁') : node.language === 'python' ? '🐍' : node.language === 'java' ? '☕' : '📄';
+  const icon   = isDir ? (open ? '📂' : '📁') : langIcon(node.language, node.name);
 
   return (
     <div>
@@ -239,6 +257,8 @@ function FilesWithSmells({ report, filter = 'all' }) {
     ? filesData.filter(f => f.language === 'python')
     : filter === 'java'
     ? filesData.filter(f => f.language === 'java')
+    : filter === 'c'
+    ? filesData.filter(f => f.language === 'c')
     : filesData;
 
   return (
@@ -259,7 +279,7 @@ function FilesWithSmells({ report, filter = 'all' }) {
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'start', marginBottom: 12 }}>
                 <div>
                   <div style={{ fontWeight: 600, fontSize: 13, color: 'var(--text-primary)' }}>
-                    {file.language === 'python' ? '🐍' : '☕'} {file.name}
+                    {langIcon(file.language, file.name)} {file.name}
                   </div>
                   <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }}>
                     {file.metrics.lines_of_code || '?'} LOC · {file.metrics.functions || 0} methods
@@ -487,7 +507,7 @@ export default function CUQAAgentPage({ repoLoaded, repoMeta, onSendToRdp }) {
             {!selFile && !loadingAst && (
               <div className="empty-state">
                 <span className="empty-icon">🌲</span>
-                <p>Click a .py or .java file in the explorer to visualise its AST.</p>
+                <p>Click a <code>.py</code>, <code>.java</code>, <code>.c</code>, or <code>.h</code> file in the explorer to visualise its AST.</p>
               </div>
             )}
             {ast && !loadingAst && !rawJson && <ASTGraph ast={ast} />}
@@ -515,13 +535,19 @@ export default function CUQAAgentPage({ repoLoaded, repoMeta, onSendToRdp }) {
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
           <h3 style={{ margin: 0, fontSize: 14, fontWeight: 600 }}>📁 Affected Files ({filesWithSmells.length})</h3>
           <div style={{ display: 'flex', gap: 8 }}>
-            {['all', 'critical', 'python', 'java'].map(f => (
+            {[
+              { id: 'all',      label: 'All Files' },
+              { id: 'critical', label: '🔴 Critical' },
+              { id: 'python',   label: '🐍 Python' },
+              { id: 'java',     label: '☕ Java' },
+              { id: 'c',        label: '⚙️ C' },
+            ].map(({ id, label }) => (
               <button
-                key={f}
-                className={`btn btn-sm ${smellFilter === f ? 'btn-primary' : 'btn-ghost'}`}
-                onClick={() => setSmellFilter(f)}
+                key={id}
+                className={`btn btn-sm ${smellFilter === id ? 'btn-primary' : 'btn-ghost'}`}
+                onClick={() => setSmellFilter(id)}
               >
-                {f === 'all' ? 'All Files' : f === 'critical' ? '🔴 Critical' : f === 'python' ? '🐍 Python' : '☕ Java'}
+                {label}
               </button>
             ))}
           </div>

@@ -8,7 +8,7 @@
 
 import { useState, useRef } from 'react';
 
-const API = 'http://localhost:8001';
+const API = 'http://localhost:8080';
 
 export default function UploadPanel({ onLoaded }) {
   const [mode, setMode] = useState('zip');   // 'zip' | 'github'

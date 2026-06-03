@@ -13,6 +13,22 @@ requests==2.32.3
 # ── Java AST Parsing ─────────────────────────────────────────
 javalang==0.13.0
 
+# ── C AST Parsing (OPTIONAL) ─────────────────────────────────
+# Preferred: install ONE of the following options.
+#
+# Option A — tree-sitter-language-pack (easiest, bundles many grammars):
+#   pip install tree-sitter-language-pack
+#
+# Option B — tree-sitter + tree-sitter-c individually:
+#   pip install tree-sitter tree-sitter-c
+#
+# If neither is installed the C parser automatically falls back to a
+# built-in regex implementation — no crash, reduced AST detail.
+#
+# Uncomment the line below to pin Option B in this project:
+# tree-sitter>=0.21.0
+# tree-sitter-c>=0.21.0
+
 # ── Static Analysis (Python code smells) ─────────────────────
 pyflakes==3.2.0
 

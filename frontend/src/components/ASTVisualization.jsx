@@ -9,7 +9,7 @@
 
 import { useState, useEffect } from 'react';
 
-const API = 'http://localhost:8001';
+const API = 'http://localhost:8080';
 
 // ── Colour mapping per node type ────────────────────────────────────────────
 

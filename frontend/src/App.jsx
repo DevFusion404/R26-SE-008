@@ -17,7 +17,7 @@ import Reports         from './pages/Reports.jsx';
 import Evaluation      from './pages/Evaluation.jsx';
 import Settings        from './pages/Settings.jsx';
 
-const API = 'http://localhost:8001';
+const API = 'http://localhost:8080';
 
 // ── Sidebar navigation definition ─────────────────────────────────────────
 const NAV_MAIN = [
