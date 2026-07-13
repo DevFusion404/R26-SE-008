@@ -69,6 +69,18 @@ def init_db(app):
             timestamp           TEXT NOT NULL
         );
         """)
+
+        # Lightweight schema migration for older prototype databases.
+        # Keep this idempotent so startup is safe across restarts.
+        existing_cols = {
+            row[1]
+            for row in conn.execute("PRAGMA table_info(workflows)").fetchall()
+        }
+        if "updated_smells_json" not in existing_cols:
+            conn.execute("ALTER TABLE workflows ADD COLUMN updated_smells_json TEXT")
+        if "planning_input_json" not in existing_cols:
+            conn.execute("ALTER TABLE workflows ADD COLUMN planning_input_json TEXT")
+
     print("[DIWO] Database initialized.")
 
 
