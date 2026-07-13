@@ -45,31 +45,53 @@ logger = logging.getLogger("rdp_agent.ml_scorer")
 # Reference texts used to build quality / risk direction vectors
 # ---------------------------------------------------------------------------
 
-# These short descriptions anchor the embedding space so we can project
-# candidate embeddings onto meaningful axes.  They are intentionally
-# simple — the cosine direction between them captures the semantic
-# gradient "low quality → high quality" and "low risk → high risk".
+# These domain-specific descriptions anchor the embedding space with concrete
+# refactoring examples, metrics, and code patterns. They capture real-world
+# scenarios (complexity levels, class sizes, parameter counts, coupling values)
+# so CodeBERT can discriminate between high-quality, low-risk refactorings and
+# poor, dangerous ones. The semantic direction between high/low pairs defines
+# the quality and risk axes for candidate evaluation.
+#
+# These are intentionally detailed with concrete metrics and examples so that
+# embeddings project meaningfully onto the quality and risk dimensions.
 
 _HIGH_QUALITY_REF = (
-    "Excellent refactoring that significantly improves code readability, "
-    "reduces complexity, increases cohesion, and follows SOLID principles. "
-    "Clean code with low coupling and high maintainability."
+    "Extract Method refactoring that breaks a long 150-line function with "
+    "cyclomatic complexity 18 into smaller, focused methods with complexity 3-5 each. "
+    "Reduces LOC per method from 150 to 30-50, improves testability, single responsibility. "
+    "Extract Class for 25-method God Class into 2-3 cohesive classes with 8-10 methods each. "
+    "Eliminate duplicate code blocks via Extract Method. Reduce parameter count from 8+ to 3-4. "
+    "Replace long conditional chains with polymorphism. Introduce Parameter Object for data clumps. "
+    "Move Method from Feature Envy class to proper owner. Hide Delegate to reduce coupling from 12 to 5. "
+    "Result: cyclomatic complexity reduced 40%, maintainability score +30%, coupling -50%."
 )
 _LOW_QUALITY_REF = (
-    "Poor refactoring that increases complexity, introduces code duplication, "
-    "violates single responsibility, and makes maintenance harder. "
-    "Tangled dependencies with low cohesion."
+    "Inline code with high duplication, creating 500+ line megamethods. "
+    "Merge classes causing 40+ method God Class with cyclomatic complexity 25+. "
+    "Add more parameters to methods already having 10+ parameters. "
+    "Deep nesting (5+ levels) and hard-coded magic numbers (99, -1, 256) throughout. "
+    "Circular dependencies between 15+ classes. No abstraction layers. "
+    "Copy-paste code in 20+ locations. Single class doing validation, persistence, and business logic. "
+    "Result: code duplication 60%, coupling 20+, cyclomatic complexity 30+, maintainability score -40%."
 )
 
 _HIGH_RISK_REF = (
-    "Dangerous refactoring with high chance of introducing regressions, "
-    "breaking existing tests, causing runtime errors, and changing "
-    "observable behavior. Complex transformation with many side effects."
+    "Inline a class used in 50+ places without updating all call sites. "
+    "Extract Subclass with complex inheritance chains affecting 8 classes. "
+    "Move Method from class A to B when A has 200+ dependencies. "
+    "Replace Conditional with Polymorphism in high-frequency code path (10k+ calls/sec). "
+    "Collapse Hierarchy with non-trivial method overrides in 12+ child classes. "
+    "Refactoring touches core data model, persistence layer, and API contract. "
+    "No comprehensive test coverage (< 30%). High coupling (15+). Complex side effects."
 )
 _LOW_RISK_REF = (
-    "Safe refactoring with minimal chance of introducing regressions. "
-    "Preserves all existing behavior, simple mechanical transformation, "
-    "well supported by automated tools."
+    "Rename Method with no external callers (private, 0 usages outside class). "
+    "Extract Method from single-caller function with clear boundaries. "
+    "Remove Dead Code that is never executed (dead branch, unreachable method). "
+    "Introduce Constant by replacing magic number 99 in a single location. "
+    "Pull Up Method into interface shared by 2 classes with identical implementation. "
+    "Hide Delegate with 1:1 forwarding method, no semantic change. "
+    "Refactoring is local (< 5 methods affected), high test coverage (> 80%), low coupling (< 3)."
 )
 
 
