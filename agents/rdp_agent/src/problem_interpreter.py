@@ -121,8 +121,8 @@ class ProblemInterpreter:
             ext = metrics.get("external_field_accesses", None)
             if ext is not None:
                 return ext >= 2
-            # Feature Envy smell itself implies this
-            return smell.type == "Feature Envy" or True
+            # Feature Envy smell itself implies external access, but don't force it for others
+            return smell.type == "Feature Envy"
 
         # --- has_parent_class ---
         if precondition == "has_parent_class":
