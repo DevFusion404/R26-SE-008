@@ -27,9 +27,12 @@ export default function RDPAgentPage({ repoLoaded, repoMeta, preloadedReport, on
   useEffect(() => {
     if (preloadedReport) {
       setCuqaBannerVisible(true);
-      handleGeneratePlan(preloadedReport, null);
+      handleGeneratePlan(preloadedReport, null).finally(() => {
+        // Clear the preloaded report after processing
+        onClearPreloaded?.();
+      });
     }
-  }, [preloadedReport]);
+  }, [preloadedReport, onClearPreloaded]);
 
   /**
    * Handle file selection from upload

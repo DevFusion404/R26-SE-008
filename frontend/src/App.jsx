@@ -103,6 +103,10 @@ export default function App() {
     setPage('rdp');
   }
 
+  function handleClearPreloaded() {
+    setCuqaReport(null);
+  }
+
   function navigate(id) {
     setPage(id);
   }
@@ -113,8 +117,8 @@ export default function App() {
       case 'overview':    return <Overview onNavigate={navigate} />;
       case 'dashboard':   return <Dashboard />;
       case 'repository':  return <RepositoryInput onLoaded={handleRepoLoaded} />;
-      case 'cuqa':        return <CUQAAgentPage repoLoaded={repoLoaded} repoMeta={repoMeta} />;
-      case 'rdp':         return <RDPAgentPage repoLoaded={repoLoaded} repoMeta={repoMeta} />;
+      case 'cuqa':        return <CUQAAgentPage repoLoaded={repoLoaded} repoMeta={repoMeta} onSendToRdp={handleSendToRdp} />;
+      case 'rdp':         return <RDPAgentPage repoLoaded={repoLoaded} repoMeta={repoMeta} preloadedReport={cuqaReport} onClearPreloaded={handleClearPreloaded} />;
       case 'transform':   return <SCTVAAgentPage />;
       case 'orchestrate': return <DIWOAgentPage />;
       case 'reports':     return <Reports />;
