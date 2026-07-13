@@ -59,10 +59,21 @@ class CodeSmell:
         Returns:
             A new ``CodeSmell`` instance.
         """
+        # Ensure location dict has required fields
+        location = data.get("location", {})
+        if not isinstance(location, dict):
+            location = {}
+        
+        # Set defaults for missing location fields
+        location.setdefault("file", "unknown")
+        location.setdefault("class", "unknown")
+        location.setdefault("method", "unknown")
+        location.setdefault("lines", [])
+        
         return cls(
             id=data["id"],
             type=data["type"],
-            location=data["location"],
+            location=location,
             metrics=data.get("metrics", {}),
             severity=data.get("severity", "medium"),
             details=data.get("details"),
