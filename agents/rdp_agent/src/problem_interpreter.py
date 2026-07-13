@@ -105,7 +105,15 @@ class ProblemInterpreter:
             param_count = metrics.get("parameter_count", None)
             if param_count is not None:
                 return param_count >= 3
-            return True  # cannot evaluate → assume OK
+            # Strict mode: fail conservatively when data is missing.
+            # Avoids selecting "Introduce Parameter Object" for 1-param methods.
+            logger.warning(
+                "Cannot evaluate has_multiple_parameters for smell %s (%s): "
+                "parameter_count missing. Assuming FAILED (conservative).",
+                smell.id,
+                smell.type,
+            )
+            return False
 
         # --- has_multiple_responsibilities ---
         # Heuristic: high method count or high LOC indicates this
@@ -114,7 +122,26 @@ class ProblemInterpreter:
             loc = metrics.get("lines_of_code", 0)
             if method_count is not None:
                 return method_count >= 5
-            return loc > 50
+            # Strict fallback: require a much higher LOC threshold (>100) when
+            # method_count is absent. loc>50 was too permissive — a 1-method,
+            # 51-LOC class incorrectly passed. Log so the missing data is visible.
+            if loc > 100:
+                logger.debug(
+                    "Inferring multiple responsibilities from LOC=%d "
+                    "(method_count missing) for smell %s.",
+                    loc,
+                    smell.id,
+                )
+                return True
+            logger.warning(
+                "Cannot confidently evaluate has_multiple_responsibilities for "
+                "smell %s (%s): method_count missing and LOC=%d is below threshold. "
+                "Assuming FAILED (conservative).",
+                smell.id,
+                smell.type,
+                loc,
+            )
+            return False
 
         # --- has_external_field_access ---
         if precondition == "has_external_field_access":
@@ -145,7 +172,18 @@ class ProblemInterpreter:
 
         # --- has_primitive_fields ---
         if precondition == "has_primitive_fields":
-            return bool(metrics.get("primitive_field_count", 0) >= 2) or True
+            primitive_count = metrics.get("primitive_field_count", None)
+            if primitive_count is not None:
+                return primitive_count >= 2
+            # Strict mode: the `or True` that was here was a bug — same pattern
+            # as has_external_field_access. Fail conservatively when data absent.
+            logger.warning(
+                "Cannot evaluate has_primitive_fields for smell %s (%s): "
+                "primitive_field_count missing. Assuming FAILED (conservative).",
+                smell.id,
+                smell.type,
+            )
+            return False
 
         # --- has_computable_parameter ---
         if precondition == "has_computable_parameter":
@@ -167,7 +205,14 @@ class ProblemInterpreter:
             coupling = metrics.get("coupling", None)
             if coupling is not None:
                 return coupling >= 3
-            return True  # cannot evaluate → assume OK
+            # Strict mode: fail conservatively when coupling data is missing.
+            logger.warning(
+                "Cannot evaluate has_multiple_dependencies for smell %s (%s): "
+                "coupling missing. Assuming FAILED (conservative).",
+                smell.id,
+                smell.type,
+            )
+            return False
 
         # Unknown precondition → pass by default
         logger.warning(
