@@ -207,8 +207,8 @@ export default function RepositoryInput({ onLoaded }) {
       <div>
         <h1 className="page-title">Repository Input</h1>
         <p className="page-subtitle">
-          Connect your codebase for agentic refactoring. R26-SE-008 analyses architectural
-          patterns and applies deep-tech transformations.
+          Connect your codebase for agentic refactoring. <strong style={{ color: 'var(--accent)' }}>RefactorIQ</strong> analyses architectural
+          patterns and applies deep-tech transformations across Java, Python, and C.
         </p>
       </div>
 

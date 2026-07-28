@@ -133,7 +133,8 @@ export default function App() {
       {/* ── Top Bar ─────────────────────────────────────────── */}
       <header className="topbar">
         <span className="topbar-brand">
-          Agentic Intelligent Code Refactoring Assistant (R26-SE-008)
+          <span style={{ color: 'var(--accent)', fontWeight: 800 }}>RefactorIQ</span>
+          <span style={{ color: 'var(--text-muted)', fontWeight: 400, fontSize: 11, marginLeft: 6 }}>R26-SE-008</span>
         </span>
 
         <div className="topbar-search">
@@ -169,8 +170,8 @@ export default function App() {
       {/* ── Sidebar ─────────────────────────────────────────── */}
       <aside className="sidebar">
         <div className="sidebar-brand">
-          <div className="sidebar-brand-name">R26-SE-008</div>
-          <div className="sidebar-brand-sub">Deep-Tech Research</div>
+          <div className="sidebar-brand-name" style={{ color: 'var(--accent)' }}>RefactorIQ</div>
+          <div className="sidebar-brand-sub">R26-SE-008 · Research Prototype</div>
         </div>
 
         <nav className="sidebar-nav">
