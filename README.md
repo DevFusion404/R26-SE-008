@@ -33,8 +33,8 @@ cd agents/cuqa_agent/src
 python main.py
 ```
 
-The FastAPI server starts at **http://localhost:8001**  
-Interactive API docs: **http://localhost:8001/docs**
+The FastAPI server starts at **http://localhost:8080**  
+Interactive API docs: **http://localhost:8080/docs**
 
 ### 3. Start the frontend dashboard
 
@@ -171,7 +171,7 @@ The report includes:
 
 ## API Reference
 
-Base URL: `http://localhost:8001`
+Base URL: `http://localhost:8080`
 
 ### `POST /api/upload-zip`
 Upload a ZIP file.

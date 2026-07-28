@@ -4,9 +4,12 @@ report_generator.py
 Generates the CUQA Quality Report JSON for a parsed codebase.
 Produces code smell detection, complexity metrics, and a structured
 report suitable for downstream consumption by the RDP Agent.
+
+Supported languages: Python, Java, C (.c / .h)
 """
 
 import os
+import re
 import ast as pyast
 from typing import Any
 
@@ -15,6 +18,23 @@ try:
     JAVALANG_AVAILABLE = True
 except ImportError:
     JAVALANG_AVAILABLE = False
+
+# Import shared regex helpers from c_ast_parser (no duplication)
+try:
+    from c_ast_parser import (
+        _find_functions_regex,
+        _find_global_vars_regex,
+        _strip_comments,
+        _strip_string_literals,
+        _INCLUDE_RE,
+        _UNSAFE_CALL_RE,
+        _NUMERIC_LIT_RE,
+        _max_nesting_depth,
+        _estimate_cyclomatic,
+    )
+    _C_HELPERS_AVAILABLE = True
+except ImportError:
+    _C_HELPERS_AVAILABLE = False
 
 
 # ---------------------------------------------------------------------------
@@ -209,6 +229,161 @@ def _java_metrics(source: str, filename: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# C metrics and smell detection
+# ---------------------------------------------------------------------------
+
+def _c_metrics(source: str, filename: str) -> dict:
+    """Compute C-specific metrics that extend the base CUQA schema."""
+    lines = source.splitlines()
+    loc = len(lines)
+    blank = sum(1 for ln in lines if not ln.strip())
+
+    # Comment lines: single-line (//) and lines inside /* */ blocks
+    clean_no_ml = re.sub(r"/\*.*?\*/", lambda m: "\n" * m.group(0).count("\n"), source, flags=re.DOTALL)
+    comment = sum(
+        1 for ln in clean_no_ml.splitlines()
+        if ln.strip().startswith("//") or ln.strip().startswith("*")
+    )
+    # Count lines that were inside /* */ (replaced with newlines above)
+    ml_comment_lines = sum(
+        m.group(0).count("\n") for m in re.finditer(r"/\*.*?\*/", source, re.DOTALL)
+    )
+    comment = comment + ml_comment_lines
+
+    functions = 0
+    include_count = 0
+    global_vars = 0
+    estimated_cyclomatic = 0
+
+    if _C_HELPERS_AVAILABLE:
+        funcs = _find_functions_regex(source)
+        functions = len(funcs)
+        include_count = len(_INCLUDE_RE.findall(_strip_comments(source)))
+        global_vars = len(_find_global_vars_regex(source))
+        estimated_cyclomatic = _estimate_cyclomatic(source)
+    else:
+        # Basic fallback without helpers
+        functions = len(re.findall(r"^\w[\w\s\*]+\w\s*\([^)]*\)\s*\{", source, re.MULTILINE))
+        include_count = len(re.findall(r"^\s*#include", source, re.MULTILINE))
+
+    return {
+        "filename": filename,
+        "lines_of_code": loc,
+        "blank_lines": blank,
+        "comment_lines": min(comment, loc),  # cap at total lines
+        "functions": functions,
+        "classes": 0,  # C has no classes
+        # C-specific extras (RDP-compatible: optional fields)
+        "include_count": include_count,
+        "global_variables": global_vars,
+        "estimated_cyclomatic_complexity": estimated_cyclomatic,
+    }
+
+
+def _analyze_c_smells(source: str, filename: str) -> list[dict]:
+    """
+    Detect C code smells using regex heuristics.
+
+    Rules:
+      1. LongFunction         - function body > 40 lines            [high]
+      2. TooManyParameters    - function with > 5 params             [medium]
+      3. DeepNesting          - nesting depth > 4                    [high]
+      4. MagicNumber          - numeric literals not in {0,1,-1,2}  [low]
+      5. UnsafeFunctionUsage  - gets/strcpy/strcat/sprintf/scanf     [high]
+      6. GlobalVariable       - global variable declaration          [medium]
+      7. LargeHeaderFile      - .h file > 300 lines                  [medium]
+    """
+    if not _C_HELPERS_AVAILABLE:
+        return []
+
+    smells: list[dict] = []
+    ext = os.path.splitext(filename)[-1].lower()
+
+    # ── 1 & 2: LongFunction / TooManyParameters ──────────────────────────────
+    funcs = _find_functions_regex(source)
+    for fn in funcs:
+        body_lines = fn["end_line"] - fn["start_line"]
+        if body_lines > 40:
+            smells.append({
+                "type": "LongFunction",
+                "message": f"Function '{fn['name']}' has {body_lines} lines (>40)",
+                "line": fn["line"],
+                "severity": "high",
+                "entity": fn["name"],
+            })
+        if fn["param_count"] > 5:
+            smells.append({
+                "type": "TooManyParameters",
+                "message": f"Function '{fn['name']}' has {fn['param_count']} parameters (>5)",
+                "line": fn["line"],
+                "severity": "medium",
+                "entity": fn["name"],
+            })
+
+    # ── 3: DeepNesting ────────────────────────────────────────────────────────
+    max_depth = _max_nesting_depth(source)
+    if max_depth > 4:
+        smells.append({
+            "type": "DeepNesting",
+            "message": f"Maximum nesting depth is {max_depth} (>4)",
+            "line": None,
+            "severity": "high",
+            "entity": filename,
+        })
+
+    # ── 4: MagicNumber ────────────────────────────────────────────────────────
+    SAFE_NUMBERS = {"0", "1", "-1", "2", "0.0", "1.0"}
+    clean = _strip_string_literals(_strip_comments(source))
+    for m in _NUMERIC_LIT_RE.finditer(clean):
+        val = m.group(0).strip()
+        if val not in SAFE_NUMBERS:
+            line_no = clean[: m.start()].count("\n") + 1
+            smells.append({
+                "type": "MagicNumber",
+                "message": f"Magic number {val} detected",
+                "line": line_no,
+                "severity": "low",
+                "entity": filename,
+            })
+
+    # ── 5: UnsafeFunctionUsage ────────────────────────────────────────────────
+    for m in _UNSAFE_CALL_RE.finditer(clean):
+        fn_name = m.group("fn")
+        line_no = clean[: m.start()].count("\n") + 1
+        smells.append({
+            "type": "UnsafeFunctionUsage",
+            "message": f"Unsafe function '{fn_name}()' detected — prefer a safe alternative",
+            "line": line_no,
+            "severity": "high",
+            "entity": fn_name,
+        })
+
+    # ── 6: GlobalVariable ────────────────────────────────────────────────────
+    for gv in _find_global_vars_regex(source):
+        smells.append({
+            "type": "GlobalVariable",
+            "message": f"Global variable '{gv['name']}' declared at file scope",
+            "line": gv["line"],
+            "severity": "medium",
+            "entity": gv["name"],
+        })
+
+    # ── 7: LargeHeaderFile ───────────────────────────────────────────────────
+    if ext == ".h":
+        loc = len(source.splitlines())
+        if loc > 300:
+            smells.append({
+                "type": "LargeHeaderFile",
+                "message": f"Header file '{filename}' has {loc} lines (>300)",
+                "line": 1,
+                "severity": "medium",
+                "entity": filename,
+            })
+
+    return smells
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
@@ -233,6 +408,10 @@ def generate_file_report(source: str, filename: str) -> dict:
         smells = _analyze_java_smells(source)
         metrics = _java_metrics(source, filename)
         language = "java"
+    elif ext in (".c", ".h"):
+        smells = _analyze_c_smells(source, filename)
+        metrics = _c_metrics(source, filename)
+        language = "c"
     else:
         return {
             "file": filename,

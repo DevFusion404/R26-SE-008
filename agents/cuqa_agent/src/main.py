@@ -77,7 +77,7 @@ _workspace: dict = {
     "files": [],           # List of relative paths to supported source files
 }
 
-SUPPORTED_EXTENSIONS = {".py", ".java"}
+SUPPORTED_EXTENSIONS = {".py", ".java", ".c", ".h"}
 
 
 def _find_source_files(root: str) -> list[str]:
@@ -384,4 +384,4 @@ def list_files():
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=8001, reload=True, reload_dirs=[str(SRC_DIR)])
+    uvicorn.run("main:app", host="0.0.0.0", port=8080, reload=True, reload_dirs=[str(SRC_DIR)])
