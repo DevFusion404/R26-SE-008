@@ -78,6 +78,7 @@ export default function App() {
   const [page,       setPage]       = useState('overview');
   const [repoLoaded, setRepoLoaded] = useState(false);
   const [repoMeta,   setRepoMeta]   = useState(null);
+  const [repoConfig, setRepoConfig] = useState(null);  // threshold, filters, mode from RepositoryInput
   const [backendOk,  setBackendOk]  = useState(null);
   const [search,     setSearch]     = useState('');
   const [cuqaReport, setCuqaReport] = useState(null); // quality report from CUQA → RDP bridge
@@ -93,6 +94,8 @@ export default function App() {
   function handleRepoLoaded(data) {
     setRepoLoaded(true);
     setRepoMeta(data);
+    // Persist the analysis config (threshold, filters, mode, language) from RepositoryInput
+    if (data.config) setRepoConfig(data.config);
     // Auto-navigate to CUQA agent after load
     setTimeout(() => setPage('cuqa'), 400);
   }
@@ -113,7 +116,7 @@ export default function App() {
       case 'overview':    return <Overview onNavigate={navigate} />;
       case 'dashboard':   return <Dashboard />;
       case 'repository':  return <RepositoryInput onLoaded={handleRepoLoaded} />;
-      case 'cuqa':        return <CUQAAgentPage repoLoaded={repoLoaded} repoMeta={repoMeta} />;
+      case 'cuqa':        return <CUQAAgentPage repoLoaded={repoLoaded} repoMeta={repoMeta} analysisConfig={repoConfig} />;
       case 'rdp':         return <RDPAgentPage repoLoaded={repoLoaded} repoMeta={repoMeta} />;
       case 'transform':   return <SCTVAAgentPage />;
       case 'orchestrate': return <DIWOAgentPage />;

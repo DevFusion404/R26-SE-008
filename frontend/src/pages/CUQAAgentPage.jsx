@@ -352,7 +352,13 @@ function FilesWithSmells({ report, filter = 'all' }) {
 }
 
 // ── Main CUQAAgentPage ─────────────────────────────────────────────────────
-export default function CUQAAgentPage({ repoLoaded, repoMeta, onSendToRdp }) {
+export default function CUQAAgentPage({ repoLoaded, repoMeta, onSendToRdp, analysisConfig }) {
+  // Extract active settings (fall back to sensible defaults if no config provided)
+  const threshold     = analysisConfig?.threshold      ?? 75;
+  const severityFilts = analysisConfig?.severity_filters ?? { critical: true, naming: true };
+  const analysisMode  = analysisConfig?.analysis_mode   ?? 'Comprehensive Refactoring';
+  const langContext   = analysisConfig?.language_context ?? 'All';
+
   const [tree,        setTree]        = useState(null);
   const [selFile,     setSelFile]     = useState(null);
   const [astData,     setAstData]     = useState(null);
@@ -407,7 +413,19 @@ export default function CUQAAgentPage({ repoLoaded, repoMeta, onSendToRdp }) {
   }
 
   const smells = report?.files?.flatMap(f => (f.code_smells || []).map(s => ({ ...s, file: f.file }))) ?? [];
+
+  // Apply severity filters from RepositoryInput config
+  const filteredSmells = smells.filter(s => {
+    const sev = s.severity || 'low';
+    if (sev === 'high' && !severityFilts.critical) return false;
+    // 'naming' filter controls medium/low naming-related smells
+    if ((sev === 'medium' || sev === 'low') && !severityFilts.naming) return false;
+    return true;
+  });
+
   const filesWithSmells = (report?.files || []).filter(f => (f.code_smells || []).length > 0);
+  // Files below quality threshold are highlighted for refactoring
+  const filesBelowThreshold = (report?.files || []).filter(f => (f.quality_score ?? 100) < threshold);
   const summary = report?.summary ?? {};
   const ast = astData?.parsed?.ast;
   const astSummary = astData?.summary;
@@ -446,6 +464,21 @@ export default function CUQAAgentPage({ repoLoaded, repoMeta, onSendToRdp }) {
           </div>
         </div>
         <div className="page-header-actions">
+          {/* Active analysis config badge */}
+          {analysisConfig && (
+            <div style={{
+              display: 'flex', gap: 6, alignItems: 'center',
+              background: 'var(--accent-muted)', border: '1px solid var(--border-accent)',
+              borderRadius: 'var(--r-sm)', padding: '4px 10px', fontSize: 10,
+            }}>
+              <span style={{ color: 'var(--accent)', fontWeight: 700 }}>⚙ Config</span>
+              <span style={{ color: 'var(--text-secondary)' }}>Threshold: {threshold}%</span>
+              <span style={{ color: 'var(--text-muted)' }}>·</span>
+              <span style={{ color: 'var(--text-secondary)' }}>{langContext}</span>
+              <span style={{ color: 'var(--text-muted)' }}>·</span>
+              <span style={{ color: 'var(--text-secondary)' }}>{analysisMode}</span>
+            </div>
+          )}
           <button className="btn btn-primary" onClick={() => { fetchTree(); fetchReport(); }}>
             ⟳ RUN ANALYSIS
           </button>
@@ -582,8 +615,14 @@ export default function CUQAAgentPage({ repoLoaded, repoMeta, onSendToRdp }) {
       {/* ── Detailed Code Smells Table ──────────────────────── */}
       <div className="card">
         <div className="card-header">
-          <span className="card-title">🔍 Detailed Code Smells ({smells.length})</span>
-          <div style={{ display: 'flex', gap: 8 }}>
+          <span className="card-title">🔍 Detailed Code Smells ({filteredSmells.length})</span>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+            {/* Threshold indicator */}
+            {filesBelowThreshold.length > 0 && (
+              <span className="badge badge-critical" title={`${filesBelowThreshold.length} files below ${threshold}% threshold`}>
+                ⚠ {filesBelowThreshold.length} below {threshold}%
+              </span>
+            )}
             {summary.smell_severity?.high   > 0 && <span className="badge badge-critical">● {summary.smell_severity.high} Critical</span>}
             {summary.smell_severity?.medium > 0 && <span className="badge badge-medium">● {summary.smell_severity.medium} Medium</span>}
             {summary.smell_severity?.low    > 0 && <span className="badge" style={{ background: '#22c55e40', color: '#22c55e' }}>● {summary.smell_severity.low} Low</span>}
@@ -612,7 +651,7 @@ export default function CUQAAgentPage({ repoLoaded, repoMeta, onSendToRdp }) {
                   </tr>
                 </thead>
                 <tbody>
-                  {smells.slice(0, 30).map((s, i) => (
+                  {filteredSmells.slice(0, 30).map((s, i) => (
                     <tr key={i}>
                       <td>
                         <span style={{ fontWeight: 600, fontSize: 12, color: 'var(--text-primary)' }}>
@@ -648,9 +687,9 @@ export default function CUQAAgentPage({ repoLoaded, repoMeta, onSendToRdp }) {
               </table>
             </div>
 
-            {smells.length > 30 && (
+            {filteredSmells.length > 30 && (
               <div style={{ padding: 14, textAlign: 'center', borderTop: '1px solid var(--border)', fontSize: 12, color: 'var(--text-secondary)' }}>
-                Showing 30 of {smells.length} code smells — <a href="#" style={{ color: 'var(--accent)' }}>Load More</a>
+                Showing 30 of {filteredSmells.length} code smells — <a href="#" style={{ color: 'var(--accent)' }}>Load More</a>
               </div>
             )}
           </>
