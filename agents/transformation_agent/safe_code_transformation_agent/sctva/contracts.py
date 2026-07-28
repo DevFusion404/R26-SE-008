@@ -121,6 +121,51 @@ class RefactoringPlanContract:
 
 
 @dataclass
+class SourceFileContract:
+    """Source file content for multi-file transformations."""
+
+    file_name: str
+    source_code: str
+    language: Optional[str] = None
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any], *, index: int) -> "SourceFileContract":
+        if not isinstance(data, dict):
+            raise ContractValidationError("Each item in 'source_files' must be an object.")
+
+        file_name = str(data.get("file_name") or data.get("name") or f"file_{index}").strip()
+        if not file_name:
+            raise ContractValidationError("Each source file must include a non-empty file_name.")
+
+        source_code = data.get("source_code", "")
+        if not isinstance(source_code, str) or not source_code.strip():
+            raise ContractValidationError("Each source file must include non-empty source_code.")
+
+        language = data.get("language")
+        if language is not None:
+            language = str(language).strip().lower()
+            if language and language not in SUPPORTED_LANGUAGES:
+                raise ContractValidationError(
+                    f"Unsupported language '{language}' in source_files. Supported: {sorted(SUPPORTED_LANGUAGES)}"
+                )
+
+        return cls(
+            file_name=file_name,
+            source_code=source_code,
+            language=language or None,
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {
+            "file_name": self.file_name,
+            "source_code": self.source_code,
+        }
+        if self.language:
+            payload["language"] = self.language
+        return payload
+
+
+@dataclass
 class ExecutionOptions:
     """Runtime options for validation strictness and performance."""
 
@@ -164,9 +209,10 @@ class SCTVARequestContract:
 
     request_id: str
     language: str
-    source_code: str
     refactoring_plan: RefactoringPlanContract
     execution_options: ExecutionOptions = field(default_factory=ExecutionOptions)
+    source_code: str = ""
+    source_files: List[SourceFileContract] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "SCTVARequestContract":
@@ -184,8 +230,25 @@ class SCTVARequestContract:
             )
 
         source_code = data.get("source_code", "")
-        if not isinstance(source_code, str) or not source_code.strip():
-            raise ContractValidationError("Field 'source_code' must be a non-empty string.")
+        source_files_raw = data.get("source_files")
+        source_files: List[SourceFileContract] = []
+
+        if source_files_raw is not None:
+            if not isinstance(source_files_raw, list):
+                raise ContractValidationError("Field 'source_files' must be a list when provided.")
+            source_files = [
+                SourceFileContract.from_dict(item, index=idx)
+                for idx, item in enumerate(source_files_raw, start=1)
+            ]
+
+        if not source_files:
+            if not isinstance(source_code, str) or not source_code.strip():
+                raise ContractValidationError(
+                    "Field 'source_code' must be a non-empty string when 'source_files' is not provided."
+                )
+
+        if source_files and not isinstance(source_code, str):
+            source_code = ""
 
         plan = RefactoringPlanContract.from_dict(data.get("refactoring_plan", {}))
         options = ExecutionOptions.from_dict(data.get("execution_options"))
@@ -193,16 +256,21 @@ class SCTVARequestContract:
         return cls(
             request_id=request_id,
             language=language,
-            source_code=source_code,
+            source_code=str(source_code or ""),
+            source_files=source_files,
             refactoring_plan=plan,
             execution_options=options,
         )
 
     def to_dict(self) -> Dict[str, Any]:
-        return {
+        payload = {
             "request_id": self.request_id,
             "language": self.language,
-            "source_code": self.source_code,
             "refactoring_plan": self.refactoring_plan.to_dict(),
             "execution_options": self.execution_options.to_dict(),
         }
+        if self.source_files:
+            payload["source_files"] = [item.to_dict() for item in self.source_files]
+        else:
+            payload["source_code"] = self.source_code
+        return payload

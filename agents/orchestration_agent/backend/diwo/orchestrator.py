@@ -16,6 +16,7 @@ Transitions are gated: each stage requires an explicit developer action.
 import uuid
 import json
 import random
+from typing import Optional
 from datetime import datetime, timezone
 
 
@@ -128,12 +129,100 @@ def _build_parameters(refactoring, cls, method, lines, metrics):
     return {"target_class": cls, "target_method": method}
 
 
+def generate_updated_plan_report(plan: dict, decisions: Optional[dict] = None, preferences: Optional[dict] = None) -> dict:
+    """
+    Re-rank and filter a plan using developer step decisions + preferences.
+    This is used for live plan updates while the developer is reviewing steps.
+    """
+    base_steps = list(plan.get("steps", []))
+    decisions = decisions or {}
+    preferences = preferences or {}
+
+    preferred_refactorings = set(preferences.get("preferred_refactorings", []))
+    risk_tolerance = str(preferences.get("risk_tolerance", "balanced")).lower()
+    impact_focus = str(preferences.get("impact_focus", "high")).lower()
+
+    impact_weight = {"low": 1, "medium": 2, "high": 3}
+    risk_weight_balanced = {"low": 3, "medium": 2, "high": 1}
+    risk_weight_aggressive = {"low": 1, "medium": 2, "high": 3}
+    risk_weight_conservative = {"low": 4, "medium": 2, "high": 0}
+
+    if risk_tolerance == "aggressive":
+        risk_weight = risk_weight_aggressive
+    elif risk_tolerance == "conservative":
+        risk_weight = risk_weight_conservative
+    else:
+        risk_weight = risk_weight_balanced
+
+    def step_score(step: dict) -> int:
+        decision = decisions.get(str(step.get("step_id"))) or decisions.get(step.get("step_id"))
+        expected_impact = str(step.get("impact") or step.get("expected_impact") or "medium").lower()
+        risk = str(step.get("risk") or "medium").lower()
+
+        score = 0
+        score += impact_weight.get(expected_impact, 2) * 4
+        score += risk_weight.get(risk, 2) * 2
+
+        if impact_focus == expected_impact:
+            score += 3
+        if preferred_refactorings and step.get("refactoring") in preferred_refactorings:
+            score += 4
+
+        if decision == "approve":
+            score += 10
+        elif decision == "reject":
+            score -= 50
+
+        return score
+
+    accepted_steps = [
+        s for s in base_steps
+        if (decisions.get(str(s.get("step_id"))) or decisions.get(s.get("step_id"))) != "reject"
+    ]
+
+    ranked = sorted(accepted_steps, key=step_score, reverse=True)
+
+    remapped_steps = []
+    for idx, step in enumerate(ranked, start=1):
+        new_step = dict(step)
+        new_step["step_id"] = idx
+        remapped_steps.append(new_step)
+
+    plan_id = plan.get("plan_id", f"plan_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}")
+    updated_plan_id = f"{plan_id}_updated"
+
+    summary_meta = {
+        "total_steps": len(remapped_steps),
+        "approved_count": sum(1 for d in decisions.values() if d == "approve"),
+        "rejected_count": sum(1 for d in decisions.values() if d == "reject"),
+        "risk_tolerance": risk_tolerance,
+        "impact_focus": impact_focus,
+        "preferred_refactorings": sorted(preferred_refactorings),
+    }
+
+    summary_text = (
+        f"{summary_meta['total_steps']}-step updated plan generated from developer preferences. "
+        f"Approved: {summary_meta['approved_count']}, Rejected: {summary_meta['rejected_count']}, "
+        f"Risk tolerance: {summary_meta['risk_tolerance']}, Impact focus: {summary_meta['impact_focus']}."
+    )
+
+    return {
+        "plan_id": updated_plan_id,
+        "target": plan.get("target"),
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "steps": remapped_steps,
+        "summary": summary_text,
+        "summary_meta": summary_meta,
+        "user_preferences": preferences,
+    }
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Simulated Agent 3: Transformation + Validation
 # In a real system this calls the Safe Code Transformation Agent over REST.
 # ─────────────────────────────────────────────────────────────────────────────
 
-def simulate_transformation(plan: dict, language: str) -> dict:
+def simulate_transformation(plan: dict, language: str, before_code: str = "") -> dict:
     steps = plan.get("steps", [])
     results = []
     all_passed = True
@@ -157,6 +246,16 @@ def simulate_transformation(plan: dict, language: str) -> dict:
             all_passed = False
 
     snapshot_id = f"snapshot_{uuid.uuid4().hex[:8]}"
+    
+    # Generate mock refactored code and diffs
+    after_code = before_code.replace("processor.calculateTotal", "processor.extracted_calculateTotal") if before_code else _generate_mock_refactored_code()
+    diff_rows = _generate_mock_diff_rows(before_code or _generate_mock_before_code(), after_code)
+    files = [{
+        "path": "ECommerceSystem.java",
+        "before": before_code or _generate_mock_before_code(),
+        "after": after_code,
+        "diff_rows": diff_rows,
+    }]
 
     return {
         "status": "success" if all_passed else "partial_failure",
@@ -168,7 +267,96 @@ def simulate_transformation(plan: dict, language: str) -> dict:
         "overall_passed": all_passed,
         "steps_passed": sum(1 for r in results if r["status"] == "passed"),
         "steps_failed": sum(1 for r in results if r["status"] == "failed"),
+        "refactored_code": after_code,
+        "diff_rows": diff_rows,
+        "files": files,
     }
+
+
+def _generate_mock_before_code():
+    return """public class ECommerceSystem {
+    public static void main(String[] args) {
+        Customer customer = new Customer(1, "Pasan", "pasan@example.com");
+        Order order = new Order(1001, customer);
+        order.items.add(new OrderItem("Laptop", 2, 1200.00));
+        order.items.add(new OrderItem("Mouse", 1, 30.00));
+
+        OrderProcessor processor = new OrderProcessor();
+        double total = processor.calculateTotal(order, "CARD", true, "PROMO10", "EXPRESS");
+        System.out.println("Order Total: " + total);
+    }
+}"""
+
+
+def _generate_mock_refactored_code():
+    return """public class ECommerceSystem {
+    public static void main(String[] args) {
+        Customer customer = new Customer(1, "Pasan", "pasan@example.com", "premium", "Colombo");
+        Order order = new Order(1001, customer);
+        order.items.add(new OrderItem("Laptop", 2, 1200.00));
+        order.items.add(new OrderItem("Mouse", 1, 30.00));
+
+        OrderProcessorHelper processor = new OrderProcessorHelper();
+        OrderParams params = new OrderParams("CARD", true, "PROMO10", "EXPRESS");
+        double total = processor.extracted_calculateTotal(order, params);
+        System.out.println("Order Total: " + total);
+    }
+}"""
+
+
+def _generate_mock_diff_rows(before: str, after: str):
+    """Generate a simple line-by-line diff for frontend display."""
+    before_lines = before.split('\n')
+    after_lines = after.split('\n')
+    diff_rows = []
+    key_counter = 0
+    
+    max_lines = max(len(before_lines), len(after_lines))
+    for i in range(max_lines):
+        if i < len(before_lines) and i < len(after_lines):
+            if before_lines[i] == after_lines[i]:
+                diff_rows.append({
+                    "key": f"same-{key_counter}",
+                    "lineNo": i + 1,
+                    "kind": "same",
+                    "marker": "  ",
+                    "text": before_lines[i],
+                })
+            else:
+                diff_rows.append({
+                    "key": f"before-{key_counter}",
+                    "lineNo": i + 1,
+                    "kind": "before",
+                    "marker": "- ",
+                    "text": before_lines[i],
+                })
+                key_counter += 1
+                diff_rows.append({
+                    "key": f"after-{key_counter}",
+                    "lineNo": i + 1,
+                    "kind": "after",
+                    "marker": "+ ",
+                    "text": after_lines[i],
+                })
+        elif i < len(before_lines):
+            diff_rows.append({
+                "key": f"before-{key_counter}",
+                "lineNo": i + 1,
+                "kind": "before",
+                "marker": "- ",
+                "text": before_lines[i],
+            })
+        else:
+            diff_rows.append({
+                "key": f"after-{key_counter}",
+                "lineNo": i + 1,
+                "kind": "after",
+                "marker": "+ ",
+                "text": after_lines[i],
+            })
+        key_counter += 1
+    
+    return diff_rows
 
 
 # ─────────────────────────────────────────────────────────────────────────────

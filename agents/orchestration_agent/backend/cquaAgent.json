@@ -1,0 +1,1321 @@
+{
+  "summary": {
+    "files_analyzed": 50,
+    "total_lines_of_code": 3015,
+    "total_code_smells": 47,
+    "smell_severity": {
+      "high": 7,
+      "medium": 0,
+      "low": 40
+    },
+    "average_quality_score": 98.1
+  },
+  "files": [
+    {
+      "file": "__init__.py",
+      "language": "python",
+      "metrics": {
+        "filename": "__init__.py",
+        "lines_of_code": 24,
+        "blank_lines": 5,
+        "comment_lines": 0,
+        "functions": 1,
+        "classes": 0
+      },
+      "code_smells": [
+        {
+          "type": "MagicNumber",
+          "message": "Magic number 6",
+          "line": 3,
+          "severity": "low"
+        }
+      ],
+      "smell_summary": {
+        "high": 0,
+        "medium": 0,
+        "low": 1
+      },
+      "quality_score": 99,
+      "relative_path": "django/__init__.py"
+    },
+    {
+      "file": "__main__.py",
+      "language": "python",
+      "metrics": {
+        "filename": "__main__.py",
+        "lines_of_code": 10,
+        "blank_lines": 3,
+        "comment_lines": 0,
+        "functions": 0,
+        "classes": 0
+      },
+      "code_smells": [],
+      "smell_summary": {
+        "high": 0,
+        "medium": 0,
+        "low": 0
+      },
+      "quality_score": 100,
+      "relative_path": "django/__main__.py"
+    },
+    {
+      "file": "__init__.py",
+      "language": "python",
+      "metrics": {
+        "filename": "__init__.py",
+        "lines_of_code": 4,
+        "blank_lines": 1,
+        "comment_lines": 0,
+        "functions": 0,
+        "classes": 0
+      },
+      "code_smells": [],
+      "smell_summary": {
+        "high": 0,
+        "medium": 0,
+        "low": 0
+      },
+      "quality_score": 100,
+      "relative_path": "django/apps/__init__.py"
+    },
+    {
+      "file": "config.py",
+      "language": "python",
+      "metrics": {
+        "filename": "config.py",
+        "lines_of_code": 274,
+        "blank_lines": 35,
+        "comment_lines": 55,
+        "functions": 10,
+        "classes": 1
+      },
+      "code_smells": [
+        {
+          "type": "LongMethod",
+          "message": "Function '__init__' has 40 lines (>30)",
+          "line": 16,
+          "severity": "high"
+        },
+        {
+          "type": "LongMethod",
+          "message": "Function 'create' has 122 lines (>30)",
+          "line": 100,
+          "severity": "high"
+        }
+      ],
+      "smell_summary": {
+        "high": 2,
+        "medium": 0,
+        "low": 0
+      },
+      "quality_score": 84,
+      "relative_path": "django/apps/config.py"
+    },
+    {
+      "file": "registry.py",
+      "language": "python",
+      "metrics": {
+        "filename": "registry.py",
+        "lines_of_code": 438,
+        "blank_lines": 79,
+        "comment_lines": 57,
+        "functions": 21,
+        "classes": 1
+      },
+      "code_smells": [
+        {
+          "type": "LargeClass",
+          "message": "Class 'Apps' has 21 methods (>15)",
+          "line": 13,
+          "severity": "high"
+        },
+        {
+          "type": "LongMethod",
+          "message": "Function '__init__' has 39 lines (>30)",
+          "line": 20,
+          "severity": "high"
+        },
+        {
+          "type": "LongMethod",
+          "message": "Function 'populate' has 66 lines (>30)",
+          "line": 61,
+          "severity": "high"
+        },
+        {
+          "type": "LongMethod",
+          "message": "Function 'lazy_model_operation' has 38 lines (>30)",
+          "line": 388,
+          "severity": "high"
+        }
+      ],
+      "smell_summary": {
+        "high": 4,
+        "medium": 0,
+        "low": 0
+      },
+      "quality_score": 68,
+      "relative_path": "django/apps/registry.py"
+    },
+    {
+      "file": "__init__.py",
+      "language": "python",
+      "metrics": {
+        "filename": "__init__.py",
+        "lines_of_code": 257,
+        "blank_lines": 45,
+        "comment_lines": 17,
+        "functions": 21,
+        "classes": 4
+      },
+      "code_smells": [
+        {
+          "type": "MagicNumber",
+          "message": "Magic number 4",
+          "line": 146,
+          "severity": "low"
+        },
+        {
+          "type": "LongMethod",
+          "message": "Function '__init__' has 43 lines (>30)",
+          "line": 152,
+          "severity": "high"
+        }
+      ],
+      "smell_summary": {
+        "high": 1,
+        "medium": 0,
+        "low": 1
+      },
+      "quality_score": 91,
+      "relative_path": "django/conf/__init__.py"
+    },
+    {
+      "file": "global_settings.py",
+      "language": "python",
+      "metrics": {
+        "filename": "global_settings.py",
+        "lines_of_code": 680,
+        "blank_lines": 118,
+        "comment_lines": 258,
+        "functions": 1,
+        "classes": 0
+      },
+      "code_smells": [
+        {
+          "type": "MagicNumber",
+          "message": "Magic number 25",
+          "line": 200,
+          "severity": "low"
+        },
+        {
+          "type": "MagicNumber",
+          "message": "Magic number 2621440",
+          "line": 307,
+          "severity": "low"
+        },
+        {
+          "type": "MagicNumber",
+          "message": "Magic number 2621440",
+          "line": 311,
+          "severity": "low"
+        },
+        {
+          "type": "MagicNumber",
+          "message": "Magic number 1000",
+          "line": 315,
+          "severity": "low"
+        },
+        {
+          "type": "MagicNumber",
+          "message": "Magic number 100",
+          "line": 319,
+          "severity": "low"
+        },
+        {
+          "type": "MagicNumber",
+          "message": "Magic number 420",
+          "line": 329,
+          "severity": "low"
+        },
+        {
+          "type": "MagicNumber",
+          "message": "Magic number 60",
+          "line": 482,
+          "severity": "low"
+        },
+        {
+          "type": "MagicNumber",
+          "message": "Magic number 60",
+          "line": 482,
+          "severity": "low"
+        },
+        {
+          "type": "MagicNumber",
+          "message": "Magic number 24",
+          "line": 482,
+          "severity": "low"
+        },
+        {
+          "type": "MagicNumber",
+          "message": "Magic number 7",
+          "line": 482,
+          "severity": "low"
+        },
+        {
+          "type": "MagicNumber",
+          "message": "Magic number 600",
+          "line": 517,
+          "severity": "low"
+        },
+        {
+          "type": "MagicNumber",
+          "message": "Magic number 60",
+          "line": 535,
+          "severity": "low"
+        },
+        {
+          "type": "MagicNumber",
+          "message": "Magic number 60",
+          "line": 535,
+          "severity": "low"
+        },
+        {
+          "type": "MagicNumber",
+          "message": "Magic number 24",
+          "line": 535,
+          "severity": "low"
+        },
+        {
+          "type": "MagicNumber",
+          "message": "Magic number 3",
+          "line": 535,
+          "severity": "low"
+        },
+        {
+          "type": "MagicNumber",
+          "message": "Magic number 60",
+          "line": 565,
+          "severity": "low"
+        },
+        {
+          "type": "MagicNumber",
+          "message": "Magic number 60",
+          "line": 565,
+          "severity": "low"
+        },
+        {
+          "type": "MagicNumber",
+          "message": "Magic number 24",
+          "line": 565,
+          "severity": "low"
+        },
+        {
+          "type": "MagicNumber",
+          "message": "Magic number 7",
+          "line": 565,
+          "severity": "low"
+        },
+        {
+          "type": "MagicNumber",
+          "message": "Magic number 52",
+          "line": 565,
+          "severity": "low"
+        }
+      ],
+      "smell_summary": {
+        "high": 0,
+        "medium": 0,
+        "low": 20
+      },
+      "quality_score": 80,
+      "relative_path": "django/conf/global_settings.py"
+    },
+    {
+      "file": "__init__.py",
+      "language": "python",
+      "metrics": {
+        "filename": "__init__.py",
+        "lines_of_code": 636,
+        "blank_lines": 2,
+        "comment_lines": 0,
+        "functions": 0,
+        "classes": 0
+      },
+      "code_smells": [],
+      "smell_summary": {
+        "high": 0,
+        "medium": 0,
+        "low": 0
+      },
+      "quality_score": 100,
+      "relative_path": "django/conf/locale/__init__.py"
+    },
+    {
+      "file": "__init__.py",
+      "language": "python",
+      "metrics": {
+        "filename": "__init__.py",
+        "lines_of_code": 0,
+        "blank_lines": 0,
+        "comment_lines": 0,
+        "functions": 0,
+        "classes": 0
+      },
+      "code_smells": [],
+      "smell_summary": {
+        "high": 0,
+        "medium": 0,
+        "low": 0
+      },
+      "quality_score": 100,
+      "relative_path": "django/conf/locale/ar/__init__.py"
+    },
+    {
+      "file": "formats.py",
+      "language": "python",
+      "metrics": {
+        "filename": "formats.py",
+        "lines_of_code": 21,
+        "blank_lines": 1,
+        "comment_lines": 13,
+        "functions": 0,
+        "classes": 0
+      },
+      "code_smells": [],
+      "smell_summary": {
+        "high": 0,
+        "medium": 0,
+        "low": 0
+      },
+      "quality_score": 100,
+      "relative_path": "django/conf/locale/ar/formats.py"
+    },
+    {
+      "file": "__init__.py",
+      "language": "python",
+      "metrics": {
+        "filename": "__init__.py",
+        "lines_of_code": 0,
+        "blank_lines": 0,
+        "comment_lines": 0,
+        "functions": 0,
+        "classes": 0
+      },
+      "code_smells": [],
+      "smell_summary": {
+        "high": 0,
+        "medium": 0,
+        "low": 0
+      },
+      "quality_score": 100,
+      "relative_path": "django/conf/locale/ar_DZ/__init__.py"
+    },
+    {
+      "file": "formats.py",
+      "language": "python",
+      "metrics": {
+        "filename": "formats.py",
+        "lines_of_code": 29,
+        "blank_lines": 1,
+        "comment_lines": 6,
+        "functions": 0,
+        "classes": 0
+      },
+      "code_smells": [
+        {
+          "type": "MagicNumber",
+          "message": "Magic number 3",
+          "line": 29,
+          "severity": "low"
+        }
+      ],
+      "smell_summary": {
+        "high": 0,
+        "medium": 0,
+        "low": 1
+      },
+      "quality_score": 99,
+      "relative_path": "django/conf/locale/ar_DZ/formats.py"
+    },
+    {
+      "file": "__init__.py",
+      "language": "python",
+      "metrics": {
+        "filename": "__init__.py",
+        "lines_of_code": 0,
+        "blank_lines": 0,
+        "comment_lines": 0,
+        "functions": 0,
+        "classes": 0
+      },
+      "code_smells": [],
+      "smell_summary": {
+        "high": 0,
+        "medium": 0,
+        "low": 0
+      },
+      "quality_score": 100,
+      "relative_path": "django/conf/locale/az/__init__.py"
+    },
+    {
+      "file": "formats.py",
+      "language": "python",
+      "metrics": {
+        "filename": "formats.py",
+        "lines_of_code": 30,
+        "blank_lines": 1,
+        "comment_lines": 6,
+        "functions": 0,
+        "classes": 0
+      },
+      "code_smells": [
+        {
+          "type": "MagicNumber",
+          "message": "Magic number 3",
+          "line": 30,
+          "severity": "low"
+        }
+      ],
+      "smell_summary": {
+        "high": 0,
+        "medium": 0,
+        "low": 1
+      },
+      "quality_score": 99,
+      "relative_path": "django/conf/locale/az/formats.py"
+    },
+    {
+      "file": "__init__.py",
+      "language": "python",
+      "metrics": {
+        "filename": "__init__.py",
+        "lines_of_code": 0,
+        "blank_lines": 0,
+        "comment_lines": 0,
+        "functions": 0,
+        "classes": 0
+      },
+      "code_smells": [],
+      "smell_summary": {
+        "high": 0,
+        "medium": 0,
+        "low": 0
+      },
+      "quality_score": 100,
+      "relative_path": "django/conf/locale/bg/__init__.py"
+    },
+    {
+      "file": "formats.py",
+      "language": "python",
+      "metrics": {
+        "filename": "formats.py",
+        "lines_of_code": 21,
+        "blank_lines": 1,
+        "comment_lines": 14,
+        "functions": 0,
+        "classes": 0
+      },
+      "code_smells": [],
+      "smell_summary": {
+        "high": 0,
+        "medium": 0,
+        "low": 0
+      },
+      "quality_score": 100,
+      "relative_path": "django/conf/locale/bg/formats.py"
+    },
+    {
+      "file": "__init__.py",
+      "language": "python",
+      "metrics": {
+        "filename": "__init__.py",
+        "lines_of_code": 0,
+        "blank_lines": 0,
+        "comment_lines": 0,
+        "functions": 0,
+        "classes": 0
+      },
+      "code_smells": [],
+      "smell_summary": {
+        "high": 0,
+        "medium": 0,
+        "low": 0
+      },
+      "quality_score": 100,
+      "relative_path": "django/conf/locale/bn/__init__.py"
+    },
+    {
+      "file": "formats.py",
+      "language": "python",
+      "metrics": {
+        "filename": "formats.py",
+        "lines_of_code": 32,
+        "blank_lines": 1,
+        "comment_lines": 9,
+        "functions": 0,
+        "classes": 0
+      },
+      "code_smells": [
+        {
+          "type": "MagicNumber",
+          "message": "Magic number 6",
+          "line": 12,
+          "severity": "low"
+        }
+      ],
+      "smell_summary": {
+        "high": 0,
+        "medium": 0,
+        "low": 1
+      },
+      "quality_score": 99,
+      "relative_path": "django/conf/locale/bn/formats.py"
+    },
+    {
+      "file": "__init__.py",
+      "language": "python",
+      "metrics": {
+        "filename": "__init__.py",
+        "lines_of_code": 0,
+        "blank_lines": 0,
+        "comment_lines": 0,
+        "functions": 0,
+        "classes": 0
+      },
+      "code_smells": [],
+      "smell_summary": {
+        "high": 0,
+        "medium": 0,
+        "low": 0
+      },
+      "quality_score": 100,
+      "relative_path": "django/conf/locale/bs/__init__.py"
+    },
+    {
+      "file": "formats.py",
+      "language": "python",
+      "metrics": {
+        "filename": "formats.py",
+        "lines_of_code": 21,
+        "blank_lines": 1,
+        "comment_lines": 12,
+        "functions": 0,
+        "classes": 0
+      },
+      "code_smells": [],
+      "smell_summary": {
+        "high": 0,
+        "medium": 0,
+        "low": 0
+      },
+      "quality_score": 100,
+      "relative_path": "django/conf/locale/bs/formats.py"
+    },
+    {
+      "file": "__init__.py",
+      "language": "python",
+      "metrics": {
+        "filename": "__init__.py",
+        "lines_of_code": 0,
+        "blank_lines": 0,
+        "comment_lines": 0,
+        "functions": 0,
+        "classes": 0
+      },
+      "code_smells": [],
+      "smell_summary": {
+        "high": 0,
+        "medium": 0,
+        "low": 0
+      },
+      "quality_score": 100,
+      "relative_path": "django/conf/locale/ca/__init__.py"
+    },
+    {
+      "file": "formats.py",
+      "language": "python",
+      "metrics": {
+        "filename": "formats.py",
+        "lines_of_code": 30,
+        "blank_lines": 1,
+        "comment_lines": 6,
+        "functions": 0,
+        "classes": 0
+      },
+      "code_smells": [
+        {
+          "type": "MagicNumber",
+          "message": "Magic number 3",
+          "line": 30,
+          "severity": "low"
+        }
+      ],
+      "smell_summary": {
+        "high": 0,
+        "medium": 0,
+        "low": 1
+      },
+      "quality_score": 99,
+      "relative_path": "django/conf/locale/ca/formats.py"
+    },
+    {
+      "file": "__init__.py",
+      "language": "python",
+      "metrics": {
+        "filename": "__init__.py",
+        "lines_of_code": 0,
+        "blank_lines": 0,
+        "comment_lines": 0,
+        "functions": 0,
+        "classes": 0
+      },
+      "code_smells": [],
+      "smell_summary": {
+        "high": 0,
+        "medium": 0,
+        "low": 0
+      },
+      "quality_score": 100,
+      "relative_path": "django/conf/locale/ckb/__init__.py"
+    },
+    {
+      "file": "formats.py",
+      "language": "python",
+      "metrics": {
+        "filename": "formats.py",
+        "lines_of_code": 21,
+        "blank_lines": 1,
+        "comment_lines": 10,
+        "functions": 0,
+        "classes": 0
+      },
+      "code_smells": [
+        {
+          "type": "MagicNumber",
+          "message": "Magic number 6",
+          "line": 12,
+          "severity": "low"
+        }
+      ],
+      "smell_summary": {
+        "high": 0,
+        "medium": 0,
+        "low": 1
+      },
+      "quality_score": 99,
+      "relative_path": "django/conf/locale/ckb/formats.py"
+    },
+    {
+      "file": "__init__.py",
+      "language": "python",
+      "metrics": {
+        "filename": "__init__.py",
+        "lines_of_code": 0,
+        "blank_lines": 0,
+        "comment_lines": 0,
+        "functions": 0,
+        "classes": 0
+      },
+      "code_smells": [],
+      "smell_summary": {
+        "high": 0,
+        "medium": 0,
+        "low": 0
+      },
+      "quality_score": 100,
+      "relative_path": "django/conf/locale/cs/__init__.py"
+    },
+    {
+      "file": "formats.py",
+      "language": "python",
+      "metrics": {
+        "filename": "formats.py",
+        "lines_of_code": 43,
+        "blank_lines": 1,
+        "comment_lines": 9,
+        "functions": 0,
+        "classes": 0
+      },
+      "code_smells": [
+        {
+          "type": "MagicNumber",
+          "message": "Magic number 3",
+          "line": 43,
+          "severity": "low"
+        }
+      ],
+      "smell_summary": {
+        "high": 0,
+        "medium": 0,
+        "low": 1
+      },
+      "quality_score": 99,
+      "relative_path": "django/conf/locale/cs/formats.py"
+    },
+    {
+      "file": "__init__.py",
+      "language": "python",
+      "metrics": {
+        "filename": "__init__.py",
+        "lines_of_code": 0,
+        "blank_lines": 0,
+        "comment_lines": 0,
+        "functions": 0,
+        "classes": 0
+      },
+      "code_smells": [],
+      "smell_summary": {
+        "high": 0,
+        "medium": 0,
+        "low": 0
+      },
+      "quality_score": 100,
+      "relative_path": "django/conf/locale/cy/__init__.py"
+    },
+    {
+      "file": "formats.py",
+      "language": "python",
+      "metrics": {
+        "filename": "formats.py",
+        "lines_of_code": 33,
+        "blank_lines": 1,
+        "comment_lines": 6,
+        "functions": 0,
+        "classes": 0
+      },
+      "code_smells": [
+        {
+          "type": "MagicNumber",
+          "message": "Magic number 3",
+          "line": 33,
+          "severity": "low"
+        }
+      ],
+      "smell_summary": {
+        "high": 0,
+        "medium": 0,
+        "low": 1
+      },
+      "quality_score": 99,
+      "relative_path": "django/conf/locale/cy/formats.py"
+    },
+    {
+      "file": "__init__.py",
+      "language": "python",
+      "metrics": {
+        "filename": "__init__.py",
+        "lines_of_code": 0,
+        "blank_lines": 0,
+        "comment_lines": 0,
+        "functions": 0,
+        "classes": 0
+      },
+      "code_smells": [],
+      "smell_summary": {
+        "high": 0,
+        "medium": 0,
+        "low": 0
+      },
+      "quality_score": 100,
+      "relative_path": "django/conf/locale/da/__init__.py"
+    },
+    {
+      "file": "formats.py",
+      "language": "python",
+      "metrics": {
+        "filename": "formats.py",
+        "lines_of_code": 26,
+        "blank_lines": 1,
+        "comment_lines": 6,
+        "functions": 0,
+        "classes": 0
+      },
+      "code_smells": [
+        {
+          "type": "MagicNumber",
+          "message": "Magic number 3",
+          "line": 26,
+          "severity": "low"
+        }
+      ],
+      "smell_summary": {
+        "high": 0,
+        "medium": 0,
+        "low": 1
+      },
+      "quality_score": 99,
+      "relative_path": "django/conf/locale/da/formats.py"
+    },
+    {
+      "file": "__init__.py",
+      "language": "python",
+      "metrics": {
+        "filename": "__init__.py",
+        "lines_of_code": 0,
+        "blank_lines": 0,
+        "comment_lines": 0,
+        "functions": 0,
+        "classes": 0
+      },
+      "code_smells": [],
+      "smell_summary": {
+        "high": 0,
+        "medium": 0,
+        "low": 0
+      },
+      "quality_score": 100,
+      "relative_path": "django/conf/locale/de/__init__.py"
+    },
+    {
+      "file": "formats.py",
+      "language": "python",
+      "metrics": {
+        "filename": "formats.py",
+        "lines_of_code": 29,
+        "blank_lines": 1,
+        "comment_lines": 8,
+        "functions": 0,
+        "classes": 0
+      },
+      "code_smells": [
+        {
+          "type": "MagicNumber",
+          "message": "Magic number 3",
+          "line": 29,
+          "severity": "low"
+        }
+      ],
+      "smell_summary": {
+        "high": 0,
+        "medium": 0,
+        "low": 1
+      },
+      "quality_score": 99,
+      "relative_path": "django/conf/locale/de/formats.py"
+    },
+    {
+      "file": "__init__.py",
+      "language": "python",
+      "metrics": {
+        "filename": "__init__.py",
+        "lines_of_code": 0,
+        "blank_lines": 0,
+        "comment_lines": 0,
+        "functions": 0,
+        "classes": 0
+      },
+      "code_smells": [],
+      "smell_summary": {
+        "high": 0,
+        "medium": 0,
+        "low": 0
+      },
+      "quality_score": 100,
+      "relative_path": "django/conf/locale/de_CH/__init__.py"
+    },
+    {
+      "file": "formats.py",
+      "language": "python",
+      "metrics": {
+        "filename": "formats.py",
+        "lines_of_code": 33,
+        "blank_lines": 2,
+        "comment_lines": 11,
+        "functions": 0,
+        "classes": 0
+      },
+      "code_smells": [
+        {
+          "type": "MagicNumber",
+          "message": "Magic number 3",
+          "line": 33,
+          "severity": "low"
+        }
+      ],
+      "smell_summary": {
+        "high": 0,
+        "medium": 0,
+        "low": 1
+      },
+      "quality_score": 99,
+      "relative_path": "django/conf/locale/de_CH/formats.py"
+    },
+    {
+      "file": "__init__.py",
+      "language": "python",
+      "metrics": {
+        "filename": "__init__.py",
+        "lines_of_code": 0,
+        "blank_lines": 0,
+        "comment_lines": 0,
+        "functions": 0,
+        "classes": 0
+      },
+      "code_smells": [],
+      "smell_summary": {
+        "high": 0,
+        "medium": 0,
+        "low": 0
+      },
+      "quality_score": 100,
+      "relative_path": "django/conf/locale/el/__init__.py"
+    },
+    {
+      "file": "formats.py",
+      "language": "python",
+      "metrics": {
+        "filename": "formats.py",
+        "lines_of_code": 34,
+        "blank_lines": 1,
+        "comment_lines": 6,
+        "functions": 0,
+        "classes": 0
+      },
+      "code_smells": [
+        {
+          "type": "MagicNumber",
+          "message": "Magic number 3",
+          "line": 34,
+          "severity": "low"
+        }
+      ],
+      "smell_summary": {
+        "high": 0,
+        "medium": 0,
+        "low": 1
+      },
+      "quality_score": 99,
+      "relative_path": "django/conf/locale/el/formats.py"
+    },
+    {
+      "file": "__init__.py",
+      "language": "python",
+      "metrics": {
+        "filename": "__init__.py",
+        "lines_of_code": 0,
+        "blank_lines": 0,
+        "comment_lines": 0,
+        "functions": 0,
+        "classes": 0
+      },
+      "code_smells": [],
+      "smell_summary": {
+        "high": 0,
+        "medium": 0,
+        "low": 0
+      },
+      "quality_score": 100,
+      "relative_path": "django/conf/locale/en/__init__.py"
+    },
+    {
+      "file": "formats.py",
+      "language": "python",
+      "metrics": {
+        "filename": "formats.py",
+        "lines_of_code": 65,
+        "blank_lines": 3,
+        "comment_lines": 22,
+        "functions": 0,
+        "classes": 0
+      },
+      "code_smells": [
+        {
+          "type": "MagicNumber",
+          "message": "Magic number 3",
+          "line": 65,
+          "severity": "low"
+        }
+      ],
+      "smell_summary": {
+        "high": 0,
+        "medium": 0,
+        "low": 1
+      },
+      "quality_score": 99,
+      "relative_path": "django/conf/locale/en/formats.py"
+    },
+    {
+      "file": "__init__.py",
+      "language": "python",
+      "metrics": {
+        "filename": "__init__.py",
+        "lines_of_code": 0,
+        "blank_lines": 0,
+        "comment_lines": 0,
+        "functions": 0,
+        "classes": 0
+      },
+      "code_smells": [],
+      "smell_summary": {
+        "high": 0,
+        "medium": 0,
+        "low": 0
+      },
+      "quality_score": 100,
+      "relative_path": "django/conf/locale/en_AU/__init__.py"
+    },
+    {
+      "file": "formats.py",
+      "language": "python",
+      "metrics": {
+        "filename": "formats.py",
+        "lines_of_code": 41,
+        "blank_lines": 1,
+        "comment_lines": 14,
+        "functions": 0,
+        "classes": 0
+      },
+      "code_smells": [
+        {
+          "type": "MagicNumber",
+          "message": "Magic number 3",
+          "line": 41,
+          "severity": "low"
+        }
+      ],
+      "smell_summary": {
+        "high": 0,
+        "medium": 0,
+        "low": 1
+      },
+      "quality_score": 99,
+      "relative_path": "django/conf/locale/en_AU/formats.py"
+    },
+    {
+      "file": "__init__.py",
+      "language": "python",
+      "metrics": {
+        "filename": "__init__.py",
+        "lines_of_code": 0,
+        "blank_lines": 0,
+        "comment_lines": 0,
+        "functions": 0,
+        "classes": 0
+      },
+      "code_smells": [],
+      "smell_summary": {
+        "high": 0,
+        "medium": 0,
+        "low": 0
+      },
+      "quality_score": 100,
+      "relative_path": "django/conf/locale/en_CA/__init__.py"
+    },
+    {
+      "file": "formats.py",
+      "language": "python",
+      "metrics": {
+        "filename": "formats.py",
+        "lines_of_code": 31,
+        "blank_lines": 2,
+        "comment_lines": 6,
+        "functions": 0,
+        "classes": 0
+      },
+      "code_smells": [
+        {
+          "type": "MagicNumber",
+          "message": "Magic number 3",
+          "line": 31,
+          "severity": "low"
+        }
+      ],
+      "smell_summary": {
+        "high": 0,
+        "medium": 0,
+        "low": 1
+      },
+      "quality_score": 99,
+      "relative_path": "django/conf/locale/en_CA/formats.py"
+    },
+    {
+      "file": "__init__.py",
+      "language": "python",
+      "metrics": {
+        "filename": "__init__.py",
+        "lines_of_code": 0,
+        "blank_lines": 0,
+        "comment_lines": 0,
+        "functions": 0,
+        "classes": 0
+      },
+      "code_smells": [],
+      "smell_summary": {
+        "high": 0,
+        "medium": 0,
+        "low": 0
+      },
+      "quality_score": 100,
+      "relative_path": "django/conf/locale/en_GB/__init__.py"
+    },
+    {
+      "file": "formats.py",
+      "language": "python",
+      "metrics": {
+        "filename": "formats.py",
+        "lines_of_code": 41,
+        "blank_lines": 1,
+        "comment_lines": 14,
+        "functions": 0,
+        "classes": 0
+      },
+      "code_smells": [
+        {
+          "type": "MagicNumber",
+          "message": "Magic number 3",
+          "line": 41,
+          "severity": "low"
+        }
+      ],
+      "smell_summary": {
+        "high": 0,
+        "medium": 0,
+        "low": 1
+      },
+      "quality_score": 99,
+      "relative_path": "django/conf/locale/en_GB/formats.py"
+    },
+    {
+      "file": "__init__.py",
+      "language": "python",
+      "metrics": {
+        "filename": "__init__.py",
+        "lines_of_code": 0,
+        "blank_lines": 0,
+        "comment_lines": 0,
+        "functions": 0,
+        "classes": 0
+      },
+      "code_smells": [],
+      "smell_summary": {
+        "high": 0,
+        "medium": 0,
+        "low": 0
+      },
+      "quality_score": 100,
+      "relative_path": "django/conf/locale/en_IE/__init__.py"
+    },
+    {
+      "file": "formats.py",
+      "language": "python",
+      "metrics": {
+        "filename": "formats.py",
+        "lines_of_code": 37,
+        "blank_lines": 1,
+        "comment_lines": 6,
+        "functions": 0,
+        "classes": 0
+      },
+      "code_smells": [
+        {
+          "type": "MagicNumber",
+          "message": "Magic number 3",
+          "line": 37,
+          "severity": "low"
+        }
+      ],
+      "smell_summary": {
+        "high": 0,
+        "medium": 0,
+        "low": 1
+      },
+      "quality_score": 99,
+      "relative_path": "django/conf/locale/en_IE/formats.py"
+    },
+    {
+      "file": "__init__.py",
+      "language": "python",
+      "metrics": {
+        "filename": "__init__.py",
+        "lines_of_code": 0,
+        "blank_lines": 0,
+        "comment_lines": 0,
+        "functions": 0,
+        "classes": 0
+      },
+      "code_smells": [],
+      "smell_summary": {
+        "high": 0,
+        "medium": 0,
+        "low": 0
+      },
+      "quality_score": 100,
+      "relative_path": "django/conf/locale/eo/__init__.py"
+    },
+    {
+      "file": "formats.py",
+      "language": "python",
+      "metrics": {
+        "filename": "formats.py",
+        "lines_of_code": 44,
+        "blank_lines": 1,
+        "comment_lines": 6,
+        "functions": 0,
+        "classes": 0
+      },
+      "code_smells": [
+        {
+          "type": "MagicNumber",
+          "message": "Magic number 3",
+          "line": 44,
+          "severity": "low"
+        }
+      ],
+      "smell_summary": {
+        "high": 0,
+        "medium": 0,
+        "low": 1
+      },
+      "quality_score": 99,
+      "relative_path": "django/conf/locale/eo/formats.py"
+    },
+    {
+      "file": "__init__.py",
+      "language": "python",
+      "metrics": {
+        "filename": "__init__.py",
+        "lines_of_code": 0,
+        "blank_lines": 0,
+        "comment_lines": 0,
+        "functions": 0,
+        "classes": 0
+      },
+      "code_smells": [],
+      "smell_summary": {
+        "high": 0,
+        "medium": 0,
+        "low": 0
+      },
+      "quality_score": 100,
+      "relative_path": "django/conf/locale/es/__init__.py"
+    },
+    {
+      "file": "formats.py",
+      "language": "python",
+      "metrics": {
+        "filename": "formats.py",
+        "lines_of_code": 30,
+        "blank_lines": 1,
+        "comment_lines": 6,
+        "functions": 0,
+        "classes": 0
+      },
+      "code_smells": [
+        {
+          "type": "MagicNumber",
+          "message": "Magic number 3",
+          "line": 30,
+          "severity": "low"
+        }
+      ],
+      "smell_summary": {
+        "high": 0,
+        "medium": 0,
+        "low": 1
+      },
+      "quality_score": 99,
+      "relative_path": "django/conf/locale/es/formats.py"
+    }
+  ],
+  "repo_name": "django-main"
+}
