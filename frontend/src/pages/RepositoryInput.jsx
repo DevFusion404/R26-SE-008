@@ -11,14 +11,15 @@ import { useState, useRef } from 'react';
 const API = 'http://localhost:8080';
 
 const RECENT = [
-  { name: 'LegacyOrderSys',  lang: 'Java',   date: 'Oct 24, 2023', files: '1,242', score: 42,  color: '#ef4444' },
-  { name: 'InventoryAPI',    lang: 'Python',  date: 'Oct 21, 2023', files: '458',   score: 88,  color: '#00d4e8' },
-  { name: 'E-Shop-Core',     lang: 'Java',    date: 'Oct 15, 2023', files: '3,120', score: 65,  color: '#8b5cf6' },
+  { name: 'LegacyOrderSys',  lang: 'Java',   date: 'Oct 24, 2023', files: '1,242',      score: 42,  color: '#ef4444' },
+  { name: 'InventoryAPI',    lang: 'Python',  date: 'Oct 21, 2023', files: '458',        score: 88,  color: '#00d4e8' },
+  { name: 'E-Shop-Core',     lang: 'Java',    date: 'Oct 15, 2023', files: '3,120',      score: 65,  color: '#8b5cf6' },
+  { name: 'tmux',            lang: 'C',       date: 'Recent',       files: 'C/Header',   score: 70,  color: '#22c55e' },
 ];
 
 export default function RepositoryInput({ onLoaded }) {
   const [githubUrl,   setGithubUrl]   = useState('');
-  const [language,    setLanguage]    = useState('Both');
+  const [language,    setLanguage]    = useState('All');
   const [mode,        setMode]        = useState('Comprehensive Refactoring');
   const [threshold,   setThreshold]   = useState(75);
   const [filters,     setFilters]     = useState({ critical: true, naming: true, optimise: false });
@@ -118,7 +119,7 @@ export default function RepositoryInput({ onLoaded }) {
             <div className="card card-body" style={{ padding: 20 }}>
               <label className="field-label">Language Context</label>
               <div className="toggle-group">
-                {['Java', 'Python', 'Both'].map(l => (
+                {['Java', 'Python', 'C', 'All'].map(l => (
                   <button
                     key={l}
                     className={`toggle-item ${language === l ? 'active' : ''}`}
@@ -188,7 +189,7 @@ export default function RepositoryInput({ onLoaded }) {
             <div style={{ display:'flex', flexDirection:'column', gap: 8 }}>
               {[
                 { key:'critical', label:'Critical Structural Issues',   sub:'Memory leaks, circular dependencies' },
-                { key:'naming',   label:'Naming & Style Violations',    sub:'PEP8, Java Conventions, Semantic Naming' },
+                { key:'naming',   label:'Naming & Style Violations',    sub:'PEP8, Java Conventions, C Coding Practices' },
                 { key:'optimise', label:'Optimisation Suggestions',     sub:'Non-critical performance improvements' },
               ].map(({ key, label, sub }) => (
                 <div

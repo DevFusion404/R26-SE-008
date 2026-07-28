@@ -4,13 +4,15 @@
  * Renders the file-tree of the loaded/analysed repository.
  * Scoped to CUQA's concern: show what was ingested and let the user
  * click a file to trigger AST parsing.
+ *
+ * Supports Python (.py), Java (.java), and C (.c, .h) source files.
  */
 
 import { useState, useEffect } from 'react';
 
 const API = 'http://localhost:8080';
 
-const LANG_ICON = { python: '🐍', java: '☕', directory: '📁', file: '📄' };
+const LANG_ICON = { python: '🐍', java: '☕', c: '⚙️', directory: '📁', file: '📄' };
 
 // ── Recursive tree node ─────────────────────────────────────────────────────
 
@@ -26,10 +28,15 @@ function TreeNode({ node, depth = 0, onFileSelect, selectedPath }) {
       ? '🐍'
       : node.language === 'java'
         ? '☕'
-        : '📄';
+        : node.language === 'c'
+          ? (node.name?.endsWith('.h') ? '🔩' : '⚙️')
+          : '📄';
 
   const langClass = !isDir
-    ? (node.language === 'python' ? 'file-py' : node.language === 'java' ? 'file-java' : '')
+    ? (node.language === 'python' ? 'file-py'
+      : node.language === 'java' ? 'file-java'
+      : node.language === 'c' ? 'file-c'
+      : '')
     : 'dir';
 
   function handleClick(e) {
@@ -141,7 +148,7 @@ export default function ProjectStructureView({ repoLoaded, onFileSelect }) {
           <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)' }}>
             {meta.repo_name}
           </span>
-          <span className={`pill pill-${meta.source === 'github' ? 'python' : 'java'}`}>
+          <span className="pill pill-accent">
             {meta.source === 'github' ? '🐙 GitHub' : '📦 ZIP'}
           </span>
           <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>

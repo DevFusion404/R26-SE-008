@@ -4,6 +4,8 @@
  * Displays the CUQA quality report JSON — code smell list,
  * severity breakdown, per-file metrics, and aggregate repo score.
  * This is the structured output the CUQA Agent passes to the RDP Agent.
+ *
+ * Supports Python (.py), Java (.java), and C (.c, .h) source files.
  */
 
 import { useState, useEffect } from 'react';

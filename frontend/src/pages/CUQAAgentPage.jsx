@@ -6,6 +6,8 @@
  * - Advanced Filtering & Search
  * - Smell Distribution & Impact Analysis
  * - Trend visualization
+ *
+ * Supports Python (.py), Java (.java), and C (.c, .h) source files.
  */
 
 import { useState, useEffect, useRef } from 'react';
@@ -23,11 +25,22 @@ const NODE_COLOR = {
   Module:'#00d4e8', FunctionDef:'#8b5cf6', AsyncFunctionDef:'#8b5cf6',
   ClassDef:'#00d4e8', Import:'#374151', ImportFrom:'#374151',
   Assign:'#3b82f6', Return:'#ef4444', If:'#f59e0b', For:'#f59e0b',
-  // C
+  // C — PascalCase (tree-sitter may return these)
   TranslationUnit:'#00d4e8', FunctionDefinition:'#8b5cf6',
-  IncludeDirective:'#374151', declaration:'#3b82f6',
-  function_declarator:'#a855f7', pointer_declarator:'#a855f7',
-  identifier:'#22c55e', preproc_include:'#374151',
+  IncludeDirective:'#374151', Declaration:'#3b82f6',
+  FunctionDeclarator:'#a855f7', ParameterDeclaration:'#22c55e',
+  CompoundStatement:'#1e40af', IfStatement:'#f59e0b',
+  ForStatement:'#f59e0b', WhileStatement:'#f59e0b',
+  ReturnStatement:'#ef4444', PreprocInclude:'#374151',
+  Identifier:'#22c55e',
+  // C — snake_case (tree-sitter native)
+  translation_unit:'#00d4e8', function_definition:'#8b5cf6',
+  preproc_include:'#374151', declaration:'#3b82f6',
+  function_declarator:'#a855f7', parameter_declaration:'#22c55e',
+  compound_statement:'#1e40af', if_statement:'#f59e0b',
+  for_statement:'#f59e0b', while_statement:'#f59e0b',
+  return_statement:'#ef4444', identifier:'#22c55e',
+  pointer_declarator:'#a855f7',
 };
 const getColor = t => NODE_COLOR[t] || '#1e3a4f';
 
