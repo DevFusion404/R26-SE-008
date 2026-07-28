@@ -16,6 +16,7 @@ import DIWOAgentPage   from './pages/diwo/DIWOAgentPage.jsx';
 import Reports         from './pages/Reports.jsx';
 import Evaluation      from './pages/Evaluation.jsx';
 import Settings        from './pages/Settings.jsx';
+import Documentation   from './pages/Documentation.jsx';
 
 const API = 'http://localhost:8080';
 
@@ -123,6 +124,7 @@ export default function App() {
       case 'reports':     return <Reports />;
       case 'evaluation':  return <Evaluation />;
       case 'settings':    return <Settings />;
+      case 'docs':        return <Documentation />;
       default:            return <PlaceholderPage page={page} />;
     }
   }
