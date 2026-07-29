@@ -97,6 +97,48 @@ def _find_source_files(root: str) -> list[str]:
     return sorted(result)
 
 
+# Extension → canonical display name mapping
+_EXT_TO_LANG = {".py": "Python", ".java": "Java", ".c": "C", ".h": "C"}
+
+
+def _get_language_breakdown(file_list: list[str]) -> dict:
+    """
+    Count source files per language and return a breakdown dict.
+
+    Returns:
+        {
+            "breakdown": {"Python": 12, "Java": 3, "C": 7},
+            "detected_languages": ["Python", "C"],   # sorted by count desc, deduplicated
+            "primary_language": "Python",             # most common language
+            "is_polyglot": True                       # True if >1 language
+        }
+    """
+    counts: dict[str, int] = {}
+    for path in file_list:
+        ext = os.path.splitext(path)[-1].lower()
+        lang = _EXT_TO_LANG.get(ext)
+        if lang:
+            counts[lang] = counts.get(lang, 0) + 1
+
+    if not counts:
+        return {
+            "breakdown": {},
+            "detected_languages": [],
+            "primary_language": None,
+            "is_polyglot": False,
+        }
+
+    # Sort by count descending
+    sorted_langs = sorted(counts.items(), key=lambda x: x[1], reverse=True)
+    detected = [lang for lang, _ in sorted_langs]
+    return {
+        "breakdown": counts,
+        "detected_languages": detected,
+        "primary_language": detected[0],
+        "is_polyglot": len(detected) > 1,
+    }
+
+
 def _build_tree(root: str) -> dict:
     """Build a recursive directory tree dict for the frontend."""
 
@@ -182,6 +224,7 @@ async def upload_zip(file: UploadFile = File(...)):
         extract_dir = os.path.join(extract_dir, entries[0])
 
     source_files = _find_source_files(extract_dir)
+    lang_info = _get_language_breakdown(source_files)
 
     _workspace.update({
         "root": extract_dir,
@@ -195,6 +238,11 @@ async def upload_zip(file: UploadFile = File(...)):
         "repo_name": _workspace["repo_name"],
         "files_found": len(source_files),
         "source_files": source_files[:100],  # cap for response size
+        # Language detection results
+        "language_breakdown":   lang_info["breakdown"],
+        "detected_languages":   lang_info["detected_languages"],
+        "primary_language":     lang_info["primary_language"],
+        "is_polyglot":          lang_info["is_polyglot"],
     }
 
 
@@ -252,6 +300,7 @@ def load_github_repo(request: GitHubRepoRequest):  # Use Pydantic model
         extract_dir = os.path.join(extract_dir, entries[0])
 
     source_files = _find_source_files(extract_dir)
+    lang_info = _get_language_breakdown(source_files)
 
     _workspace.update({
         "root": extract_dir,
@@ -266,6 +315,11 @@ def load_github_repo(request: GitHubRepoRequest):  # Use Pydantic model
         "github_url": url,
         "files_found": len(source_files),
         "source_files": source_files[:100],
+        # Language detection results
+        "language_breakdown":   lang_info["breakdown"],
+        "detected_languages":   lang_info["detected_languages"],
+        "primary_language":     lang_info["primary_language"],
+        "is_polyglot":          lang_info["is_polyglot"],
     }
 
 

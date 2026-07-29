@@ -464,21 +464,68 @@ export default function CUQAAgentPage({ repoLoaded, repoMeta, onSendToRdp, analy
           </div>
         </div>
         <div className="page-header-actions">
-          {/* Active analysis config badge */}
-          {analysisConfig && (
-            <div style={{
-              display: 'flex', gap: 6, alignItems: 'center',
-              background: 'var(--accent-muted)', border: '1px solid var(--border-accent)',
-              borderRadius: 'var(--r-sm)', padding: '4px 10px', fontSize: 10,
-            }}>
-              <span style={{ color: 'var(--accent)', fontWeight: 700 }}>⚙ Config</span>
-              <span style={{ color: 'var(--text-secondary)' }}>Threshold: {threshold}%</span>
-              <span style={{ color: 'var(--text-muted)' }}>·</span>
-              <span style={{ color: 'var(--text-secondary)' }}>{langContext}</span>
-              <span style={{ color: 'var(--text-muted)' }}>·</span>
-              <span style={{ color: 'var(--text-secondary)' }}>{analysisMode}</span>
-            </div>
-          )}
+          {analysisConfig && (() => {
+            // Build language display from repoMeta (real breakdown) or fall back to config label
+            const breakdown   = repoMeta?.language_breakdown   || {};
+            const detectedArr = repoMeta?.detected_languages   || [];
+            const isPolyglot  = repoMeta?.is_polyglot          || false;
+            const LANG_COLORS = { Python: '#3b82f6', Java: '#f59e0b', C: '#8b5cf6' };
+            const LANG_ICONS  = { Python: '🐍', Java: '☕', C: '⚙️' };
+            const total = Object.values(breakdown).reduce((a, b) => a + b, 0);
+
+            return (
+              <div style={{
+                display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap',
+              }}>
+                {/* Language chips with real file counts */}
+                {detectedArr.length > 0 ? (
+                  detectedArr.map(lang => {
+                    const count = breakdown[lang] || 0;
+                    const pct   = total > 0 ? Math.round((count / total) * 100) : 0;
+                    const color = LANG_COLORS[lang] || 'var(--accent)';
+                    return (
+                      <div key={lang} style={{
+                        display: 'flex', alignItems: 'center', gap: 5,
+                        background: `${color}15`, border: `1px solid ${color}40`,
+                        borderRadius: 'var(--r-sm)', padding: '4px 10px',
+                      }}>
+                        <span style={{ fontSize: 13 }}>{LANG_ICONS[lang] || '📄'}</span>
+                        <div>
+                          <div style={{ fontSize: 11, fontWeight: 700, color, lineHeight: 1.2 }}>{lang}</div>
+                          <div style={{ fontSize: 9, color: 'var(--text-muted)', lineHeight: 1 }}>{count} files · {pct}%</div>
+                        </div>
+                      </div>
+                    );
+                  })
+                ) : (
+                  /* Fallback to config text badge when no breakdown data */
+                  <div style={{
+                    display: 'flex', gap: 6, alignItems: 'center',
+                    background: 'var(--accent-muted)', border: '1px solid var(--border-accent)',
+                    borderRadius: 'var(--r-sm)', padding: '4px 10px', fontSize: 10,
+                  }}>
+                    <span style={{ color: 'var(--accent)', fontWeight: 700 }}>⚙ Config</span>
+                    <span style={{ color: 'var(--text-secondary)' }}>Threshold: {threshold}%</span>
+                    <span style={{ color: 'var(--text-muted)' }}>·</span>
+                    <span style={{ color: 'var(--text-secondary)' }}>{langContext}</span>
+                    <span style={{ color: 'var(--text-muted)' }}>·</span>
+                    <span style={{ color: 'var(--text-secondary)' }}>{analysisMode}</span>
+                  </div>
+                )}
+                {isPolyglot && (
+                  <span style={{
+                    fontSize: 9, fontWeight: 700, letterSpacing: '0.5px',
+                    padding: '2px 7px', borderRadius: 'var(--r-full)',
+                    background: 'rgba(139,92,246,0.2)', color: '#a78bfa',
+                    border: '1px solid rgba(139,92,246,0.4)',
+                  }}>
+                    POLYGLOT
+                  </span>
+                )}
+              </div>
+            );
+          })()}
+
           <button className="btn btn-primary" onClick={() => { fetchTree(); fetchReport(); }}>
             ⟳ RUN ANALYSIS
           </button>
