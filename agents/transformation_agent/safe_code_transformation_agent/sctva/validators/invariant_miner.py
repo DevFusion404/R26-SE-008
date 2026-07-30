@@ -11,6 +11,7 @@ from typing import Any, Dict, List, Sequence
 from ..contracts import RefactoringAction
 from ..models import ValidationStepResult
 from ..utils.io_helpers import utc_now_iso
+from .c_support import summarize_c_source
 
 
 class InvariantMiner:
@@ -67,6 +68,8 @@ class InvariantMiner:
 
         if language == "python":
             mined = self._mine_python(details)
+        elif language == "c":
+            mined = self._mine_c(details)
         else:
             mined = self._mine_java(details)
 
@@ -201,6 +204,72 @@ class InvariantMiner:
         result["details"]["java_group_invariants"] = self._group_java_pairs(pairs)
 
         return result
+
+    def _mine_c(self, details: Dict[str, Any]) -> Dict[str, Any]:
+        pairs: List[Dict[str, Any]] = []
+
+        for item in details.get("c_results") or []:
+            if not isinstance(item, dict):
+                continue
+
+            if item.get("original_fingerprint") and item.get("transformed_fingerprint"):
+                pairs.append(
+                    {
+                        "name": item.get("name") or "c_case",
+                        "original_fingerprint": item.get("original_fingerprint"),
+                        "transformed_fingerprint": item.get("transformed_fingerprint"),
+                        "comparison": item.get("comparison") or {},
+                        "mode": item.get("mode") or "",
+                    }
+                )
+
+        if not pairs:
+            return self._skipped_result(
+                "No C paired fingerprints were available for invariant mining."
+            )
+
+        if any(pair.get("mode") == "static_c_fingerprint" for pair in pairs):
+            return self._mine_static_c(pairs)
+
+        return self._mine_from_pairs(pairs, language_label="C")
+
+    def _mine_static_c(self, pairs: List[Dict[str, Any]]) -> Dict[str, Any]:
+        invariants: List[Dict[str, Any]] = []
+        preserved: List[Dict[str, Any]] = []
+        violations: List[Dict[str, Any]] = []
+
+        for pair in pairs:
+            comparison = pair.get("comparison") or {}
+            matched = bool(comparison.get("matched", True))
+            reason = comparison.get("reason") or "static_fingerprint_match"
+
+            self._append(
+                invariants,
+                preserved,
+                violations,
+                name=f"static_fingerprint::{pair.get('name', 'c_case')}",
+                ok=matched,
+                critical=True,
+                reason=reason,
+                original=pair.get("original_fingerprint"),
+                transformed=pair.get("transformed_fingerprint"),
+            )
+
+        summary = (
+            "C static invariants preserved."
+            if not violations
+            else f"C static invariant violations detected: {len(violations)}."
+        )
+
+        return self._finalize(
+            mode="static",
+            message=summary,
+            original_summary={"mode": "static_c_fingerprint"},
+            transformed_summary={"mode": "static_c_fingerprint"},
+            invariants=invariants,
+            preserved=preserved,
+            violations=violations,
+        )
 
     def _mine_from_pairs(
         self,
