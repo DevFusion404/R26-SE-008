@@ -82,7 +82,7 @@ def _translate_cuqa_to_rdp(data: dict) -> dict:
     SMELL_TYPE_MAP = {
         # Python smells
         "LongMethod":          "Long Method",
-        "LargeClass":          "God Class",
+        "LargeClass":          "Large Class",         # Changed from "God Class" for semantic accuracy
         "TooManyParameters":   "Long Parameter List",
         "MagicNumber":         "Magic Numbers",
         "MagicNumbers":        "Magic Numbers",
@@ -153,26 +153,36 @@ def _translate_cuqa_to_rdp(data: dict) -> dict:
             normalised_type = SMELL_TYPE_MAP.get(raw_type, raw_type)
 
             # Resolve the entity (function / class / method name)
-            # Priority: explicit "entity" field → parse message → file base name
+            # Priority: explicit "entity" field → parse message → fallback to file base name
             entity = raw.get("entity")
+            
             if not entity:
                 # CUQA messages look like: "Function 'foo' has ..." or "Class 'Bar' has ..."
                 _m = re.search(r"(?:Function|Method|Class)\s+'([^']+)'", raw.get("message", ""))
                 entity = _m.group(1) if _m else None
+            
+            # Last resort: use file base name if entity still missing
+            if not entity or entity == "unknown":
+                entity = file_name.replace(".java", "").replace(".py", "")
 
-            # Build location dict
+            # Build location dict based on smell type
             line = raw.get("line")
             base_name = file_name.replace(".java", "").replace(".py", "")
+            
+            # Determine whether entity is a class or method based on smell type
+            is_class_smell = normalised_type in ("Large Class", "Lazy Class", "God Class")
+            is_method_smell = normalised_type in ("Long Method", "Long Parameter List", "Too Many Parameters")
+            
             location = {
                 "file": file_name,
                 "language": language,
-                "class": entity if normalised_type in ("God Class", "Large Class", "Lazy Class") else base_name,
-                "method": entity if normalised_type not in ("God Class", "Large Class", "Lazy Class") else None,
+                "class": entity if is_class_smell else base_name,
+                "method": entity if is_method_smell else (base_name if not is_class_smell else None),
                 "lines": [line] if line else [],
             }
-            # Clean up None method
-            if location["method"] is None:
-                location["method"] = base_name
+            # Clean up None values
+            if location["method"] is None or location["method"] == "unknown":
+                location["method"] = base_name if not is_class_smell else None
 
 
             # Build metrics dict — file-level + any numeric smell-level fields

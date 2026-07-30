@@ -350,19 +350,42 @@ class RDPAgent:
             len(report.smells),
         )
 
-        # ----- Steps 5-6: Dependency analysis & sequencing -----
-        # Capture pre-sequence order
-        pre_order = [
-            {"smell_id": s.id, "refactoring": c["name"]}
-            for s, c in selections
-        ]
-
-        ordered = self.dependency_analyzer.sequence_steps(selections)
+        try:
+            ordered = self.dependency_analyzer.sequence_steps(selections)
+        except ValueError as exc:
+            logger.error("Plan generation failed due to circular dependencies: %s", exc)
+            trace["dependency_analysis"] = {
+                "error": str(exc),
+                "rules_applied": {},
+                "order_before": [
+                    {"smell_id": s.id, "refactoring": c["name"]}
+                    for s, c in selections
+                ],
+                "order_after": [],
+                "reordered": False,
+            }
+            return {
+                "plan_object": None,
+                "plan": {
+                    "error": str(exc),
+                    "smells_with_circular_deps": [
+                        {"smell_id": s.id, "refactoring": c["name"]}
+                        for s, c in selections
+                    ],
+                },
+                "trace": trace,
+            }
 
         # Capture post-sequence order
         post_order = [
             {"smell_id": s.id, "refactoring": c["name"]}
             for s, c in ordered
+        ]
+
+        # Capture pre-sequence order
+        pre_order = [
+            {"smell_id": s.id, "refactoring": c["name"]}
+            for s, c in selections
         ]
 
         # Collect relevant dependency rules
@@ -378,6 +401,7 @@ class RDPAgent:
             "order_after": post_order,
             "reordered": pre_order != post_order,
         }
+
 
         # ----- Step 7: Generate plan -----
         plan = self.plan_generator.build_plan(

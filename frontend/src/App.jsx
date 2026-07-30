@@ -107,6 +107,10 @@ export default function App() {
     setPage('rdp');
   }
 
+  function handleClearPreloaded() {
+    setCuqaReport(null);
+  }
+
   function navigate(id) {
     setPage(id);
   }
