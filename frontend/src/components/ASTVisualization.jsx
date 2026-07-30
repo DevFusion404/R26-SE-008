@@ -4,12 +4,12 @@
  * Parses a selected source file via the CUQA backend and renders
  * the returned AST as an interactive, collapsible node tree.
  *
- * Supports Python and Java files.
+ * Supports Python (.py), Java (.java), and C (.c, .h) files.
  */
 
 import { useState, useEffect } from 'react';
 
-const API = 'http://localhost:8001';
+const API = 'http://localhost:8080';
 
 // ── Colour mapping per node type ────────────────────────────────────────────
 
@@ -40,6 +40,33 @@ const NODE_COLORS = {
   ImportDeclaration:  '#a5d6ff',
   Parameter:          '#69db7c',
   InterfaceDeclaration: '#e8c468',
+  // C — PascalCase
+  TranslationUnit:        '#39d0d8',
+  FunctionDefinition:     '#ffa94d',
+  IncludeDirective:       '#a5d6ff',
+  Declaration:            '#74c0fc',
+  FunctionDeclarator:     '#d2a8ff',
+  ParameterDeclaration:   '#69db7c',
+  CompoundStatement:      '#5c7cfa',
+  IfStatement:            '#e8c468',
+  ForStatement:           '#e8c468',
+  WhileStatement:         '#e8c468',
+  ReturnStatement:        '#ff6b6b',
+  PreprocInclude:         '#a5d6ff',
+  Identifier:             '#69db7c',
+  // C — snake_case (tree-sitter native)
+  translation_unit:       '#39d0d8',
+  function_definition:    '#ffa94d',
+  preproc_include:        '#a5d6ff',
+  declaration:            '#74c0fc',
+  function_declarator:    '#d2a8ff',
+  parameter_declaration:  '#69db7c',
+  compound_statement:     '#5c7cfa',
+  if_statement:           '#e8c468',
+  for_statement:          '#e8c468',
+  while_statement:        '#e8c468',
+  return_statement:       '#ff6b6b',
+  identifier:             '#69db7c',
 };
 
 const DEFAULT_COLOR = '#8b949e';
@@ -138,9 +165,9 @@ function ASTSummary({ summary }) {
       </div>
       <div className="metric-card">
         <div className="metric-value">
-          {language === 'python' ? '🐍' : language === 'java' ? '☕' : '?'}
+          {language === 'python' ? '🐍' : language === 'java' ? '☕' : language === 'c' ? '⚙️' : '📄'}
         </div>
-        <div className="metric-label">{language}</div>
+        <div className="metric-label">{language ?? '—'}</div>
       </div>
       {topTypes.map(([type, count]) => (
         <div className="metric-card" key={type}>
@@ -194,7 +221,7 @@ export default function ASTVisualization({ selectedFile, repoLoaded }) {
     return (
       <div className="empty-state">
         <span className="empty-icon">🌲</span>
-        <p>Load a repository first, then select a Python or Java file to visualise its AST.</p>
+        <p>Load a repository first, then select a Python, Java, or C file to visualise its AST.</p>
       </div>
     );
   }
@@ -204,8 +231,10 @@ export default function ASTVisualization({ selectedFile, repoLoaded }) {
       <div className="empty-state">
         <span className="empty-icon">👈</span>
         <p>
-          Select a <span style={{ color: '#79c0ff' }}>.py</span> or{' '}
-          <span style={{ color: '#ffa94d' }}>.java</span> file from the{' '}
+          Select a <span style={{ color: '#79c0ff' }}>.py</span>,{' '}
+          <span style={{ color: '#ffa94d' }}>.java</span>,{' '}
+          <span style={{ color: '#22c55e' }}>.c</span>, or{' '}
+          <span style={{ color: '#22c55e' }}>.h</span> file from the{' '}
           <strong>Project Structure</strong> tab.
         </p>
       </div>

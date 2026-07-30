@@ -6,21 +6,41 @@
  * - Advanced Filtering & Search
  * - Smell Distribution & Impact Analysis
  * - Trend visualization
+ *
+ * Supports Python (.py), Java (.java), and C (.c, .h) source files.
  */
 
 import { useState, useEffect, useRef } from 'react';
 
-const API = 'http://localhost:8001';
+const API = 'http://localhost:8080';
 
 // ── Node colours by type ───────────────────────────────────────────────────
 const NODE_COLOR = {
+  // Java
   CompilationUnit:'#00d4e8', ClassDeclaration:'#00d4e8', ClassOrInterfaceDeclaration:'#00d4e8',
   MethodDeclaration:'#8b5cf6', ConstructorDeclaration:'#8b5cf6',
-  FieldDeclaration:'#3b82f6',  ImportDeclaration:'#374151',
+  FieldDeclaration:'#3b82f6', ImportDeclaration:'#374151',
   PackageDeclaration:'#374151', Parameter:'#22c55e',
+  // Python
   Module:'#00d4e8', FunctionDef:'#8b5cf6', AsyncFunctionDef:'#8b5cf6',
   ClassDef:'#00d4e8', Import:'#374151', ImportFrom:'#374151',
   Assign:'#3b82f6', Return:'#ef4444', If:'#f59e0b', For:'#f59e0b',
+  // C — PascalCase (tree-sitter may return these)
+  TranslationUnit:'#00d4e8', FunctionDefinition:'#8b5cf6',
+  IncludeDirective:'#374151', Declaration:'#3b82f6',
+  FunctionDeclarator:'#a855f7', ParameterDeclaration:'#22c55e',
+  CompoundStatement:'#1e40af', IfStatement:'#f59e0b',
+  ForStatement:'#f59e0b', WhileStatement:'#f59e0b',
+  ReturnStatement:'#ef4444', PreprocInclude:'#374151',
+  Identifier:'#22c55e',
+  // C — snake_case (tree-sitter native)
+  translation_unit:'#00d4e8', function_definition:'#8b5cf6',
+  preproc_include:'#374151', declaration:'#3b82f6',
+  function_declarator:'#a855f7', parameter_declaration:'#22c55e',
+  compound_statement:'#1e40af', if_statement:'#f59e0b',
+  for_statement:'#f59e0b', while_statement:'#f59e0b',
+  return_statement:'#ef4444', identifier:'#22c55e',
+  pointer_declarator:'#a855f7',
 };
 const getColor = t => NODE_COLOR[t] || '#1e3a4f';
 
@@ -135,12 +155,23 @@ function ASTGraph({ ast }) {
   );
 }
 
+// ── Language icon helper ────────────────────────────────────────────────────
+function langIcon(language, filename) {
+  if (language === 'python') return '🐍';
+  if (language === 'java')   return '☕';
+  if (language === 'c') {
+    const ext = filename?.split('.').pop()?.toLowerCase();
+    return ext === 'h' ? '🔩' : '⚙️';
+  }
+  return '📄';
+}
+
 // ── File Tree node ─────────────────────────────────────────────────────────
 function TreeNode({ node, depth = 0, onSelect, selected }) {
   const [open, setOpen] = useState(depth < 2);
   const isDir  = node.type === 'directory';
   const isSel  = node.path === selected;
-  const icon   = isDir ? (open ? '📂' : '📁') : node.language === 'python' ? '🐍' : node.language === 'java' ? '☕' : '📄';
+  const icon   = isDir ? (open ? '📂' : '📁') : langIcon(node.language, node.name);
 
   return (
     <div>
@@ -239,6 +270,8 @@ function FilesWithSmells({ report, filter = 'all' }) {
     ? filesData.filter(f => f.language === 'python')
     : filter === 'java'
     ? filesData.filter(f => f.language === 'java')
+    : filter === 'c'
+    ? filesData.filter(f => f.language === 'c')
     : filesData;
 
   return (
@@ -259,7 +292,7 @@ function FilesWithSmells({ report, filter = 'all' }) {
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'start', marginBottom: 12 }}>
                 <div>
                   <div style={{ fontWeight: 600, fontSize: 13, color: 'var(--text-primary)' }}>
-                    {file.language === 'python' ? '🐍' : '☕'} {file.name}
+                    {langIcon(file.language, file.name)} {file.name}
                   </div>
                   <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }}>
                     {file.metrics.lines_of_code || '?'} LOC · {file.metrics.functions || 0} methods
@@ -319,7 +352,13 @@ function FilesWithSmells({ report, filter = 'all' }) {
 }
 
 // ── Main CUQAAgentPage ─────────────────────────────────────────────────────
-export default function CUQAAgentPage({ repoLoaded, repoMeta, onSendToRdp }) {
+export default function CUQAAgentPage({ repoLoaded, repoMeta, onSendToRdp, analysisConfig }) {
+  // Extract active settings (fall back to sensible defaults if no config provided)
+  const threshold     = analysisConfig?.threshold      ?? 75;
+  const severityFilts = analysisConfig?.severity_filters ?? { critical: true, naming: true };
+  const analysisMode  = analysisConfig?.analysis_mode   ?? 'Comprehensive Refactoring';
+  const langContext   = analysisConfig?.language_context ?? 'All';
+
   const [tree,        setTree]        = useState(null);
   const [selFile,     setSelFile]     = useState(null);
   const [astData,     setAstData]     = useState(null);
@@ -374,7 +413,19 @@ export default function CUQAAgentPage({ repoLoaded, repoMeta, onSendToRdp }) {
   }
 
   const smells = report?.files?.flatMap(f => (f.code_smells || []).map(s => ({ ...s, file: f.file }))) ?? [];
+
+  // Apply severity filters from RepositoryInput config
+  const filteredSmells = smells.filter(s => {
+    const sev = s.severity || 'low';
+    if (sev === 'high' && !severityFilts.critical) return false;
+    // 'naming' filter controls medium/low naming-related smells
+    if ((sev === 'medium' || sev === 'low') && !severityFilts.naming) return false;
+    return true;
+  });
+
   const filesWithSmells = (report?.files || []).filter(f => (f.code_smells || []).length > 0);
+  // Files below quality threshold are highlighted for refactoring
+  const filesBelowThreshold = (report?.files || []).filter(f => (f.quality_score ?? 100) < threshold);
   const summary = report?.summary ?? {};
   const ast = astData?.parsed?.ast;
   const astSummary = astData?.summary;
@@ -413,6 +464,21 @@ export default function CUQAAgentPage({ repoLoaded, repoMeta, onSendToRdp }) {
           </div>
         </div>
         <div className="page-header-actions">
+          {/* Active analysis config badge */}
+          {analysisConfig && (
+            <div style={{
+              display: 'flex', gap: 6, alignItems: 'center',
+              background: 'var(--accent-muted)', border: '1px solid var(--border-accent)',
+              borderRadius: 'var(--r-sm)', padding: '4px 10px', fontSize: 10,
+            }}>
+              <span style={{ color: 'var(--accent)', fontWeight: 700 }}>⚙ Config</span>
+              <span style={{ color: 'var(--text-secondary)' }}>Threshold: {threshold}%</span>
+              <span style={{ color: 'var(--text-muted)' }}>·</span>
+              <span style={{ color: 'var(--text-secondary)' }}>{langContext}</span>
+              <span style={{ color: 'var(--text-muted)' }}>·</span>
+              <span style={{ color: 'var(--text-secondary)' }}>{analysisMode}</span>
+            </div>
+          )}
           <button className="btn btn-primary" onClick={() => { fetchTree(); fetchReport(); }}>
             ⟳ RUN ANALYSIS
           </button>
@@ -487,7 +553,7 @@ export default function CUQAAgentPage({ repoLoaded, repoMeta, onSendToRdp }) {
             {!selFile && !loadingAst && (
               <div className="empty-state">
                 <span className="empty-icon">🌲</span>
-                <p>Click a .py or .java file in the explorer to visualise its AST.</p>
+                <p>Click a <code>.py</code>, <code>.java</code>, <code>.c</code>, or <code>.h</code> file in the explorer to visualise its AST.</p>
               </div>
             )}
             {ast && !loadingAst && !rawJson && <ASTGraph ast={ast} />}
@@ -515,13 +581,19 @@ export default function CUQAAgentPage({ repoLoaded, repoMeta, onSendToRdp }) {
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
           <h3 style={{ margin: 0, fontSize: 14, fontWeight: 600 }}>📁 Affected Files ({filesWithSmells.length})</h3>
           <div style={{ display: 'flex', gap: 8 }}>
-            {['all', 'critical', 'python', 'java'].map(f => (
+            {[
+              { id: 'all',      label: 'All Files' },
+              { id: 'critical', label: '🔴 Critical' },
+              { id: 'python',   label: '🐍 Python' },
+              { id: 'java',     label: '☕ Java' },
+              { id: 'c',        label: '⚙️ C' },
+            ].map(({ id, label }) => (
               <button
-                key={f}
-                className={`btn btn-sm ${smellFilter === f ? 'btn-primary' : 'btn-ghost'}`}
-                onClick={() => setSmellFilter(f)}
+                key={id}
+                className={`btn btn-sm ${smellFilter === id ? 'btn-primary' : 'btn-ghost'}`}
+                onClick={() => setSmellFilter(id)}
               >
-                {f === 'all' ? 'All Files' : f === 'critical' ? '🔴 Critical' : f === 'python' ? '🐍 Python' : '☕ Java'}
+                {label}
               </button>
             ))}
           </div>
@@ -543,8 +615,14 @@ export default function CUQAAgentPage({ repoLoaded, repoMeta, onSendToRdp }) {
       {/* ── Detailed Code Smells Table ──────────────────────── */}
       <div className="card">
         <div className="card-header">
-          <span className="card-title">🔍 Detailed Code Smells ({smells.length})</span>
-          <div style={{ display: 'flex', gap: 8 }}>
+          <span className="card-title">🔍 Detailed Code Smells ({filteredSmells.length})</span>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+            {/* Threshold indicator */}
+            {filesBelowThreshold.length > 0 && (
+              <span className="badge badge-critical" title={`${filesBelowThreshold.length} files below ${threshold}% threshold`}>
+                ⚠ {filesBelowThreshold.length} below {threshold}%
+              </span>
+            )}
             {summary.smell_severity?.high   > 0 && <span className="badge badge-critical">● {summary.smell_severity.high} Critical</span>}
             {summary.smell_severity?.medium > 0 && <span className="badge badge-medium">● {summary.smell_severity.medium} Medium</span>}
             {summary.smell_severity?.low    > 0 && <span className="badge" style={{ background: '#22c55e40', color: '#22c55e' }}>● {summary.smell_severity.low} Low</span>}
@@ -573,7 +651,7 @@ export default function CUQAAgentPage({ repoLoaded, repoMeta, onSendToRdp }) {
                   </tr>
                 </thead>
                 <tbody>
-                  {smells.slice(0, 30).map((s, i) => (
+                  {filteredSmells.slice(0, 30).map((s, i) => (
                     <tr key={i}>
                       <td>
                         <span style={{ fontWeight: 600, fontSize: 12, color: 'var(--text-primary)' }}>
@@ -609,9 +687,9 @@ export default function CUQAAgentPage({ repoLoaded, repoMeta, onSendToRdp }) {
               </table>
             </div>
 
-            {smells.length > 30 && (
+            {filteredSmells.length > 30 && (
               <div style={{ padding: 14, textAlign: 'center', borderTop: '1px solid var(--border)', fontSize: 12, color: 'var(--text-secondary)' }}>
-                Showing 30 of {smells.length} code smells — <a href="#" style={{ color: 'var(--accent)' }}>Load More</a>
+                Showing 30 of {filteredSmells.length} code smells — <a href="#" style={{ color: 'var(--accent)' }}>Load More</a>
               </div>
             )}
           </>

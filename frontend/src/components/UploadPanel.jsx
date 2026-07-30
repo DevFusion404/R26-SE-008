@@ -4,11 +4,13 @@
  * First-step UI for the CUQA Agent.
  * Accepts a ZIP file (drag-and-drop or click) OR a public GitHub URL.
  * Posts to the CUQA backend and triggers the analysis pipeline.
+ *
+ * Supports Python (.py), Java (.java), and C (.c, .h) source files.
  */
 
 import { useState, useRef } from 'react';
 
-const API = 'http://localhost:8001';
+const API = 'http://localhost:8080';
 
 export default function UploadPanel({ onLoaded }) {
   const [mode, setMode] = useState('zip');   // 'zip' | 'github'
@@ -116,8 +118,13 @@ export default function UploadPanel({ onLoaded }) {
               Drop your project ZIP here
             </p>
             <p style={{ color: 'var(--text-secondary)', fontSize: 12 }}>
-              or click to browse — supports Python (.py) and Java (.java) files
+              or click to browse — supports Python (.py), Java (.java), and C (.c, .h) files
             </p>
+            <div style={{ marginTop: 10, display: 'inline-flex', gap: 10, flexWrap: 'wrap', justifyContent: 'center' }}>
+              <span style={{ fontSize: 11, color: 'var(--text-muted)', background: 'var(--bg-elevated)', padding: '2px 8px', borderRadius: 4 }}>🐍 Python: .py</span>
+              <span style={{ fontSize: 11, color: 'var(--text-muted)', background: 'var(--bg-elevated)', padding: '2px 8px', borderRadius: 4 }}>☕ Java: .java</span>
+              <span style={{ fontSize: 11, color: 'var(--text-muted)', background: 'var(--bg-elevated)', padding: '2px 8px', borderRadius: 4 }}>⚙️ C: .c, .h</span>
+            </div>
             <input
               ref={fileRef}
               type="file"

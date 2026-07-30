@@ -16,8 +16,9 @@ import DIWOAgentPage   from './pages/diwo/DIWOAgentPage.jsx';
 import Reports         from './pages/Reports.jsx';
 import Evaluation      from './pages/Evaluation.jsx';
 import Settings        from './pages/Settings.jsx';
+import Documentation   from './pages/Documentation.jsx';
 
-const API = 'http://localhost:8001';
+const API = 'http://localhost:8080';
 
 // ── Sidebar navigation definition ─────────────────────────────────────────
 const NAV_MAIN = [
@@ -78,6 +79,7 @@ export default function App() {
   const [page,       setPage]       = useState('overview');
   const [repoLoaded, setRepoLoaded] = useState(false);
   const [repoMeta,   setRepoMeta]   = useState(null);
+  const [repoConfig, setRepoConfig] = useState(null);  // threshold, filters, mode from RepositoryInput
   const [backendOk,  setBackendOk]  = useState(null);
   const [search,     setSearch]     = useState('');
   const [cuqaReport, setCuqaReport] = useState(null); // quality report from CUQA → RDP bridge
@@ -93,6 +95,8 @@ export default function App() {
   function handleRepoLoaded(data) {
     setRepoLoaded(true);
     setRepoMeta(data);
+    // Persist the analysis config (threshold, filters, mode, language) from RepositoryInput
+    if (data.config) setRepoConfig(data.config);
     // Auto-navigate to CUQA agent after load
     setTimeout(() => setPage('cuqa'), 400);
   }
@@ -117,13 +121,14 @@ export default function App() {
       case 'overview':    return <Overview onNavigate={navigate} />;
       case 'dashboard':   return <Dashboard />;
       case 'repository':  return <RepositoryInput onLoaded={handleRepoLoaded} />;
-      case 'cuqa':        return <CUQAAgentPage repoLoaded={repoLoaded} repoMeta={repoMeta} onSendToRdp={handleSendToRdp} />;
-      case 'rdp':         return <RDPAgentPage repoLoaded={repoLoaded} repoMeta={repoMeta} preloadedReport={cuqaReport} onClearPreloaded={handleClearPreloaded} />;
+      case 'cuqa':        return <CUQAAgentPage repoLoaded={repoLoaded} repoMeta={repoMeta} analysisConfig={repoConfig} />;
+      case 'rdp':         return <RDPAgentPage repoLoaded={repoLoaded} repoMeta={repoMeta} />;
       case 'transform':   return <SCTVAAgentPage />;
       case 'orchestrate': return <DIWOAgentPage />;
       case 'reports':     return <Reports />;
       case 'evaluation':  return <Evaluation />;
       case 'settings':    return <Settings />;
+      case 'docs':        return <Documentation />;
       default:            return <PlaceholderPage page={page} />;
     }
   }
@@ -134,7 +139,8 @@ export default function App() {
       {/* ── Top Bar ─────────────────────────────────────────── */}
       <header className="topbar">
         <span className="topbar-brand">
-          Agentic Intelligent Code Refactoring Assistant (R26-SE-008)
+          <span style={{ color: 'var(--accent)', fontWeight: 800 }}>RefactorIQ</span>
+          <span style={{ color: 'var(--text-muted)', fontWeight: 400, fontSize: 11, marginLeft: 6 }}>R26-SE-008</span>
         </span>
 
         <div className="topbar-search">
@@ -170,8 +176,8 @@ export default function App() {
       {/* ── Sidebar ─────────────────────────────────────────── */}
       <aside className="sidebar">
         <div className="sidebar-brand">
-          <div className="sidebar-brand-name">R26-SE-008</div>
-          <div className="sidebar-brand-sub">Deep-Tech Research</div>
+          <div className="sidebar-brand-name" style={{ color: 'var(--accent)' }}>RefactorIQ</div>
+          <div className="sidebar-brand-sub">R26-SE-008 · Research Prototype</div>
         </div>
 
         <nav className="sidebar-nav">

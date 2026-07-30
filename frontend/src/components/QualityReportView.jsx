@@ -4,16 +4,32 @@
  * Displays the CUQA quality report JSON — code smell list,
  * severity breakdown, per-file metrics, and aggregate repo score.
  * This is the structured output the CUQA Agent passes to the RDP Agent.
+ *
+ * Supports Python (.py), Java (.java), and C (.c, .h) source files.
  */
 
 import { useState, useEffect } from 'react';
 
-const API = 'http://localhost:8001';
+const API = 'http://localhost:8080';
 
 // ── Severity badge ──────────────────────────────────────────────────────────
 function SeverityBadge({ level }) {
   return <span className={`pill pill-${level}`}>{level.toUpperCase()}</span>;
 }
+
+// ── Language icon helper ────────────────────────────────────────────────────
+function langIcon(language, filename) {
+  if (language === 'python') return '🐍';
+  if (language === 'java')   return '☕';
+  if (language === 'c') {
+    const ext = filename?.split('.').pop()?.toLowerCase();
+    return ext === 'h' ? '🔩' : '⚙️';
+  }
+  return '📄';
+}
+
+const LANG_LABEL = { python: 'Python', java: 'Java', c: 'C' };
+const LANG_COLOR = { python: '#3b82f6', java: '#f59e0b', c: '#22c55e' };
 
 // ── Score ring ──────────────────────────────────────────────────────────────
 function ScoreRing({ score }) {
@@ -95,8 +111,20 @@ function FileReportCard({ report }) {
         onClick={() => setOpen(v => !v)}
       >
         <span className="card-title">
-          <span>{report.language === 'python' ? '🐍' : '☕'}</span>
+          <span>{langIcon(report.language, report.file)}</span>
           <span style={{ fontFamily: 'var(--font-mono)' }}>{report.file}</span>
+          {report.language && (
+            <span style={{
+              fontSize: 10, fontWeight: 600, padding: '2px 7px',
+              borderRadius: 20, marginLeft: 6,
+              background: (LANG_COLOR[report.language] || '#374151') + '28',
+              color: LANG_COLOR[report.language] || '#9ca3af',
+              border: `1px solid ${(LANG_COLOR[report.language] || '#374151')}55`,
+              textTransform: 'uppercase', letterSpacing: '0.5px',
+            }}>
+              {LANG_LABEL[report.language] || report.language}
+            </span>
+          )}
         </span>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
           <span style={{
@@ -115,7 +143,7 @@ function FileReportCard({ report }) {
 
       {open && (
         <div className="card-body" style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-          {/* Metrics */}
+          {/* Core metrics */}
           <div className="metrics-grid">
             {[
               ['LOC', m.lines_of_code],
@@ -130,6 +158,27 @@ function FileReportCard({ report }) {
               </div>
             ))}
           </div>
+
+          {/* C-specific metrics — only shown for C files */}
+          {report.language === 'c' && (
+            <div>
+              <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+                C-Specific Metrics
+              </div>
+              <div className="metrics-grid">
+                {[
+                  ['Includes', m.include_count],
+                  ['Globals', m.global_variables],
+                  ['Cyclomatic', m.estimated_cyclomatic_complexity],
+                ].map(([label, val]) => (
+                  <div className="metric-card" key={label} style={{ borderColor: '#22c55e33' }}>
+                    <div className="metric-value" style={{ fontSize: 20, color: '#22c55e' }}>{val ?? '—'}</div>
+                    <div className="metric-label">{label}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
 
           {/* Smells */}
           <div>
