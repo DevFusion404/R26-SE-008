@@ -224,6 +224,42 @@
   background: rgba(59, 130, 246, 0.22);
 }
 
+.sctva-mini-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.sctva-cuqa-strip {
+  display: grid;
+  grid-template-columns: 1.4fr 1fr 1fr;
+  gap: 10px;
+  margin: 8px 0 14px;
+}
+
+.sctva-cuqa-strip > div {
+  min-width: 0;
+  border: 1px solid rgba(96, 165, 250, 0.18);
+  background: rgba(7, 16, 30, 0.58);
+  border-radius: 10px;
+  padding: 10px 12px;
+}
+
+.sctva-cuqa-strip strong {
+  display: block;
+  overflow: hidden;
+  color: #dbeafe;
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sctva-cuqa-strip span {
+  display: block;
+  margin-top: 4px;
+  color: #91a0b8;
+  font-size: 11px;
+}
+
 .sctva-file-name {
   color: #66738a;
   font-size: 12px;
@@ -862,6 +898,10 @@
   }
 
   .sctva-checklist {
+    grid-template-columns: 1fr;
+  }
+
+  .sctva-cuqa-strip {
     grid-template-columns: 1fr;
   }
 }

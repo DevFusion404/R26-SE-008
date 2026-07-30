@@ -1,7 +1,12 @@
-import { useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import SCTVAAgentService from '../../services/sctvaAgentService';
 import transformBadge from '../../assets/transform-badge.svg';
 import './SCTVAAgentPage.css';
+
+const CUQA_API = import.meta.env.VITE_CUQA_AGENT_API_URL || 'http://localhost:8001';
+const CUQA_IMPORT_LIMIT = 50;
+const RDP_AGENT_SESSION_KEY = 'rdp-agent-page-state';
+const SCTVA_AGENT_SESSION_KEY = 'sctva-agent-page-state';
 
 const PIPELINE_STAGES = [
   {
@@ -176,6 +181,79 @@ function renameAction(step, oldName, newName) {
     source_step_id: step.step_id ?? null,
     source_refactoring: step.refactoring ?? null,
     warnings: [],
+  };
+}
+
+function normalizePathForMatch(value) {
+  return String(value || '')
+    .replace(/\\/g, '/')
+    .replace(/^\.\//, '')
+    .replace(/\/+/g, '/')
+    .trim()
+    .toLowerCase();
+}
+
+function pathBaseName(value) {
+  const normalized = normalizePathForMatch(value);
+  return normalized.split('/').filter(Boolean).pop() || normalized;
+}
+
+function firstStringValue(values) {
+  const found = values.find(value => typeof value === 'string' && value.trim());
+  return found ? found.trim() : '';
+}
+
+function extractSourceFileFromPlanItem(item) {
+  if (!item || typeof item !== 'object' || Array.isArray(item)) return '';
+
+  const params = isPlainObject(item.parameters) ? item.parameters : {};
+  const target = isPlainObject(item.target) ? item.target : {};
+  const location = isPlainObject(item.location) ? item.location : {};
+
+  return firstStringValue([
+    typeof item.target === 'string' ? item.target : '',
+    item.source_file,
+    item.sourceFile,
+    item.file,
+    item.file_name,
+    item.fileName,
+    item.file_path,
+    item.filePath,
+    item.relative_path,
+    item.relativePath,
+    params.source_file,
+    params.sourceFile,
+    params.file,
+    params.file_name,
+    params.fileName,
+    params.file_path,
+    params.filePath,
+    params.relative_path,
+    params.relativePath,
+    target.source_file,
+    target.file,
+    target.file_name,
+    target.file_path,
+    target.relative_path,
+    location.source_file,
+    location.file,
+    location.file_name,
+    location.file_path,
+    location.relative_path,
+  ]);
+}
+
+function attachSourceFileToAction(action, sourceItem) {
+  if (!action || !sourceItem) return action;
+  const sourceFile = extractSourceFileFromPlanItem(sourceItem);
+  if (!sourceFile) return action;
+
+  return {
+    ...action,
+    parameters: {
+      ...(action.parameters || {}),
+      source_file: action.parameters?.source_file || sourceFile,
+    },
   };
 }
 
@@ -396,9 +474,25 @@ function normalizeRefactoringPlan(input, fallbackPlanId) {
 
   let actions = [];
   if (Array.isArray(source.actions)) {
-    actions = source.actions.map(normalizeAction).filter(Boolean);
+    actions = source.actions
+      .map(action => attachSourceFileToAction(normalizeAction(action), action))
+      .filter(Boolean);
   } else if (Array.isArray(source.steps)) {
-    actions = source.steps.map(normalizeStep).filter(Boolean);
+    actions = source.steps
+      .map(step => {
+        const action = normalizeStep(step);
+        return action ? attachSourceFileToAction(action, step) : null;
+      })
+      .filter(Boolean);
+  }
+
+  const planLevelSourceFile = extractSourceFileFromPlanItem(source);
+  if (planLevelSourceFile) {
+    actions = actions.map(action => (
+      action.parameters?.source_file
+        ? action
+        : attachSourceFileToAction(action, { parameters: { source_file: planLevelSourceFile } })
+    ));
   }
 
   if (!planId) throw new Error('Refactoring plan must include a plan_id.');
@@ -420,6 +514,39 @@ function normalizeRefactoringPlan(input, fallbackPlanId) {
     behavior_tests: behaviorTests,
     metadata,
   };
+}
+
+function getPlanTargetFiles(refactoringPlan) {
+  const files = [];
+  (refactoringPlan?.actions || []).forEach(action => {
+    const sourceFile = extractSourceFileFromPlanItem(action);
+    if (sourceFile) files.push(sourceFile);
+  });
+
+  const seen = new Set();
+  return files
+    .map(normalizePathForMatch)
+    .filter(file => {
+      if (!file || seen.has(file)) return false;
+      seen.add(file);
+      return true;
+    });
+}
+
+function fileMatchesPlanTarget(fileName, targetFiles) {
+  const filePath = normalizePathForMatch(fileName);
+  const fileBase = pathBaseName(filePath);
+
+  return targetFiles.some(targetFile => {
+    const targetPath = normalizePathForMatch(targetFile);
+    const targetBase = pathBaseName(targetPath);
+    return (
+      filePath === targetPath
+      || filePath.endsWith(`/${targetPath}`)
+      || targetPath.endsWith(`/${filePath}`)
+      || fileBase === targetBase
+    );
+  });
 }
 
 function diffLines(oldText, newText) {
@@ -571,7 +698,264 @@ function buildSafetyMessages(report) {
 
 function chooseLanguageFromName(fileName) {
   if (fileName.toLowerCase().endsWith('.py')) return 'python';
+  if (fileName.toLowerCase().endsWith('.c') || fileName.toLowerCase().endsWith('.h')) return 'c';
   return 'java';
+}
+
+function isSupportedSourcePath(filePath) {
+  const normalized = String(filePath || '').toLowerCase();
+  return normalized.endsWith('.java') || normalized.endsWith('.py') || normalized.endsWith('.c') || normalized.endsWith('.h');
+}
+
+function collectSourcePathsFromTree(node, result = []) {
+  if (!node || typeof node !== 'object') return result;
+
+  if (node.type === 'file' && isSupportedSourcePath(node.path || node.name)) {
+    result.push(String(node.path || node.name));
+    return result;
+  }
+
+  (node.children || []).forEach(child => collectSourcePathsFromTree(child, result));
+  return result;
+}
+
+function uniqueSourcePaths(paths) {
+  const seen = new Set();
+  return paths
+    .map(path => String(path || '').replace(/\\/g, '/').trim())
+    .filter(path => {
+      if (!path || !isSupportedSourcePath(path) || seen.has(path)) return false;
+      seen.add(path);
+      return true;
+    });
+}
+
+function extractSourceFromCuqaPayload(data) {
+  const candidates = [
+    data?.source_code,
+    data?.source,
+    data?.content,
+    data?.file_content,
+    data?.parsed?.source_code,
+    data?.parsed?.source,
+    data?.parsed?.content,
+    data?.parsed?.file_content,
+  ];
+  const source = candidates.find(value => typeof value === 'string');
+  return source || '';
+}
+
+function walkAst(node, visitor) {
+  if (!node || typeof node !== 'object') return;
+  visitor(node);
+  (node.children || []).forEach(child => walkAst(child, visitor));
+}
+
+function findAstNodes(ast, type) {
+  const nodes = [];
+  walkAst(ast, node => {
+    if (node.type === type) nodes.push(node);
+  });
+  return nodes;
+}
+
+function guessJavaType(name) {
+  const normalized = String(name || '').toLowerCase();
+  if (normalized.includes('id') || normalized.includes('count') || normalized.includes('quantity') || normalized.includes('number')) {
+    return 'int';
+  }
+  if (normalized.startsWith('is') || normalized.startsWith('has')) return 'boolean';
+  return 'String';
+}
+
+function javaDefaultReturn(type) {
+  if (type === 'int' || type === 'long' || type === 'double' || type === 'float') return '0';
+  if (type === 'boolean') return 'false';
+  return 'null';
+}
+
+function uniqueByName(nodes) {
+  const seen = new Set();
+  return nodes.filter(node => {
+    const name = String(node?.name || '').trim();
+    if (!name || seen.has(name)) return false;
+    seen.add(name);
+    return true;
+  });
+}
+
+function buildJavaSourceFromAst(parsed, filePath) {
+  const ast = parsed?.ast;
+  const imports = uniqueByName(findAstNodes(ast, 'ImportDeclaration'));
+  const classNodes = uniqueByName([
+    ...findAstNodes(ast, 'ClassDeclaration'),
+    ...findAstNodes(ast, 'ClassOrInterfaceDeclaration'),
+    ...findAstNodes(ast, 'InterfaceDeclaration'),
+  ]);
+  const fallbackClassName = String(parsed?.file || filePath || 'CuqaRecoveredSource')
+    .split(/[\\/]/)
+    .pop()
+    .replace(/\.java$/i, '') || 'CuqaRecoveredSource';
+  const classNode = classNodes[0] || { name: fallbackClassName, children: [] };
+  const className = sanitizeIdentifier(classNode.name || fallbackClassName);
+  const directChildren = Array.isArray(classNode.children) ? classNode.children : [];
+  const fields = uniqueByName(directChildren.filter(node => node.type === 'FieldDeclaration'));
+  const methods = uniqueByName(directChildren.filter(node => node.type === 'MethodDeclaration'));
+  const ctors = uniqueByName(directChildren.filter(node => node.type === 'ConstructorDeclaration'));
+  const lines = [];
+
+  imports.forEach(item => {
+    if (item.name) lines.push(`import ${item.name};`);
+  });
+  if (imports.length) lines.push('');
+
+  lines.push(`public class ${className} {`);
+
+  fields.forEach(field => {
+    const fieldName = sanitizeIdentifier(field.name || 'field');
+    lines.push(`    private ${guessJavaType(fieldName)} ${fieldName};`);
+  });
+  if (fields.length) lines.push('');
+
+  if (!ctors.length) {
+    lines.push(`    public ${className}() {`);
+    lines.push('    }');
+    lines.push('');
+  } else {
+    ctors.forEach(ctor => {
+      lines.push(`    public ${className}() {`);
+      lines.push('    }');
+      if (ctor !== ctors[ctors.length - 1] || methods.length) lines.push('');
+    });
+  }
+
+  methods.forEach((method, index) => {
+    const methodName = sanitizeIdentifier(method.name || `method${index + 1}`);
+    const parameters = uniqueByName((method.children || []).filter(node => node.type === 'Parameter'));
+    const params = parameters.map(param => {
+      const paramName = sanitizeIdentifier(param.name || 'value');
+      return `${param.paramType || guessJavaType(paramName)} ${paramName}`;
+    });
+    const getterFieldName = methodName.startsWith('get')
+      ? methodName.charAt(3).toLowerCase() + methodName.slice(4)
+      : '';
+    const setterFieldName = methodName.startsWith('set')
+      ? methodName.charAt(3).toLowerCase() + methodName.slice(4)
+      : '';
+    const matchingGetterField = fields.find(field => field.name === getterFieldName);
+    const matchingSetterField = fields.find(field => field.name === setterFieldName);
+    const returnType = methodName.startsWith('get')
+      ? guessJavaType(getterFieldName || methodName)
+      : methodName === 'toString'
+        ? 'String'
+        : 'void';
+
+    lines.push(`    public ${returnType} ${methodName}(${params.join(', ')}) {`);
+    if (matchingGetterField) {
+      lines.push(`        return ${sanitizeIdentifier(matchingGetterField.name)};`);
+    } else if (matchingSetterField && parameters[0]) {
+      lines.push(`        this.${sanitizeIdentifier(matchingSetterField.name)} = ${sanitizeIdentifier(parameters[0].name)};`);
+    } else if (methodName === 'toString') {
+      lines.push(`        return "${className}";`);
+    } else if (returnType !== 'void') {
+      lines.push(`        return ${javaDefaultReturn(returnType)};`);
+    }
+    lines.push('    }');
+    if (index < methods.length - 1) lines.push('');
+  });
+
+  lines.push('}');
+  return `${lines.join('\n')}\n`;
+}
+
+function buildPythonSourceFromAst(parsed, filePath) {
+  const ast = parsed?.ast;
+  const classes = uniqueByName(findAstNodes(ast, 'ClassDef'));
+  const functions = uniqueByName(findAstNodes(ast, 'FunctionDef'));
+  const asyncFunctions = uniqueByName(findAstNodes(ast, 'AsyncFunctionDef'));
+  const lines = [
+    `# Reconstructed from CUQA AST for ${String(filePath || parsed?.file || 'source.py')}`,
+    '',
+  ];
+
+  if (classes.length) {
+    classes.forEach((cls, classIndex) => {
+      const className = sanitizeIdentifier(cls.name || `RecoveredClass${classIndex + 1}`);
+      const classMethods = uniqueByName((cls.children || []).filter(node => node.type === 'FunctionDef' || node.type === 'AsyncFunctionDef'));
+      lines.push(`class ${className}:`);
+      if (!classMethods.length) {
+        lines.push('    pass');
+      } else {
+        classMethods.forEach((method, methodIndex) => {
+          const keyword = method.type === 'AsyncFunctionDef' ? 'async def' : 'def';
+          const methodName = sanitizeIdentifier(method.name || `method_${methodIndex + 1}`);
+          const params = uniqueByName((method.children || []).filter(node => node.type === 'arg'))
+            .map(node => sanitizeIdentifier(node.name || node.arg || 'value'));
+          const finalParams = params.length ? params : ['self'];
+          lines.push(`    ${keyword} ${methodName}(${finalParams.join(', ')}):`);
+          lines.push('        pass');
+          if (methodIndex < classMethods.length - 1) lines.push('');
+        });
+      }
+      if (classIndex < classes.length - 1 || functions.length || asyncFunctions.length) lines.push('');
+    });
+  }
+
+  [...functions, ...asyncFunctions].forEach((fn, index, list) => {
+    const keyword = fn.type === 'AsyncFunctionDef' ? 'async def' : 'def';
+    const functionName = sanitizeIdentifier(fn.name || `function_${index + 1}`);
+    const params = uniqueByName((fn.children || []).filter(node => node.type === 'arg'))
+      .map(node => sanitizeIdentifier(node.name || node.arg || 'value'));
+    lines.push(`${keyword} ${functionName}(${params.join(', ')}):`);
+    lines.push('    pass');
+    if (index < list.length - 1) lines.push('');
+  });
+
+  if (!classes.length && !functions.length && !asyncFunctions.length) {
+    lines.push('pass');
+  }
+
+  return `${lines.join('\n')}\n`;
+}
+
+function buildSourceFromCuqaAst(data, filePath) {
+  const parsed = data?.parsed || {};
+  const language = parsed.language || chooseLanguageFromName(filePath);
+  if (language === 'java') return buildJavaSourceFromAst(parsed, filePath);
+  if (language === 'python') return buildPythonSourceFromAst(parsed, filePath);
+  return '';
+}
+
+async function fetchCuqaJson(path, options = {}) {
+  const response = await fetch(`${CUQA_API}${path}`, options);
+  let data = {};
+  try {
+    data = await response.json();
+  } catch {
+    data = {};
+  }
+
+  if (!response.ok) {
+    throw new Error(data.detail || data.error || `CUQA request failed: ${path}`);
+  }
+
+  return data;
+}
+
+async function fetchCuqaParsedFile(filePath) {
+  const data = await fetchCuqaJson('/api/parse-ast', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ file_path: filePath }),
+  });
+  const rawSource = extractSourceFromCuqaPayload(data);
+
+  return {
+    source: rawSource || buildSourceFromCuqaAst(data, filePath),
+    language: data?.parsed?.language || chooseLanguageFromName(filePath),
+    summary: data?.summary || null,
+    sourceMode: rawSource ? 'raw' : 'ast_reconstructed',
+  };
 }
 
 function readFileAsText(file) {
@@ -589,56 +973,235 @@ function summarizeSourceFiles(files) {
   return `${files.length} files selected.`;
 }
 
+function readRdpSessionPlan() {
+  if (typeof window === 'undefined') return null;
+
+  try {
+    const rawState = window.sessionStorage.getItem(RDP_AGENT_SESSION_KEY);
+    if (!rawState) return null;
+
+    const savedState = JSON.parse(rawState);
+    return savedState?.plan && typeof savedState.plan === 'object' && !Array.isArray(savedState.plan)
+      ? savedState.plan
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function buildRdpPlanFileName(plan) {
+  const planId = String(plan?.plan_id || plan?.planId || 'latest').trim() || 'latest';
+  return `RDP Agent plan: ${planId}.json`;
+}
+
+function isBrowserRefreshNavigation() {
+  if (typeof window === 'undefined' || !window.performance) return false;
+
+  const navigationEntry = window.performance.getEntriesByType?.('navigation')?.[0];
+  if (navigationEntry?.type) return navigationEntry.type === 'reload';
+
+  return window.performance.navigation?.type === 1;
+}
+
+function readSctvaSessionState() {
+  if (typeof window === 'undefined') return null;
+
+  try {
+    if (isBrowserRefreshNavigation()) {
+      window.sessionStorage.removeItem(SCTVA_AGENT_SESSION_KEY);
+      return null;
+    }
+
+    const rawState = window.sessionStorage.getItem(SCTVA_AGENT_SESSION_KEY);
+    return rawState ? JSON.parse(rawState) : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeSctvaSessionState(state) {
+  if (typeof window === 'undefined') return;
+
+  try {
+    window.sessionStorage.setItem(SCTVA_AGENT_SESSION_KEY, JSON.stringify(state));
+  } catch {
+    // Ignore storage quota or browser privacy mode failures.
+  }
+}
+
+function clearSctvaSessionState() {
+  if (typeof window === 'undefined') return;
+
+  try {
+    window.sessionStorage.removeItem(SCTVA_AGENT_SESSION_KEY);
+  } catch {
+    // Ignore storage cleanup failures.
+  }
+}
+
+function buildRunSignature({
+  requestId,
+  language,
+  sourceFiles,
+  refactoringPlanText,
+  executionOptionsText,
+}) {
+  return JSON.stringify({
+    requestId: String(requestId || '').trim(),
+    language: String(language || '').trim().toLowerCase(),
+    sourceFiles: sourceFiles.map(file => ({
+      name: file.name,
+      language: file.language,
+      code: file.code,
+    })),
+    refactoringPlanText,
+    executionOptionsText,
+  });
+}
+
 export default function SCTVAAgentPage() {
   const sourceFileInputRef = useRef(null);
   const planFileInputRef = useRef(null);
+  const autoImportAttemptedRef = useRef(false);
+  const autoRdpPlanAttemptedRef = useRef(false);
+  const savedState = useMemo(() => readSctvaSessionState() || {}, []);
 
-  const [requestId, setRequestId] = useState('');
-  const [language, setLanguage] = useState('java');
-  const [sourceFiles, setSourceFiles] = useState([]);
-  const [activeFileName, setActiveFileName] = useState('');
-  const [fileResults, setFileResults] = useState([]);
-  const [refactoringPlanText, setRefactoringPlanText] = useState('');
-  const [executionOptionsText, setExecutionOptionsText] = useState(SCTVAAgentService.defaultExecutionOptionsJson);
+  const [requestId, setRequestId] = useState(savedState.requestId || '');
+  const [language, setLanguage] = useState(savedState.language || 'java');
+  const [sourceFiles, setSourceFiles] = useState(Array.isArray(savedState.sourceFiles) ? savedState.sourceFiles : []);
+  const [activeFileName, setActiveFileName] = useState(savedState.activeFileName || '');
+  const [fileResults, setFileResults] = useState(Array.isArray(savedState.fileResults) ? savedState.fileResults : []);
+  const [refactoringPlanText, setRefactoringPlanText] = useState(savedState.refactoringPlanText || '');
+  const [executionOptionsText, setExecutionOptionsText] = useState(savedState.executionOptionsText || SCTVAAgentService.defaultExecutionOptionsJson);
 
-  const [sourceFileName, setSourceFileName] = useState('No source files selected.');
-  const [planFileName, setPlanFileName] = useState('No plan file selected.');
-  const [planLoaded, setPlanLoaded] = useState(false);
-  const [planStepCount, setPlanStepCount] = useState(0);
+  const [sourceFileName, setSourceFileName] = useState(savedState.sourceFileName || 'No source files selected.');
+  const [planFileName, setPlanFileName] = useState(savedState.planFileName || 'No plan file selected.');
+  const [planLoaded, setPlanLoaded] = useState(Boolean(savedState.planLoaded));
+  const [planStepCount, setPlanStepCount] = useState(savedState.planStepCount || 0);
 
   const [isRunning, setIsRunning] = useState(false);
+  const [lastRunSignature, setLastRunSignature] = useState(savedState.lastRunSignature || '');
   const [errorMessage, setErrorMessage] = useState('');
   const [statusTone, setStatusTone] = useState('info');
   const [statusMessage, setStatusMessage] = useState('');
 
-  const [timeline, setTimeline] = useState(DEFAULT_TIMELINE);
-  const [timelineCount, setTimelineCount] = useState(`${PIPELINE_STAGES.length} Stages`);
+  const [timeline, setTimeline] = useState(Array.isArray(savedState.timeline) ? savedState.timeline : DEFAULT_TIMELINE);
+  const [timelineCount, setTimelineCount] = useState(savedState.timelineCount || `${PIPELINE_STAGES.length} Stages`);
 
-  const [validation, setValidation] = useState(null);
-  const [safetyMessages, setSafetyMessages] = useState([]);
-  const [rawResponse, setRawResponse] = useState('{}');
+  const [validation, setValidation] = useState(savedState.validation || null);
+  const [safetyMessages, setSafetyMessages] = useState(Array.isArray(savedState.safetyMessages) ? savedState.safetyMessages : []);
+  const [rawResponse, setRawResponse] = useState(savedState.rawResponse || '{}');
 
-  const [metricSuccess, setMetricSuccess] = useState('--');
-  const [metricRollback, setMetricRollback] = useState('--');
-  const [metricConfidence, setMetricConfidence] = useState('--');
-  const [metricLanguage, setMetricLanguage] = useState('--');
-  const [confidenceLabel, setConfidenceLabel] = useState('Idle');
-  const [confidenceCopy, setConfidenceCopy] = useState('Model analysis will appear after execution.');
-  const [confidenceScore, setConfidenceScore] = useState(0);
+  const [metricSuccess, setMetricSuccess] = useState(savedState.metricSuccess || '--');
+  const [metricRollback, setMetricRollback] = useState(savedState.metricRollback || '--');
+  const [metricConfidence, setMetricConfidence] = useState(savedState.metricConfidence || '--');
+  const [metricLanguage, setMetricLanguage] = useState(savedState.metricLanguage || '--');
+  const [confidenceLabel, setConfidenceLabel] = useState(savedState.confidenceLabel || 'Idle');
+  const [confidenceCopy, setConfidenceCopy] = useState(savedState.confidenceCopy || 'Model analysis will appear after execution.');
+  const [confidenceScore, setConfidenceScore] = useState(savedState.confidenceScore || 0);
 
-  const [additions, setAdditions] = useState(0);
-  const [deletions, setDeletions] = useState(0);
+  const [additions, setAdditions] = useState(savedState.additions || 0);
+  const [deletions, setDeletions] = useState(savedState.deletions || 0);
 
-  const [logs, setLogs] = useState([
+  const [logs, setLogs] = useState(Array.isArray(savedState.logs) ? savedState.logs : [
     { level: 'READY', message: 'Transformation Agent initialized.' },
     { level: 'INFO', message: 'Upload source and refactoring plan to begin.' },
   ]);
 
   const [sourceDragOver, setSourceDragOver] = useState(false);
   const [planDragOver, setPlanDragOver] = useState(false);
+  const [isImportingCuqa, setIsImportingCuqa] = useState(false);
+  const [cuqaWorkspaceMeta, setCuqaWorkspaceMeta] = useState(savedState.cuqaWorkspaceMeta || null);
+  const [cuqaImportWarning, setCuqaImportWarning] = useState(savedState.cuqaImportWarning || '');
 
-  const [diffRows, setDiffRows] = useState([]);
-  const [finalCode, setFinalCode] = useState('');
+  const [diffRows, setDiffRows] = useState(Array.isArray(savedState.diffRows) ? savedState.diffRows : []);
+  const [finalCode, setFinalCode] = useState(savedState.finalCode || '');
+
+  useEffect(() => {
+    if (autoImportAttemptedRef.current) return;
+    autoImportAttemptedRef.current = true;
+    if (!sourceFiles.length) {
+      importCuqaWorkspace({ silent: true });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    if (autoRdpPlanAttemptedRef.current) return;
+    autoRdpPlanAttemptedRef.current = true;
+    if (!refactoringPlanText.trim()) {
+      importRdpPlan({ silent: true });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    writeSctvaSessionState({
+      requestId,
+      language,
+      sourceFiles,
+      activeFileName,
+      fileResults,
+      refactoringPlanText,
+      executionOptionsText,
+      sourceFileName,
+      planFileName,
+      planLoaded,
+      planStepCount,
+      lastRunSignature,
+      timeline,
+      timelineCount,
+      validation,
+      safetyMessages,
+      rawResponse,
+      metricSuccess,
+      metricRollback,
+      metricConfidence,
+      metricLanguage,
+      confidenceLabel,
+      confidenceCopy,
+      confidenceScore,
+      additions,
+      deletions,
+      logs,
+      cuqaWorkspaceMeta,
+      cuqaImportWarning,
+      diffRows,
+      finalCode,
+    });
+  }, [
+    requestId,
+    language,
+    sourceFiles,
+    activeFileName,
+    fileResults,
+    refactoringPlanText,
+    executionOptionsText,
+    sourceFileName,
+    planFileName,
+    planLoaded,
+    planStepCount,
+    lastRunSignature,
+    timeline,
+    timelineCount,
+    validation,
+    safetyMessages,
+    rawResponse,
+    metricSuccess,
+    metricRollback,
+    metricConfidence,
+    metricLanguage,
+    confidenceLabel,
+    confidenceCopy,
+    confidenceScore,
+    additions,
+    deletions,
+    logs,
+    cuqaWorkspaceMeta,
+    cuqaImportWarning,
+    diffRows,
+    finalCode,
+  ]);
 
   const renderDefaultChecklist = useMemo(
     () => (
@@ -697,9 +1260,10 @@ export default function SCTVAAgentPage() {
       const files = Array.from(fileList);
       const loaded = await Promise.all(
         files.map(async file => ({
-          name: file.name,
+          name: file.webkitRelativePath || file.name,
           language: chooseLanguageFromName(file.name),
           code: await readFileAsText(file),
+          origin: 'local',
         }))
       );
 
@@ -707,6 +1271,7 @@ export default function SCTVAAgentPage() {
       setSourceFileName(summarizeSourceFiles(loaded));
       setActiveFileName(loaded[0]?.name || '');
       setLanguage(loaded[0]?.language || 'java');
+      setCuqaImportWarning('');
       setFileResults([]);
       setDiffRows([]);
       setFinalCode('');
@@ -718,6 +1283,126 @@ export default function SCTVAAgentPage() {
       pushLog('INFO', `Loaded ${loaded.length} source file${loaded.length === 1 ? '' : 's'} from your computer.`);
     } catch (error) {
       pushLog('ERROR', error.message || 'Failed to load source files.');
+    }
+  }
+
+  async function importCuqaWorkspace({ silent = false } = {}) {
+    setIsImportingCuqa(true);
+    if (!silent) {
+      setErrorMessage('');
+      setCuqaImportWarning('');
+      showStatus('Importing source files from CUQA workspace...', 'info');
+      pushLog('INFO', 'Reading current CUQA workspace metadata...');
+    }
+
+    try {
+      const [structure, fileList] = await Promise.all([
+        fetchCuqaJson('/api/project-structure'),
+        fetchCuqaJson('/api/files').catch(() => null),
+      ]);
+
+      const treePaths = collectSourcePathsFromTree(structure.tree);
+      const apiPaths = Array.isArray(fileList?.files) ? fileList.files : [];
+      const paths = uniqueSourcePaths([...apiPaths, ...treePaths]);
+
+      if (!paths.length) {
+        throw new Error('CUQA workspace is loaded, but no Java or Python source files were found.');
+      }
+
+      const selectedPaths = paths.slice(0, CUQA_IMPORT_LIMIT);
+      const firstParsed = await fetchCuqaParsedFile(selectedPaths[0]);
+      let loaded;
+
+      if (firstParsed.source) {
+        const remaining = selectedPaths.slice(1);
+        const remainingParsed = await Promise.all(
+          remaining.map(async filePath => {
+            try {
+              return { filePath, parsed: await fetchCuqaParsedFile(filePath), error: null };
+            } catch (error) {
+              return { filePath, parsed: null, error };
+            }
+          })
+        );
+
+        loaded = [
+          {
+            name: selectedPaths[0],
+            language: firstParsed.language,
+            code: firstParsed.source,
+            origin: 'cuqa',
+            astSummary: firstParsed.summary,
+            sourceMode: firstParsed.sourceMode,
+          },
+          ...remainingParsed.map(({ filePath, parsed }) => ({
+            name: filePath,
+            language: parsed?.language || chooseLanguageFromName(filePath),
+            code: parsed?.source || '',
+            origin: 'cuqa',
+            astSummary: parsed?.summary || null,
+            sourceMode: parsed?.sourceMode || 'unavailable',
+          })),
+        ];
+      } else {
+        loaded = selectedPaths.map(filePath => ({
+          name: filePath,
+          language: chooseLanguageFromName(filePath),
+          code: '',
+          origin: 'cuqa',
+          astSummary: null,
+          sourceMode: 'unavailable',
+        }));
+      }
+
+      const filesWithSource = loaded.filter(file => String(file.code || '').trim()).length;
+      const reconstructedCount = loaded.filter(file => file.sourceMode === 'ast_reconstructed').length;
+      const limitedCopy = paths.length > selectedPaths.length
+        ? ` Showing first ${selectedPaths.length} of ${paths.length} files.`
+        : '';
+      const warning = filesWithSource
+        ? ''
+        : 'CUQA workspace was found, but SCTVA could not prepare source code from the CUQA AST payload.';
+
+      setCuqaWorkspaceMeta({
+        repoName: structure.repo_name || fileList?.repo_name || 'CUQA workspace',
+        source: structure.source || 'workspace',
+        total: paths.length,
+        imported: selectedPaths.length,
+        filesWithSource,
+      });
+      setCuqaImportWarning(warning);
+      setSourceFiles(loaded);
+      setSourceFileName(`CUQA workspace: ${selectedPaths.length} file${selectedPaths.length === 1 ? '' : 's'} selected.${limitedCopy}`);
+      setActiveFileName(loaded[0]?.name || '');
+      setLanguage(loaded.find(file => file.code)?.language || loaded[0]?.language || 'java');
+      setFileResults([]);
+      setDiffRows([]);
+      setFinalCode('');
+      setRawResponse('{}');
+      setValidation(null);
+      setSafetyMessages([]);
+      setAdditions(0);
+      setDeletions(0);
+
+      if (warning) {
+        if (!silent) showStatus('CUQA workspace detected, but SCTVA could not prepare source code.', 'warn');
+        pushLog('WARN', warning);
+      } else {
+        const suffix = reconstructedCount
+          ? ` (${reconstructedCount} reconstructed from AST)`
+          : '';
+        showStatus(`Imported ${filesWithSource} source file${filesWithSource === 1 ? '' : 's'} from CUQA${suffix}.`, 'success');
+        pushLog('INFO', `Imported ${filesWithSource} source file${filesWithSource === 1 ? '' : 's'} from CUQA workspace${suffix}.`);
+      }
+    } catch (error) {
+      if (!silent) {
+        const message = error.message || 'Unable to import from CUQA workspace.';
+        setCuqaImportWarning(message);
+        showStatus(message, 'warn');
+        pushLog('WARN', message);
+      }
+    } finally {
+      setIsImportingCuqa(false);
     }
   }
 
@@ -738,6 +1423,32 @@ export default function SCTVAAgentPage() {
       }
     };
     reader.readAsText(file);
+  }
+
+  function importRdpPlan({ silent = false } = {}) {
+    const plan = readRdpSessionPlan();
+
+    if (!plan) {
+      if (!silent) {
+        const message = 'No RDP refactoring plan found. Generate a plan in the RDP Agent first.';
+        setErrorMessage(message);
+        showStatus(message, 'warn');
+        pushLog('WARN', message);
+      }
+      return false;
+    }
+
+    const planText = JSON.stringify(plan, null, 2);
+    setRefactoringPlanText(planText);
+    setPlanFileName(buildRdpPlanFileName(plan));
+    renderPlanTimeline(plan);
+    setErrorMessage('');
+
+    if (!silent) {
+      showStatus('Imported refactoring plan from RDP Agent.', 'success');
+    }
+    pushLog('INFO', 'Loaded refactoring plan from RDP Agent.');
+    return true;
   }
 
   function renderPlanTimeline(plan) {
@@ -771,8 +1482,10 @@ export default function SCTVAAgentPage() {
     const finalRequestId = requestId.trim() || `sctva_${Date.now()}`;
     const fallbackLanguage = language.trim().toLowerCase();
 
-    if (!sourceFiles.length) {
-      throw new Error('No source code files loaded from your computer.');
+    const executableFiles = sourceFiles.filter(file => String(file.code || '').trim());
+
+    if (!executableFiles.length) {
+      throw new Error('No source code is available. Import from CUQA again or upload source files manually.');
     }
 
     let uploadedJson;
@@ -785,6 +1498,14 @@ export default function SCTVAAgentPage() {
     }
 
     const refactoringPlan = normalizeRefactoringPlan(uploadedJson, finalRequestId);
+    const planTargetFiles = getPlanTargetFiles(refactoringPlan);
+    const selectedExecutableFiles = planTargetFiles.length
+      ? executableFiles.filter(file => fileMatchesPlanTarget(file.name, planTargetFiles))
+      : executableFiles;
+
+    if (planTargetFiles.length && !selectedExecutableFiles.length) {
+      throw new Error(`No loaded source file matches the refactoring plan target file(s): ${planTargetFiles.join(', ')}`);
+    }
 
     try {
       executionOptions = SCTVAAgentService.parseJson(executionOptionsText || '{}');
@@ -794,9 +1515,9 @@ export default function SCTVAAgentPage() {
 
     return {
       request_id: finalRequestId,
-      language: (sourceFiles[0]?.language || fallbackLanguage || 'java').toLowerCase(),
-      source_code: sourceFiles[0]?.code || '',
-      source_files: sourceFiles.map(file => ({
+      language: (selectedExecutableFiles[0]?.language || fallbackLanguage || 'java').toLowerCase(),
+      source_code: selectedExecutableFiles[0]?.code || '',
+      source_files: selectedExecutableFiles.map(file => ({
         file_name: file.name,
         source_code: file.code,
         language: file.language,
@@ -927,8 +1648,7 @@ export default function SCTVAAgentPage() {
     }
   }
 
-  async function handleSubmit(event) {
-    event.preventDefault();
+  async function runTransformation({ trigger = 'manual' } = {}) {
     setErrorMessage('');
 
     let payload;
@@ -940,9 +1660,20 @@ export default function SCTVAAgentPage() {
       return;
     }
 
+    const runSignature = buildRunSignature({
+      requestId,
+      language,
+      sourceFiles,
+      refactoringPlanText,
+      executionOptionsText,
+    });
+    setLastRunSignature(runSignature);
     setIsRunning(true);
-    showStatus('Running transformation...', 'info');
-    pushLog('INFO', 'Targeting source for transformation...');
+    showStatus(trigger === 'auto' ? 'Auto-running transformation...' : 'Running transformation...', 'info');
+    if (trigger === 'auto') {
+      pushLog('INFO', 'Source files and refactoring plan detected. Starting transformation automatically.');
+    }
+    pushLog('INFO', `Targeting ${payload.source_files?.length || 1} source file${(payload.source_files?.length || 1) === 1 ? '' : 's'} from the refactoring plan.`);
     pushLog('DEBUG', 'Applying refactoring plan and validation pipeline...');
     renderPipelineTimeline({ phase: 'running', overridePlanLoaded: true });
 
@@ -961,7 +1692,45 @@ export default function SCTVAAgentPage() {
     }
   }
 
+  async function handleSubmit(event) {
+    event.preventDefault();
+    await runTransformation();
+  }
+
+  useEffect(() => {
+    const hasExecutableSource = sourceFiles.some(file => String(file.code || '').trim());
+    const hasPlan = Boolean(refactoringPlanText.trim());
+
+    if (!hasExecutableSource || !hasPlan || isRunning) return;
+
+    const runSignature = buildRunSignature({
+      requestId,
+      language,
+      sourceFiles,
+      refactoringPlanText,
+      executionOptionsText,
+    });
+
+    if (runSignature === lastRunSignature) return;
+
+    const autoRunTimer = window.setTimeout(() => {
+      runTransformation({ trigger: 'auto' });
+    }, 0);
+
+    return () => window.clearTimeout(autoRunTimer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    sourceFiles,
+    refactoringPlanText,
+    executionOptionsText,
+    requestId,
+    language,
+    isRunning,
+    lastRunSignature,
+  ]);
+
   function handleClear() {
+    clearSctvaSessionState();
     setRequestId('');
     if (sourceFileInputRef.current) sourceFileInputRef.current.value = '';
     if (planFileInputRef.current) planFileInputRef.current.value = '';
@@ -969,12 +1738,15 @@ export default function SCTVAAgentPage() {
     setSourceFiles([]);
     setActiveFileName('');
     setFileResults([]);
+    setCuqaWorkspaceMeta(null);
+    setCuqaImportWarning('');
     setRefactoringPlanText('');
     setExecutionOptionsText(SCTVAAgentService.defaultExecutionOptionsJson);
     setSourceFileName('No source files selected.');
     setPlanFileName('No plan file selected.');
     setPlanLoaded(false);
     setPlanStepCount(0);
+    setLastRunSignature('');
 
     setDiffRows([]);
     setRawResponse('{}');
@@ -1063,6 +1835,14 @@ export default function SCTVAAgentPage() {
           <div className="sctva-card">
             <div className="sctva-control-head">
               <h2>Source & Plan Input</h2>
+              <button
+                className="sctva-mini-btn"
+                type="button"
+                onClick={() => importCuqaWorkspace()}
+                disabled={isImportingCuqa}
+              >
+                {isImportingCuqa ? 'Importing CUQA...' : 'Import from CUQA'}
+              </button>
             </div>
 
             <div className="sctva-form-grid">
@@ -1082,9 +1862,27 @@ export default function SCTVAAgentPage() {
                 <select className="sctva-field" value={language} onChange={e => setLanguage(e.target.value)}>
                   <option value="java">Java</option>
                   <option value="python">Python</option>
+                  <option value="c">C</option>
                 </select>
               </label> */}
             </div>
+
+            {cuqaWorkspaceMeta ? (
+              <div className="sctva-cuqa-strip">
+                <div>
+                  <strong>{cuqaWorkspaceMeta.repoName}</strong>
+                  <span>{`${cuqaWorkspaceMeta.source} workspace`}</span>
+                </div>
+                <div>
+                  <strong>{cuqaWorkspaceMeta.imported}</strong>
+                  <span>{`of ${cuqaWorkspaceMeta.total} files selected`}</span>
+                </div>
+                <div>
+                  <strong>{cuqaWorkspaceMeta.filesWithSource}</strong>
+                  <span>files with source text</span>
+                </div>
+              </div>
+            ) : null}
 
             <div
               className={`sctva-upload-zone ${sourceDragOver ? 'drag-over' : ''}`}
@@ -1095,7 +1893,7 @@ export default function SCTVAAgentPage() {
             >
               <div>
                 <strong>Upload Source Code Files</strong>
-                <p>Drag and drop multiple local source files here, or browse your computer.</p>
+                <p>Files are auto-imported from the CUQA workspace. If CUQA does not send raw text, SCTVA reconstructs code from the AST.</p>
               </div>
               <label className="sctva-mini-btn" htmlFor="sctva-source-file-input">Browse File</label>
               <input
@@ -1110,6 +1908,7 @@ export default function SCTVAAgentPage() {
             </div>
 
             <div className="sctva-file-name">{sourceFileName}</div>
+            {cuqaImportWarning ? <div className="sctva-alert sctva-alert-warn">{cuqaImportWarning}</div> : null}
 
             <div
               className={`sctva-upload-zone ${planDragOver ? 'drag-over' : ''}`}
@@ -1120,9 +1919,14 @@ export default function SCTVAAgentPage() {
             >
               <div>
                 <strong>Upload Refactoring Plan JSON</strong>
-                <p>Drag and drop your RDP plan JSON here, or browse a file.</p>
+                <p>Import the latest RDP Agent plan automatically, or drag and drop a JSON file here.</p>
               </div>
-              <label className="sctva-mini-btn" htmlFor="sctva-plan-file-input">Browse JSON</label>
+              <div className="sctva-hero-actions">
+                <button className="sctva-mini-btn" type="button" onClick={() => importRdpPlan()}>
+                  Import from RDP
+                </button>
+                <label className="sctva-mini-btn" htmlFor="sctva-plan-file-input">Browse JSON</label>
+              </div>
               <input
                 ref={planFileInputRef}
                 id="sctva-plan-file-input"
@@ -1324,7 +2128,7 @@ export default function SCTVAAgentPage() {
         <div className="sctva-raw-actions">
           <h2>Raw Response JSON</h2>
           <div>
-            {/* <button className="sctva-mini-btn" type="button" onClick={handleCopyFinalCode}>Copy Final Code</button> */}
+            <button className="sctva-mini-btn" type="button" onClick={handleCopyFinalCode}>Copy Final Code</button>
             <button className="sctva-mini-btn" type="button" style={{ marginLeft: 8 }} onClick={handleDownloadResult}>Download Result JSON</button>
           </div>
         </div>

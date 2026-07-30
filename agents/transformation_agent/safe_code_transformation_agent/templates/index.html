@@ -124,6 +124,7 @@
 								<select id="language" name="language">
 									<option value="java">Java</option>
 									<option value="python">Python</option>
+									<option value="c">C</option>
 								</select>
 							</label>
 						</div>
@@ -522,6 +523,8 @@
 				activeFileLabel.textContent = file.name;
 				if (file.name.toLowerCase().endsWith('.py')) {
 					languageEl.value = 'python';
+				} else if (file.name.toLowerCase().endsWith('.c') || file.name.toLowerCase().endsWith('.h')) {
+					languageEl.value = 'c';
 				} else {
 					languageEl.value = 'java';
 				}
