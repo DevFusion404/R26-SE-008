@@ -17,7 +17,7 @@ from ..constants import (
 )
 from ..contracts import RefactoringAction
 from ..models import TransformationLogEntry
-from . import java_transformers, python_transformers
+from . import c_transformers, java_transformers, python_transformers
 
 
 def _parse_literal_values_from_hint(hint: str) -> List[Any]:
@@ -81,6 +81,10 @@ class TransformationEngine:
                         current_code, replacements = python_transformers.apply_rename_symbol(
                             current_code, old_name, new_name
                         )
+                    elif language == "c":
+                        current_code, replacements = c_transformers.apply_rename_symbol(
+                            current_code, old_name, new_name
+                        )
                     else:
                         current_code, replacements = java_transformers.apply_rename_symbol(
                             current_code, old_name, new_name
@@ -93,6 +97,10 @@ class TransformationEngine:
                         raise ValueError("extract_constant requires 'literal_value'.")
                     if language == "python":
                         current_code, replacements = python_transformers.apply_extract_constant(
+                            current_code, literal_value, constant_name
+                        )
+                    elif language == "c":
+                        current_code, replacements = c_transformers.apply_extract_constant(
                             current_code, literal_value, constant_name
                         )
                     else:
@@ -123,6 +131,10 @@ class TransformationEngine:
                             current_code, step_replacements = python_transformers.apply_extract_constant(
                                 current_code, literal_value, name
                             )
+                        elif language == "c":
+                            current_code, step_replacements = c_transformers.apply_extract_constant(
+                                current_code, literal_value, name
+                            )
                         else:
                             current_code, step_replacements = java_transformers.apply_extract_constant(
                                 current_code, literal_value, name
@@ -138,6 +150,10 @@ class TransformationEngine:
                         current_code, replacements = python_transformers.apply_replace_literal(
                             current_code, old_literal, new_literal
                         )
+                    elif language == "c":
+                        current_code, replacements = c_transformers.apply_replace_literal(
+                            current_code, old_literal, new_literal
+                        )
                     else:
                         current_code, replacements = java_transformers.apply_replace_literal(
                             current_code, old_literal, new_literal
@@ -146,6 +162,8 @@ class TransformationEngine:
                 elif action.action_type == ACTION_INJECT_SYNTAX_ERROR:
                     if language == "python":
                         current_code, replacements = python_transformers.apply_inject_syntax_error(current_code)
+                    elif language == "c":
+                        current_code, replacements = c_transformers.apply_inject_syntax_error(current_code)
                     else:
                         current_code, replacements = java_transformers.apply_inject_syntax_error(current_code)
 
@@ -158,6 +176,10 @@ class TransformationEngine:
                         raise ValueError("fault_injection requires 'faulty_logic'.")
                     if language == "python":
                         current_code, replacements = python_transformers.apply_fault_injection(
+                            current_code, original_logic, str(faulty_logic)
+                        )
+                    elif language == "c":
+                        current_code, replacements = c_transformers.apply_fault_injection(
                             current_code, original_logic, str(faulty_logic)
                         )
                     else:
@@ -185,6 +207,10 @@ class TransformationEngine:
 
                     if language == "python":
                         current_code, replacements = python_transformers.apply_remove_dead_code(
+                            current_code, method_name, class_name
+                        )
+                    elif language == "c":
+                        current_code, replacements = c_transformers.apply_remove_dead_code(
                             current_code, method_name, class_name
                         )
                     else:
