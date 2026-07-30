@@ -131,8 +131,11 @@ class PlanGenerator:
             details_parts.append(f"cyclomatic complexity {cc}")
         if mc:
             details_parts.append(f"{mc} methods")
-        if isinstance(lines, list) and len(lines) == 2:
+        # Handle both single-line [line] and range [start, end] formats
+        if isinstance(lines, list) and len(lines) >= 2:
             details_parts.append(f"lines {lines[0]}-{lines[1]}")
+        elif isinstance(lines, list) and len(lines) == 1:
+            details_parts.append(f"line {lines[0]}")
 
         if details_parts:
             explanation += f" Metrics: {', '.join(details_parts)}."

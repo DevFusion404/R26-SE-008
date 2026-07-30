@@ -1,0 +1,41 @@
+# ── Python ──────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg
+*.egg-info/
+
+# ── Virtual environments ─────────────────────────────────────
+venv/
+.venv/
+env/
+ENV/
+
+# ── Dev / test artifacts ─────────────────────────────────────
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+dist/
+build/
+
+# ── IDE & OS ─────────────────────────────────────────────────
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.swp
+
+# ── Project specific ─────────────────────────────────────────
+datasets/
+deprecated/
+outputs/
+*.tmp
+*.log
+
+# ── Docs & CI (not needed in image) ─────────────────────────
+docs/
+tests/
+*.md

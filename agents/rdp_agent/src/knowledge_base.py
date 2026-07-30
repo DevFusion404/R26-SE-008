@@ -450,16 +450,44 @@ class RefactoringKnowledgeBase:
     def get_candidates(self, smell_type: str) -> List[Dict[str, Any]]:
         """Retrieve candidate refactorings for a given smell type.
 
+        Falls back to generic low-risk refactorings if the smell type is
+        not in the catalog, so that unknown smells are never silently dropped
+        from the plan.
+
         Args:
             smell_type: The code smell category (e.g., ``"Long Method"``).
 
         Returns:
-            List of candidate dictionaries, or an empty list if the smell
-            type is not in the catalog.
+            List of candidate dictionaries. If the smell type is unknown,
+            returns a set of generic fallback candidates and logs a WARNING.
         """
         candidates = self.catalog.get(smell_type, [])
+
         if not candidates:
-            logger.info("No catalog entry for smell type '%s'.", smell_type)
+            logger.warning(
+                "Unknown smell type '%s' — no catalog entry found. "
+                "Using generic refactoring fallback to avoid silent skip.",
+                smell_type,
+            )
+            # Fallback: return safe, low-risk refactorings applicable to most smells.
+            # These have no preconditions so they will always pass precondition checks.
+            candidates = [
+                {
+                    "name": "Extract Method",
+                    "complexity": "low",
+                    "risk": "low",
+                    "impact": "medium",
+                    "preconditions": [],
+                },
+                {
+                    "name": "Rename Method",
+                    "complexity": "low",
+                    "risk": "low",
+                    "impact": "low",
+                    "preconditions": [],
+                },
+            ]
+
         return candidates
 
     def get_dependencies(self, refactoring_name: str) -> List[str]:

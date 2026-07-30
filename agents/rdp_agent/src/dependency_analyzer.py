@@ -15,8 +15,9 @@ Algorithm:
        (or not present in the current plan).
     2. Among those ready items, pick the one with the highest severity.
     3. Repeat until all items are placed.
-    4. If a deadlock occurs (circular dependencies), force the
-       highest-severity item with a warning.
+    4. Safety guarantee: if a circular dependency deadlock is detected,
+       a ``ValueError`` is raised and plan generation is aborted — the
+       agent will NEVER force an unsafe execution order.
 """
 
 from __future__ import annotations
@@ -97,18 +98,22 @@ class DependencyAnalyzer:
                     ready.append(item)
 
             if not ready:
-                # Deadlock — force the highest-severity item
-                remaining.sort(
-                    key=lambda x: self.severity_order.get(x[0].severity, 0),
-                    reverse=True,
+                # Deadlock — circular dependency detected.
+                # DO NOT force execution: running a refactoring before its
+                # prerequisites are applied can leave the codebase in an
+                # inconsistent, broken state.
+                circular_deps = [c["name"] for _, c in remaining]
+                logger.error(
+                    "Circular dependency deadlock detected in refactoring "
+                    "sequence: %s. Plan generation aborted to prevent "
+                    "inconsistent code state.",
+                    " → ".join(circular_deps),
                 )
-                forced = remaining[0]
-                logger.warning(
-                    "Dependency deadlock detected. Forcing '%s' for smell %s.",
-                    forced[1]["name"],
-                    forced[0].id,
+                raise ValueError(
+                    f"Circular dependency deadlock in refactoring plan: "
+                    f"{circular_deps}. These refactorings cannot be safely "
+                    f"ordered — plan generation aborted."
                 )
-                ready = [forced]
 
             # Pick highest severity among ready items
             ready.sort(
