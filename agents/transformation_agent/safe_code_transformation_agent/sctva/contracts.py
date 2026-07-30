@@ -250,6 +250,11 @@ class SCTVARequestContract:
         if source_files and not isinstance(source_code, str):
             source_code = ""
 
+        if not source_files and isinstance(source_code, str) and not source_code.strip():
+            raise ContractValidationError(
+                "Field 'source_code' must be a non-empty string when 'source_files' is not provided."
+            )
+
         plan = RefactoringPlanContract.from_dict(data.get("refactoring_plan", {}))
         options = ExecutionOptions.from_dict(data.get("execution_options"))
 
