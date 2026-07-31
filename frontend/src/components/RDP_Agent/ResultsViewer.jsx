@@ -197,7 +197,8 @@ export default function ResultsViewer({ plan, stats, onDownload, onCopy }) {
                       <span style={{ fontWeight: '500' }}>
                         {step.target?.class || step.target?.method
                           ? `${step.target.class || ''}${step.target.method ? `.${step.target.method}` : ''}`
-                          : 'unknown'}
+                          : (step.target?.file || '(module level)')}
+                        {step.target?.lines && step.target.lines.length > 0 ? ` (Lines: ${step.target.lines.join('-')})` : ''}
                       </span>
                     </div>
                     <div>
