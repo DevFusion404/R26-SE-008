@@ -59,7 +59,7 @@ class PlanGenerator:
             target_dict = {
                 k: v
                 for k, v in smell.location.items()
-                if k in ("class", "method") and v and v != "unknown"
+                if k in ("class", "method", "lines", "file") and v and v != "unknown"
             }
             step = RefactoringStep(
                 step_id=idx,
