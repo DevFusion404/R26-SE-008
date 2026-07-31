@@ -76,7 +76,10 @@ function PlaceholderPage({ page }) {
 
 // ── Main App ───────────────────────────────────────────────────────────────
 export default function App() {
-  const [page,       setPage]       = useState('overview');
+  // Persist active page across refreshes
+  const [page, setPage] = useState(
+    () => localStorage.getItem('rfiq_active_page') || 'overview'
+  );
   const [repoLoaded, setRepoLoaded] = useState(false);
   const [repoMeta,   setRepoMeta]   = useState(null);
   const [repoConfig, setRepoConfig] = useState(null);  // threshold, filters, mode from RepositoryInput
@@ -98,12 +101,16 @@ export default function App() {
     // Persist the analysis config (threshold, filters, mode, language) from RepositoryInput
     if (data.config) setRepoConfig(data.config);
     // Auto-navigate to CUQA agent after load
-    setTimeout(() => setPage('cuqa'), 400);
+    setTimeout(() => {
+      localStorage.setItem('rfiq_active_page', 'cuqa');
+      setPage('cuqa');
+    }, 400);
   }
 
   // Called from CUQAAgentPage when user clicks "Send to RDP Agent"
   function handleSendToRdp(report) {
     setCuqaReport(report);
+    localStorage.setItem('rfiq_active_page', 'rdp');
     setPage('rdp');
   }
 
@@ -112,6 +119,7 @@ export default function App() {
   }
 
   function navigate(id) {
+    localStorage.setItem('rfiq_active_page', id);
     setPage(id);
   }
 

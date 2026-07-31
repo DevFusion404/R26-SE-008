@@ -12,13 +12,70 @@ import ResultsViewer from '../components/RDP_Agent/ResultsViewer';
 import ErrorAlert from '../components/RDP_Agent/ErrorAlert';
 import ErrorBoundary from '../components/common/ErrorBoundary';
 
+// ── RDP plan history — localStorage persistence (mirrors CUQA's cuqa_analysis_history) ──
+const RDP_HISTORY_KEY = 'rdp_plan_history';
+const MAX_HISTORY = 20;
+
+function loadRdpHistory() {
+  try { return JSON.parse(localStorage.getItem(RDP_HISTORY_KEY) || '[]'); }
+  catch { return []; }
+}
+
+function saveRdpHistory(entries) {
+  localStorage.setItem(RDP_HISTORY_KEY, JSON.stringify(entries.slice(0, MAX_HISTORY)));
+}
+
+function appendRdpHistory(plan, sourceFileName) {
+  const entry = {
+    id:               plan.plan_id || `rdp_${Date.now()}`,
+    plan_id:          plan.plan_id,
+    target:           plan.target || 'unknown',
+    date:             new Date().toISOString(),
+    step_count:       plan.steps?.length || 0,
+    smell_count:      plan.steps?.length || 0,
+    refactorings:     [...new Set((plan.steps || []).map(s => s.refactoring))].slice(0, 3),
+    source_file:      sourceFileName || 'unknown',
+    summary:          plan.summary || '',
+    plan,             // full plan stored for export / view
+  };
+  const updated = [entry, ...loadRdpHistory()].slice(0, MAX_HISTORY);
+  saveRdpHistory(updated);
+  return entry;
+}
+
+// ── Session persistence — save/restore last plan+trace across page refreshes ──
+const RDP_SESSION_KEY = 'rdp_last_session';
+
+function loadSession() {
+  try {
+    const raw = localStorage.getItem(RDP_SESSION_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch { return null; }
+}
+
+function saveSession(plan, trace, sourceFileName) {
+  try {
+    localStorage.setItem(
+      RDP_SESSION_KEY,
+      JSON.stringify({ plan, trace, sourceFileName, savedAt: new Date().toISOString() })
+    );
+  } catch { /* storage quota exceeded — silently ignore */ }
+}
+
+function clearRdpSession() {
+  localStorage.removeItem(RDP_SESSION_KEY);
+}
+
 export default function RDPAgentPage({ repoLoaded, repoMeta, preloadedReport, onClearPreloaded }) {
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState(null);
-  const [plan, setPlan] = useState(null);
-  const [trace, setTrace] = useState(null);
-  const [selectedFile, setSelectedFile] = useState(null);
+  // Load last session once on mount (lazy initializer so it only runs once)
+  const [loading,           setLoading]           = useState(false);
+  const [error,             setError]             = useState(null);
+  const [plan,              setPlan]              = useState(() => loadSession()?.plan  ?? null);
+  const [trace,             setTrace]             = useState(() => loadSession()?.trace ?? null);
+  const [selectedFile,      setSelectedFile]      = useState(null);
   const [cuqaBannerVisible, setCuqaBannerVisible] = useState(false);
+  // sessionRestored: true when plan was loaded from localStorage (not freshly generated)
+  const [sessionRestored,   setSessionRestored]   = useState(() => !!loadSession()?.plan);
   const fileInputRef = useRef(null);
 
   /**
@@ -74,6 +131,12 @@ export default function RDPAgentPage({ repoLoaded, repoMeta, preloadedReport, on
       // Display results
       setPlan(result.plan);
       setTrace(result.trace);
+
+      // Persist plan+trace to localStorage history and session
+      const sourceFileName = file?.name || (result.plan?.target) || 'piped-from-cuqa';
+      appendRdpHistory(result.plan, sourceFileName);
+      saveSession(result.plan, result.trace, sourceFileName);  // ← restores on refresh
+      setSessionRestored(false);  // this is a fresh generation, not a restored one
 
       // Scroll to pipeline
       setTimeout(() => {
@@ -201,7 +264,38 @@ export default function RDPAgentPage({ repoLoaded, repoMeta, preloadedReport, on
       {/* Error Alert */}
       {error && <ErrorAlert message={error} onClose={() => setError(null)} />}
 
-      {/* Upload Section — shown when no preloaded report or after dismissing banner */}
+      {/* Restored session banner — shown when plan came from localStorage after a refresh */}
+      {plan && sessionRestored && !loading && (
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: 12,
+          padding: '10px 18px', marginTop: 12,
+          background: 'linear-gradient(135deg, rgba(34,197,94,0.08), rgba(74,222,128,0.04))',
+          border: '1px solid rgba(34,197,94,0.25)',
+          borderRadius: 8, fontSize: 12,
+        }}>
+          <span style={{ fontSize: 16 }}>💾</span>
+          <div style={{ flex: 1, color: 'var(--text-secondary)' }}>
+            <strong style={{ color: '#22c55e' }}>Session restored</strong>
+            {' '}— showing your last generated plan. Upload a new report to replace it.
+          </div>
+          <button
+            onClick={() => {
+              clearRdpSession();
+              setPlan(null);
+              setTrace(null);
+              setSessionRestored(false);
+            }}
+            style={{
+              background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.25)',
+              borderRadius: 4, color: '#ef4444', fontSize: 11, padding: '4px 10px', cursor: 'pointer',
+            }}
+          >
+            ✕ Clear
+          </button>
+        </div>
+      )}
+
+      {/* Upload Section — always visible so the user can generate a new plan at any time */}
       {!preloadedReport && (
         <UploadSection
           onFileSelect={handleFileSelect}

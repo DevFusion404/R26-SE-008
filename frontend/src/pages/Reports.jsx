@@ -7,10 +7,16 @@
 import { useState, useEffect } from 'react';
 
 const API = 'http://localhost:8080';
-const HISTORY_KEY = 'cuqa_analysis_history';
+const HISTORY_KEY     = 'cuqa_analysis_history';
+const RDP_HISTORY_KEY = 'rdp_plan_history';
 
 function loadHistory() {
   try { return JSON.parse(localStorage.getItem(HISTORY_KEY) || '[]'); }
+  catch { return []; }
+}
+
+function loadRdpHistory() {
+  try { return JSON.parse(localStorage.getItem(RDP_HISTORY_KEY) || '[]'); }
   catch { return []; }
 }
 
@@ -28,15 +34,19 @@ function scoreColor(s) {
 }
 
 export default function Reports() {
-  const [history, setHistory] = useState([]);
-  const [search, setSearch] = useState('');
-  const [langFilter, setLangFilter] = useState('All');
-  const [selectedReport, setSelectedReport] = useState(null);
-  const [liveReport, setLiveReport] = useState(null);
-  const [loadingLive, setLoadingLive] = useState(false);
+  const [history,       setHistory]       = useState([]);
+  const [rdpHistory,    setRdpHistory]    = useState([]);
+  const [search,        setSearch]        = useState('');
+  const [langFilter,    setLangFilter]    = useState('All');
+  const [agentFilter,   setAgentFilter]   = useState('All');   // 'All' | 'CUQA' | 'RDP'
+  const [selectedReport,  setSelectedReport]  = useState(null);
+  const [selectedRdpPlan, setSelectedRdpPlan] = useState(null);
+  const [liveReport,    setLiveReport]    = useState(null);
+  const [loadingLive,   setLoadingLive]   = useState(false);
 
   useEffect(() => {
     setHistory(loadHistory());
+    setRdpHistory(loadRdpHistory());
     fetchLiveReport();
   }, []);
 
@@ -59,11 +69,35 @@ export default function Reports() {
     }
   }
 
+  function exportRdpPlanJSON(planItem) {
+    const dataStr = JSON.stringify(planItem.plan || planItem, null, 2);
+    const blob = new Blob([dataStr], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `rdp_plan_${planItem.plan_id || planItem.id}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
   const filteredHistory = history.filter(item => {
-    const matchesSearch = item.name.toLowerCase().includes(search.toLowerCase());
-    const matchesLang = langFilter === 'All' || item.language.toLowerCase() === langFilter.toLowerCase();
-    return matchesSearch && matchesLang;
+    const matchesSearch = item.name?.toLowerCase().includes(search.toLowerCase());
+    const matchesLang   = langFilter === 'All' || item.language?.toLowerCase() === langFilter.toLowerCase();
+    const matchesAgent  = agentFilter === 'All' || agentFilter === 'CUQA';
+    return matchesSearch && matchesLang && matchesAgent;
   });
+
+  const filteredRdpHistory = rdpHistory.filter(item => {
+    const matchesSearch = item.target?.toLowerCase().includes(search.toLowerCase()) ||
+                          item.source_file?.toLowerCase().includes(search.toLowerCase());
+    const matchesAgent  = agentFilter === 'All' || agentFilter === 'RDP';
+    return matchesSearch && matchesAgent;
+  });
+
+  const totalPlans = rdpHistory.length;
+  const avgSteps   = rdpHistory.length
+    ? Math.round(rdpHistory.reduce((a, b) => a + (b.step_count || 0), 0) / rdpHistory.length)
+    : 0;
 
   function exportReportJSON(reportItem) {
     const dataStr = JSON.stringify(reportItem, null, 2);
@@ -117,25 +151,26 @@ export default function Reports() {
       </div>
 
       {/* Top Metrics Cards */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 14 }}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 14 }}>
         <div className="card card-body" style={{ padding: 18 }}>
-          <div style={{ fontSize: 10, color: 'var(--text-muted)', textTransform: 'uppercase', fontWeight: 600 }}>Total Reports</div>
+          <div style={{ fontSize: 10, color: 'var(--text-muted)', textTransform: 'uppercase', fontWeight: 600 }}>CUQA Reports</div>
           <div style={{ fontSize: 26, fontWeight: 800, color: 'var(--accent)', marginTop: 4 }}>{history.length}</div>
-          <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginTop: 4 }}>Persisted analyses</div>
+          <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginTop: 4 }}>Quality analyses</div>
+        </div>
+        <div className="card card-body" style={{ padding: 18 }}>
+          <div style={{ fontSize: 10, color: 'var(--text-muted)', textTransform: 'uppercase', fontWeight: 600 }}>RDP Plans</div>
+          <div style={{ fontSize: 26, fontWeight: 800, color: '#a78bfa', marginTop: 4 }}>{totalPlans}</div>
+          <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginTop: 4 }}>Refactoring plans</div>
         </div>
         <div className="card card-body" style={{ padding: 18 }}>
           <div style={{ fontSize: 10, color: 'var(--text-muted)', textTransform: 'uppercase', fontWeight: 600 }}>Avg Code Score</div>
           <div style={{ fontSize: 26, fontWeight: 800, color: scoreColor(avgScore), marginTop: 4 }}>{avgScore > 0 ? `${avgScore}%` : '—'}</div>
-          <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginTop: 4 }}>Across all runs</div>
+          <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginTop: 4 }}>Across CUQA runs</div>
         </div>
         <div className="card card-body" style={{ padding: 18 }}>
-          <div style={{ fontSize: 10, color: 'var(--text-muted)', textTransform: 'uppercase', fontWeight: 600 }}>Live Active Report</div>
-          <div style={{ fontSize: 26, fontWeight: 800, color: liveReport ? '#22c55e' : 'var(--text-muted)', marginTop: 4 }}>
-            {liveReport ? 'Ready' : 'None'}
-          </div>
-          <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginTop: 4 }}>
-            {liveReport ? `${liveReport.repo_name} (${liveReport.summary?.total_files || 0} files)` : 'No active workspace'}
-          </div>
+          <div style={{ fontSize: 10, color: 'var(--text-muted)', textTransform: 'uppercase', fontWeight: 600 }}>Avg Steps / Plan</div>
+          <div style={{ fontSize: 26, fontWeight: 800, color: '#22c55e', marginTop: 4 }}>{avgSteps || '—'}</div>
+          <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginTop: 4 }}>Refactoring steps</div>
         </div>
         <div className="card card-body" style={{ padding: 18 }}>
           <div style={{ fontSize: 10, color: 'var(--text-muted)', textTransform: 'uppercase', fontWeight: 600 }}>Export Formats</div>
@@ -149,34 +184,37 @@ export default function Reports() {
         <div style={{ flex: 1, minWidth: 220 }}>
           <input
             className="input"
-            placeholder="Search report by repository name..."
+            placeholder="Search by repository or target name..."
             value={search}
             onChange={e => setSearch(e.target.value)}
           />
         </div>
         <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+          <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>Agent:</span>
+          {['All', 'CUQA', 'RDP'].map(a => (
+            <button key={a} className={`btn btn-sm ${agentFilter === a ? 'btn-primary' : 'btn-ghost'}`}
+              onClick={() => setAgentFilter(a)}>{a}</button>
+          ))}
+        </div>
+        <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
           <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>Language:</span>
           {['All', 'Java', 'Python', 'C'].map(l => (
-            <button
-              key={l}
-              className={`btn btn-sm ${langFilter === l ? 'btn-primary' : 'btn-ghost'}`}
-              onClick={() => setLangFilter(l)}
-            >
-              {l}
-            </button>
+            <button key={l} className={`btn btn-sm ${langFilter === l ? 'btn-primary' : 'btn-ghost'}`}
+              onClick={() => setLangFilter(l)}>{l}</button>
           ))}
         </div>
       </div>
 
-      {/* Main Reports Table */}
+      {/* CUQA Reports Table */}
+      {(agentFilter === 'All' || agentFilter === 'CUQA') && (
       <div className="card">
         <div className="card-header">
-          <span className="card-title">📜 Historical Analysis Reports ({filteredHistory.length})</span>
+          <span className="card-title">🔍 CUQA Quality Reports ({filteredHistory.length})</span>
         </div>
         {filteredHistory.length === 0 ? (
           <div className="empty-state" style={{ padding: 40 }}>
             <span className="empty-icon">📋</span>
-            <p>No quality reports match your search criteria. Run a code analysis in <strong>Repository Input</strong> first.</p>
+            <p>No CUQA reports yet. Run a code analysis in <strong>Repository Input</strong> first.</p>
           </div>
         ) : (
           <div style={{ overflowX: 'auto' }}>
@@ -186,9 +224,9 @@ export default function Reports() {
                   <th>Repository Name</th>
                   <th>Source</th>
                   <th>Language</th>
-                  <th>Analysis Mode</th>
+                  <th>Mode</th>
                   <th>Timestamp</th>
-                  <th>Files Scanned</th>
+                  <th>Files</th>
                   <th>Score</th>
                   <th>Actions</th>
                 </tr>
@@ -196,39 +234,17 @@ export default function Reports() {
               <tbody>
                 {filteredHistory.map(r => (
                   <tr key={r.id}>
-                    <td>
-                      <span style={{ fontWeight: 600, color: 'var(--text-primary)' }}>{r.name}</span>
-                    </td>
-                    <td>
-                      <span className="badge badge-accent" style={{ fontSize: 10 }}>
-                        {r.source === 'github' ? '🔗 GitHub' : '📁 ZIP'}
-                      </span>
-                    </td>
-                    <td>
-                      <span className={`badge badge-${(r.language || '').toLowerCase()}`}>
-                        {r.language}
-                      </span>
-                    </td>
+                    <td><span style={{ fontWeight: 600, color: 'var(--text-primary)' }}>{r.name}</span></td>
+                    <td><span className="badge badge-accent" style={{ fontSize: 10 }}>{r.source === 'github' ? '🔗 GitHub' : '📁 ZIP'}</span></td>
+                    <td><span className={`badge badge-${(r.language || '').toLowerCase()}`}>{r.language}</span></td>
                     <td style={{ fontSize: 11, color: 'var(--text-secondary)' }}>{r.mode || 'Comprehensive'}</td>
                     <td style={{ fontSize: 11, color: 'var(--text-muted)' }}>{fmtDate(r.date)}</td>
                     <td style={{ fontSize: 11 }}>{r.files_found} files</td>
-                    <td>
-                      <span style={{ fontWeight: 700, color: r.color }}>{r.score}%</span>
-                    </td>
+                    <td><span style={{ fontWeight: 700, color: r.color }}>{r.score}%</span></td>
                     <td>
                       <div style={{ display: 'flex', gap: 6 }}>
-                        <button
-                          className="btn btn-ghost btn-sm"
-                          onClick={() => setSelectedReport(r)}
-                        >
-                          👁️ View Summary
-                        </button>
-                        <button
-                          className="btn btn-outline btn-sm"
-                          onClick={() => exportReportJSON(r)}
-                        >
-                          ↓ JSON
-                        </button>
+                        <button className="btn btn-ghost btn-sm" onClick={() => setSelectedReport(r)}>👁️ View</button>
+                        <button className="btn btn-outline btn-sm" onClick={() => exportReportJSON(r)}>↓ JSON</button>
                       </div>
                     </td>
                   </tr>
@@ -238,6 +254,61 @@ export default function Reports() {
           </div>
         )}
       </div>
+      )}
+
+      {/* RDP Plan History Table */}
+      {(agentFilter === 'All' || agentFilter === 'RDP') && (
+      <div className="card">
+        <div className="card-header">
+          <span className="card-title">🧠 RDP Refactoring Plans ({filteredRdpHistory.length})</span>
+        </div>
+        {filteredRdpHistory.length === 0 ? (
+          <div className="empty-state" style={{ padding: 40 }}>
+            <span className="empty-icon">📋</span>
+            <p>No RDP plans yet. Upload a CUQA quality report in the <strong>RDP Agent</strong> tab to generate a plan.</p>
+          </div>
+        ) : (
+          <div style={{ overflowX: 'auto' }}>
+            <table className="data-table">
+              <thead>
+                <tr>
+                  <th>Plan ID</th>
+                  <th>Target</th>
+                  <th>Source File</th>
+                  <th>Timestamp</th>
+                  <th>Steps</th>
+                  <th>Top Refactorings</th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {filteredRdpHistory.map(r => (
+                  <tr key={r.id}>
+                    <td><span style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: '#a78bfa' }}>{r.plan_id}</span></td>
+                    <td><span style={{ fontWeight: 600, color: 'var(--text-primary)' }}>{r.target}</span></td>
+                    <td style={{ fontSize: 11, color: 'var(--text-secondary)' }}>{r.source_file}</td>
+                    <td style={{ fontSize: 11, color: 'var(--text-muted)' }}>{fmtDate(r.date)}</td>
+                    <td>
+                      <span style={{ fontWeight: 700, color: '#22c55e' }}>{r.step_count}</span>
+                      <span style={{ fontSize: 10, color: 'var(--text-muted)', marginLeft: 4 }}>steps</span>
+                    </td>
+                    <td style={{ fontSize: 11, color: 'var(--text-secondary)' }}>
+                      {(r.refactorings || []).join(', ') || '—'}
+                    </td>
+                    <td>
+                      <div style={{ display: 'flex', gap: 6 }}>
+                        <button className="btn btn-ghost btn-sm" onClick={() => setSelectedRdpPlan(r)}>👁️ View</button>
+                        <button className="btn btn-outline btn-sm" onClick={() => exportRdpPlanJSON(r)}>↓ JSON</button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+      )}
 
       {/* Selected Report Modal / View */}
       {selectedReport && (
@@ -285,6 +356,43 @@ export default function Reports() {
               <button className="btn btn-outline" onClick={() => exportReportJSON(selectedReport)}>
                 ↓ Download Full Report JSON
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {/* RDP Plan Modal */}
+      {selectedRdpPlan && (
+        <div style={{
+          position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
+          background: 'rgba(0,0,0,0.7)', zIndex: 1000, display: 'flex',
+          alignItems: 'center', justifyContent: 'center', padding: 20
+        }}>
+          <div className="card" style={{ width: '100%', maxWidth: 680, maxHeight: '82vh', overflowY: 'auto', padding: 24 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16, borderBottom: '1px solid var(--border)', paddingBottom: 12 }}>
+              <h3 style={{ fontSize: 16, fontWeight: 700, color: 'var(--text-primary)' }}>
+                🧠 Refactoring Plan: {selectedRdpPlan.target}
+              </h3>
+              <button className="btn btn-ghost btn-sm" onClick={() => setSelectedRdpPlan(null)}>✕ Close</button>
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 12, marginBottom: 16 }}>
+              <div style={{ background: 'var(--bg-elevated)', padding: 12, borderRadius: 'var(--r-sm)' }}>
+                <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>PLAN ID</div>
+                <div style={{ fontSize: 12, fontWeight: 600, color: '#a78bfa', fontFamily: 'var(--font-mono)' }}>{selectedRdpPlan.plan_id}</div>
+              </div>
+              <div style={{ background: 'var(--bg-elevated)', padding: 12, borderRadius: 'var(--r-sm)' }}>
+                <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>STEPS</div>
+                <div style={{ fontSize: 20, fontWeight: 800, color: '#22c55e' }}>{selectedRdpPlan.step_count}</div>
+              </div>
+              <div style={{ background: 'var(--bg-elevated)', padding: 12, borderRadius: 'var(--r-sm)' }}>
+                <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>SOURCE FILE</div>
+                <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-primary)' }}>{selectedRdpPlan.source_file}</div>
+              </div>
+            </div>
+            {selectedRdpPlan.summary && (
+              <p style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 16, lineHeight: 1.6 }}>{selectedRdpPlan.summary}</p>
+            )}
+            <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+              <button className="btn btn-outline" onClick={() => exportRdpPlanJSON(selectedRdpPlan)}>↓ Download Plan JSON</button>
             </div>
           </div>
         </div>
