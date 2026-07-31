@@ -86,7 +86,7 @@ def _translate_cuqa_to_rdp(data: dict) -> dict:
         "TooManyParameters":   "Long Parameter List",
         "MagicNumber":         "Magic Numbers",
         "MagicNumbers":        "Magic Numbers",
-        "BareExcept":          "Dead Code",          # closest analogue: defensive code smell
+        "BareExcept":          "Bare Except",        # exception handling anti-pattern → correct KB entry
         "DeadCode":            "Dead Code",
         "DuplicateCode":       "Duplicate Code",
         "DataClumps":          "Data Clumps",
