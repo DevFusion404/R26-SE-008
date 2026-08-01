@@ -351,8 +351,161 @@ function FilesWithSmells({ report, filter = 'all' }) {
   );
 }
 
+// ── Human-in-the-Loop Handoff Panel ───────────────────────────────────────
+function HumanInTheLoopPanel({ report, onContinue, pipelineState }) {
+  const summary       = report?.summary ?? {};
+  const totalSmells   = summary.total_code_smells || 0;
+  const highSmells    = summary.smell_severity?.high || 0;
+  const mediumSmells  = summary.smell_severity?.medium || 0;
+  const lowSmells     = summary.smell_severity?.low || 0;
+  const filesAffected = (report?.files || []).filter(f => (f.code_smells || []).length > 0).length;
+  const avgScore      = summary.average_quality_score;
+  const alreadySent   = pipelineState === 'rdp_running' || pipelineState === 'rdp_done';
+
+  if (!report) return null;
+
+  return (
+    <div style={{
+      marginTop: 32,
+      borderRadius: 12,
+      border: alreadySent ? '1px solid rgba(34,197,94,0.4)' : '1px solid rgba(139,92,246,0.5)',
+      background: alreadySent
+        ? 'linear-gradient(135deg, rgba(34,197,94,0.06), rgba(16,185,129,0.04))'
+        : 'linear-gradient(135deg, rgba(139,92,246,0.10), rgba(168,85,247,0.06))',
+      overflow: 'hidden',
+      boxShadow: alreadySent
+        ? '0 0 24px rgba(34,197,94,0.12)'
+        : '0 0 30px rgba(139,92,246,0.18)',
+    }}>
+      {/* Panel header */}
+      <div style={{
+        padding: '14px 20px',
+        borderBottom: alreadySent ? '1px solid rgba(34,197,94,0.2)' : '1px solid rgba(139,92,246,0.25)',
+        display: 'flex', alignItems: 'center', gap: 10,
+        background: alreadySent
+          ? 'rgba(34,197,94,0.08)'
+          : 'rgba(139,92,246,0.08)',
+      }}>
+        <span style={{ fontSize: 20 }}>{alreadySent ? '✅' : '🤖'}</span>
+        <div style={{ flex: 1 }}>
+          <div style={{ fontSize: 13, fontWeight: 700, color: alreadySent ? '#4ade80' : '#c4b5fd' }}>
+            {alreadySent ? 'Report Sent — RDP Agent is Processing' : 'CUQA Analysis Complete — Human Review Required'}
+          </div>
+          <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginTop: 2 }}>
+            {alreadySent
+              ? 'The refactoring plan is being generated automatically. Navigate to RDP Agent to see results.'
+              : 'Review the findings below, then click Continue to pass the report to the RDP Agent.'}
+          </div>
+        </div>
+        {/* Pipeline stage chips */}
+        <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexShrink: 0 }}>
+          <span style={{
+            padding: '3px 10px', borderRadius: 'var(--r-full)', fontSize: 10, fontWeight: 700,
+            background: 'rgba(0,212,232,0.15)', color: '#00d4e8', border: '1px solid rgba(0,212,232,0.3)',
+          }}>① CUQA ✓</span>
+          <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>→</span>
+          <span style={{
+            padding: '3px 10px', borderRadius: 'var(--r-full)', fontSize: 10, fontWeight: 700,
+            background: alreadySent ? 'rgba(139,92,246,0.25)' : 'rgba(139,92,246,0.10)',
+            color: alreadySent ? '#c4b5fd' : '#7c6aaa',
+            border: `1px solid ${alreadySent ? 'rgba(139,92,246,0.5)' : 'rgba(139,92,246,0.2)'}`,
+            animation: alreadySent && pipelineState === 'rdp_running' ? 'pulse 1.2s infinite' : 'none',
+          }}>② RDP {alreadySent ? (pipelineState === 'rdp_done' ? '✓' : '…') : '—'}</span>
+        </div>
+      </div>
+
+      {/* Summary metrics */}
+      <div style={{
+        display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)',
+        gap: 0, padding: '16px 20px',
+        borderBottom: '1px solid rgba(139,92,246,0.12)',
+      }}>
+        {[
+          { label: 'Total Smells',   value: totalSmells,  color: totalSmells > 10 ? '#ef4444' : '#f59e0b', icon: '🦨' },
+          { label: '🔴 Critical',     value: highSmells,   color: '#ef4444', icon: null },
+          { label: '🟠 Medium',       value: mediumSmells, color: '#f59e0b', icon: null },
+          { label: '🟢 Low',          value: lowSmells,    color: '#22c55e', icon: null },
+          { label: 'Files Affected', value: filesAffected, color: '#8b5cf6', icon: '📁' },
+        ].map(({ label, value, color, icon }) => (
+          <div key={label} style={{
+            textAlign: 'center', padding: '8px 4px',
+            borderRight: '1px solid rgba(139,92,246,0.1)',
+          }}>
+            <div style={{ fontSize: 22, fontWeight: 800, color, fontFamily: 'var(--font-mono)' }}>
+              {value}
+            </div>
+            <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 3 }}>{label}</div>
+          </div>
+        ))}
+      </div>
+
+      {/* Additional context row */}
+      <div style={{
+        display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+        padding: '10px 20px',
+        borderBottom: '1px solid rgba(139,92,246,0.12)',
+        fontSize: 11, color: 'var(--text-secondary)', gap: 24,
+        flexWrap: 'wrap',
+      }}>
+        <span>📊 Avg. Quality Score: <strong style={{ color: avgScore < 60 ? '#ef4444' : avgScore < 75 ? '#f59e0b' : '#22c55e' }}>
+          {avgScore ? `${avgScore.toFixed(1)}/100` : '—'}
+        </strong></span>
+        <span>📁 Total Files: <strong style={{ color: 'var(--text-primary)' }}>{report?.files?.length ?? 0}</strong></span>
+        <span>🔢 Total LOC: <strong style={{ color: 'var(--text-primary)' }}>{summary.total_lines_of_code?.toLocaleString() ?? '—'}</strong></span>
+        <span style={{ marginLeft: 'auto', color: 'var(--text-muted)', fontSize: 10, fontStyle: 'italic' }}>
+          All findings above will be forwarded to the RDP Agent.
+        </span>
+      </div>
+
+      {/* Action row */}
+      <div style={{
+        display: 'flex', justifyContent: 'flex-end', alignItems: 'center',
+        gap: 12, padding: '12px 20px',
+      }}>
+        {alreadySent ? (
+          <div style={{ fontSize: 12, color: '#4ade80', display: 'flex', alignItems: 'center', gap: 8 }}>
+            <span>✅</span>
+            <span>Report successfully forwarded — navigate to <strong>RDP Agent</strong> to view the plan.</span>
+          </div>
+        ) : (
+          <>
+            <div style={{ fontSize: 11, color: 'var(--text-muted)', marginRight: 'auto' }}>
+              ⚠ Please review the analysis above before continuing.
+            </div>
+            <button
+              id="hitl-continue-btn"
+              onClick={() => onContinue(report)}
+              disabled={totalSmells === 0}
+              style={{
+                padding: '10px 28px',
+                background: totalSmells === 0
+                  ? 'rgba(139,92,246,0.15)'
+                  : 'linear-gradient(135deg, #7c3aed, #a855f7)',
+                color: totalSmells === 0 ? '#6b7280' : 'white',
+                border: 'none',
+                borderRadius: 8,
+                fontSize: 13,
+                fontWeight: 700,
+                cursor: totalSmells === 0 ? 'not-allowed' : 'pointer',
+                boxShadow: totalSmells === 0 ? 'none' : '0 0 20px rgba(139,92,246,0.5)',
+                letterSpacing: '0.4px',
+                display: 'flex', alignItems: 'center', gap: 8,
+                transition: 'all 0.2s ease',
+              }}
+              title={totalSmells === 0 ? 'No code smells detected — nothing to send' : 'Send report to RDP Agent and auto-generate refactoring plan'}
+            >
+              <span>⚡</span>
+              <span>Continue → RDP Agent</span>
+            </button>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // ── Main CUQAAgentPage ─────────────────────────────────────────────────────
-export default function CUQAAgentPage({ repoLoaded, repoMeta, onSendToRdp, analysisConfig }) {
+export default function CUQAAgentPage({ repoLoaded, repoMeta, onSendToRdp, analysisConfig, pipelineState, onPipelineStateChange }) {
   // Extract active settings (fall back to sensible defaults if no config provided)
   const threshold     = analysisConfig?.threshold      ?? 75;
   const severityFilts = analysisConfig?.severity_filters ?? { critical: true, naming: true };
@@ -786,6 +939,13 @@ export default function CUQAAgentPage({ repoLoaded, repoMeta, onSendToRdp, analy
           }
         </div>
       </div>
+
+      {/* ── Human-in-the-Loop Handoff Panel ──────────────────── */}
+      <HumanInTheLoopPanel
+        report={report}
+        onContinue={onSendToRdp}
+        pipelineState={pipelineState}
+      />
 
     </div>
   );
