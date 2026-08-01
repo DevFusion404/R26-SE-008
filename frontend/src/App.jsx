@@ -76,7 +76,10 @@ function PlaceholderPage({ page }) {
 
 // ── Main App ───────────────────────────────────────────────────────────────
 export default function App() {
-  const [page,          setPage]          = useState('overview');
+  // Persist active page across refreshes
+  const [page, setPage] = useState(
+    () => localStorage.getItem('rfiq_active_page') || 'overview'
+  );
   const [repoLoaded,    setRepoLoaded]    = useState(false);
   const [repoMeta,      setRepoMeta]      = useState(null);
   const [repoConfig,    setRepoConfig]    = useState(null);  // threshold, filters, mode from RepositoryInput
@@ -110,6 +113,7 @@ export default function App() {
   function handleSendToRdp(report) {
     setCuqaReport(report);
     setPipelineState('rdp_running');
+    localStorage.setItem('rfiq_active_page', 'rdp');
     setPage('rdp');
   }
 
