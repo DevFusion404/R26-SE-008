@@ -188,10 +188,13 @@ def health():
 
 # ── 1. Upload ZIP ────────────────────────────────────────────────────────────
 
+MAX_ZIP_SIZE_MB = 500
+MAX_ZIP_SIZE_BYTES = MAX_ZIP_SIZE_MB * 1024 * 1024  # 500 MB limit
+
 @app.post("/api/upload-zip")
 async def upload_zip(file: UploadFile = File(...)):
     """
-    Accept a ZIP file, extract it to a temporary workspace, and
+    Accept a ZIP file (up to 500 MB), extract it to a temporary workspace, and
     scan for supported source files.
     """
     if not file.filename.endswith(".zip"):
@@ -204,9 +207,15 @@ async def upload_zip(file: UploadFile = File(...)):
     tmp_dir = tempfile.mkdtemp(prefix="cuqa_")
     zip_path = os.path.join(tmp_dir, "upload.zip")
 
-    contents = await file.read()
+    total_bytes = 0
     with open(zip_path, "wb") as f:
-        f.write(contents)
+        while chunk := await file.read(1024 * 1024):  # Read in 1MB chunks
+            total_bytes += len(chunk)
+            if total_bytes > MAX_ZIP_SIZE_BYTES:
+                f.close()
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+                raise HTTPException(413, f"ZIP file exceeds the {MAX_ZIP_SIZE_MB}MB size limit.")
+            f.write(chunk)
 
     extract_dir = os.path.join(tmp_dir, "extracted")
     os.makedirs(extract_dir, exist_ok=True)
@@ -263,11 +272,16 @@ def load_github_repo(request: GitHubRepoRequest):  # Use Pydantic model
     repo_name = url.split("/")[-1]
     
     # Try multiple common branches
+    response = None
     for branch in ["main", "master", "develop", "trunk"]:
         zip_url = f"{url}/archive/refs/heads/{branch}.zip"
         try:
-            response = requests.get(zip_url, timeout=30, allow_redirects=True)
-            if response.status_code == 200:
+            res = requests.get(zip_url, timeout=120, stream=True, allow_redirects=True)
+            if res.status_code == 200:
+                content_length = res.headers.get("Content-Length")
+                if content_length and int(content_length) > MAX_ZIP_SIZE_BYTES:
+                    raise HTTPException(413, f"GitHub repository archive exceeds the {MAX_ZIP_SIZE_MB}MB size limit.")
+                response = res
                 break
         except requests.exceptions.RequestException:
             continue
@@ -281,9 +295,16 @@ def load_github_repo(request: GitHubRepoRequest):  # Use Pydantic model
     tmp_dir = tempfile.mkdtemp(prefix="cuqa_gh_")
     zip_path = os.path.join(tmp_dir, "repo.zip")
 
+    total_bytes = 0
     with open(zip_path, "wb") as f:
-        for chunk in response.iter_content(chunk_size=8192):
-            f.write(chunk)
+        for chunk in response.iter_content(chunk_size=65536):
+            if chunk:
+                total_bytes += len(chunk)
+                if total_bytes > MAX_ZIP_SIZE_BYTES:
+                    f.close()
+                    shutil.rmtree(tmp_dir, ignore_errors=True)
+                    raise HTTPException(413, f"Downloaded GitHub repository archive exceeds the {MAX_ZIP_SIZE_MB}MB size limit.")
+                f.write(chunk)
 
     extract_dir = os.path.join(tmp_dir, "extracted")
     os.makedirs(extract_dir, exist_ok=True)
