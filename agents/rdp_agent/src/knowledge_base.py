@@ -396,6 +396,74 @@ DEFAULT_CATALOG: Dict[str, List[Dict[str, Any]]] = {
             "preconditions": [],
         },
     ],
+
+    # ---- C-specific smells ----
+    # These map directly from CUQA's C smell detector output.
+
+    "Deep Nesting": [
+        {
+            "name": "Extract Method",
+            "complexity": "low",
+            "risk": "low",
+            "impact": "high",
+            "preconditions": ["has_nesting"],
+        },
+        {
+            "name": "Replace Conditional with Polymorphism",
+            "complexity": "high",
+            "risk": "medium",
+            "impact": "high",
+            "preconditions": ["has_nesting"],
+        },
+    ],
+    "Unsafe Function Usage": [
+        {
+            "name": "Replace Unsafe Function",
+            "complexity": "low",
+            "risk": "low",
+            "impact": "high",
+            "preconditions": [],  # always applicable — the smell itself is the trigger
+        },
+        {
+            "name": "Extract Method",
+            "complexity": "low",
+            "risk": "low",
+            "impact": "medium",
+            "preconditions": [],
+        },
+    ],
+    "Global Variable": [
+        {
+            "name": "Encapsulate Variable",
+            "complexity": "medium",
+            "risk": "low",
+            "impact": "high",
+            "preconditions": [],
+        },
+        {
+            "name": "Move Method",
+            "complexity": "medium",
+            "risk": "medium",
+            "impact": "medium",
+            "preconditions": [],
+        },
+    ],
+    "Large Header File": [
+        {
+            "name": "Extract Class",
+            "complexity": "high",
+            "risk": "medium",
+            "impact": "high",
+            "preconditions": [],
+        },
+        {
+            "name": "Remove Dead Code",
+            "complexity": "low",
+            "risk": "low",
+            "impact": "medium",
+            "preconditions": [],
+        },
+    ],
 }
 
 
@@ -408,13 +476,16 @@ DEFAULT_CATALOG: Dict[str, List[Dict[str, Any]]] = {
 # *before* it, when both appear in the same plan.
 
 DEFAULT_DEPENDENCIES: Dict[str, List[str]] = {
-    "Extract Class": ["Extract Method"],
-    "Extract Subclass": ["Extract Method", "Extract Class"],
-    "Move Method": ["Extract Method"],
-    "Pull Up Method": ["Extract Method"],
-    "Inline Class": ["Move Method"],
-    "Collapse Hierarchy": ["Extract Method"],
-    "Replace Conditional with Polymorphism": ["Extract Method"],
+    "Extract Class":                          ["Extract Method"],
+    "Extract Subclass":                       ["Extract Method", "Extract Class"],
+    "Move Method":                            ["Extract Method"],
+    "Pull Up Method":                         ["Extract Method"],
+    "Inline Class":                           ["Move Method"],          # HIGH #2
+    "Collapse Hierarchy":                     ["Extract Method"],
+    "Replace Conditional with Polymorphism":  ["Extract Method"],       # HIGH #2
+    "Introduce Parameter Object":             ["Extract Method"],       # HIGH #2
+    "Hide Delegate":                          ["Extract Method"],       # HIGH #2
+    "Replace Temp with Query":                [],                       # HIGH #2 — no prereqs, but explicit entry
 }
 
 

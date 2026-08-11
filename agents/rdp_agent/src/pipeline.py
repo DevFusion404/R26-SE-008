@@ -183,6 +183,7 @@ class RDPAgent:
 
         # ----- Steps 2-7: For each smell, generate + predict + decide -----
         selections: List[Tuple[CodeSmell, Dict[str, Any]]] = []
+        skipped_smells: List[Dict[str, Any]] = []  # CRITICAL #6
 
         for smell in report.smells:
             smell_trace: Dict[str, Any] = {
@@ -338,9 +339,31 @@ class RDPAgent:
                     smell_trace["selected_score"] = None
                     smell_trace["scoring_method"] = None
             else:
-                smell_trace["selected"] = None
+                # CRITICAL #6: track skipped smells with reason
+                if not all_candidates:
+                    reason = f"no candidates in knowledge base for smell type '{smell.type}'"
+                elif not viable_candidates:
+                    reason = (
+                        f"all {len(all_candidates)} candidate(s) failed precondition checks "
+                        f"(missing metric data or conditions not met)"
+                    )
+                else:
+                    reason = "no MCDA-scored candidates could be ranked"
+
+                skipped_smells.append({
+                    "smell_id":   smell.id,
+                    "smell_type": smell.type,
+                    "severity":   smell.severity,
+                    "reason":     reason,
+                })
+                logger.warning(
+                    "Smell %s (%s, %s) skipped: %s",
+                    smell.id, smell.type, smell.severity, reason,
+                )
+                smell_trace["selected"]       = None
                 smell_trace["selected_score"] = None
                 smell_trace["scoring_method"] = None
+                smell_trace["skip_reason"]    = reason
 
             trace["candidate_generation"].append(smell_trace)
 
@@ -411,11 +434,12 @@ class RDPAgent:
         )
 
         trace["plan_generation"] = {
-            "plan_id": plan.plan_id,
-            "total_steps": len(plan.steps),
-            "smells_addressed": len(plan.steps),
-            "smells_skipped": len(report.smells) - len(plan.steps),
-            "summary": plan.summary,
+            "plan_id":           plan.plan_id,
+            "total_steps":       len(plan.steps),
+            "smells_addressed":  len(plan.steps),
+            "smells_skipped":    len(report.smells) - len(plan.steps),
+            "summary":           plan.summary,
+            "skipped_smells":    skipped_smells,   # CRITICAL #6
         }
 
         return {
