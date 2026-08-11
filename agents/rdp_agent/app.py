@@ -86,7 +86,7 @@ def _translate_cuqa_to_rdp(data: dict) -> dict:
         "TooManyParameters":   "Long Parameter List",
         "MagicNumber":         "Magic Numbers",
         "MagicNumbers":        "Magic Numbers",
-        "BareExcept":          "Dead Code",          # closest analogue: defensive code smell
+        "BareExcept":          "Bare Except",        # exception handling anti-pattern → correct KB entry
         "DeadCode":            "Dead Code",
         "DuplicateCode":       "Duplicate Code",
         "DataClumps":          "Data Clumps",
@@ -153,16 +153,19 @@ def _translate_cuqa_to_rdp(data: dict) -> dict:
             normalised_type = SMELL_TYPE_MAP.get(raw_type, raw_type)
 
             # Resolve the entity (function / class / method name)
-            # Priority: explicit "entity" field → parse message → fallback to file base name
+            # Priority: explicit "entity" field → parse message → None for module-level smells
             entity = raw.get("entity")
-            
+
             if not entity:
                 # CUQA messages look like: "Function 'foo' has ..." or "Class 'Bar' has ..."
                 _m = re.search(r"(?:Function|Method|Class)\s+'([^']+)'", raw.get("message", ""))
                 entity = _m.group(1) if _m else None
-            
-            # Last resort: use file base name if entity still missing
-            if not entity or entity == "unknown":
+
+            # RDP-FIX-03: Don't force file basename as class/method for module-level smells
+            # (e.g. MagicNumber with entity=null lives at module scope, not inside a class).
+            # Only fall back to basename for method/class smells where it makes sense.
+            is_module_level_smell = normalised_type in ("Magic Numbers", "Comments", "Dead Code")
+            if (not entity or entity == "unknown") and not is_module_level_smell:
                 entity = file_name.replace(".java", "").replace(".py", "")
 
             # Build location dict based on smell type
@@ -173,27 +176,46 @@ def _translate_cuqa_to_rdp(data: dict) -> dict:
             is_class_smell = normalised_type in ("Large Class", "Lazy Class", "God Class")
             is_method_smell = normalised_type in ("Long Method", "Long Parameter List", "Too Many Parameters")
             
+            # RDP-FIX-02: Build line range [start, end] when CUQA provides both endpoints.
+            # has_code_block precondition requires len(lines) >= 2 to evaluate properly.
+            # Falls back to [line] (single point) for older CUQA output without end_line.
+            start_line = raw.get("start_line", line)
+            end_line   = raw.get("end_line", line)
+            if start_line and end_line and start_line != end_line:
+                lines_range = [start_line, end_line]
+            else:
+                lines_range = [line] if line else []
+
             location = {
                 "file": file_name,
                 "language": language,
-                "class": entity if is_class_smell else base_name,
-                "method": entity if is_method_smell else (base_name if not is_class_smell else None),
-                "lines": [line] if line else [],
+                "class": entity if is_class_smell else (None if is_module_level_smell else base_name),
+                "method": entity if is_method_smell else (None if (is_class_smell or is_module_level_smell) else base_name),
+                "lines": lines_range,
             }
             # Clean up None values
             if location["method"] is None or location["method"] == "unknown":
-                location["method"] = base_name if not is_class_smell else None
+                location["method"] = base_name if not (is_class_smell or is_module_level_smell) else None
 
 
-            # Build metrics dict — file-level + any numeric smell-level fields
+            # Build metrics dict — per-method size when available, file-level as fallback.
+            # RDP-FIX-01: Use per-method body LOC (end_line - start_line) when CUQA provides
+            # start_line/end_line. Using whole-file LOC inflates severity for small methods
+            # inside large files (e.g. a 39-line method in a 438-line file got LOC=438).
+            if start_line and end_line and start_line != end_line:
+                method_loc = end_line - start_line
+            else:
+                method_loc = file_metrics.get("lines_of_code", 0)
+
             metrics = {
-                "lines_of_code": file_metrics.get("lines_of_code", 0),
+                "lines_of_code": method_loc,
                 "complexity": file_metrics.get("complexity", 1),
                 "functions": file_metrics.get("functions", 0),
                 "classes": file_metrics.get("classes", 0),
             }
             for k, v in raw.items():
-                if k not in ("type", "severity", "line", "message", "entity", "method") \
+                if k not in ("type", "severity", "line", "message", "entity",
+                             "method", "start_line", "end_line") \
                         and isinstance(v, (int, float)):
                     metrics[k] = v
 

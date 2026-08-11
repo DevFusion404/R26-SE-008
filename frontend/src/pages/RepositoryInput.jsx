@@ -79,16 +79,18 @@ const LANG_LABEL = {
 
 // ────────────────────────────────────────────────────────────────────────────
 export default function RepositoryInput({ onLoaded }) {
-  const [githubUrl, setGithubUrl] = useState('');
-  const [language,  setLanguage]  = useState('All');
-  const [mode,      setMode]      = useState('Comprehensive Refactoring');
-  const [threshold, setThreshold] = useState(75);
-  const [filters,   setFilters]   = useState({ critical: true, naming: true });
-  const [dragging,  setDragging]  = useState(false);
-  const [loading,   setLoading]   = useState(false);
-  const [error,     setError]     = useState(null);
-  const [success,   setSuccess]   = useState(null);
-  const [history,   setHistory]   = useState([]);
+  const [githubUrl,     setGithubUrl]     = useState('');
+  const [language,      setLanguage]      = useState('All');
+  const [mode,          setMode]          = useState('Comprehensive Refactoring');
+  const [threshold,     setThreshold]     = useState(75);
+  const [filters,       setFilters]       = useState({ critical: true, naming: true });
+  const [dragging,      setDragging]      = useState(false);
+  const [loading,       setLoading]       = useState(false);
+  const [error,         setError]         = useState(null);
+  const [success,       setSuccess]       = useState(null);
+  // detectedLangs: { breakdown:{Python:12,Java:3}, detected_languages:['Python','Java'], primary_language:'Python', is_polyglot:true }
+  const [detectedLangs, setDetectedLangs] = useState(null);
+  const [history,       setHistory]       = useState([]);
   const fileRef = useRef(null);
 
   // Load persisted history on mount
@@ -116,17 +118,42 @@ export default function RepositoryInput({ onLoaded }) {
   /** Append a new entry to the localStorage history and update React state. */
   function appendHistory(data, source) {
     const score = deriveScore(data);
+
+    // Determine the display language label:
+    // 1. If user explicitly chose a single language, use it.
+    // 2. Otherwise use what the backend detected.
+    const breakdown   = data.language_breakdown   || {};  // {Python:12, Java:3}
+    const detectedArr = data.detected_languages   || [];  // ['Python', 'Java']
+    const primary     = data.primary_language     || null;
+    const isPolyglot  = data.is_polyglot          || false;
+
+    let displayLanguage;
+    if (language !== 'All') {
+      // User forced a specific context
+      displayLanguage = language;
+    } else if (isPolyglot) {
+      displayLanguage = 'Mixed';
+    } else if (primary) {
+      displayLanguage = primary;
+    } else {
+      displayLanguage = 'Unknown';
+    }
+
     const entry = {
-      id:          Date.now(),
-      name:        data.repo_name,
-      source,                          // "zip" | "github"
-      language:    language !== 'All' ? language : (data.detected_language || 'Mixed'),
-      date:        new Date().toISOString(),
-      files_found: data.files_found,
+      id:                  Date.now(),
+      name:                data.repo_name,
+      source,                               // "zip" | "github"
+      language:            displayLanguage,
+      language_breakdown:  breakdown,
+      detected_languages:  detectedArr,
+      primary_language:    primary,
+      is_polyglot:         isPolyglot,
+      date:                new Date().toISOString(),
+      files_found:         data.files_found,
       score,
-      color:       scoreColor(score),
+      color:               scoreColor(score),
       threshold,
-      filters:     { ...filters },
+      filters:             { ...filters },
       mode,
     };
     const updated = [entry, ...loadHistory()].slice(0, MAX_HISTORY);
@@ -138,11 +165,11 @@ export default function RepositoryInput({ onLoaded }) {
   // ── ZIP upload ─────────────────────────────────────────────────────────────
   async function handleZip(file) {
     if (!file?.name.endsWith('.zip')) { setError('Only .zip files supported.'); return; }
-    setError(null); setSuccess(null); setLoading(true);
+    if (file.size > 500 * 1024 * 1024) { setError('ZIP file size exceeds the 500MB limit.'); return; }
+    setError(null); setSuccess(null); setDetectedLangs(null); setLoading(true);
 
     const form = new FormData();
     form.append('file', file);
-    // Attach config as JSON string so the backend can read it if needed
     form.append('config', JSON.stringify(buildConfig()));
 
     try {
@@ -150,9 +177,17 @@ export default function RepositoryInput({ onLoaded }) {
       const data = await res.json();
       if (!res.ok) throw new Error(data.detail || 'Upload failed.');
 
+      // Store detected language info in state so we can display it
+      const langInfo = {
+        breakdown:          data.language_breakdown  || {},
+        detected_languages: data.detected_languages || [],
+        primary_language:   data.primary_language   || null,
+        is_polyglot:        data.is_polyglot         || false,
+      };
+      setDetectedLangs(langInfo);
+
       const entry = appendHistory(data, 'zip');
       setSuccess(`✔ "${data.repo_name}" loaded — ${data.files_found} source files detected.`);
-      // Pass threshold + filters downstream so CUQA agent page can use them
       onLoaded?.({ ...data, config: buildConfig(), historyEntry: entry });
     } catch (e) { setError(e.message); }
     finally { setLoading(false); }
@@ -161,7 +196,7 @@ export default function RepositoryInput({ onLoaded }) {
   // ── GitHub load ────────────────────────────────────────────────────────────
   async function handleGitHub() {
     if (!githubUrl.trim()) { setError('Enter a GitHub URL.'); return; }
-    setError(null); setSuccess(null); setLoading(true);
+    setError(null); setSuccess(null); setDetectedLangs(null); setLoading(true);
 
     try {
       const res  = await fetch(`${API}/api/github-repo`, {
@@ -169,11 +204,20 @@ export default function RepositoryInput({ onLoaded }) {
         headers: { 'Content-Type': 'application/json' },
         body:    JSON.stringify({
           url: githubUrl.trim(),
-          config: buildConfig(),        // Pass config to backend
+          config: buildConfig(),
         }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.detail || 'Failed to load repo.');
+
+      // Store detected language info in state so we can display it
+      const langInfo = {
+        breakdown:          data.language_breakdown  || {},
+        detected_languages: data.detected_languages || [],
+        primary_language:   data.primary_language   || null,
+        is_polyglot:        data.is_polyglot         || false,
+      };
+      setDetectedLangs(langInfo);
 
       const entry = appendHistory(data, 'github');
       setSuccess(`✔ "${data.repo_name}" loaded — ${data.files_found} source files detected.`);
@@ -243,7 +287,7 @@ export default function RepositoryInput({ onLoaded }) {
             >
               <span className="upload-zone-icon">📁</span>
               <div className="upload-zone-title">Drag &amp; Drop or Upload ZIP</div>
-              <div className="upload-zone-sub">Local projects up to 250MB</div>
+              <div className="upload-zone-sub">Local projects up to 500MB</div>
               <input ref={fileRef} type="file" accept=".zip" style={{ display: 'none' }}
                 onChange={e => handleZip(e.target.files?.[0])} />
             </div>
@@ -280,9 +324,112 @@ export default function RepositoryInput({ onLoaded }) {
             </div>
           </div>
 
-          {/* Alerts */}
-          {error   && <div className="alert alert-error">⚠ {error}</div>}
-          {success && <div className="alert alert-success">{success}</div>}
+          {/* Error alert */}
+          {error && <div className="alert alert-error">⚠ {error}</div>}
+
+          {/* Language Detection Result Panel */}
+          {success && detectedLangs && (
+            <div style={{
+              background: 'var(--bg-elevated)',
+              border: '1px solid var(--border-accent)',
+              borderRadius: 'var(--r-sm)',
+              padding: 14,
+            }}>
+              {/* Header row */}
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <span style={{ color: '#22c55e', fontSize: 14 }}>✔</span>
+                  <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-primary)' }}>
+                    Repository loaded — {success.split('—')[1]?.trim()}
+                  </span>
+                </div>
+                {detectedLangs.is_polyglot && (
+                  <span style={{
+                    fontSize: 9, fontWeight: 700, letterSpacing: '0.6px',
+                    padding: '2px 7px', borderRadius: 'var(--r-full)',
+                    background: 'rgba(139,92,246,0.2)', color: '#a78bfa',
+                    border: '1px solid rgba(139,92,246,0.4)',
+                  }}>
+                    POLYGLOT
+                  </span>
+                )}
+              </div>
+
+              {/* Language breakdown */}
+              {detectedLangs.detected_languages.length === 0 ? (
+                <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+                  ⚠ No supported source files detected (.py, .java, .c, .h)
+                </div>
+              ) : (
+                <div>
+                  <div style={{ fontSize: 10, color: 'var(--text-muted)', letterSpacing: '0.5px', marginBottom: 6, textTransform: 'uppercase' }}>
+                    Detected Languages
+                  </div>
+                  {/* Bar chart for each language */}
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 7 }}>
+                    {(() => {
+                      const breakdown = detectedLangs.breakdown;
+                      const total = Object.values(breakdown).reduce((a, b) => a + b, 0);
+                      const LANG_COLORS = { Python: '#3b82f6', Java: '#f59e0b', C: '#8b5cf6' };
+                      return detectedLangs.detected_languages.map(lang => {
+                        const count = breakdown[lang] || 0;
+                        const pct   = total > 0 ? Math.round((count / total) * 100) : 0;
+                        const color = LANG_COLORS[lang] || 'var(--accent)';
+                        return (
+                          <div key={lang}>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 3 }}>
+                              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                                <span style={{ fontSize: 11, fontWeight: 600, color }}>
+                                  {lang === 'Python' ? '🐍' : lang === 'Java' ? '☕' : '⚙️'} {lang}
+                                </span>
+                                {lang === detectedLangs.primary_language && (
+                                  <span style={{ fontSize: 9, color: '#22c55e', fontWeight: 600 }}>PRIMARY</span>
+                                )}
+                              </div>
+                              <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+                                {count} file{count !== 1 ? 's' : ''} ({pct}%)
+                              </span>
+                            </div>
+                            <div style={{ height: 5, background: 'var(--bg-base)', borderRadius: 3, overflow: 'hidden' }}>
+                              <div style={{
+                                height: '100%',
+                                width: `${pct}%`,
+                                background: color,
+                                borderRadius: 3,
+                                transition: 'width 0.5s ease',
+                              }} />
+                            </div>
+                          </div>
+                        );
+                      });
+                    })()}
+                  </div>
+
+                  {/* Inline language chips */}
+                  <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 10 }}>
+                    {detectedLangs.detected_languages.map(lang => {
+                      const LANG_COLORS = { Python: '#3b82f6', Java: '#f59e0b', C: '#8b5cf6' };
+                      const c = LANG_COLORS[lang] || 'var(--accent)';
+                      return (
+                        <span key={lang} style={{
+                          fontSize: 10, fontWeight: 600, padding: '2px 8px',
+                          borderRadius: 'var(--r-full)', background: `${c}18`,
+                          color: c, border: `1px solid ${c}40`,
+                        }}>
+                          {lang}
+                        </span>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Simple success without lang data */}
+          {success && !detectedLangs && (
+            <div className="alert alert-success">{success}</div>
+          )}
 
           {/* CTA Button */}
           <button
@@ -296,6 +443,7 @@ export default function RepositoryInput({ onLoaded }) {
             }
           </button>
         </div>
+
 
         {/* RIGHT PANEL */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>

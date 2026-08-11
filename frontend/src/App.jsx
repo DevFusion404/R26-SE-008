@@ -76,13 +76,18 @@ function PlaceholderPage({ page }) {
 
 // ── Main App ───────────────────────────────────────────────────────────────
 export default function App() {
-  const [page,       setPage]       = useState('overview');
-  const [repoLoaded, setRepoLoaded] = useState(false);
-  const [repoMeta,   setRepoMeta]   = useState(null);
-  const [repoConfig, setRepoConfig] = useState(null);  // threshold, filters, mode from RepositoryInput
-  const [backendOk,  setBackendOk]  = useState(null);
-  const [search,     setSearch]     = useState('');
-  const [cuqaReport, setCuqaReport] = useState(null); // quality report from CUQA → RDP bridge
+  // Persist active page across refreshes
+  const [page, setPage] = useState(
+    () => localStorage.getItem('rfiq_active_page') || 'overview'
+  );
+  const [repoLoaded,    setRepoLoaded]    = useState(false);
+  const [repoMeta,      setRepoMeta]      = useState(null);
+  const [repoConfig,    setRepoConfig]    = useState(null);  // threshold, filters, mode from RepositoryInput
+  const [backendOk,     setBackendOk]     = useState(null);
+  const [search,        setSearch]        = useState('');
+  const [cuqaReport,    setCuqaReport]    = useState(null); // quality report from CUQA → RDP bridge
+  // 'idle' | 'cuqa_done' | 'rdp_running' | 'rdp_done'
+  const [pipelineState, setPipelineState] = useState('idle');
 
   // Check backend health on mount
   useEffect(() => {
@@ -98,12 +103,17 @@ export default function App() {
     // Persist the analysis config (threshold, filters, mode, language) from RepositoryInput
     if (data.config) setRepoConfig(data.config);
     // Auto-navigate to CUQA agent after load
-    setTimeout(() => setPage('cuqa'), 400);
+    setTimeout(() => {
+      localStorage.setItem('rfiq_active_page', 'cuqa');
+      setPage('cuqa');
+    }, 400);
   }
 
-  // Called from CUQAAgentPage when user clicks "Send to RDP Agent"
+  // Called from CUQAAgentPage when user clicks "Continue → RDP Agent"
   function handleSendToRdp(report) {
     setCuqaReport(report);
+    setPipelineState('rdp_running');
+    localStorage.setItem('rfiq_active_page', 'rdp');
     setPage('rdp');
   }
 
@@ -111,7 +121,12 @@ export default function App() {
     setCuqaReport(null);
   }
 
+  function handleRdpDone() {
+    setPipelineState('rdp_done');
+  }
+
   function navigate(id) {
+    localStorage.setItem('rfiq_active_page', id);
     setPage(id);
   }
 
@@ -121,8 +136,25 @@ export default function App() {
       case 'overview':    return <Overview onNavigate={navigate} />;
       case 'dashboard':   return <Dashboard />;
       case 'repository':  return <RepositoryInput onLoaded={handleRepoLoaded} />;
-      case 'cuqa':        return <CUQAAgentPage repoLoaded={repoLoaded} repoMeta={repoMeta} analysisConfig={repoConfig} />;
-      case 'rdp':         return <RDPAgentPage repoLoaded={repoLoaded} repoMeta={repoMeta} />;
+      case 'cuqa':        return (
+        <CUQAAgentPage
+          repoLoaded={repoLoaded}
+          repoMeta={repoMeta}
+          analysisConfig={repoConfig}
+          onSendToRdp={handleSendToRdp}
+          pipelineState={pipelineState}
+          onPipelineStateChange={setPipelineState}
+        />
+      );
+      case 'rdp':         return (
+        <RDPAgentPage
+          repoLoaded={repoLoaded}
+          repoMeta={repoMeta}
+          preloadedReport={cuqaReport}
+          onClearPreloaded={handleClearPreloaded}
+          onPlanGenerated={handleRdpDone}
+        />
+      );
       case 'transform':   return <SCTVAAgentPage />;
       case 'orchestrate': return <DIWOAgentPage />;
       case 'reports':     return <Reports />;
@@ -205,8 +237,10 @@ export default function App() {
           {/* Main nav items */}
           {NAV_MAIN.map(item => {
             const isActive = page === item.id;
-            // highlight agent items differently when repo is loaded
             const isAgentReady = repoLoaded && ['cuqa'].includes(item.id);
+            // Pipeline status dot colours
+            const rdpPulsing = item.id === 'rdp' && pipelineState === 'rdp_running';
+            const rdpDone    = item.id === 'rdp' && pipelineState === 'rdp_done';
 
             return (
               <div
@@ -219,12 +253,27 @@ export default function App() {
               >
                 <span className="s-icon">{item.icon}</span>
                 <span>{item.label}</span>
+                {/* CUQA ready dot */}
                 {item.id === 'cuqa' && repoLoaded && !isActive && (
                   <span style={{
                     marginLeft: 'auto', width: 6, height: 6,
                     borderRadius: '50%', background: 'var(--accent)',
                     flexShrink: 0,
                   }} />
+                )}
+                {/* RDP pipeline running pulse */}
+                {rdpPulsing && (
+                  <span style={{
+                    marginLeft: 'auto', width: 8, height: 8,
+                    borderRadius: '50%', background: '#a855f7',
+                    flexShrink: 0, animation: 'pulse 1.2s infinite',
+                  }} />
+                )}
+                {/* RDP done check */}
+                {rdpDone && !isActive && (
+                  <span style={{
+                    marginLeft: 'auto', fontSize: 11, color: '#22c55e', flexShrink: 0,
+                  }}>✓</span>
                 )}
               </div>
             );

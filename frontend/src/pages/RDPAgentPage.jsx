@@ -12,13 +12,69 @@ import ResultsViewer from '../components/RDP_Agent/ResultsViewer';
 import ErrorAlert from '../components/RDP_Agent/ErrorAlert';
 import ErrorBoundary from '../components/common/ErrorBoundary';
 
-export default function RDPAgentPage({ repoLoaded, repoMeta, preloadedReport, onClearPreloaded }) {
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState(null);
-  const [plan, setPlan] = useState(null);
-  const [trace, setTrace] = useState(null);
-  const [selectedFile, setSelectedFile] = useState(null);
+// ── localStorage key constants ─────────────────────────────────────────────
+const RDP_SESSION_KEY = 'rdp_last_session';   // stores last plan + trace
+const RDP_HISTORY_KEY = 'rdp_plan_history';   // stores list of all past plans
+const MAX_HISTORY     = 20;
+
+// ── Session helpers (save/restore last plan+trace across page refreshes) ────
+function loadSession() {
+  try {
+    const raw = localStorage.getItem(RDP_SESSION_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch { return null; }
+}
+
+function saveSession(plan, trace, sourceFileName) {
+  try {
+    localStorage.setItem(
+      RDP_SESSION_KEY,
+      JSON.stringify({ plan, trace, sourceFileName, savedAt: new Date().toISOString() })
+    );
+  } catch { /* storage quota exceeded — ignore */ }
+}
+
+function clearRdpSession() {
+  localStorage.removeItem(RDP_SESSION_KEY);
+}
+
+// ── Plan history helpers (mirrors CUQA cuqa_analysis_history pattern) ────────
+function loadRdpHistory() {
+  try { return JSON.parse(localStorage.getItem(RDP_HISTORY_KEY) || '[]'); }
+  catch { return []; }
+}
+
+function saveRdpHistory(entries) {
+  localStorage.setItem(RDP_HISTORY_KEY, JSON.stringify(entries.slice(0, MAX_HISTORY)));
+}
+
+function appendRdpHistory(plan, sourceFileName) {
+  const entry = {
+    id:           plan.plan_id || `rdp_${Date.now()}`,
+    plan_id:      plan.plan_id,
+    target:       plan.target || 'unknown',
+    date:         new Date().toISOString(),
+    step_count:   plan.steps?.length || 0,
+    refactorings: [...new Set((plan.steps || []).map(s => s.refactoring))].slice(0, 3),
+    source_file:  sourceFileName || 'unknown',
+    summary:      plan.summary || '',
+    plan,
+  };
+  const updated = [entry, ...loadRdpHistory()].slice(0, MAX_HISTORY);
+  saveRdpHistory(updated);
+  return entry;
+}
+
+export default function RDPAgentPage({ repoLoaded, repoMeta, preloadedReport, onClearPreloaded, onPlanGenerated }) {
+  // Restore last session from localStorage so a page refresh doesn't lose the plan
+  const [loading,           setLoading]           = useState(false);
+  const [error,             setError]             = useState(null);
+  const [plan,              setPlan]              = useState(() => loadSession()?.plan  ?? null);
+  const [trace,             setTrace]             = useState(() => loadSession()?.trace ?? null);
+  const [selectedFile,      setSelectedFile]      = useState(null);
   const [cuqaBannerVisible, setCuqaBannerVisible] = useState(false);
+  // true when the shown plan came from localStorage (not freshly generated this session)
+  const [sessionRestored,   setSessionRestored]   = useState(() => !!loadSession()?.plan);
   const fileInputRef = useRef(null);
 
   /**
@@ -28,11 +84,12 @@ export default function RDPAgentPage({ repoLoaded, repoMeta, preloadedReport, on
     if (preloadedReport) {
       setCuqaBannerVisible(true);
       handleGeneratePlan(preloadedReport, null).finally(() => {
-        // Clear the preloaded report after processing
+        // Clear the preloaded report after processing — but keep banner visible
         onClearPreloaded?.();
       });
     }
-  }, [preloadedReport, onClearPreloaded]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [preloadedReport]);
 
   /**
    * Handle file selection from upload
@@ -74,6 +131,15 @@ export default function RDPAgentPage({ repoLoaded, repoMeta, preloadedReport, on
       // Display results
       setPlan(result.plan);
       setTrace(result.trace);
+
+      // Persist to localStorage: session (for refresh restore) + history list
+      const sourceFileName = file?.name || (result.plan?.target) || 'piped-from-cuqa';
+      saveSession(result.plan, result.trace, sourceFileName);
+      appendRdpHistory(result.plan, sourceFileName);
+      setSessionRestored(false); // this is a fresh generation
+
+      // Notify parent that RDP has finished (updates pipeline state / sidebar dot)
+      onPlanGenerated?.();
 
       // Scroll to pipeline
       setTimeout(() => {
@@ -157,84 +223,138 @@ export default function RDPAgentPage({ repoLoaded, repoMeta, preloadedReport, on
       </div>
 
       {/* CUQA pipeline banner — shown when report was piped from CUQA */}
-      {cuqaBannerVisible && preloadedReport && (
+      {cuqaBannerVisible && (
         <div
           style={{
-            display: 'flex',
-            alignItems: 'center',
-            gap: 12,
-            padding: '12px 18px',
             marginTop: 12,
-            background: 'linear-gradient(135deg, rgba(139,92,246,0.12), rgba(168,85,247,0.08))',
-            border: '1px solid rgba(139,92,246,0.35)',
-            borderRadius: 8,
-            fontSize: 13,
+            borderRadius: 10,
+            border: plan
+              ? '1px solid rgba(34,197,94,0.4)'
+              : loading
+              ? '1px solid rgba(139,92,246,0.5)'
+              : '1px solid rgba(0,212,232,0.35)',
+            background: plan
+              ? 'linear-gradient(135deg, rgba(34,197,94,0.08), rgba(16,185,129,0.04))'
+              : loading
+              ? 'linear-gradient(135deg, rgba(139,92,246,0.10), rgba(168,85,247,0.06))'
+              : 'linear-gradient(135deg, rgba(0,212,232,0.08), rgba(6,182,212,0.04))',
+            overflow: 'hidden',
           }}
         >
-          <span style={{ fontSize: 18 }}>⚡</span>
-          <div style={{ flex: 1 }}>
-            <strong style={{ color: '#a78bfa' }}>Quality report piped from CUQA Agent</strong>
-            <span style={{ color: 'var(--text-secondary)', marginLeft: 8 }}>
-              — generating refactoring plan automatically…
+          {/* Banner header */}
+          <div style={{
+            padding: '12px 18px',
+            display: 'flex', alignItems: 'center', gap: 12,
+            borderBottom: '1px solid rgba(139,92,246,0.15)',
+          }}>
+            <span style={{ fontSize: 18 }}>
+              {plan ? '✅' : loading ? '⚡' : '🔗'}
             </span>
+            <div style={{ flex: 1 }}>
+              <div style={{
+                fontSize: 13, fontWeight: 700,
+                color: plan ? '#4ade80' : loading ? '#c4b5fd' : '#00d4e8',
+              }}>
+                {plan
+                  ? 'Refactoring Plan Generated Successfully'
+                  : loading
+                  ? 'Automated Pipeline Active — Generating Plan…'
+                  : 'Quality Report Received from CUQA Agent'}
+              </div>
+              <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginTop: 2 }}>
+                {plan
+                  ? 'The RDP Agent has completed its analysis. Review the results below.'
+                  : loading
+                  ? 'Running pipeline: problem interpretation → candidate generation → ML scoring → dependency analysis'
+                  : 'Ready to generate refactoring plan automatically.'}
+              </div>
+            </div>
+            {/* Pipeline stage indicator */}
+            <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexShrink: 0 }}>
+              <span style={{
+                padding: '3px 10px', borderRadius: 'var(--r-full)', fontSize: 10, fontWeight: 700,
+                background: 'rgba(0,212,232,0.15)', color: '#00d4e8', border: '1px solid rgba(0,212,232,0.3)',
+              }}>① CUQA ✓</span>
+              <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>→</span>
+              <span style={{
+                padding: '3px 10px', borderRadius: 'var(--r-full)', fontSize: 10, fontWeight: 700,
+                background: plan
+                  ? 'rgba(34,197,94,0.2)'
+                  : loading
+                  ? 'rgba(139,92,246,0.25)'
+                  : 'rgba(139,92,246,0.10)',
+                color: plan ? '#4ade80' : loading ? '#c4b5fd' : '#7c6aaa',
+                border: `1px solid ${plan ? 'rgba(34,197,94,0.4)' : loading ? 'rgba(139,92,246,0.5)' : 'rgba(139,92,246,0.2)'}`,
+                animation: loading ? 'pulse 1.2s infinite' : 'none',
+              }}>② RDP {plan ? '✓' : loading ? '…' : '—'}</span>
+            </div>
+            <button
+              onClick={() => setCuqaBannerVisible(false)}
+              style={{
+                background: 'none', border: 'none',
+                color: 'var(--text-muted)', cursor: 'pointer', fontSize: 16, lineHeight: 1,
+              }}
+              title="Dismiss"
+            >✕</button>
           </div>
-          <button
-            onClick={() => {
-              setCuqaBannerVisible(false);
-              onClearPreloaded?.();
-            }}
-            style={{
-              background: 'none',
-              border: 'none',
-              color: 'var(--text-muted)',
-              cursor: 'pointer',
-              fontSize: 16,
-              lineHeight: 1,
-            }}
-            title="Dismiss"
-          >
-            ✕
-          </button>
+
+          {/* Loading progress bar */}
+          {loading && (
+            <div style={{ height: 3, background: 'rgba(139,92,246,0.15)', position: 'relative', overflow: 'hidden' }}>
+              <div style={{
+                position: 'absolute', top: 0, left: '-100%',
+                width: '60%', height: '100%',
+                background: 'linear-gradient(90deg, transparent, #a855f7, transparent)',
+                animation: 'shimmer 1.5s infinite',
+              }} />
+            </div>
+          )}
         </div>
       )}
 
       {/* Error Alert */}
       {error && <ErrorAlert message={error} onClose={() => setError(null)} />}
 
-      {/* Upload Section — shown when no preloaded report or after dismissing banner */}
-      {!preloadedReport && (
+      {/* Restored session banner — appears after a page refresh when a saved plan is shown */}
+      {plan && sessionRestored && !loading && (
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: 12,
+          padding: '10px 18px', marginTop: 12,
+          background: 'linear-gradient(135deg, rgba(34,197,94,0.08), rgba(74,222,128,0.04))',
+          border: '1px solid rgba(34,197,94,0.25)',
+          borderRadius: 8, fontSize: 12,
+        }}>
+          <span style={{ fontSize: 16 }}>💾</span>
+          <div style={{ flex: 1, color: 'var(--text-secondary)' }}>
+            <strong style={{ color: '#22c55e' }}>Session restored</strong>
+            {' '}— showing your last generated plan. Upload a new report to replace it.
+          </div>
+          <button
+            onClick={() => {
+              clearRdpSession();
+              setPlan(null);
+              setTrace(null);
+              setSessionRestored(false);
+            }}
+            style={{
+              background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.25)',
+              borderRadius: 4, color: '#ef4444', fontSize: 11,
+              padding: '4px 10px', cursor: 'pointer',
+            }}
+          >
+            ✕ Clear
+          </button>
+        </div>
+      )}
+
+      {/* Upload Section — always visible so the user can generate a new plan at any time */}
+      {!cuqaBannerVisible && (
         <UploadSection
           onFileSelect={handleFileSelect}
           onSubmit={handleUploadSubmit}
           loading={loading}
           selectedFile={selectedFile}
         />
-      )}
-
-      {/* Loading spinner while auto-generating from preloaded report */}
-      {loading && preloadedReport && (
-        <div
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            gap: 14,
-            padding: '24px',
-            marginTop: 16,
-            background: 'var(--bg-card)',
-            border: '1px solid var(--border)',
-            borderRadius: 8,
-          }}
-        >
-          <div className="spinner" style={{ width: 28, height: 28, borderWidth: 3 }} />
-          <div>
-            <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--text-primary)' }}>
-              Generating refactoring plan…
-            </div>
-            <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginTop: 4 }}>
-              Running pipeline: interpretation → candidate generation → ML scoring → dependency analysis
-            </div>
-          </div>
-        </div>
       )}
 
       {/* Pipeline Viewer */}

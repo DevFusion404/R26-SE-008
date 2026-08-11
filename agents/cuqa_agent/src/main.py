@@ -97,6 +97,48 @@ def _find_source_files(root: str) -> list[str]:
     return sorted(result)
 
 
+# Extension → canonical display name mapping
+_EXT_TO_LANG = {".py": "Python", ".java": "Java", ".c": "C", ".h": "C"}
+
+
+def _get_language_breakdown(file_list: list[str]) -> dict:
+    """
+    Count source files per language and return a breakdown dict.
+
+    Returns:
+        {
+            "breakdown": {"Python": 12, "Java": 3, "C": 7},
+            "detected_languages": ["Python", "C"],   # sorted by count desc, deduplicated
+            "primary_language": "Python",             # most common language
+            "is_polyglot": True                       # True if >1 language
+        }
+    """
+    counts: dict[str, int] = {}
+    for path in file_list:
+        ext = os.path.splitext(path)[-1].lower()
+        lang = _EXT_TO_LANG.get(ext)
+        if lang:
+            counts[lang] = counts.get(lang, 0) + 1
+
+    if not counts:
+        return {
+            "breakdown": {},
+            "detected_languages": [],
+            "primary_language": None,
+            "is_polyglot": False,
+        }
+
+    # Sort by count descending
+    sorted_langs = sorted(counts.items(), key=lambda x: x[1], reverse=True)
+    detected = [lang for lang, _ in sorted_langs]
+    return {
+        "breakdown": counts,
+        "detected_languages": detected,
+        "primary_language": detected[0],
+        "is_polyglot": len(detected) > 1,
+    }
+
+
 def _build_tree(root: str) -> dict:
     """Build a recursive directory tree dict for the frontend."""
 
@@ -146,10 +188,13 @@ def health():
 
 # ── 1. Upload ZIP ────────────────────────────────────────────────────────────
 
+MAX_ZIP_SIZE_MB = 500
+MAX_ZIP_SIZE_BYTES = MAX_ZIP_SIZE_MB * 1024 * 1024  # 500 MB limit
+
 @app.post("/api/upload-zip")
 async def upload_zip(file: UploadFile = File(...)):
     """
-    Accept a ZIP file, extract it to a temporary workspace, and
+    Accept a ZIP file (up to 500 MB), extract it to a temporary workspace, and
     scan for supported source files.
     """
     if not file.filename.endswith(".zip"):
@@ -162,9 +207,15 @@ async def upload_zip(file: UploadFile = File(...)):
     tmp_dir = tempfile.mkdtemp(prefix="cuqa_")
     zip_path = os.path.join(tmp_dir, "upload.zip")
 
-    contents = await file.read()
+    total_bytes = 0
     with open(zip_path, "wb") as f:
-        f.write(contents)
+        while chunk := await file.read(1024 * 1024):  # Read in 1MB chunks
+            total_bytes += len(chunk)
+            if total_bytes > MAX_ZIP_SIZE_BYTES:
+                f.close()
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+                raise HTTPException(413, f"ZIP file exceeds the {MAX_ZIP_SIZE_MB}MB size limit.")
+            f.write(chunk)
 
     extract_dir = os.path.join(tmp_dir, "extracted")
     os.makedirs(extract_dir, exist_ok=True)
@@ -182,6 +233,7 @@ async def upload_zip(file: UploadFile = File(...)):
         extract_dir = os.path.join(extract_dir, entries[0])
 
     source_files = _find_source_files(extract_dir)
+    lang_info = _get_language_breakdown(source_files)
 
     _workspace.update({
         "root": extract_dir,
@@ -195,6 +247,11 @@ async def upload_zip(file: UploadFile = File(...)):
         "repo_name": _workspace["repo_name"],
         "files_found": len(source_files),
         "source_files": source_files[:100],  # cap for response size
+        # Language detection results
+        "language_breakdown":   lang_info["breakdown"],
+        "detected_languages":   lang_info["detected_languages"],
+        "primary_language":     lang_info["primary_language"],
+        "is_polyglot":          lang_info["is_polyglot"],
     }
 
 
@@ -215,11 +272,16 @@ def load_github_repo(request: GitHubRepoRequest):  # Use Pydantic model
     repo_name = url.split("/")[-1]
     
     # Try multiple common branches
+    response = None
     for branch in ["main", "master", "develop", "trunk"]:
         zip_url = f"{url}/archive/refs/heads/{branch}.zip"
         try:
-            response = requests.get(zip_url, timeout=30, allow_redirects=True)
-            if response.status_code == 200:
+            res = requests.get(zip_url, timeout=120, stream=True, allow_redirects=True)
+            if res.status_code == 200:
+                content_length = res.headers.get("Content-Length")
+                if content_length and int(content_length) > MAX_ZIP_SIZE_BYTES:
+                    raise HTTPException(413, f"GitHub repository archive exceeds the {MAX_ZIP_SIZE_MB}MB size limit.")
+                response = res
                 break
         except requests.exceptions.RequestException:
             continue
@@ -233,9 +295,16 @@ def load_github_repo(request: GitHubRepoRequest):  # Use Pydantic model
     tmp_dir = tempfile.mkdtemp(prefix="cuqa_gh_")
     zip_path = os.path.join(tmp_dir, "repo.zip")
 
+    total_bytes = 0
     with open(zip_path, "wb") as f:
-        for chunk in response.iter_content(chunk_size=8192):
-            f.write(chunk)
+        for chunk in response.iter_content(chunk_size=65536):
+            if chunk:
+                total_bytes += len(chunk)
+                if total_bytes > MAX_ZIP_SIZE_BYTES:
+                    f.close()
+                    shutil.rmtree(tmp_dir, ignore_errors=True)
+                    raise HTTPException(413, f"Downloaded GitHub repository archive exceeds the {MAX_ZIP_SIZE_MB}MB size limit.")
+                f.write(chunk)
 
     extract_dir = os.path.join(tmp_dir, "extracted")
     os.makedirs(extract_dir, exist_ok=True)
@@ -252,6 +321,7 @@ def load_github_repo(request: GitHubRepoRequest):  # Use Pydantic model
         extract_dir = os.path.join(extract_dir, entries[0])
 
     source_files = _find_source_files(extract_dir)
+    lang_info = _get_language_breakdown(source_files)
 
     _workspace.update({
         "root": extract_dir,
@@ -266,6 +336,11 @@ def load_github_repo(request: GitHubRepoRequest):  # Use Pydantic model
         "github_url": url,
         "files_found": len(source_files),
         "source_files": source_files[:100],
+        # Language detection results
+        "language_breakdown":   lang_info["breakdown"],
+        "detected_languages":   lang_info["detected_languages"],
+        "primary_language":     lang_info["primary_language"],
+        "is_polyglot":          lang_info["is_polyglot"],
     }
 
 
