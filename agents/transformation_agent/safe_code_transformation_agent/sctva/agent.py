@@ -2,7 +2,19 @@
 
 from __future__ import annotations
 
+import os
+import sys
+from pathlib import Path
 from typing import Any, Dict, List
+
+if __name__ == "__main__" and not __package__:
+    # Allow `python sctva/agent.py` to resolve the package-relative imports below.
+    package_parent = Path(__file__).resolve().parents[1]
+    sys.path.insert(0, str(package_parent))
+    __package__ = "sctva"
+
+if __name__ == "__main__":
+    sys.modules.setdefault("sctva.agent", sys.modules[__name__])
 
 from .contracts import ContractValidationError, SCTVARequestContract, SourceFileContract
 from .contracts import RefactoringAction
@@ -271,3 +283,21 @@ class SafeCodeTransformationValidationAgent:
 
 
 __all__ = ["SafeCodeTransformationValidationAgent", "ContractValidationError"]
+
+
+def _run_api_server() -> None:
+    """Start the SCTVA Flask API when this module is run as a script."""
+    app_dir = Path(__file__).resolve().parents[1]
+    if str(app_dir) not in sys.path:
+        sys.path.insert(0, str(app_dir))
+
+    from app import create_app
+
+    port = int(os.getenv("SCTVA_PORT", "8002"))
+    app = create_app()
+    print(f"Starting SCTVA API server on http://localhost:{port}")
+    app.run(host="0.0.0.0", port=port, debug=False)
+
+
+if __name__ == "__main__":
+    _run_api_server()
