@@ -114,6 +114,13 @@ class PlannerAdapter:
                 }
             )
 
+        plan_level_source_file = self._source_file_from_plan(planner_output)
+        if plan_level_source_file:
+            for action in actions:
+                params = action.setdefault("parameters", {})
+                if "source_file" not in params:
+                    params["source_file"] = plan_level_source_file
+
         metadata = {
             "source_agent": "rdp_agent",
             "source_plan_id": plan_id,
@@ -155,7 +162,7 @@ class PlannerAdapter:
                 "strict_mode": True,
                 "enable_behavior_tests": True,
                 "timeout_seconds": 10,
-                "require_compilation": language.lower() == "java",
+                "require_compilation": language.lower() in {"java", "c"},
             },
         }
 
@@ -178,6 +185,7 @@ class PlannerAdapter:
         action: Optional[Dict[str, Any]] = None
 
         rename_aliases = {
+            "rename function",
             "rename method",
             "rename variable",
             "rename class",
@@ -439,11 +447,60 @@ class PlannerAdapter:
             }
 
         if action:
+            source_file = self._source_file_from_step(step, params=params, target=target)
+            if source_file and "source_file" not in action["parameters"]:
+                action["parameters"]["source_file"] = source_file
             action["source_step_id"] = step.get("step_id")
             action["source_refactoring"] = refactoring
             action["warnings"] = []
 
         return action
+
+    @staticmethod
+    def _source_file_from_plan(planner_output: Dict[str, Any]) -> str:
+        target = planner_output.get("target")
+        if isinstance(target, str) and target.strip():
+            return target.strip()
+        if not isinstance(target, dict):
+            target = {}
+        return PlannerAdapter._source_file_from_sources(planner_output, target)
+
+    @staticmethod
+    def _source_file_from_step(
+        step: Dict[str, Any],
+        *,
+        params: Dict[str, Any],
+        target: Dict[str, Any],
+    ) -> str:
+        location = step.get("location") or {}
+        if not isinstance(location, dict):
+            location = {}
+
+        return PlannerAdapter._source_file_from_sources(params, target, location, step)
+
+    @staticmethod
+    def _source_file_from_sources(*sources: Dict[str, Any]) -> str:
+        for source in sources:
+            if not isinstance(source, dict):
+                continue
+            for key in (
+                "source_file",
+                "sourceFile",
+                "target_file",
+                "targetFile",
+                "file",
+                "file_name",
+                "fileName",
+                "file_path",
+                "filePath",
+                "relative_path",
+                "relativePath",
+            ):
+                value = source.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+
+        return ""
 
     @staticmethod
     def _safe_identifier(name: str) -> str:

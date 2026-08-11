@@ -75,3 +75,58 @@ def test_language_guard_rejects_non_supported():
         assert "Unsupported language" in str(exc)
     else:
         assert False, "Expected unsupported language error"
+
+
+def test_c_safe_pipeline_passes_without_rollback():
+    agent = SafeCodeTransformationValidationAgent()
+    payload = {
+        "request_id": "int_c_001",
+        "language": "c",
+        "source_code": "#include <stdio.h>\ndouble ratio(void) { return 0.12; }\n",
+        "refactoring_plan": {
+            "plan_id": "plan_c_001",
+            "actions": [
+                {
+                    "action_type": "introduce_constant",
+                    "parameters": {"literal_value": 0.12, "constant_name": "EXTRACTED_CONSTANT"},
+                }
+            ],
+            "behavior_tests": [],
+            "metadata": {},
+        },
+        "execution_options": {
+            "strict_mode": True,
+            "enable_behavior_tests": True,
+            "timeout_seconds": 10,
+            "require_compilation": False,
+        },
+    }
+
+    result = agent.execute(payload)
+    assert result["rollback_occurred"] is False
+    assert result["success"] is True
+
+
+def test_c_syntax_error_rolls_back():
+    agent = SafeCodeTransformationValidationAgent()
+    payload = {
+        "request_id": "int_c_002",
+        "language": "c",
+        "source_code": "int value(void) { return 1; }\n",
+        "refactoring_plan": {
+            "plan_id": "plan_c_002",
+            "actions": [{"action_type": "inject_syntax_error", "parameters": {}}],
+            "behavior_tests": [],
+            "metadata": {},
+        },
+        "execution_options": {
+            "strict_mode": True,
+            "enable_behavior_tests": True,
+            "timeout_seconds": 10,
+            "require_compilation": False,
+        },
+    }
+
+    result = agent.execute(payload)
+    assert result["rollback_occurred"] is True
+    assert result["success"] is False

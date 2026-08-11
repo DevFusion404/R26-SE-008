@@ -251,3 +251,27 @@ public class Demo {
     assert result.passed is False
     assert result.details["fingerprint_status"] == "failed"
     assert "fingerprint_execution_failed" in result.details["failures"][0]
+
+
+def test_c_static_behavioral_fingerprint_passes_without_behavior_tests():
+    original = "#include <stdio.h>\ndouble ratio(void) { return 0.12; }\n"
+    transformed = "#include <stdio.h>\n#define MAGIC_NUMBER_0_12 0.12\ndouble ratio(void) { return MAGIC_NUMBER_0_12; }\n"
+    validator = BehavioralValidator()
+    result = validator.validate(
+        language="c",
+        original_code=original,
+        transformed_code=transformed,
+        behavior_tests=[],
+        enable_behavior_tests=True,
+        actions=[
+            RefactoringAction(
+                action_type="introduce_constant",
+                parameters={"literal_value": 0.12, "constant_name": "EXTRACTED_CONSTANT"},
+            )
+        ],
+        strict_mode=False,
+    )
+
+    assert result.passed is True
+    assert result.details["fingerprint_status"] == "passed"
+    assert "static_c_fingerprint" in result.details["c_results"][0]["mode"]

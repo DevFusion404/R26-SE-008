@@ -2,9 +2,22 @@
 
 from __future__ import annotations
 
+import os
+import sys
+from pathlib import Path
 from typing import Any, Dict, List
 
+if __name__ == "__main__" and not __package__:
+    # Allow `python sctva/agent.py` to resolve the package-relative imports below.
+    package_parent = Path(__file__).resolve().parents[1]
+    sys.path.insert(0, str(package_parent))
+    __package__ = "sctva"
+
+if __name__ == "__main__":
+    sys.modules.setdefault("sctva.agent", sys.modules[__name__])
+
 from .contracts import ContractValidationError, SCTVARequestContract, SourceFileContract
+from .contracts import RefactoringAction
 from .models import SCTVAResult
 from .reporting.safety_reporter import SafetyReporter
 from .rollback.rollback_manager import RollbackManager
@@ -40,14 +53,22 @@ class SafeCodeTransformationValidationAgent:
 
         file_results: List[Dict[str, Any]] = []
         for file_entry in file_entries:
+            actions = self._actions_for_file(
+                request.refactoring_plan.actions,
+                file_entry.file_name,
+            )
+            if not actions:
+                continue
+
             file_result = self._execute_single_file(
                 request=request,
                 file_entry=file_entry,
+                actions=actions,
             )
             file_results.append(file_result)
 
         if not file_results:
-            raise ContractValidationError("No source files were provided for execution.")
+            raise ContractValidationError("No source files matched the refactoring plan targets.")
 
         if len(file_results) == 1:
             return file_results[0]
@@ -87,13 +108,14 @@ class SafeCodeTransformationValidationAgent:
         *,
         request: SCTVARequestContract,
         file_entry: SourceFileContract,
+        actions: List[RefactoringAction],
     ) -> Dict[str, Any]:
         language = (file_entry.language or request.language).strip().lower()
 
         transformed_code, transformation_log, transform_warnings = self.transformer.apply_actions(
             language=language,
             source_code=file_entry.source_code,
-            actions=request.refactoring_plan.actions,
+            actions=actions,
             strict_mode=request.execution_options.strict_mode,
         )
 
@@ -116,14 +138,14 @@ class SafeCodeTransformationValidationAgent:
             transformed_code=transformed_code,
             behavior_tests=request.refactoring_plan.behavior_tests,
             enable_behavior_tests=request.execution_options.enable_behavior_tests,
-            actions=request.refactoring_plan.actions,
+            actions=actions,
             strict_mode=request.execution_options.strict_mode,
         )
 
         invariant_step = self.invariant_miner.mine(
             language=language,
             behavioral_step=behavioral_step,
-            actions=request.refactoring_plan.actions,
+            actions=actions,
             strict_mode=request.execution_options.strict_mode,
         )
 
@@ -181,6 +203,71 @@ class SafeCodeTransformationValidationAgent:
         result["confidence_components"] = confidence_details
         return result
 
+    @classmethod
+    def _actions_for_file(
+        cls,
+        actions: List[RefactoringAction],
+        file_name: str,
+    ) -> List[RefactoringAction]:
+        scoped_actions = [
+            action
+            for action in actions
+            if cls._action_source_file(action)
+        ]
+        if not scoped_actions:
+            return actions
+
+        return [
+            action
+            for action in actions
+            if cls._file_matches(action_source_file=cls._action_source_file(action), file_name=file_name)
+        ]
+
+    @staticmethod
+    def _action_source_file(action: RefactoringAction) -> str:
+        params = action.parameters or {}
+        for key in (
+            "source_file",
+            "sourceFile",
+            "target_file",
+            "targetFile",
+            "file",
+            "file_name",
+            "fileName",
+            "file_path",
+            "filePath",
+            "relative_path",
+            "relativePath",
+        ):
+            value = params.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return ""
+
+    @classmethod
+    def _file_matches(cls, *, action_source_file: str, file_name: str) -> bool:
+        action_path = cls._normalize_path(action_source_file)
+        file_path = cls._normalize_path(file_name)
+        if not action_path or not file_path:
+            return False
+
+        action_base = action_path.rsplit("/", 1)[-1]
+        file_base = file_path.rsplit("/", 1)[-1]
+        return (
+            action_path == file_path
+            or file_path.endswith(f"/{action_path}")
+            or action_path.endswith(f"/{file_path}")
+            or action_base == file_base
+        )
+
+    @staticmethod
+    def _normalize_path(value: str) -> str:
+        return "/".join(
+            part
+            for part in str(value).replace("\\", "/").strip().lower().split("/")
+            if part and part != "."
+        )
+
     @staticmethod
     def _summarize_languages(file_results: List[Dict[str, Any]]) -> str:
         languages = {
@@ -196,3 +283,21 @@ class SafeCodeTransformationValidationAgent:
 
 
 __all__ = ["SafeCodeTransformationValidationAgent", "ContractValidationError"]
+
+
+def _run_api_server() -> None:
+    """Start the SCTVA Flask API when this module is run as a script."""
+    app_dir = Path(__file__).resolve().parents[1]
+    if str(app_dir) not in sys.path:
+        sys.path.insert(0, str(app_dir))
+
+    from app import create_app
+
+    port = int(os.getenv("SCTVA_PORT", "8002"))
+    app = create_app()
+    print(f"Starting SCTVA API server on http://localhost:{port}")
+    app.run(host="0.0.0.0", port=port, debug=False)
+
+
+if __name__ == "__main__":
+    _run_api_server()

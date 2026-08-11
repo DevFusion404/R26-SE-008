@@ -1,4 +1,5 @@
 from agents.transformation_agent.safe_code_transformation_agent.sctva.transformers import python_transformers
+from sctva.transformers import c_transformers
 from sctva.transformers import java_transformers
 
 
@@ -42,3 +43,46 @@ def test_python_fault_injection_replaces_return_logic():
     transformed, count = python_transformers.apply_fault_injection(source, "return total", "return total + 1")
     assert count == 1
     assert "return total + 1" in transformed
+
+
+def test_c_rename_symbol_changes_function_name():
+    source = "int calc(int value) { return value + 1; }\n"
+    transformed, count = c_transformers.apply_rename_symbol(source, "calc", "calculate")
+    assert count >= 1
+    assert "calculate" in transformed
+
+
+def test_c_introduce_constant_uses_define_for_magic_number():
+    source = "double ratio(void) { return 0.12; }\n"
+    transformed, count = c_transformers.apply_extract_constant(source, 0.12, "EXTRACTED_CONSTANT")
+    assert count == 1
+    assert "#define MAGIC_NUMBER_0_12 0.12" in transformed
+    assert "MAGIC_NUMBER_0_12" in transformed
+
+
+def test_c_replace_literal_changes_value():
+    source = "int size(void) { return 5; }\n"
+    transformed, count = c_transformers.apply_replace_literal(source, 5, 7)
+    assert count == 1
+    assert "return 7" in transformed
+
+
+def test_c_remove_dead_code_deletes_function():
+    source = "int live(void) { return 1; }\nint dead(void) { return 0; }\n"
+    transformed, count = c_transformers.apply_remove_dead_code(source, "dead")
+    assert count == 1
+    assert "dead(void)" not in transformed
+
+
+def test_c_fault_injection_replaces_return_logic():
+    source = "int total(void) { int value = 1; return value; }\n"
+    transformed, count = c_transformers.apply_fault_injection(source, "return value;", "return value + 1;")
+    assert count == 1
+    assert "return value + 1;" in transformed
+
+
+def test_c_inject_syntax_error_breaks_source():
+    source = "int total(void) { return 1; }\n"
+    transformed, count = c_transformers.apply_inject_syntax_error(source)
+    assert count == 1
+    assert "__sctva_broken" in transformed

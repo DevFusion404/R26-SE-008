@@ -528,7 +528,7 @@ class BehaviorFingerprintRunner:
         test: dict,
         timeout: Optional[float] = None,
     ) -> Dict[str, Any]:
-        timeout = timeout or self.default_timeout_seconds
+        timeout = self.default_timeout_seconds if timeout is None else timeout
 
         parent_conn, child_conn = mp.Pipe()
         proc = mp.Process(target=_runner_callable, args=(child_conn, source_code, test))

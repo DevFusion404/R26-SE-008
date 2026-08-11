@@ -1,4 +1,4 @@
-"""Syntax validation for Python and Java outputs."""
+"""Syntax validation for Python, Java, and C outputs."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ import tempfile
 import time
 from pathlib import Path
 
+from .c_support import strip_c_comments
 from ..models import ValidationStepResult
 from ..utils.io_helpers import utc_now_iso
 
@@ -56,6 +57,34 @@ class SyntaxValidator:
                 if passed and require_compilation:
                     details["checks"].append("javac_compile")
                     compile_passed, compile_msg = self._optional_javac_check(source_code, timeout_seconds)
+                    if not compile_passed:
+                        passed = False
+                        message = compile_msg
+                    elif "skipped" in compile_msg.lower():
+                        details["warning"] = compile_msg
+
+            elif language == "c":
+                bracket_ok, bracket_msg = self._check_brackets(source_code)
+                function_ok = bool(re.search(r"\b[A-Za-z_][A-Za-z0-9_\s\*]*\b[A-Za-z_][A-Za-z0-9_]*\s*\([^;{}]*\)\s*\{", strip_c_comments(source_code)))
+                semicolon_ok = ";" in strip_c_comments(source_code)
+                details["checks"].extend(["bracket_heuristic", "function_heuristic", "semicolon_heuristic"])
+
+                if not bracket_ok:
+                    passed = False
+                    message = f"C syntax heuristic failed: {bracket_msg}"
+                elif not function_ok:
+                    passed = False
+                    message = "C syntax heuristic failed: no function definition found."
+                elif not semicolon_ok:
+                    passed = False
+                    message = "C syntax heuristic failed: no semicolon found."
+                elif re.search(r"=\s*;", strip_c_comments(source_code)):
+                    passed = False
+                    message = "C syntax heuristic failed: malformed assignment or declaration."
+
+                if passed and require_compilation:
+                    details["checks"].append("c_compile_only")
+                    compile_passed, compile_msg = self._optional_c_compile_check(source_code, timeout_seconds)
                     if not compile_passed:
                         passed = False
                         message = compile_msg
@@ -132,3 +161,28 @@ class SyntaxValidator:
                 return False, f"javac compile check failed: {stderr}"
 
         return True, "javac compile check passed."
+
+    @staticmethod
+    def _optional_c_compile_check(source: str, timeout_seconds: int) -> tuple[bool, str]:
+        compiler = shutil.which("gcc") or shutil.which("clang")
+        if not compiler:
+            return True, "C compiler not available; compile check skipped."
+
+        source = source.lstrip("\ufeff")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            c_file = Path(temp_dir) / "sctva_temp.c"
+            c_file.write_text(source, encoding="utf-8")
+
+            compile_args = [compiler, "-std=c11", "-fsyntax-only", str(c_file)]
+            proc = subprocess.run(
+                compile_args,
+                capture_output=True,
+                text=True,
+                timeout=timeout_seconds,
+            )
+            if proc.returncode != 0:
+                stderr = (proc.stderr or proc.stdout or "").strip()
+                return False, f"C compile check failed: {stderr}"
+
+        return True, f"{compiler} compile check passed."

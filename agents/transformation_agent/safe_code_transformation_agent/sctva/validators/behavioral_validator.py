@@ -1,4 +1,4 @@
-"""Behavior-preservation checks for Python and Java."""
+"""Behavior-preservation checks for Python, Java, and C."""
 
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Sequence
 
 from .behavior_fingerprint import BehaviorFingerprintRunner, compare_fingerprints
+from .c_support import validate_c_behavior
 
 from ..constants import KNOWN_UNSAFE_JAVA_ACTIONS
 from ..contracts import RefactoringAction
@@ -74,6 +75,19 @@ class BehavioralValidator:
                 actions=actions,
                 strict_mode=strict_mode,
             )
+        elif language.lower() == "c":
+            result = validate_c_behavior(
+                original_code=original_code,
+                transformed_code=transformed_code,
+                behavior_tests=behavior_tests,
+                actions=actions,
+                enable_behavior_tests=enable_behavior_tests,
+                timeout_seconds=self.DEFAULT_JAVA_TIMEOUT_SECONDS,
+            )
+            passed = result["passed"]
+            score = result["score"]
+            message = result["message"]
+            details = result["details"]
         else:
             passed, score, message, details = self._validate_java(
                 original_code=original_code,
@@ -123,11 +137,14 @@ class BehavioralValidator:
 
         for idx, test in enumerate(runtime_tests, start=1):
             name = str(test.get("name", test.get("test_id", f"test_{idx}")))
-            timeout = int(
-                test.get("timeout_seconds")
-                or test.get("timeout")
-                or self.DEFAULT_PYTHON_TIMEOUT_SECONDS
-            )
+            timeout = test.get("timeout_seconds")
+            if timeout is None:
+                timeout = test.get("timeout")
+            if timeout is None:
+                timeout = self.DEFAULT_PYTHON_TIMEOUT_SECONDS
+            timeout = float(timeout)
+            if timeout <= 0:
+                timeout = float(self.DEFAULT_PYTHON_TIMEOUT_SECONDS)
 
             try:
                 if "expression" in test:
