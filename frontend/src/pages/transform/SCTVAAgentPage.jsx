@@ -3,9 +3,13 @@ import SCTVAAgentService from '../../services/sctvaAgentService';
 import transformBadge from '../../assets/transform-badge.svg';
 import './SCTVAAgentPage.css';
 
-const CUQA_API = import.meta.env.VITE_CUQA_AGENT_API_URL || 'http://localhost:8001';
+const CUQA_API = import.meta.env.VITE_CUQA_AGENT_API_URL
+  || import.meta.env.VITE_CUA_API_URL
+  || 'http://localhost:8080';
 const CUQA_IMPORT_LIMIT = 50;
 const RDP_AGENT_SESSION_KEY = 'rdp-agent-page-state';
+const RDP_AGENT_LOCAL_SESSION_KEY = 'rdp_last_session';
+const RDP_AGENT_HISTORY_KEY = 'rdp_plan_history';
 const SCTVA_AGENT_SESSION_KEY = 'sctva-agent-page-state';
 
 const PIPELINE_STAGES = [
@@ -973,20 +977,81 @@ function summarizeSourceFiles(files) {
   return `${files.length} files selected.`;
 }
 
-function readRdpSessionPlan() {
-  if (typeof window === 'undefined') return null;
-
+function parseStoredJson(rawValue) {
   try {
-    const rawState = window.sessionStorage.getItem(RDP_AGENT_SESSION_KEY);
-    if (!rawState) return null;
-
-    const savedState = JSON.parse(rawState);
-    return savedState?.plan && typeof savedState.plan === 'object' && !Array.isArray(savedState.plan)
-      ? savedState.plan
-      : null;
+    return rawValue ? JSON.parse(rawValue) : null;
   } catch {
     return null;
   }
+}
+
+function isPlanObject(value) {
+  return Boolean(
+    value
+    && typeof value === 'object'
+    && !Array.isArray(value)
+    && (
+      Array.isArray(value.steps)
+      || Array.isArray(value.actions)
+      || value.plan_id
+      || value.planId
+    )
+  );
+}
+
+function extractRdpPlan(value) {
+  const storedValue = typeof value === 'string' ? parseStoredJson(value) : value;
+  if (!storedValue || typeof storedValue !== 'object') return null;
+  if (isPlanObject(storedValue)) return storedValue;
+
+  const wrappedPlans = [
+    storedValue.plan,
+    storedValue.refactoring_plan,
+    storedValue.rdp_sample,
+    storedValue.generatedPlan,
+    storedValue.latestPlan,
+  ];
+
+  for (const wrappedPlan of wrappedPlans) {
+    const plan = extractRdpPlan(wrappedPlan);
+    if (plan) return plan;
+  }
+
+  return null;
+}
+
+function readStorageJson(storage, key) {
+  try {
+    return parseStoredJson(storage.getItem(key));
+  } catch {
+    return null;
+  }
+}
+
+function readRdpSessionPlan() {
+  if (typeof window === 'undefined') return null;
+
+  const storageSources = [
+    [window.localStorage, RDP_AGENT_LOCAL_SESSION_KEY],
+    [window.sessionStorage, RDP_AGENT_SESSION_KEY],
+    [window.sessionStorage, RDP_AGENT_LOCAL_SESSION_KEY],
+    [window.localStorage, RDP_AGENT_SESSION_KEY],
+  ];
+
+  for (const [storage, key] of storageSources) {
+    const plan = extractRdpPlan(readStorageJson(storage, key));
+    if (plan) return plan;
+  }
+
+  const history = readStorageJson(window.localStorage, RDP_AGENT_HISTORY_KEY);
+  if (Array.isArray(history)) {
+    for (const entry of history) {
+      const plan = extractRdpPlan(entry);
+      if (plan) return plan;
+    }
+  }
+
+  return null;
 }
 
 function buildRdpPlanFileName(plan) {
@@ -1062,8 +1127,8 @@ function buildRunSignature({
 export default function SCTVAAgentPage() {
   const sourceFileInputRef = useRef(null);
   const planFileInputRef = useRef(null);
-  const autoImportAttemptedRef = useRef(false);
   const autoRdpPlanAttemptedRef = useRef(false);
+  const autoCuqaImportAttemptedRef = useRef(false);
   const savedState = useMemo(() => readSctvaSessionState() || {}, []);
 
   const [requestId, setRequestId] = useState(savedState.requestId || '');
@@ -1118,20 +1183,16 @@ export default function SCTVAAgentPage() {
   const [finalCode, setFinalCode] = useState(savedState.finalCode || '');
 
   useEffect(() => {
-    if (autoImportAttemptedRef.current) return;
-    autoImportAttemptedRef.current = true;
-    if (!sourceFiles.length) {
-      importCuqaWorkspace({ silent: true });
-    }
+    if (autoRdpPlanAttemptedRef.current) return;
+    autoRdpPlanAttemptedRef.current = true;
+    importRdpPlan();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
-    if (autoRdpPlanAttemptedRef.current) return;
-    autoRdpPlanAttemptedRef.current = true;
-    if (!refactoringPlanText.trim()) {
-      importRdpPlan({ silent: true });
-    }
+    if (autoCuqaImportAttemptedRef.current) return;
+    autoCuqaImportAttemptedRef.current = true;
+    importCuqaWorkspace();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
