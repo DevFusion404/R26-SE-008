@@ -214,6 +214,16 @@ class ProblemInterpreter:
             )
             return False
 
+        # --- has_nesting ---
+        # Used by C DeepNesting smells. Checks nesting_depth metric.
+        # Open-world: if nesting_depth is absent, assume the precondition passes
+        # (the smell detection itself is sufficient evidence of deep nesting).
+        if precondition == "has_nesting":
+            depth = metrics.get("nesting_depth", None)
+            if depth is not None:
+                return depth >= 4
+            return True  # nesting_depth not provided → trust the smell detector
+
         # Unknown precondition → pass by default
         logger.warning(
             "Unknown precondition '%s'; assuming satisfied.", precondition
