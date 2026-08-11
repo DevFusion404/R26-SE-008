@@ -105,6 +105,12 @@ def _translate_cuqa_to_rdp(data: dict) -> dict:
         "GodClass":            "God Class",
         "FunctionTooLong":     "Long Method",
         "MethodTooLong":       "Long Method",
+        # C smells
+        "LongFunction":           "Long Function",
+        "DeepNesting":            "Deep Nesting",
+        "UnsafeFunctionUsage":    "Unsafe Function Usage",
+        "GlobalVariable":         "Global Variable",
+        "LargeHeaderFile":        "Large Header File",
         # Already correctly formatted (pass-through)
         "Long Method":         "Long Method",
         "God Class":           "God Class",
@@ -164,17 +170,26 @@ def _translate_cuqa_to_rdp(data: dict) -> dict:
             # RDP-FIX-03: Don't force file basename as class/method for module-level smells
             # (e.g. MagicNumber with entity=null lives at module scope, not inside a class).
             # Only fall back to basename for method/class smells where it makes sense.
-            is_module_level_smell = normalised_type in ("Magic Numbers", "Comments", "Dead Code")
+            is_module_level_smell = normalised_type in (
+                "Magic Numbers", "Comments", "Dead Code",
+                # C module-level smells (no class/method context in C)
+                "Deep Nesting", "Global Variable", "Large Header File",
+                "Unsafe Function Usage",
+            )
             if (not entity or entity == "unknown") and not is_module_level_smell:
-                entity = file_name.replace(".java", "").replace(".py", "")
+                entity = file_name.replace(".java", "").replace(".py", "").replace(".c", "").replace(".h", "")
 
             # Build location dict based on smell type
             line = raw.get("line")
-            base_name = file_name.replace(".java", "").replace(".py", "")
+            base_name = file_name.replace(".java", "").replace(".py", "").replace(".c", "").replace(".h", "")
             
             # Determine whether entity is a class or method based on smell type
             is_class_smell = normalised_type in ("Large Class", "Lazy Class", "God Class")
-            is_method_smell = normalised_type in ("Long Method", "Long Parameter List", "Too Many Parameters")
+            is_method_smell = normalised_type in (
+                "Long Method", "Long Parameter List", "Too Many Parameters",
+                # C function-level smells
+                "Long Function", "Unsafe Function Usage",
+            )
             
             # RDP-FIX-02: Build line range [start, end] when CUQA provides both endpoints.
             # has_code_block precondition requires len(lines) >= 2 to evaluate properly.
@@ -196,6 +211,14 @@ def _translate_cuqa_to_rdp(data: dict) -> dict:
             # Clean up None values
             if location["method"] is None or location["method"] == "unknown":
                 location["method"] = base_name if not (is_class_smell or is_module_level_smell) else None
+
+            # RDP-FIX: SpeculativeGenerality — parse base class from message so that
+            # has_parent_class precondition passes and "Collapse Hierarchy" can be selected.
+            # CUQA message format: "Class 'Foo' extends ['ABC', 'Mixin'] — ..."
+            if normalised_type == "Speculative Generality":
+                _base_m = re.search(r"extends\s+(\[.*?\])", raw.get("message", ""))
+                if _base_m:
+                    location["parent_class"] = _base_m.group(1)
 
 
             # Build metrics dict — per-method size when available, file-level as fallback.
