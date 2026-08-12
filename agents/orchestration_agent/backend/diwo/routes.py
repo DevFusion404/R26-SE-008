@@ -37,6 +37,11 @@ from diwo.orchestrator import (
     generate_refactoring_plan, simulate_transformation,
     compute_metrics_before, compute_metrics_after, next_stage,
     generate_updated_plan_report,
+    normalize_cuqa_report, cuqa_report_to_smells,
+    detect_primary_language, derive_target_name,
+)
+from diwo.cuqa_client import (
+    CUQAError, cuqa_base_url, fetch_quality_report, probe_cuqa,
 )
 
 diwo_bp = Blueprint("diwo", __name__)
@@ -222,19 +227,148 @@ def start_workflow():
         if not s.get("type"):
             return _err(f"smells[{idx}] is missing required field 'type'.")
 
-    wf_id          = f"wf_{uuid.uuid4().hex[:10]}"
-    metrics_before = compute_metrics_before(smells)
-
-    create_workflow(wf_id, target, language, smells)
-    update_workflow(wf_id, metrics_before_json=json.dumps(metrics_before))
-    log_event(wf_id, "smell_review", "workflow_started",
-              {"target": target, "language": language, "smell_count": len(smells)})
+    wf_id, metrics_before = _persist_new_workflow(target, language, smells)
 
     return jsonify({
         "workflow_id":     wf_id,
         "status":          "smell_review",
         "message":         "Workflow started. Developer can now review detected smells.",
         "metrics_before":  metrics_before,
+    }), 201
+
+
+def _persist_new_workflow(target: str, language: str, smells: list, source: str = "client"):
+    """Create the workflow row, seed metrics_before, and log the start event."""
+    wf_id          = f"wf_{uuid.uuid4().hex[:10]}"
+    metrics_before = compute_metrics_before(smells)
+
+    create_workflow(wf_id, target, language, smells)
+    update_workflow(wf_id, metrics_before_json=json.dumps(metrics_before))
+    log_event(wf_id, "smell_review", "workflow_started",
+              {"target": target, "language": language,
+               "smell_count": len(smells), "source": source})
+
+    return wf_id, metrics_before
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Stage 1 – CUQA Agent ingestion (live quality report)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _cuqa_error_response(exc: CUQAError):
+    """Pass CUQA's own status through so the UI can tell 'not running' from
+    'running but no repository loaded'."""
+    status = exc.status if 400 <= exc.status < 600 else 502
+    payload = {
+        "error":     exc.message,
+        "cuqa_url":  cuqa_base_url(),
+        "reachable": exc.status != 503,
+    }
+    return jsonify(payload), status
+
+
+@diwo_bp.route("/cuqa/status", methods=["GET"])
+def cuqa_status():
+    """Is the CUQA agent up, and does it have a repository loaded?"""
+    return jsonify(probe_cuqa())
+
+
+@diwo_bp.route("/cuqa/quality-report", methods=["GET", "POST"])
+def cuqa_quality_report():
+    """
+    Proxy the CUQA agent's POST /api/quality-report (default localhost:8080)
+    and return it in the shape the DIWO frontend renders.
+
+    Body / query (optional): { file_path: "relative/path/File.py" }
+    Omit file_path to report on the whole loaded workspace.
+    """
+    data = request.get_json(force=True, silent=True) or {}
+    file_path = data.get("file_path") or request.args.get("file_path")
+
+    try:
+        payload = fetch_quality_report(file_path)
+    except CUQAError as exc:
+        return _cuqa_error_response(exc)
+
+    try:
+        report = normalize_cuqa_report(payload)
+    except ValueError as exc:
+        return _err(f"Unexpected CUQA response shape: {exc}", 502)
+
+    smells = cuqa_report_to_smells(report)
+
+    return jsonify({
+        "status":      "ok",
+        "source":      "cuqa",
+        "cuqa_url":    cuqa_base_url(),
+        "report_type": report.get("report_type", "repository"),
+        "report":      report,
+        "smells":      smells,
+        "smell_count": len(smells),
+        "language":    detect_primary_language(report),
+    })
+
+
+@diwo_bp.route("/workflows/from-cuqa", methods=["POST"])
+def start_workflow_from_cuqa():
+    """
+    Start a DIWO workflow from the CUQA agent's live quality report instead of
+    a client-supplied smell list.
+
+    Body (all optional):
+      { file_path?: str, target?: str, language?: str }
+
+    Returns the same fields as POST /workflows plus the CUQA report itself, so
+    the frontend can render the real Agent 1 output in the Code Smell Review
+    stage without a second round trip.
+    """
+    data = request.get_json(force=True, silent=True) or {}
+
+    try:
+        payload = fetch_quality_report(data.get("file_path"))
+    except CUQAError as exc:
+        return _cuqa_error_response(exc)
+
+    try:
+        report = normalize_cuqa_report(payload)
+    except ValueError as exc:
+        return _err(f"Unexpected CUQA response shape: {exc}", 502)
+
+    smells = cuqa_report_to_smells(report)
+    if not smells:
+        return _err(
+            "The CUQA quality report contains no code smells, so there is nothing "
+            "to refactor. Load a repository with detectable smells in the CUQA agent.",
+            400,
+        )
+
+    target   = data.get("target") or derive_target_name(report)
+    language = data.get("language") or detect_primary_language(report)
+
+    wf_id, metrics_before = _persist_new_workflow(target, language, smells, source="cuqa")
+    log_event(wf_id, "smell_review", "cuqa_report_ingested", {
+        "cuqa_url":       cuqa_base_url(),
+        "report_type":    report.get("report_type"),
+        "repo_name":      report.get("repo_name"),
+        "files_analyzed": report.get("summary", {}).get("files_analyzed", 0),
+        "smell_count":    len(smells),
+    }, actor="system")
+
+    return jsonify({
+        "workflow_id":    wf_id,
+        "status":         "smell_review",
+        "source":         "cuqa",
+        "cuqa_url":       cuqa_base_url(),
+        "target":         target,
+        "language":       language,
+        "report":         report,
+        "smells":         smells,
+        "smell_count":    len(smells),
+        "metrics_before": metrics_before,
+        "message": (
+            f"Workflow started from the CUQA quality report: "
+            f"{report.get('summary', {}).get('files_analyzed', 0)} file(s), {len(smells)} smell(s)."
+        ),
     }), 201
 
 

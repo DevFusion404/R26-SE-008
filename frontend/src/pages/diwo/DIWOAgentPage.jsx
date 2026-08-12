@@ -70,9 +70,12 @@ const PHASE_DESCRIPTIONS = [
 
 // ─── Smell builder ────────────────────────────────────────────────────────────
 /**
- * FIX [F1]: Converts CUQA_DATA.files into the smell format the backend expects.
- * When a real file-upload endpoint exists, this function is replaced by the
- * response from POST /api/analyse.
+ * Converts CUQA_DATA.files into the smell format the backend expects.
+ *
+ * This is the OFFLINE fallback only. The normal path is
+ * POST /workflows/from-cuqa, where the backend pulls the live quality report
+ * from the CUQA agent (POST http://localhost:8080/api/quality-report) and seeds
+ * the workflow from it — see bootstrapWorkflow() below.
  */
 function buildBackendSmells() {
   const smells = [];
@@ -104,6 +107,7 @@ export default function DIWOAgentPage() {
   const [phase, setPhase]         = useState(0);
   const [workflowId, setWorkflowId]           = useState(null);
   const [workflowLanguage, setWorkflowLanguage] = useState("java");
+  const [cuqaReport, setCuqaReport]           = useState(null);   // live Agent 1 report
   const [planData, setPlanData]               = useState(null);
   const [transformationData, setTransformationData] = useState(null);
   const [metricsBeforeApi, setMetricsBeforeApi]     = useState(null);
@@ -121,10 +125,37 @@ export default function DIWOAgentPage() {
     ]);
 
   // ── On mount: create backend workflow ─────────────────────────────────────
+  /**
+   * Preferred path: POST /workflows/from-cuqa — the DIWO backend calls the CUQA
+   * agent's POST /api/quality-report, normalizes it, and seeds the workflow with
+   * the real detected smells. The same report is handed to Stage 1 so the file
+   * paths the developer selects always resolve against the workflow's smells.
+   *
+   * Fallback: the bundled sample report via POST /workflows, so the flow stays
+   * usable when the CUQA agent is not running or has no repository loaded.
+   */
   useEffect(() => {
     (async () => {
+      setBackendBusy(true);
       try {
-        setBackendBusy(true);
+        try {
+          const res = await api.post("/workflows/from-cuqa", {});
+          setWorkflowId(res.workflow_id);
+          setWorkflowLanguage(res.language || "java");
+          setMetricsBeforeApi(res.metrics_before || null);
+          setCuqaReport(res.report || null);
+          addLog(
+            `CUQA report ingested from ${res.cuqa_url || "CUQA agent"}: ` +
+            `${res.report?.summary?.files_analyzed ?? 0} file(s), ${res.smell_count ?? 0} smell(s)`,
+            "success"
+          );
+          addLog(`Backend workflow created: ${res.workflow_id} (target: ${res.target})`, "success");
+          return;
+        } catch (e) {
+          // FIX [F3]: Surface the reason; do not silently fall to mock.
+          addLog(`Live CUQA ingestion unavailable: ${e.message}`, "warn");
+        }
+
         const smells = buildBackendSmells();
         const res = await api.post("/workflows", {
           target: "ECommerceSystem.java",
@@ -134,15 +165,29 @@ export default function DIWOAgentPage() {
         setWorkflowId(res.workflow_id);
         setWorkflowLanguage("java");
         setMetricsBeforeApi(res.metrics_before || null);
-        addLog(`Backend workflow created: ${res.workflow_id}`, "success");
+        addLog(`Backend workflow created from sample report: ${res.workflow_id}`, "warn");
       } catch (e) {
-        // FIX [F3]: Surface error; do not silently fall to mock.
-        addLog(`Backend unavailable: ${e.message}. Running in offline mode.`, "warn");
+        addLog(`Backend unavailable: ${e.message}. Running in offline mode.`, "danger");
       } finally {
         setBackendBusy(false);
       }
     })();
   }, []);
+
+  /**
+   * Stage 1 fetched (or re-analyzed) the CUQA report on its own — either
+   * because /workflows/from-cuqa failed on mount, or because the developer
+   * pressed "Re-analyze". Log it; the page keeps ownership of that copy so a
+   * re-analyze is not overwritten by the report the parent already holds.
+   */
+  const handleCuqaReportLoaded = (result) => {
+    const summary = result?.report?.summary || {};
+    addLog(
+      `CUQA report loaded (${result?.via === "cuqa-direct" ? "direct" : "via backend"}): ` +
+      `${summary.files_analyzed ?? 0} file(s), ${summary.total_code_smells ?? 0} smell(s)`,
+      "info"
+    );
+  };
 
   // ── Stage 0 → 1: Smell selection ─────────────────────────────────────────
   const handleSmellsSelected = async (selection) => {
@@ -465,7 +510,8 @@ export default function DIWOAgentPage() {
             <CodeSmellApprovalPage
               workflowId={workflowId}
               onProceed={handleSmellsSelected}
-              reportData={workflow?.updated_report || null}
+              reportData={workflow?.updated_report || cuqaReport || null}
+              onReportLoaded={handleCuqaReportLoaded}
             />
           )}
           {phase === 1 && (
