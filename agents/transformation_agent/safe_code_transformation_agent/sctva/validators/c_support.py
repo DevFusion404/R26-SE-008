@@ -12,6 +12,12 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Sequence, Tuple
 
 from ..contracts import RefactoringAction
+from .behavior_fingerprint import (
+    compare_fingerprints,
+    mine_exception_invariants,
+    mine_value_invariants,
+    stdout_invariants,
+)
 
 
 _C_COMMENT_RE = re.compile(r"/\*.*?\*/|//.*?$", re.MULTILINE | re.DOTALL)
@@ -21,6 +27,12 @@ _C_FUNCTION_RE = re.compile(
 )
 _C_MACRO_RE = re.compile(r"(?m)^\s*#\s*define\s+([A-Za-z_][A-Za-z0-9_]*)\b(.*)$")
 _C_CONTROL_FLOW_RE = re.compile(r"\b(if|for|while|switch|case|default|goto)\b")
+
+
+def _runtime_temp_root() -> Path:
+    root = Path(__file__).resolve().parents[2] / ".sctva_runtime"
+    root.mkdir(parents=True, exist_ok=True)
+    return root
 
 
 def strip_c_comments(source_code: str) -> str:
@@ -229,6 +241,11 @@ def _java_style_result(success: bool, return_value: str, return_type: str, stdou
         "execution_time_ms": 0,
         "timeout": False,
         "runtime_error_details": None,
+        "observed_invariants": (
+            {"return": mine_value_invariants(return_value), **stdout_invariants(stdout)}
+            if success
+            else {**mine_exception_invariants("RuntimeError", "c_runtime_failed"), **stdout_invariants(stdout)}
+        ),
     }
 
 
@@ -355,6 +372,10 @@ def run_c_runtime_test(
             "execution_time_ms": 0,
             "timeout": False,
             "runtime_error_details": "gcc/clang not available",
+            "observed_invariants": {
+                **mine_exception_invariants("RuntimeUnavailable", "c_runtime_unavailable"),
+                **stdout_invariants(""),
+            },
         }
 
     source_code = source_code.lstrip("\ufeff")
@@ -376,13 +397,20 @@ def run_c_runtime_test(
             "execution_time_ms": 0,
             "timeout": False,
             "runtime_error_details": "behavior test missing target function",
+            "observed_invariants": {
+                **mine_exception_invariants("HarnessError", "missing_target_function"),
+                **stdout_invariants(""),
+            },
         }
 
     args = test.get("args", []) or []
     returns_void = bool(test.get("returns_void") or test.get("return_type") == "void")
     start = time.perf_counter()
 
-    with tempfile.TemporaryDirectory() as temp_dir:
+    with tempfile.TemporaryDirectory(
+        dir=_runtime_temp_root(),
+        ignore_cleanup_errors=True,
+    ) as temp_dir:
         temp_path = Path(temp_dir)
         source_path = temp_path / "source.c"
         harness_path = temp_path / "probe.c"
@@ -420,6 +448,10 @@ def run_c_runtime_test(
                 "execution_time_ms": int((time.perf_counter() - start) * 1000),
                 "timeout": True,
                 "runtime_error_details": "C harness compilation timed out.",
+                "observed_invariants": {
+                    **mine_exception_invariants("TimeoutError", "c_compile_timeout"),
+                    **stdout_invariants(""),
+                },
             }
 
         if compile_proc.returncode != 0:
@@ -434,6 +466,10 @@ def run_c_runtime_test(
                 "execution_time_ms": int((time.perf_counter() - start) * 1000),
                 "timeout": False,
                 "runtime_error_details": compile_proc.stderr or compile_proc.stdout,
+                "observed_invariants": {
+                    **mine_exception_invariants("CompilationError", "c_compile_failed"),
+                    **stdout_invariants(compile_proc.stdout or ""),
+                },
             }
 
         try:
@@ -455,6 +491,10 @@ def run_c_runtime_test(
                 "execution_time_ms": int((time.perf_counter() - start) * 1000),
                 "timeout": True,
                 "runtime_error_details": "C runtime probe timed out.",
+                "observed_invariants": {
+                    **mine_exception_invariants("TimeoutError", "c_runtime_timeout"),
+                    **stdout_invariants(""),
+                },
             }
 
         stdout_raw = (run_proc.stdout or "").strip()
@@ -470,6 +510,10 @@ def run_c_runtime_test(
                 "execution_time_ms": int((time.perf_counter() - start) * 1000),
                 "timeout": False,
                 "runtime_error_details": run_proc.stderr or stdout_raw,
+                "observed_invariants": {
+                    **mine_exception_invariants("RuntimeError", "c_runtime_failed"),
+                    **stdout_invariants(stdout_raw),
+                },
             }
 
         lines = [line.strip() for line in stdout_raw.splitlines() if line.strip()]
@@ -486,6 +530,10 @@ def run_c_runtime_test(
                 "execution_time_ms": int((time.perf_counter() - start) * 1000),
                 "timeout": False,
                 "runtime_error_details": None,
+                "observed_invariants": {
+                    "return": mine_value_invariants(_parse_c_observed_value(value_part)),
+                    **stdout_invariants(stdout_raw),
+                },
             }
 
         return {
@@ -498,7 +546,59 @@ def run_c_runtime_test(
             "execution_time_ms": int((time.perf_counter() - start) * 1000),
             "timeout": False,
             "runtime_error_details": None,
+            "observed_invariants": {
+                "return": mine_value_invariants(_parse_c_observed_value(last_line)),
+                **stdout_invariants(stdout_raw),
+            },
         }
+
+
+def _parse_c_observed_value(value: str) -> Any:
+    text = str(value).strip()
+    if text in {"void", "<null>"}:
+        return None
+    try:
+        if re.fullmatch(r"-?\d+", text):
+            return int(text)
+        if re.fullmatch(r"-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?", text):
+            return float(text)
+    except Exception:
+        pass
+    return text
+
+
+def infer_c_runtime_tests_from_source(source_code: str, limit: int = 10) -> List[Dict[str, Any]]:
+    stripped = strip_c_comments(source_code.lstrip("\ufeff"))
+    inferred: List[Dict[str, Any]] = []
+    seen: set[str] = set()
+
+    for match in _C_FUNCTION_RE.finditer(stripped):
+        name = match.group("name")
+        if name in seen or name in {"main", "if", "for", "while", "switch"}:
+            continue
+
+        params = _normalize_params(match.group("params") or "")
+        if params not in {"", "void"}:
+            continue
+
+        prefix = stripped[match.start() : match.start("name")].strip()
+        returns_void = bool(re.search(r"\bvoid\s*$", prefix))
+        seen.add(name)
+        inferred.append(
+            {
+                "name": f"auto_c_{name}",
+                "call": name,
+                "args": [],
+                "returns_void": returns_void,
+                "timeout_seconds": 8,
+                "auto_generated": True,
+            }
+        )
+
+        if len(inferred) >= limit:
+            break
+
+    return inferred
 
 
 def validate_c_behavior(
@@ -509,6 +609,8 @@ def validate_c_behavior(
     actions: Sequence[RefactoringAction],
     enable_behavior_tests: bool,
     timeout_seconds: int,
+    project_source_files: Sequence[Any] | None = None,
+    current_file_name: str | None = None,
 ) -> Dict[str, Any]:
     if not enable_behavior_tests:
         return {
@@ -531,12 +633,36 @@ def validate_c_behavior(
             transformed_code=transformed_code,
             runtime_tests=runtime_tests,
             timeout_seconds=timeout_seconds,
+            actions=actions,
+        )
+
+    inferred_tests = infer_c_runtime_tests_from_source(original_code)
+    if inferred_tests and (shutil.which("gcc") or shutil.which("clang")):
+        result = _validate_c_runtime(
+            original_code=original_code,
+            transformed_code=transformed_code,
+            runtime_tests=inferred_tests,
+            timeout_seconds=timeout_seconds,
+            actions=actions,
+        )
+        result["details"]["checks"].append("auto_generated_c_runtime_probes")
+        result["details"]["warnings"].append(
+            f"No explicit C behavior_tests were provided, so {len(inferred_tests)} "
+            "no-argument runtime probe(s) were inferred from the source."
+        )
+        return result
+
+    fallback_warnings = []
+    if inferred_tests:
+        fallback_warnings.append(
+            "C runtime probes were inferred, but gcc/clang was not available; used static behavioral fingerprints instead."
         )
 
     return _validate_c_static(
         original_code=original_code,
         transformed_code=transformed_code,
         actions=actions,
+        extra_warnings=fallback_warnings,
     )
 
 
@@ -546,30 +672,55 @@ def _validate_c_runtime(
     transformed_code: str,
     runtime_tests: List[Dict[str, Any]],
     timeout_seconds: int,
+    actions: Sequence[RefactoringAction],
 ) -> Dict[str, Any]:
-    from .behavior_fingerprint import compare_fingerprints
-
     fingerprints: List[Dict[str, Any]] = []
     failures: List[str] = []
     warnings: List[str] = []
     passed_count = 0
+    dependency_unavailable_count = 0
 
     for idx, test in enumerate(runtime_tests, start=1):
         name = str(test.get("name") or test.get("test_id") or f"c_probe_{idx}")
         try:
-            original_fp = run_c_runtime_test(original_code, test, timeout_seconds)
-            transformed_fp = run_c_runtime_test(transformed_code, test, timeout_seconds)
+            original_call = test.get("original_call") or test.get("call") or test.get("function") or test.get("method") or test.get("target_method")
+            transformed_call = test.get("transformed_call") or test.get("call") or test.get("function") or test.get("method") or test.get("target_method")
+            original_test = {**test, "call": original_call}
+            transformed_test = {**test, "call": transformed_call}
+
+            original_fp = run_c_runtime_test(original_code, original_test, timeout_seconds)
+            transformed_fp = run_c_runtime_test(transformed_code, transformed_test, timeout_seconds)
             comparison = compare_fingerprints(original_fp, transformed_fp)
+            dependency_unavailable = _c_fingerprints_dependency_unavailable(original_fp, transformed_fp)
+            expected_failure = _expected_failure_c(
+                name=name,
+                test=test,
+                original_fp=original_fp,
+                transformed_fp=transformed_fp,
+            )
+            if expected_failure:
+                comparison = {"matched": False, "reason": expected_failure}
+                dependency_unavailable = False
+            if dependency_unavailable:
+                comparison = {"matched": False, "reason": "runtime_unavailable_due_to_dependencies"}
             entry = {
                 "name": name,
-                "call": test.get("call") or test.get("function") or test.get("method") or test.get("target_method"),
+                "call": original_call,
+                "transformed_call": transformed_call,
                 "args": test.get("args", []) or [],
+                "auto_generated": bool(test.get("auto_generated")),
                 "original_fingerprint": original_fp,
                 "transformed_fingerprint": transformed_fp,
                 "comparison": comparison,
+                "dependency_unavailable": dependency_unavailable,
             }
             fingerprints.append(entry)
-            if comparison.get("matched"):
+            if dependency_unavailable:
+                dependency_unavailable_count += 1
+                warnings.append(
+                    f"{name}: C runtime probe could not execute because compiler, headers, or linked dependencies were unavailable."
+                )
+            elif comparison.get("matched"):
                 passed_count += 1
             else:
                 failures.append(f"{name}: {comparison.get('reason', 'fingerprint_mismatch')}")
@@ -577,6 +728,32 @@ def _validate_c_runtime(
             failures.append(f"{name}: runtime error {exc}")
 
     total = len(runtime_tests)
+    if fingerprints and dependency_unavailable_count == len(fingerprints) and not failures:
+        result = _validate_c_static(
+            original_code=original_code,
+            transformed_code=transformed_code,
+            actions=actions,
+            extra_warnings=warnings
+            + [
+                "Used C static behavioral fallback because runtime probes could not execute with available dependencies."
+            ],
+        )
+        result["score"] = min(result["score"], 0.75)
+        result["details"]["checks"] = [
+            "c_runtime_dependency_detection",
+            *result["details"].get("checks", []),
+        ]
+        result["details"]["runtime_c_results"] = fingerprints
+        result["details"]["runtime_unavailable_reason"] = "missing_c_dependencies"
+        result["details"]["fingerprint_status"] = (
+            "degraded_static_passed" if result["passed"] else "failed"
+        )
+        result["details"]["fingerprint_summary"] = (
+            "C runtime probes could not execute because dependencies were unavailable; "
+            + result["details"].get("fingerprint_summary", result["message"])
+        )
+        return result
+
     passed = len(failures) == 0
     score = passed_count / total if total else 0.0
 
@@ -605,11 +782,53 @@ def _validate_c_runtime(
     }
 
 
+def _c_fingerprints_dependency_unavailable(
+    original_fp: Dict[str, Any],
+    transformed_fp: Dict[str, Any],
+) -> bool:
+    return _c_fingerprint_dependency_unavailable(original_fp) and _c_fingerprint_dependency_unavailable(transformed_fp)
+
+
+def _c_fingerprint_dependency_unavailable(fp: Dict[str, Any]) -> bool:
+    if fp.get("success"):
+        return False
+    exception_type = str(fp.get("exception_type") or "")
+    message = "\n".join(
+        str(fp.get(key) or "")
+        for key in ("exception_message_category", "runtime_error_details", "stderr", "stdout")
+    ).lower()
+    if exception_type == "RuntimeUnavailable":
+        return True
+    if exception_type != "CompilationError":
+        return False
+    dependency_patterns = (
+        "no such file or directory",
+        "file not found",
+        "cannot find",
+        "fatal error:",
+        "undefined reference",
+        "ld returned",
+    )
+    syntax_patterns = (
+        "expected ';'",
+        "expected expression",
+        "expected declaration",
+        "syntax error",
+        "undeclared",
+        "too few arguments",
+        "too many arguments",
+    )
+    return any(pattern in message for pattern in dependency_patterns) and not any(
+        pattern in message for pattern in syntax_patterns
+    )
+
+
 def _validate_c_static(
     *,
     original_code: str,
     transformed_code: str,
     actions: Sequence[RefactoringAction],
+    extra_warnings: List[str] | None = None,
 ) -> Dict[str, Any]:
     original_summary = summarize_c_source(original_code)
     transformed_summary = summarize_c_source(transformed_code)
@@ -630,7 +849,7 @@ def _validate_c_static(
             "warnings": [
                 "No explicit C behavior_tests were provided.",
                 "Used safe static behavioral fingerprints instead of executing arbitrary C functions.",
-            ],
+            ] + list(extra_warnings or []),
             "c_results": [
                 {
                     "name": "static_c_summary",
@@ -654,10 +873,40 @@ def _validate_c_static(
     }
 
 
+def _expected_failure_c(
+    *,
+    name: str,
+    test: Dict[str, Any],
+    original_fp: Dict[str, Any],
+    transformed_fp: Dict[str, Any],
+) -> str:
+    expected_marker = object()
+    expected = test.get("expected", expected_marker)
+    if expected is expected_marker:
+        expected = test.get("expected_return", expected_marker)
+    if expected is expected_marker:
+        expected = test.get("expected_value", expected_marker)
+    if expected is expected_marker:
+        return ""
+
+    expected_values = {str(expected), repr(expected)}
+    original_actual = str(original_fp.get("return_value_repr"))
+    transformed_actual = str(transformed_fp.get("return_value_repr"))
+
+    if original_fp.get("success") and original_actual not in expected_values:
+        return f"original_expected_value_mismatch:{name}"
+
+    if transformed_fp.get("success") and transformed_actual not in expected_values:
+        return f"transformed_expected_value_mismatch:{name}"
+
+    return ""
+
+
 __all__ = [
     "compare_c_static_summaries",
     "extract_c_function_signatures",
     "extract_c_macros",
+    "infer_c_runtime_tests_from_source",
     "run_c_runtime_test",
     "summarize_c_source",
     "validate_c_behavior",
