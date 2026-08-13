@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-import json
-import re
+import shutil
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any
 
 from flask import Blueprint, jsonify, request
 
@@ -18,95 +17,24 @@ def _new_request_id() -> str:
     return "sctva_" + datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f")
 
 
-def _results_dir() -> Path:
-    base_dir = Path(__file__).resolve().parents[2]
-    results = base_dir / "results"
-    results.mkdir(parents=True, exist_ok=True)
-    return results
+def _remove_legacy_result_artifacts() -> None:
+    """Remove old SCTVA disk artifacts without touching unrelated files."""
+    results_dir = Path(__file__).resolve().parents[2] / "results"
+    if not results_dir.exists() or not results_dir.is_dir():
+        return
 
+    for item in results_dir.iterdir():
+        if not item.name.startswith("refactored_code_"):
+            continue
+        if item.is_dir():
+            shutil.rmtree(item, ignore_errors=True)
+        else:
+            item.unlink(missing_ok=True)
 
-def _sanitize_name(value: str) -> str:
-    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "_", value.strip())
-    return cleaned or "sctva_run"
-
-
-def _extract_java_public_type_name(source_code: str) -> Optional[str]:
-    match = re.search(
-        r"\bpublic\s+(?:class|interface|enum|record)\s+([A-Za-z_][A-Za-z0-9_]*)\b",
-        source_code,
-    )
-    if not match:
-        return None
-    return match.group(1)
-
-
-def _save_execution_artifacts(result: Dict[str, Any]) -> Dict[str, Any]:
-    results = _results_dir()
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")
-    stem = f"refactored_code_{stamp}"
-
-    result_json_path = results / f"{stem}.result.json"
-    result_json_path.write_text(
-        json.dumps(result, indent=2, sort_keys=True),
-        encoding="utf-8",
-    )
-
-    artifact_paths: Dict[str, Any] = {
-        "results_folder": str(results),
-        "result_json": str(result_json_path),
-    }
-
-    file_results = result.get("file_results")
-    if isinstance(file_results, list) and file_results:
-        artifact_paths["file_artifacts"] = []
-        for idx, file_result in enumerate(file_results, start=1):
-            artifact_paths["file_artifacts"].append(
-                _save_artifacts_for_file(results, stem, file_result, idx)
-            )
-        return artifact_paths
-
-    artifact_paths.update(_save_artifacts_for_file(results, stem, result, 1))
-    return artifact_paths
-
-
-def _save_artifacts_for_file(
-    results: Path,
-    stem: str,
-    file_result: Dict[str, Any],
-    index: int,
-) -> Dict[str, str]:
-    language = str(file_result.get("language", "")).strip().lower()
-    file_name = str(file_result.get("file_name") or f"file_{index}").strip()
-    file_label = _sanitize_name(Path(file_name).stem or file_name)
-    file_stem = f"{stem}_{file_label}"
-
-    refactored_code_text = str(file_result.get("refactored_code", ""))
-    refactored_code_text = refactored_code_text.lstrip("\ufeff")
-
-    artifact_paths: Dict[str, str] = {
-        "file_name": file_name,
-    }
-
-    if language == "python":
-        refactored_code_path = results / f"{file_stem}.refactored.py"
-        refactored_code_path.write_text(
-            refactored_code_text,
-            encoding="utf-8",
-        )
-        artifact_paths["refactored_code"] = str(refactored_code_path)
-
-    # Java: save only compile-ready file where class name matches file name.
-    elif language == "java":
-        public_type_name = _extract_java_public_type_name(refactored_code_text)
-        compile_ready_dir = results / f"{file_stem}.compile_ready"
-        compile_ready_dir.mkdir(parents=True, exist_ok=True)
-        class_name = public_type_name or "RefactoredOutput"
-        compile_ready_path = compile_ready_dir / f"{class_name}.java"
-        compile_ready_path.write_text(refactored_code_text, encoding="utf-8")
-        artifact_paths["compile_ready_java"] = str(compile_ready_path)
-        artifact_paths["refactored_code"] = str(compile_ready_path)
-
-    return artifact_paths
+    try:
+        results_dir.rmdir()
+    except OSError:
+        pass
 
 
 def create_sctva_blueprint() -> Blueprint:
@@ -125,13 +53,13 @@ def create_sctva_blueprint() -> Blueprint:
             payload = request.get_json(silent=True)
             if not isinstance(payload, dict):
                 return jsonify({"error": "Invalid JSON payload."}), 400
+            _remove_legacy_result_artifacts()
             result = agent.execute(payload)
-            try:
-                result["saved_artifacts"] = _save_execution_artifacts(result)
-            except Exception as exc:
-                result["saved_artifacts"] = {
-                    "error": f"Failed to persist artifacts: {exc}",
-                }
+            _remove_legacy_result_artifacts()
+            result["artifact_persistence"] = {
+                "mode": "browser_storage",
+                "backend_results_folder_disabled": True,
+            }
             return jsonify(result), 200
         except ContractValidationError as exc:
             return jsonify({"error": str(exc)}), 400
@@ -168,13 +96,13 @@ def create_sctva_blueprint() -> Blueprint:
             # )
             # result = agent.execute(sctva_request)
 
+            _remove_legacy_result_artifacts()
             result = agent.execute(payload)
-            try:
-                result["saved_artifacts"] = _save_execution_artifacts(result)
-            except Exception as exc:
-                result["saved_artifacts"] = {
-                    "error": f"Failed to persist artifacts: {exc}",
-                }
+            _remove_legacy_result_artifacts()
+            result["artifact_persistence"] = {
+                "mode": "browser_storage",
+                "backend_results_folder_disabled": True,
+            }
             return jsonify(result), 200
 
         except PlannerAdapterError as exc:

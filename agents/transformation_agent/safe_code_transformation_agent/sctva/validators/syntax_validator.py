@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import ast
+import io
 import re
 import shutil
 import subprocess
 import tempfile
 import time
+import tokenize
 from pathlib import Path
 
 from .c_support import strip_c_comments
@@ -17,6 +19,20 @@ from ..utils.io_helpers import utc_now_iso
 
 class SyntaxValidator:
     """Performs language-specific syntax checks."""
+
+    _JAVA_TYPE_RE = re.compile(r"\b(?:class|interface|enum|record)\s+([A-Za-z_][A-Za-z0-9_]*)\b")
+    _JAVA_PUBLIC_TYPE_RE = re.compile(
+        r"\bpublic\s+(?:class|interface|enum|record)\s+([A-Za-z_][A-Za-z0-9_]*)\b"
+    )
+    _C_FUNCTION_RE = re.compile(
+        r"""
+        (?m)^[ \t]*
+        (?:[A-Za-z_][A-Za-z0-9_]*\s+|[*\s])*
+        (?P<name>[A-Za-z_][A-Za-z0-9_]*)
+        \s*\([^;{}]*\)\s*\{
+        """,
+        re.VERBOSE,
+    )
 
     def validate(
         self,
@@ -31,28 +47,23 @@ class SyntaxValidator:
 
         passed = True
         message = "Syntax validation passed."
-        details = {"checks": []}
+        details = {"checks": [], "warnings": [], "diagnostics": []}
 
         try:
+            language = str(language or "").strip().lower()
+            source_code = source_code or ""
+            if not source_code.strip():
+                passed = False
+                message = "Syntax validation failed: source code is empty."
+                details["diagnostics"].append({"severity": "error", "message": message})
+
             if language == "python":
-                ast.parse(source_code)
-                details["checks"].append("ast.parse")
-                if require_compilation:
-                    compile(source_code, "<sctva_python>", "exec")
-                    details["checks"].append("python_compile")
+                if passed:
+                    passed, message = self._validate_python(source_code, details)
 
             elif language == "java":
-                bracket_ok, bracket_msg = self._check_brackets(source_code)
-                class_ok = bool(re.search(r"\bclass\s+[A-Za-z_][A-Za-z0-9_]*", source_code))
-                details["checks"].append("bracket_heuristic")
-                details["checks"].append("class_heuristic")
-
-                if not bracket_ok:
-                    passed = False
-                    message = f"Java syntax heuristic failed: {bracket_msg}"
-                elif not class_ok:
-                    passed = False
-                    message = "Java syntax heuristic failed: no class declaration found."
+                if passed:
+                    passed, message = self._validate_java_heuristics(source_code, details)
 
                 if passed and require_compilation:
                     details["checks"].append("javac_compile")
@@ -60,27 +71,13 @@ class SyntaxValidator:
                     if not compile_passed:
                         passed = False
                         message = compile_msg
+                        details["diagnostics"].append({"severity": "error", "message": compile_msg})
                     elif "skipped" in compile_msg.lower():
-                        details["warning"] = compile_msg
+                        details["warnings"].append(compile_msg)
 
             elif language == "c":
-                bracket_ok, bracket_msg = self._check_brackets(source_code)
-                function_ok = bool(re.search(r"\b[A-Za-z_][A-Za-z0-9_\s\*]*\b[A-Za-z_][A-Za-z0-9_]*\s*\([^;{}]*\)\s*\{", strip_c_comments(source_code)))
-                semicolon_ok = ";" in strip_c_comments(source_code)
-                details["checks"].extend(["bracket_heuristic", "function_heuristic", "semicolon_heuristic"])
-
-                if not bracket_ok:
-                    passed = False
-                    message = f"C syntax heuristic failed: {bracket_msg}"
-                elif not function_ok:
-                    passed = False
-                    message = "C syntax heuristic failed: no function definition found."
-                elif not semicolon_ok:
-                    passed = False
-                    message = "C syntax heuristic failed: no semicolon found."
-                elif re.search(r"=\s*;", strip_c_comments(source_code)):
-                    passed = False
-                    message = "C syntax heuristic failed: malformed assignment or declaration."
+                if passed:
+                    passed, message = self._validate_c_heuristics(source_code, details)
 
                 if passed and require_compilation:
                     details["checks"].append("c_compile_only")
@@ -88,19 +85,27 @@ class SyntaxValidator:
                     if not compile_passed:
                         passed = False
                         message = compile_msg
+                        details["diagnostics"].append({"severity": "error", "message": compile_msg})
                     elif "skipped" in compile_msg.lower():
-                        details["warning"] = compile_msg
+                        details["warnings"].append(compile_msg)
 
             else:
                 passed = False
                 message = f"Unsupported language for syntax validation: {language}"
+                details["diagnostics"].append({"severity": "error", "message": message})
 
         except SyntaxError as exc:
             passed = False
             message = f"Python syntax error: {exc}"
+            details["diagnostics"].append(self._python_syntax_diagnostic(exc))
+        except tokenize.TokenError as exc:
+            passed = False
+            message = f"Python tokenization error: {exc}"
+            details["diagnostics"].append({"severity": "error", "message": message})
         except Exception as exc:
             passed = False
             message = f"Syntax validation exception: {exc}"
+            details["diagnostics"].append({"severity": "error", "message": message})
 
         duration_ms = int((time.perf_counter() - started) * 1000)
         end_iso = utc_now_iso()
@@ -116,6 +121,94 @@ class SyntaxValidator:
             finished_at=end_iso,
             duration_ms=duration_ms,
         )
+
+    def _validate_python(self, source: str, details: dict) -> tuple[bool, str]:
+        details["checks"].append("python_tokenize")
+        list(tokenize.generate_tokens(io.StringIO(source).readline))
+
+        details["checks"].append("ast.parse")
+        ast.parse(source)
+
+        details["checks"].append("python_compile")
+        compile(source, "<sctva_python>", "exec")
+
+        return True, "Python syntax validation passed."
+
+    def _validate_java_heuristics(self, source: str, details: dict) -> tuple[bool, str]:
+        details["checks"].extend(
+            [
+                "java_lexical_scan",
+                "java_comment_string_aware_brackets",
+                "java_type_declaration",
+                "java_declaration_order",
+                "java_statement_terminators",
+            ]
+        )
+
+        scan_ok, scan_msg = self._scan_delimiters(source, language="java")
+        if not scan_ok:
+            return self._syntax_failure(details, "Java syntax heuristic failed", scan_msg)
+
+        clean = self._strip_comments_and_literals(source)
+        if not self._JAVA_TYPE_RE.search(clean):
+            return self._syntax_failure(details, "Java syntax heuristic failed", "no class/interface/enum/record declaration found.")
+
+        order_ok, order_msg = self._check_java_declaration_order(clean)
+        if not order_ok:
+            return self._syntax_failure(details, "Java syntax heuristic failed", order_msg)
+
+        malformed = self._find_malformed_assignment(clean)
+        if malformed:
+            return self._syntax_failure(details, "Java syntax heuristic failed", malformed)
+
+        terminator_issue = self._find_java_terminator_issue(clean)
+        if terminator_issue:
+            return self._syntax_failure(details, "Java syntax heuristic failed", terminator_issue)
+
+        return True, "Java syntax validation passed."
+
+    def _validate_c_heuristics(self, source: str, details: dict) -> tuple[bool, str]:
+        details["checks"].extend(
+            [
+                "c_lexical_scan",
+                "c_comment_string_aware_brackets",
+                "c_function_definition",
+                "c_preprocessor_directives",
+                "c_statement_terminators",
+            ]
+        )
+
+        scan_ok, scan_msg = self._scan_delimiters(source, language="c")
+        if not scan_ok:
+            return self._syntax_failure(details, "C syntax heuristic failed", scan_msg)
+
+        clean = self._strip_comments_and_literals(source)
+        clean_without_comments = strip_c_comments(source)
+        if not self._C_FUNCTION_RE.search(clean_without_comments):
+            return self._syntax_failure(details, "C syntax heuristic failed", "no function definition found.")
+
+        include_issue = self._find_c_preprocessor_issue(clean)
+        if include_issue:
+            return self._syntax_failure(details, "C syntax heuristic failed", include_issue)
+
+        malformed = self._find_malformed_assignment(clean)
+        if malformed:
+            return self._syntax_failure(details, "C syntax heuristic failed", malformed)
+
+        terminator_issue = self._find_c_terminator_issue(clean)
+        if terminator_issue:
+            return self._syntax_failure(details, "C syntax heuristic failed", terminator_issue)
+
+        if ";" not in clean_without_comments:
+            return self._syntax_failure(details, "C syntax heuristic failed", "no semicolon found.")
+
+        return True, "C syntax validation passed."
+
+    @staticmethod
+    def _syntax_failure(details: dict, prefix: str, reason: str) -> tuple[bool, str]:
+        message = f"{prefix}: {reason}"
+        details["diagnostics"].append({"severity": "error", "message": message})
+        return False, message
 
     @staticmethod
     def _check_brackets(source: str) -> tuple[bool, str]:
@@ -135,6 +228,246 @@ class SyntaxValidator:
             return False, f"unclosed bracket '{stack[-1][0]}'"
         return True, "balanced"
 
+    @classmethod
+    def _scan_delimiters(cls, source: str, *, language: str) -> tuple[bool, str]:
+        stack: list[tuple[str, int, int]] = []
+        pairs = {")": "(", "]": "[", "}": "{"}
+        open_set = set(pairs.values())
+        state = "normal"
+        line = 1
+        col = 0
+        i = 0
+
+        while i < len(source):
+            char = source[i]
+            nxt = source[i + 1] if i + 1 < len(source) else ""
+
+            if char == "\n":
+                line += 1
+                col = 0
+                if state == "line_comment":
+                    state = "normal"
+                i += 1
+                continue
+
+            col += 1
+
+            if state == "block_comment":
+                if char == "*" and nxt == "/":
+                    state = "normal"
+                    i += 2
+                    col += 1
+                    continue
+                i += 1
+                continue
+
+            if state == "line_comment":
+                i += 1
+                continue
+
+            if state in {"string", "char"}:
+                quote = '"' if state == "string" else "'"
+                if char == "\\":
+                    i += 2
+                    col += 1
+                    continue
+                if char == quote:
+                    state = "normal"
+                i += 1
+                continue
+
+            if char == "/" and nxt == "/":
+                state = "line_comment"
+                i += 2
+                col += 1
+                continue
+
+            if char == "/" and nxt == "*":
+                state = "block_comment"
+                i += 2
+                col += 1
+                continue
+
+            if char == '"':
+                state = "string"
+                i += 1
+                continue
+
+            if char == "'":
+                state = "char"
+                i += 1
+                continue
+
+            if char in open_set:
+                stack.append((char, line, col))
+            elif char in pairs:
+                if not stack or stack[-1][0] != pairs[char]:
+                    return False, f"unmatched '{char}' at line {line}, column {col}"
+                stack.pop()
+
+            i += 1
+
+        if state == "block_comment":
+            return False, "unclosed block comment"
+        if state == "string":
+            return False, "unclosed string literal"
+        if state == "char":
+            return False, "unclosed character literal"
+        if stack:
+            bracket, bracket_line, bracket_col = stack[-1]
+            return False, f"unclosed bracket '{bracket}' opened at line {bracket_line}, column {bracket_col}"
+
+        return True, "balanced"
+
+    @staticmethod
+    def _strip_comments_and_literals(source: str) -> str:
+        result: list[str] = []
+        state = "normal"
+        i = 0
+
+        while i < len(source):
+            char = source[i]
+            nxt = source[i + 1] if i + 1 < len(source) else ""
+
+            if state == "line_comment":
+                if char == "\n":
+                    state = "normal"
+                    result.append("\n")
+                else:
+                    result.append(" ")
+                i += 1
+                continue
+
+            if state == "block_comment":
+                if char == "*" and nxt == "/":
+                    result.extend("  ")
+                    state = "normal"
+                    i += 2
+                else:
+                    result.append("\n" if char == "\n" else " ")
+                    i += 1
+                continue
+
+            if state in {"string", "char"}:
+                if char == "\\":
+                    result.append(" ")
+                    if nxt:
+                        result.append("\n" if nxt == "\n" else " ")
+                    i += 2
+                    continue
+                if (state == "string" and char == '"') or (state == "char" and char == "'"):
+                    state = "normal"
+                result.append("\n" if char == "\n" else " ")
+                i += 1
+                continue
+
+            if char == "/" and nxt == "/":
+                state = "line_comment"
+                result.extend("  ")
+                i += 2
+                continue
+            if char == "/" and nxt == "*":
+                state = "block_comment"
+                result.extend("  ")
+                i += 2
+                continue
+            if char == '"':
+                state = "string"
+                result.append("0")
+                i += 1
+                continue
+            if char == "'":
+                state = "char"
+                result.append("0")
+                i += 1
+                continue
+
+            result.append(char)
+            i += 1
+
+        return "".join(result)
+
+    @staticmethod
+    def _check_java_declaration_order(clean_source: str) -> tuple[bool, str]:
+        package_matches = list(re.finditer(r"(?m)^\s*package\s+[A-Za-z_][A-Za-z0-9_.]*\s*;", clean_source))
+        if len(package_matches) > 1:
+            return False, "multiple package declarations found."
+
+        first_type = re.search(r"\b(?:class|interface|enum|record)\s+[A-Za-z_][A-Za-z0-9_]*\b", clean_source)
+        first_type_idx = first_type.start() if first_type else len(clean_source)
+
+        if package_matches:
+            non_blank_prefix = clean_source[: package_matches[0].start()].strip()
+            if non_blank_prefix:
+                return False, "package declaration must appear before imports and type declarations."
+
+        for match in re.finditer(r"(?m)^\s*import\s+(?:static\s+)?[A-Za-z_][A-Za-z0-9_.*]*\s*;", clean_source):
+            if match.start() > first_type_idx:
+                return False, "import declaration appears after a type declaration."
+
+        return True, "declaration order ok"
+
+    @staticmethod
+    def _find_malformed_assignment(clean_source: str) -> str:
+        match = re.search(r"=\s*(?:[;,)}}]|$)", clean_source, re.MULTILINE)
+        if not match:
+            return ""
+        line = clean_source[: match.start()].count("\n") + 1
+        return f"malformed assignment or declaration near line {line}."
+
+    @staticmethod
+    def _find_java_terminator_issue(clean_source: str) -> str:
+        statement_re = re.compile(r"^\s*(?:return|throw|break|continue)\b")
+        for line_no, raw_line in enumerate(clean_source.splitlines(), start=1):
+            line = raw_line.strip()
+            if not line or line.startswith("@") or line.startswith("*"):
+                continue
+            if line.endswith((";", "{", "}", ":", ",")):
+                continue
+            if statement_re.match(line):
+                return f"statement missing semicolon near line {line_no}."
+            if "=" in line and not re.search(r"\b(?:if|while|for|switch|catch)\s*\(", line):
+                return f"assignment or declaration missing semicolon near line {line_no}."
+        return ""
+
+    @staticmethod
+    def _find_c_preprocessor_issue(clean_source: str) -> str:
+        for line_no, raw_line in enumerate(clean_source.splitlines(), start=1):
+            line = raw_line.strip()
+            if not line.startswith("#"):
+                continue
+            if re.match(r"#\s*include\s*(?:<[^>]+>|\"[^\"]+\")\s*$", line):
+                continue
+            if re.match(r"#\s*(?:define|ifdef|ifndef|if|elif|else|endif|pragma|undef|error|warning)\b", line):
+                continue
+            return f"malformed preprocessor directive near line {line_no}."
+        return ""
+
+    @staticmethod
+    def _find_c_terminator_issue(clean_source: str) -> str:
+        statement_re = re.compile(r"^\s*(?:return|break|continue|goto)\b")
+        for line_no, raw_line in enumerate(clean_source.splitlines(), start=1):
+            line = raw_line.strip()
+            if not line or line.startswith("#") or line.startswith("*"):
+                continue
+            if line.endswith((";", "{", "}", ":", ",")):
+                continue
+            if statement_re.match(line):
+                return f"statement missing semicolon near line {line_no}."
+            if "=" in line and not re.search(r"\b(?:if|while|for|switch)\s*\(", line):
+                return f"assignment or declaration missing semicolon near line {line_no}."
+        return ""
+
+    @staticmethod
+    def _python_syntax_diagnostic(exc: SyntaxError) -> dict:
+        return {
+            "severity": "error",
+            "message": str(exc),
+            "line": exc.lineno,
+            "column": exc.offset,
+            "text": exc.text.strip() if exc.text else "",
+        }
+
     @staticmethod
     def _optional_javac_check(source: str, timeout_seconds: int) -> tuple[bool, str]:
         javac = shutil.which("javac")
@@ -143,15 +476,18 @@ class SyntaxValidator:
 
         source = source.lstrip("\ufeff")
 
-        class_match = re.search(r"\bclass\s+([A-Za-z_][A-Za-z0-9_]*)", source)
-        class_name = class_match.group(1) if class_match else "SctvaTemp"
+        public_type = SyntaxValidator._JAVA_PUBLIC_TYPE_RE.search(source)
+        first_type = SyntaxValidator._JAVA_TYPE_RE.search(source)
+        class_name = (public_type or first_type).group(1) if (public_type or first_type) else "SctvaTemp"
 
         with tempfile.TemporaryDirectory() as temp_dir:
+            classes_dir = Path(temp_dir) / "classes"
+            classes_dir.mkdir(parents=True, exist_ok=True)
             java_file = Path(temp_dir) / f"{class_name}.java"
             java_file.write_text(source, encoding="utf-8")
 
             proc = subprocess.run(
-                [javac, str(java_file)],
+                [javac, "-proc:none", "-d", str(classes_dir), str(java_file)],
                 capture_output=True,
                 text=True,
                 timeout=timeout_seconds,
@@ -174,7 +510,7 @@ class SyntaxValidator:
             c_file = Path(temp_dir) / "sctva_temp.c"
             c_file.write_text(source, encoding="utf-8")
 
-            compile_args = [compiler, "-std=c11", "-fsyntax-only", str(c_file)]
+            compile_args = [compiler, "-std=c11", "-fsyntax-only", "-I", temp_dir, str(c_file)]
             proc = subprocess.run(
                 compile_args,
                 capture_output=True,

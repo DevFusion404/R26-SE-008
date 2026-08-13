@@ -219,7 +219,52 @@ def test_compare_fingerprints_rejects_matching_infrastructure_failures():
     assert comparison["reason"] == "fingerprint_execution_failed"
 
 
-def test_java_fingerprint_compile_failure_fails_behavioral_validation():
+def test_java_dependency_compile_failure_uses_static_fallback():
+    java_with_missing_dependency = """
+import missing.Dependency;
+
+public class Demo {
+    public int value() {
+        return 1;
+    }
+}
+"""
+    transformed = """
+import missing.Dependency;
+
+public class Demo {
+    public int valueRenamed() {
+        return 1;
+    }
+}
+"""
+    actions = [
+        RefactoringAction(
+            action_type="rename_symbol",
+            parameters={
+                "old_name": "value",
+                "new_name": "valueRenamed",
+            },
+        )
+    ]
+
+    validator = BehavioralValidator()
+    result = validator.validate(
+        language="java",
+        original_code=java_with_missing_dependency,
+        transformed_code=transformed,
+        behavior_tests=[],
+        enable_behavior_tests=True,
+        actions=actions,
+        strict_mode=False,
+    )
+
+    assert result.passed is True
+    assert result.details["fingerprint_status"] == "degraded_static_passed"
+    assert result.details["runtime_unavailable_reason"] == "missing_java_dependencies"
+
+
+def test_java_real_compile_failure_still_fails_behavioral_validation():
     broken_java = """
 public class Demo {
     public double calculateTotal() {

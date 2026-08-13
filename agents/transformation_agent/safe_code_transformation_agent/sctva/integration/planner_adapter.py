@@ -24,6 +24,8 @@ class PlannerAdapter:
         if not isinstance(planner_output, dict):
             raise PlannerAdapterError("Planner output must be an object.")
 
+        planner_output = self._unwrap_planner_output(planner_output)
+
         plan_id = str(planner_output.get("plan_id", "")).strip()
         if not plan_id:
             raise PlannerAdapterError("Planner output missing required field 'plan_id'.")
@@ -450,11 +452,31 @@ class PlannerAdapter:
             source_file = self._source_file_from_step(step, params=params, target=target)
             if source_file and "source_file" not in action["parameters"]:
                 action["parameters"]["source_file"] = source_file
+            source_line = self._source_line_from_step(step, params=params, target=target)
+            if source_line is not None and "source_line" not in action["parameters"]:
+                action["parameters"]["source_line"] = source_line
             action["source_step_id"] = step.get("step_id")
             action["source_refactoring"] = refactoring
             action["warnings"] = []
 
         return action
+
+    @classmethod
+    def _unwrap_planner_output(cls, planner_output: Dict[str, Any]) -> Dict[str, Any]:
+        for key in ("plan", "refactoring_plan", "rdp_sample", "generatedPlan", "latestPlan"):
+            wrapped = planner_output.get(key)
+            if isinstance(wrapped, dict):
+                return cls._unwrap_planner_output(wrapped)
+
+        data = planner_output.get("data")
+        if isinstance(data, dict) and isinstance(data.get("plan"), dict):
+            return cls._unwrap_planner_output(data["plan"])
+
+        result = planner_output.get("result")
+        if isinstance(result, dict) and isinstance(result.get("plan"), dict):
+            return cls._unwrap_planner_output(result["plan"])
+
+        return planner_output
 
     @staticmethod
     def _source_file_from_plan(planner_output: Dict[str, Any]) -> str:
@@ -501,6 +523,40 @@ class PlannerAdapter:
                     return value.strip()
 
         return ""
+
+    @staticmethod
+    def _source_line_from_step(
+        step: Dict[str, Any],
+        *,
+        params: Dict[str, Any],
+        target: Dict[str, Any],
+    ) -> Optional[int]:
+        location = step.get("location") or {}
+        if not isinstance(location, dict):
+            location = {}
+
+        for source in (params, target, location, step):
+            if not isinstance(source, dict):
+                continue
+
+            for key in ("source_line", "sourceLine", "line", "start_line", "startLine"):
+                value = source.get(key)
+                if isinstance(value, (int, float)):
+                    return int(value)
+                if isinstance(value, str) and value.strip().isdigit():
+                    return int(value.strip())
+
+            for key in ("source_lines", "sourceLines", "lines"):
+                values = source.get(key)
+                if not isinstance(values, list) or not values:
+                    continue
+                first = values[0]
+                if isinstance(first, (int, float)):
+                    return int(first)
+                if isinstance(first, str) and first.strip().isdigit():
+                    return int(first.strip())
+
+        return None
 
     @staticmethod
     def _safe_identifier(name: str) -> str:
