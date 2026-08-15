@@ -11,6 +11,15 @@ const RDP_AGENT_SESSION_KEY = 'rdp-agent-page-state';
 const RDP_AGENT_LOCAL_SESSION_KEY = 'rdp_last_session';
 const RDP_AGENT_HISTORY_KEY = 'rdp_plan_history';
 const SCTVA_AGENT_SESSION_KEY = 'sctva-agent-page-state';
+const SCTVA_ARTIFACT_STORAGE_KEY = 'sctva-agent-final-artifacts';
+const SCTVA_ARTIFACT_STORAGE_THRESHOLD_BYTES = 3500000;
+const ZIP_CRC32_TABLE = Array.from({ length: 256 }, (_, index) => {
+  let value = index;
+  for (let bit = 0; bit < 8; bit += 1) {
+    value = value & 1 ? (0xedb88320 ^ (value >>> 1)) : (value >>> 1);
+  }
+  return value >>> 0;
+});
 
 const PIPELINE_STAGES = [
   {
@@ -175,12 +184,49 @@ function sanitizeIdentifier(value) {
   return /^[0-9]/.test(cleaned) ? `R_${cleaned}` : cleaned;
 }
 
+function firstNumberValue(values) {
+  const found = values.find(value => Number.isFinite(Number(value)));
+  return found === undefined ? null : Number(found);
+}
+
+function extractSourceLineFromPlanItem(item) {
+  if (!item || typeof item !== 'object' || Array.isArray(item)) return null;
+
+  const params = isPlainObject(item.parameters) ? item.parameters : {};
+  const target = isPlainObject(item.target) ? item.target : {};
+  const location = isPlainObject(item.location) ? item.location : {};
+  const sourceLines = Array.isArray(params.source_lines) ? params.source_lines : [];
+  const targetLines = Array.isArray(target.lines) ? target.lines : [];
+  const locationLines = Array.isArray(location.lines) ? location.lines : [];
+
+  return firstNumberValue([
+    item.source_line,
+    item.sourceLine,
+    params.source_line,
+    params.sourceLine,
+    sourceLines[0],
+    target.source_line,
+    target.sourceLine,
+    targetLines[0],
+    location.source_line,
+    location.sourceLine,
+    locationLines[0],
+  ]);
+}
+
 function renameAction(step, oldName, newName) {
+  const params = isPlainObject(step?.parameters) ? step.parameters : {};
+  const target = isPlainObject(step?.target) ? step.target : {};
+  const sourceLine = extractSourceLineFromPlanItem(step);
+
   return {
     action_type: 'rename_symbol',
     parameters: {
       old_name: String(oldName),
       new_name: sanitizeIdentifier(String(newName)),
+      source_line: sourceLine,
+      target_class: target.class || params.source_class,
+      target_method: target.method || params.method,
     },
     source_step_id: step.step_id ?? null,
     source_refactoring: step.refactoring ?? null,
@@ -467,6 +513,9 @@ function unwrapPlanPayload(input) {
     throw new Error('Refactoring plan JSON must be an object.');
   }
 
+  if (input.plan && typeof input.plan === 'object' && !Array.isArray(input.plan)) return unwrapPlanPayload(input.plan);
+  if (input.data?.plan && typeof input.data.plan === 'object' && !Array.isArray(input.data.plan)) return unwrapPlanPayload(input.data.plan);
+  if (input.result?.plan && typeof input.result.plan === 'object' && !Array.isArray(input.result.plan)) return unwrapPlanPayload(input.result.plan);
   if (input.refactoring_plan && typeof input.refactoring_plan === 'object') return input.refactoring_plan;
   if (input.rdp_sample && typeof input.rdp_sample === 'object') return input.rdp_sample;
   return input;
@@ -763,6 +812,18 @@ function findAstNodes(ast, type) {
   return nodes;
 }
 
+function findAstNodesByTypeNames(ast, typeNames) {
+  const expected = new Set(typeNames.map(type => String(type).toLowerCase()));
+  const nodes = [];
+
+  walkAst(ast, node => {
+    const normalized = String(node.type || '').toLowerCase();
+    if (expected.has(normalized)) nodes.push(node);
+  });
+
+  return nodes;
+}
+
 function guessJavaType(name) {
   const normalized = String(name || '').toLowerCase();
   if (normalized.includes('id') || normalized.includes('count') || normalized.includes('quantity') || normalized.includes('number')) {
@@ -922,11 +983,61 @@ function buildPythonSourceFromAst(parsed, filePath) {
   return `${lines.join('\n')}\n`;
 }
 
+function cDefaultReturnValue(functionName) {
+  const normalized = String(functionName || '').toLowerCase();
+  if (normalized.startsWith('is') || normalized.startsWith('has')) return '0';
+  return '0';
+}
+
+function normalizeCInclude(includeNode) {
+  const name = String(includeNode?.name || '').trim();
+  if (/^#\s*include\b/.test(name) && !name.includes('[')) return name;
+  return '';
+}
+
+function buildCSourceFromAst(parsed, filePath) {
+  const ast = parsed?.ast;
+  const fileLabel = String(filePath || parsed?.file || 'source.c');
+  const includeNodes = findAstNodesByTypeNames(ast, ['IncludeDirective', 'preproc_include']);
+  const functionNodes = uniqueByName(findAstNodesByTypeNames(ast, ['FunctionDefinition', 'function_definition']));
+  const includeLines = includeNodes
+    .map(normalizeCInclude)
+    .filter(Boolean);
+  const lines = [
+    `/* Reconstructed from CUQA AST for ${fileLabel} */`,
+  ];
+
+  if (includeLines.length) {
+    includeLines.forEach(includeLine => lines.push(includeLine));
+  } else {
+    lines.push('#include <stdio.h>');
+  }
+  lines.push('');
+
+  if (!functionNodes.length) {
+    lines.push('int sctva_recovered_entry(void) {');
+    lines.push('    return 0;');
+    lines.push('}');
+    return `${lines.join('\n')}\n`;
+  }
+
+  functionNodes.forEach((fn, index) => {
+    const functionName = sanitizeIdentifier(fn.name || `recovered_function_${index + 1}`);
+    lines.push(`int ${functionName}(void) {`);
+    lines.push(`    return ${cDefaultReturnValue(functionName)};`);
+    lines.push('}');
+    if (index < functionNodes.length - 1) lines.push('');
+  });
+
+  return `${lines.join('\n')}\n`;
+}
+
 function buildSourceFromCuqaAst(data, filePath) {
   const parsed = data?.parsed || {};
-  const language = parsed.language || chooseLanguageFromName(filePath);
+  const language = String(parsed.language || chooseLanguageFromName(filePath)).toLowerCase();
   if (language === 'java') return buildJavaSourceFromAst(parsed, filePath);
   if (language === 'python') return buildPythonSourceFromAst(parsed, filePath);
+  if (language === 'c') return buildCSourceFromAst(parsed, filePath);
   return '';
 }
 
@@ -956,7 +1067,7 @@ async function fetchCuqaParsedFile(filePath) {
 
   return {
     source: rawSource || buildSourceFromCuqaAst(data, filePath),
-    language: data?.parsed?.language || chooseLanguageFromName(filePath),
+    language: String(data?.parsed?.language || chooseLanguageFromName(filePath)).toLowerCase(),
     summary: data?.summary || null,
     sourceMode: rawSource ? 'raw' : 'ast_reconstructed',
   };
@@ -1104,6 +1215,425 @@ function clearSctvaSessionState() {
   }
 }
 
+function clearSctvaArtifactStorage() {
+  if (typeof window === 'undefined') return;
+
+  try {
+    window.sessionStorage.removeItem(SCTVA_ARTIFACT_STORAGE_KEY);
+  } catch {
+    // Ignore storage cleanup failures.
+  }
+
+  try {
+    window.localStorage.removeItem(SCTVA_ARTIFACT_STORAGE_KEY);
+  } catch {
+    // Ignore storage cleanup failures.
+  }
+}
+
+function storageByteSize(value) {
+  try {
+    return new Blob([value]).size;
+  } catch {
+    return String(value || '').length;
+  }
+}
+
+function crc32(bytes) {
+  let crc = 0xffffffff;
+  bytes.forEach(byte => {
+    crc = ZIP_CRC32_TABLE[(crc ^ byte) & 0xff] ^ (crc >>> 8);
+  });
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+function writeUint16(buffer, offset, value) {
+  buffer[offset] = value & 0xff;
+  buffer[offset + 1] = (value >>> 8) & 0xff;
+}
+
+function writeUint32(buffer, offset, value) {
+  buffer[offset] = value & 0xff;
+  buffer[offset + 1] = (value >>> 8) & 0xff;
+  buffer[offset + 2] = (value >>> 16) & 0xff;
+  buffer[offset + 3] = (value >>> 24) & 0xff;
+}
+
+function concatUint8Arrays(chunks) {
+  const size = chunks.reduce((total, chunk) => total + chunk.length, 0);
+  const combined = new Uint8Array(size);
+  let offset = 0;
+  chunks.forEach(chunk => {
+    combined.set(chunk, offset);
+    offset += chunk.length;
+  });
+  return combined;
+}
+
+function getZipDateTime(date = new Date()) {
+  const year = Math.max(1980, date.getFullYear());
+  return {
+    time: (
+      (date.getHours() << 11)
+      | (date.getMinutes() << 5)
+      | Math.floor(date.getSeconds() / 2)
+    ),
+    date: (
+      ((year - 1980) << 9)
+      | ((date.getMonth() + 1) << 5)
+      | date.getDate()
+    ),
+  };
+}
+
+function encodeUtf8(value) {
+  return new TextEncoder().encode(String(value ?? ''));
+}
+
+function normalizeZipPath(value, fallback) {
+  const normalized = normalizeArtifactPath(value, fallback)
+    .replace(/^[A-Za-z]:\//, '')
+    .split('/')
+    .filter(part => part && part !== '.' && part !== '..')
+    .join('/');
+
+  return normalized || normalizeArtifactPath(fallback, 'source_code');
+}
+
+function makeUniqueZipPath(path, usedPaths) {
+  const normalized = normalizeZipPath(path, 'source_code');
+  const lower = normalized.toLowerCase();
+  if (!usedPaths.has(lower)) {
+    usedPaths.add(lower);
+    return normalized;
+  }
+
+  const slashIndex = normalized.lastIndexOf('/');
+  const folder = slashIndex >= 0 ? normalized.slice(0, slashIndex + 1) : '';
+  const name = slashIndex >= 0 ? normalized.slice(slashIndex + 1) : normalized;
+  const dotIndex = name.lastIndexOf('.');
+  const stem = dotIndex > 0 ? name.slice(0, dotIndex) : name;
+  const extension = dotIndex > 0 ? name.slice(dotIndex) : '';
+  let counter = 2;
+
+  while (true) {
+    const nextPath = `${folder}${stem}_${counter}${extension}`;
+    const nextLower = nextPath.toLowerCase();
+    if (!usedPaths.has(nextLower)) {
+      usedPaths.add(nextLower);
+      return nextPath;
+    }
+    counter += 1;
+  }
+}
+
+function createStoredZipBlob(entries) {
+  const timestamp = getZipDateTime();
+  const localChunks = [];
+  const centralChunks = [];
+  let offset = 0;
+
+  entries.forEach(entry => {
+    const nameBytes = encodeUtf8(entry.path);
+    const contentBytes = encodeUtf8(entry.content);
+    const checksum = crc32(contentBytes);
+    const localHeader = new Uint8Array(30 + nameBytes.length);
+
+    writeUint32(localHeader, 0, 0x04034b50);
+    writeUint16(localHeader, 4, 20);
+    writeUint16(localHeader, 6, 0x0800);
+    writeUint16(localHeader, 8, 0);
+    writeUint16(localHeader, 10, timestamp.time);
+    writeUint16(localHeader, 12, timestamp.date);
+    writeUint32(localHeader, 14, checksum);
+    writeUint32(localHeader, 18, contentBytes.length);
+    writeUint32(localHeader, 22, contentBytes.length);
+    writeUint16(localHeader, 26, nameBytes.length);
+    writeUint16(localHeader, 28, 0);
+    localHeader.set(nameBytes, 30);
+
+    localChunks.push(localHeader, contentBytes);
+
+    const centralHeader = new Uint8Array(46 + nameBytes.length);
+    writeUint32(centralHeader, 0, 0x02014b50);
+    writeUint16(centralHeader, 4, 20);
+    writeUint16(centralHeader, 6, 20);
+    writeUint16(centralHeader, 8, 0x0800);
+    writeUint16(centralHeader, 10, 0);
+    writeUint16(centralHeader, 12, timestamp.time);
+    writeUint16(centralHeader, 14, timestamp.date);
+    writeUint32(centralHeader, 16, checksum);
+    writeUint32(centralHeader, 20, contentBytes.length);
+    writeUint32(centralHeader, 24, contentBytes.length);
+    writeUint16(centralHeader, 28, nameBytes.length);
+    writeUint16(centralHeader, 30, 0);
+    writeUint16(centralHeader, 32, 0);
+    writeUint16(centralHeader, 34, 0);
+    writeUint16(centralHeader, 36, 0);
+    writeUint32(centralHeader, 38, 0);
+    writeUint32(centralHeader, 42, offset);
+    centralHeader.set(nameBytes, 46);
+
+    centralChunks.push(centralHeader);
+    offset += localHeader.length + contentBytes.length;
+  });
+
+  const centralDirectory = concatUint8Arrays(centralChunks);
+  const endRecord = new Uint8Array(22);
+  writeUint32(endRecord, 0, 0x06054b50);
+  writeUint16(endRecord, 4, 0);
+  writeUint16(endRecord, 6, 0);
+  writeUint16(endRecord, 8, entries.length);
+  writeUint16(endRecord, 10, entries.length);
+  writeUint32(endRecord, 12, centralDirectory.length);
+  writeUint32(endRecord, 16, offset);
+  writeUint16(endRecord, 20, 0);
+
+  return new Blob([...localChunks, centralDirectory, endRecord], { type: 'application/zip' });
+}
+
+function findResultForSource(source, results) {
+  const sourcePath = normalizePathForMatch(source?.name);
+  const sourceBase = pathBaseName(sourcePath);
+
+  return results.find(result => {
+    const resultPath = normalizePathForMatch(result?.file_name);
+    return resultPath && sourcePath && resultPath === sourcePath;
+  }) || results.find(result => {
+    const resultPath = normalizePathForMatch(result?.file_name);
+    const resultBase = pathBaseName(resultPath);
+    return (
+      resultPath
+      && sourcePath
+      && (
+        resultPath.endsWith(`/${sourcePath}`)
+        || sourcePath.endsWith(`/${resultPath}`)
+        || resultBase === sourceBase
+      )
+    );
+  }) || null;
+}
+
+function buildTransformedProjectZipEntries(sourceFiles, results) {
+  const usedPaths = new Set();
+  const consumedResults = new Set();
+  const entries = sourceFiles.map((source, index) => {
+    const result = findResultForSource(source, results);
+    if (result) consumedResults.add(result);
+
+    return {
+      path: makeUniqueZipPath(source?.name || `file_${index + 1}`, usedPaths),
+      content: result ? String(result.refactored_code ?? source?.code ?? '') : String(source?.code ?? ''),
+    };
+  });
+
+  results.forEach((result, index) => {
+    if (consumedResults.has(result)) return;
+    entries.push({
+      path: makeUniqueZipPath(result?.file_name || `transformed_file_${index + 1}`, usedPaths),
+      content: String(result?.refactored_code ?? ''),
+    });
+  });
+
+  return entries.filter(entry => entry.path);
+}
+
+function slugifyFileName(value, fallback) {
+  return String(value || fallback || 'sctva_transformed_project')
+    .trim()
+    .replace(/[^A-Za-z0-9._-]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    || 'sctva_transformed_project';
+}
+
+function downloadBlob(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename;
+  link.click();
+  URL.revokeObjectURL(url);
+}
+
+function getBrowserStorage(name) {
+  if (typeof window === 'undefined') return null;
+
+  try {
+    return window[name] || null;
+  } catch {
+    return null;
+  }
+}
+
+function normalizeArtifactPath(value, fallback) {
+  const normalized = String(value || fallback || '')
+    .replace(/\\/g, '/')
+    .replace(/^\.\//, '')
+    .replace(/^\/+/, '')
+    .replace(/\/+/g, '/')
+    .trim();
+
+  return normalized || 'source_code';
+}
+
+function insertArtifactTreeNode(nodes, parts, file) {
+  const [head, ...tail] = parts;
+  if (!head) return;
+
+  if (!tail.length) {
+    nodes.push({
+      type: 'file',
+      name: head,
+      path: file.path,
+      language: file.language,
+      success: file.success,
+      rollback_occurred: file.rollback_occurred,
+    });
+    return;
+  }
+
+  let folder = nodes.find(node => node.type === 'folder' && node.name === head);
+  if (!folder) {
+    folder = {
+      type: 'folder',
+      name: head,
+      path: parts.slice(0, parts.length - tail.length).join('/'),
+      children: [],
+    };
+    nodes.push(folder);
+  }
+
+  insertArtifactTreeNode(folder.children, tail, file);
+}
+
+function buildArtifactTree(files) {
+  const tree = [];
+  files.forEach(file => {
+    insertArtifactTreeNode(tree, file.path.split('/').filter(Boolean), file);
+  });
+  return tree;
+}
+
+function buildStoredFileArtifact({ result, source, index }) {
+  const path = normalizeArtifactPath(result?.file_name || source?.name, `file_${index + 1}`);
+
+  return {
+    path,
+    file_name: path.split('/').pop() || path,
+    language: result?.language || source?.language || chooseLanguageFromName(path),
+    origin: source?.origin || 'sctva',
+    source_mode: source?.sourceMode || 'raw',
+    original_code: String(source?.code || ''),
+    transformed_code: String(result?.refactored_code || ''),
+    success: Boolean(result?.success),
+    rollback_occurred: Boolean(result?.rollback_occurred),
+    confidence_score: typeof result?.confidence_score === 'number' ? result.confidence_score : 0,
+    validation: result?.validation || {},
+    safety_report: result?.safety_report || {},
+  };
+}
+
+function buildSctvaStorageArtifact({
+  data,
+  results,
+  sourceFiles,
+  requestId,
+  cuqaWorkspaceMeta,
+}) {
+  const files = results.map((result, index) => {
+    const path = normalizeArtifactPath(result?.file_name, `file_${index + 1}`);
+    const source = sourceFiles.find(item => normalizeArtifactPath(item.name) === path)
+      || sourceFiles.find(item => pathBaseName(item.name) === pathBaseName(path))
+      || null;
+
+    return buildStoredFileArtifact({ result, source, index });
+  });
+
+  return {
+    schema_version: 1,
+    artifact_type: 'sctva_final_transformation',
+    saved_at: new Date().toISOString(),
+    request_id: data?.request_id || requestId || '',
+    folder_structure_source: cuqaWorkspaceMeta ? 'cuqa' : 'uploaded_source',
+    workspace: cuqaWorkspaceMeta || null,
+    tree: buildArtifactTree(files),
+    files,
+    safety_report: {
+      request_id: data?.request_id || requestId || '',
+      success: Boolean(data?.success),
+      rollback_occurred: Boolean(data?.rollback_occurred),
+      confidence_score: typeof data?.confidence_score === 'number' ? data.confidence_score : null,
+      file_reports: files.map(file => ({
+        path: file.path,
+        success: file.success,
+        rollback_occurred: file.rollback_occurred,
+        confidence_score: file.confidence_score,
+        report: file.safety_report,
+        validation: file.validation,
+      })),
+    },
+  };
+}
+
+function persistSctvaStorageArtifact(artifact) {
+  if (typeof window === 'undefined') {
+    return {
+      ok: false,
+      storage: 'unavailable',
+      key: SCTVA_ARTIFACT_STORAGE_KEY,
+      message: 'Browser storage is not available.',
+    };
+  }
+
+  const serialized = JSON.stringify(artifact);
+  const sizeBytes = storageByteSize(serialized);
+  const preferLocalStorage = sizeBytes > SCTVA_ARTIFACT_STORAGE_THRESHOLD_BYTES;
+  const sessionStore = getBrowserStorage('sessionStorage');
+  const localStore = getBrowserStorage('localStorage');
+  const preferred = preferLocalStorage
+    ? { name: 'localStorage', storage: localStore }
+    : { name: 'sessionStorage', storage: sessionStore };
+  const fallback = preferLocalStorage
+    ? { name: 'sessionStorage', storage: sessionStore }
+    : { name: 'localStorage', storage: localStore };
+
+  try {
+    if (!preferred.storage) throw new Error(`${preferred.name} is not available.`);
+    preferred.storage.setItem(SCTVA_ARTIFACT_STORAGE_KEY, serialized);
+    fallback.storage?.removeItem(SCTVA_ARTIFACT_STORAGE_KEY);
+    return {
+      ok: true,
+      storage: preferred.name,
+      key: SCTVA_ARTIFACT_STORAGE_KEY,
+      sizeBytes,
+      fileCount: artifact.files.length,
+    };
+  } catch (preferredError) {
+    try {
+      if (!fallback.storage) throw new Error(`${fallback.name} is not available.`);
+      fallback.storage.setItem(SCTVA_ARTIFACT_STORAGE_KEY, serialized);
+      preferred.storage?.removeItem(SCTVA_ARTIFACT_STORAGE_KEY);
+      return {
+        ok: true,
+        storage: fallback.name,
+        key: SCTVA_ARTIFACT_STORAGE_KEY,
+        sizeBytes,
+        fileCount: artifact.files.length,
+        fallback: true,
+      };
+    } catch (fallbackError) {
+      return {
+        ok: false,
+        storage: 'unavailable',
+        key: SCTVA_ARTIFACT_STORAGE_KEY,
+        sizeBytes,
+        fileCount: artifact.files.length,
+        message: fallbackError.message || preferredError.message || 'Browser storage quota exceeded.',
+      };
+    }
+  }
+}
+
 function buildRunSignature({
   requestId,
   language,
@@ -1181,6 +1711,7 @@ export default function SCTVAAgentPage() {
 
   const [diffRows, setDiffRows] = useState(Array.isArray(savedState.diffRows) ? savedState.diffRows : []);
   const [finalCode, setFinalCode] = useState(savedState.finalCode || '');
+  const [artifactStorageInfo, setArtifactStorageInfo] = useState(savedState.artifactStorageInfo || null);
 
   useEffect(() => {
     if (autoRdpPlanAttemptedRef.current) return;
@@ -1229,6 +1760,7 @@ export default function SCTVAAgentPage() {
       cuqaImportWarning,
       diffRows,
       finalCode,
+      artifactStorageInfo,
     });
   }, [
     requestId,
@@ -1262,6 +1794,7 @@ export default function SCTVAAgentPage() {
     cuqaImportWarning,
     diffRows,
     finalCode,
+    artifactStorageInfo,
   ]);
 
   const renderDefaultChecklist = useMemo(
@@ -1341,6 +1874,7 @@ export default function SCTVAAgentPage() {
       setSafetyMessages([]);
       setAdditions(0);
       setDeletions(0);
+      setArtifactStorageInfo(null);
       pushLog('INFO', `Loaded ${loaded.length} source file${loaded.length === 1 ? '' : 's'} from your computer.`);
     } catch (error) {
       pushLog('ERROR', error.message || 'Failed to load source files.');
@@ -1367,7 +1901,7 @@ export default function SCTVAAgentPage() {
       const paths = uniqueSourcePaths([...apiPaths, ...treePaths]);
 
       if (!paths.length) {
-        throw new Error('CUQA workspace is loaded, but no Java or Python source files were found.');
+        throw new Error('CUQA workspace is loaded, but no Java, Python, or C source files were found.');
       }
 
       const selectedPaths = paths.slice(0, CUQA_IMPORT_LIMIT);
@@ -1444,6 +1978,7 @@ export default function SCTVAAgentPage() {
       setSafetyMessages([]);
       setAdditions(0);
       setDeletions(0);
+      setArtifactStorageInfo(null);
 
       if (warning) {
         if (!silent) showStatus('CUQA workspace detected, but SCTVA could not prepare source code.', 'warn');
@@ -1682,6 +2217,24 @@ export default function SCTVAAgentPage() {
     const results = normalizeFileResults(data);
     setFileResults(results);
 
+    const artifact = buildSctvaStorageArtifact({
+      data,
+      results,
+      sourceFiles,
+      requestId,
+      cuqaWorkspaceMeta,
+    });
+    const storageInfo = persistSctvaStorageArtifact(artifact);
+    setArtifactStorageInfo(storageInfo);
+    if (storageInfo.ok) {
+      pushLog(
+        'INFO',
+        `Stored ${storageInfo.fileCount} final file${storageInfo.fileCount === 1 ? '' : 's'} and safety report in ${storageInfo.storage}.`
+      );
+    } else {
+      pushLog('WARN', `Could not store final artifacts in browser storage: ${storageInfo.message}`);
+    }
+
     const preferredName = activeFileName && results.some(item => item.file_name === activeFileName)
       ? activeFileName
       : results[0]?.file_name;
@@ -1792,6 +2345,7 @@ export default function SCTVAAgentPage() {
 
   function handleClear() {
     clearSctvaSessionState();
+    clearSctvaArtifactStorage();
     setRequestId('');
     if (sourceFileInputRef.current) sourceFileInputRef.current.value = '';
     if (planFileInputRef.current) planFileInputRef.current.value = '';
@@ -1825,6 +2379,7 @@ export default function SCTVAAgentPage() {
     setTimeline(DEFAULT_TIMELINE);
     setTimelineCount(`${PIPELINE_STAGES.length} Stages`);
     setSafetyMessages([]);
+    setArtifactStorageInfo(null);
     setLogs([]);
     pushLog('INFO', 'Workspace cleared.');
     setErrorMessage('');
@@ -1837,14 +2392,38 @@ export default function SCTVAAgentPage() {
     pushLog('INFO', 'Final output copied to clipboard.');
   }
 
+  function handleDownloadTransformedProject() {
+    if (!fileResults.length) {
+      const message = 'Run the transformation before downloading the transformed project ZIP.';
+      setErrorMessage(message);
+      showStatus(message, 'warn');
+      pushLog('WARN', message);
+      return;
+    }
+
+    const entries = buildTransformedProjectZipEntries(sourceFiles, fileResults);
+    if (!entries.length) {
+      const message = 'No transformed files are available to download.';
+      setErrorMessage(message);
+      showStatus(message, 'warn');
+      pushLog('WARN', message);
+      return;
+    }
+
+    const zipBlob = createStoredZipBlob(entries);
+    const projectName = slugifyFileName(
+      cuqaWorkspaceMeta?.repoName || requestId,
+      'sctva_transformed_project'
+    );
+    downloadBlob(zipBlob, `${projectName}_transformed_code.zip`);
+    setErrorMessage('');
+    showStatus(`Downloaded transformed project ZIP with ${entries.length} file${entries.length === 1 ? '' : 's'}.`, 'success');
+    pushLog('INFO', `Downloaded transformed project ZIP with ${entries.length} file${entries.length === 1 ? '' : 's'} preserving project paths.`);
+  }
+
   function handleDownloadResult() {
     const blob = new Blob([rawResponse || '{}'], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = 'sctva_result.json';
-    link.click();
-    URL.revokeObjectURL(url);
+    downloadBlob(blob, 'sctva_result.json');
     pushLog('INFO', 'Result JSON downloaded.');
   }
 
@@ -2039,6 +2618,15 @@ export default function SCTVAAgentPage() {
               <span></span>
               {isRunning ? 'Running...' : 'Run Transformation'}
             </button>
+            <button
+              className="sctva-btn sctva-btn-secondary"
+              type="button"
+              onClick={handleDownloadTransformedProject}
+              disabled={isRunning || !fileResults.length}
+            >
+              <span></span>
+              Download ZIP
+            </button>
           </div>
         </form>
       </section>
@@ -2193,6 +2781,16 @@ export default function SCTVAAgentPage() {
             <button className="sctva-mini-btn" type="button" style={{ marginLeft: 8 }} onClick={handleDownloadResult}>Download Result JSON</button>
           </div>
         </div>
+        {artifactStorageInfo ? (
+          <div className={`sctva-storage-status ${artifactStorageInfo.ok ? 'saved' : 'failed'}`}>
+            <strong>{artifactStorageInfo.ok ? 'Browser artifact saved' : 'Browser artifact not saved'}</strong>
+            <span>
+              {artifactStorageInfo.ok
+                ? `${artifactStorageInfo.fileCount} file${artifactStorageInfo.fileCount === 1 ? '' : 's'} + safety report in ${artifactStorageInfo.storage} (${artifactStorageInfo.key})`
+                : artifactStorageInfo.message}
+            </span>
+          </div>
+        ) : null}
         <pre className="sctva-json-output">{rawResponse}</pre>
       </section>
     </div>
