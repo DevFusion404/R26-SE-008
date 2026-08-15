@@ -109,6 +109,8 @@ export default function DIWOAgentPage() {
   const [workflowLanguage, setWorkflowLanguage] = useState("java");
   const [cuqaReport, setCuqaReport]           = useState(null);   // live Agent 1 report
   const [planData, setPlanData]               = useState(null);
+  // Only the steps the developer approved — this is what Stage 3 sends to SCTVA.
+  const [approvedPlan, setApprovedPlan]       = useState(null);
   const [transformationData, setTransformationData] = useState(null);
   const [metricsBeforeApi, setMetricsBeforeApi]     = useState(null);
   const [metricsAfterApi, setMetricsAfterApi]       = useState(null);
@@ -354,6 +356,10 @@ export default function DIWOAgentPage() {
         return;
       }
 
+      // Stage 3 executes exactly these steps against the Safe Transformation
+      // Agent, so keep them separate from the full plan the page rendered.
+      setApprovedPlan({ ...activePlan, steps: approvedSteps });
+
       // If some steps rejected, modify first
       if (approvedSteps.length < (activePlan.steps || []).length) {
         const modRes = await api.post(`/workflows/${workflowId}/plan-decision`, {
@@ -401,13 +407,44 @@ export default function DIWOAgentPage() {
 
   // ── Stage 2 → 3: Transformation complete ─────────────────────────────────
   /**
-   * FIX [F4]: Called by TransformationApprovalPage once its progress animation
-   * finishes. At this point transformationData already holds real backend data.
+   * FIX [F4]: Called by TransformationApprovalPage with the result it is
+   * showing — the Safe Transformation Agent's own output when SCTVA ran, the
+   * DIWO backend's simulated result when the developer fell back to it.
    */
-  const handleTransformComplete = () => {
-    addLog("Safe Code Transformation Agent completed. Confidence: 100%", "success");
+  const handleTransformComplete = (payload = {}) => {
+    const td = payload.refactored_code || (payload.files || []).length
+      ? payload
+      : (transformationData || {});
+    const sctva = td.sctva || null;
 
-    const td = transformationData || {};
+    if (sctva) {
+      const confidence = typeof sctva.confidence_score === "number"
+        ? `${(sctva.confidence_score * 100).toFixed(1)}%`
+        : "not applicable";
+      addLog(
+        `Safe Code Transformation Agent completed (${sctva.agent_url}): ` +
+        `${sctva.file_summary?.applied ?? 0}/${sctva.file_summary?.total ?? 0} file(s) changed, ` +
+        `${sctva.total_replacements ?? 0} replacement(s), confidence ${confidence}` +
+        (sctva.rollback_occurred ? " — rollback performed" : ""),
+        sctva.rollback_occurred ? "warn" : "success"
+      );
+    } else {
+      addLog("Transformation stage completed with the DIWO backend's simulated result.", "warn");
+    }
+
+    const acceptedFiles = td.accepted_files || [];
+    const rejectedFiles = td.rejected_files || [];
+    if (acceptedFiles.length || rejectedFiles.length) {
+      addLog(
+        `Developer reviewed the transformed files: ${acceptedFiles.length} accepted, ` +
+        `${rejectedFiles.length} rejected.`,
+        rejectedFiles.length ? "warn" : "success"
+      );
+      rejectedFiles.forEach((path) => addLog(`Rejected refactoring of ${path}`, "warn"));
+    }
+
+    setTransformationData(td);
+
     const before = metricsBeforeApi || {
       cyclomatic_complexity: 35, code_duplication_pct: 18,
       maintainability_index: 65, total_smells: CUQA_DATA.summary.total_code_smells,
@@ -425,30 +462,49 @@ export default function DIWOAgentPage() {
       improvements: { complexity_reduced_by: 11, duplication_reduced_by: 9, maintainability_gained: 17 },
     };
 
-    setWorkflow({
+    setWorkflow((prev) => ({
+      ...(prev || {}),
       metrics_before:  before,
       metrics_after:   after,
       refactored_code: td.refactored_code || "",
       diff_rows:       td.diff_rows || [],
       files:           td.files || [],
-    });
+      sctva,
+      // Stage 3's per-file verdict, kept apart from the Results stage's own
+      // accept list so the two decisions stay distinguishable in the audit.
+      transformation_accepted_files: acceptedFiles,
+      transformation_rejected_files: rejectedFiles,
+    }));
     setPhase(3);
   };
 
   // ── Stage 3: Accept → go to comparison ───────────────────────────────────
   const handleAccept = async (payload = {}) => {
     const acceptedEntries = Array.isArray(payload.acceptedFiles) ? payload.acceptedFiles : [];
-    const accepted_paths = acceptedEntries.map((f) => f.path || f.relative_path || f.file || f);
+    const written_paths = acceptedEntries.map((f) => f.path || f.relative_path || f.file || f);
+    // Files the developer rejected in Stage 3 were reverted to their original
+    // source before being written, so report them separately from files that
+    // were simply left out of this commit.
+    const reverted_paths = Array.isArray(payload.revertedFiles)
+      ? payload.revertedFiles
+      : (workflow?.transformation_rejected_files || []);
+    const accepted_paths = written_paths.filter((p) => !reverted_paths.includes(p));
     const allFiles = (workflow?.files && workflow.files.length > 0) ? workflow.files : (transformationData?.files || []);
     const all_paths = allFiles.map((f) => f.path || f.relative_path || f.file || f);
     const rejected_paths = all_paths.filter((p) => !accepted_paths.includes(p));
 
-    addLog("Developer accepted changes. Moving to comparison view.", "info");
+    addLog(
+      `Developer committed ${written_paths.length} file(s): ${accepted_paths.length} refactored, ` +
+      `${reverted_paths.length} reverted to original.`,
+      "info"
+    );
     if (workflowId) {
       try {
         await api.post(`/workflows/${workflowId}/transformation-decision`, {
           decision: "accept",
           accepted_files: accepted_paths,
+          rejected_files: reverted_paths,
+          written_files: written_paths,
           feedback: { reason: "Accepted from frontend", rating: 5 },
         });
       } catch (e) {
@@ -483,12 +539,17 @@ export default function DIWOAgentPage() {
         addLog(`Backend rollback failed: ${e.message}`, "warn");
       }
     }
+    // Drop the approved steps so the next approval re-runs SCTVA from scratch.
+    setApprovedPlan(null);
+    setTransformationData(null);
     setPhase(1);
   };
 
   // ── Restart ───────────────────────────────────────────────────────────────
   const handleRestart = () => {
     addLog("New refactoring session initiated.", "info");
+    setApprovedPlan(null);
+    setTransformationData(null);
     setPhase(0);
   };
 
@@ -546,6 +607,8 @@ export default function DIWOAgentPage() {
           )}
           {phase === 2 && (
             <TransformationApprovalPage
+              plan={approvedPlan || planData}
+              language={workflowLanguage}
               transformationData={transformationData}
               onComplete={handleTransformComplete}
             />
@@ -558,6 +621,7 @@ export default function DIWOAgentPage() {
               refactoredCode={workflow?.refactored_code}
               diffRows={workflow?.diff_rows}
               files={workflow?.files}
+              sctva={workflow?.sctva}
             />
           )}
           {phase === 4 && (

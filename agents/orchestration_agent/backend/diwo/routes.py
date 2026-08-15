@@ -759,7 +759,18 @@ def plan_decision(wf_id):
 @diwo_bp.route("/workflows/<wf_id>/transformation-decision", methods=["POST"])
 def transformation_decision(wf_id):
     """
-    Body: { decision: 'accept'|'rollback', feedback?: {...} }
+    Body: {
+      decision: 'accept'|'rollback',
+      accepted_files?: [path],   # kept as refactored
+      rejected_files?: [path],   # reverted to their original source
+      written_files?:  [path],   # everything actually written out
+      feedback?: {...}
+    }
+
+    The per-file lists come from the developer's Accept/Reject verdict in the
+    transformation stage. A rejected file is written back as its original
+    source, so recording the split is what makes the audit trail say which
+    files were actually refactored and which were reverted.
 
     FIX [13,16]: Stage guard + decision enum validation.
     """
@@ -795,12 +806,43 @@ def transformation_decision(wf_id):
         })
 
     # Accept → move to comparison
-    update_workflow(wf_id, status="comparison")
+    def _paths(key):
+        value = data.get(key) or []
+        return [str(p) for p in value if isinstance(p, (str, int))] if isinstance(value, list) else []
+
+    accepted_files = _paths("accepted_files")
+    rejected_files = _paths("rejected_files")
+    written_files  = _paths("written_files") or accepted_files
+
+    tr = _parse_json_field(wf, "transformation_result_json") or {}
+    tr["file_decisions"] = {
+        "accepted": accepted_files,
+        "rejected_reverted": rejected_files,
+        "written": written_files,
+    }
+
+    update_workflow(wf_id,
+                    status="comparison",
+                    transformation_result_json=json.dumps(tr))
+
     log_event(wf_id, "comparison", "transformation_accepted",
-              {"rating": feedback.get("rating")})
+              {"rating": feedback.get("rating"),
+               "accepted_files": accepted_files,
+               "rejected_files": rejected_files,
+               "written_files": written_files})
     save_feedback(wf_id, "comparison", "transformation_accepted",
                   reason=feedback.get("reason"), rating=feedback.get("rating"),
                   accepted=True)
+
+    # One feedback row per reverted file: the Feedback Manager trains on
+    # rejections, and a file-level reject is a stronger signal than the
+    # session-level accept above.
+    for path in rejected_files:
+        log_event(wf_id, "comparison", "refactoring_reverted", {"file": path})
+        save_feedback(wf_id, "comparison", "refactoring_reverted",
+                      reason=f"Developer rejected the refactoring of {path}; "
+                             "file reverted to its original source.",
+                      accepted=False)
 
     metrics_before = _parse_json_field(wf, "metrics_before_json")
     metrics_after  = _parse_json_field(wf, "metrics_after_json")
@@ -809,6 +851,9 @@ def transformation_decision(wf_id):
         "status":          "comparison",
         "metrics_before":  metrics_before,
         "metrics_after":   metrics_after,
+        "accepted_files":  accepted_files,
+        "rejected_files":  rejected_files,
+        "written_files":   written_files,
         "message":         "Changes accepted. View comparison report.",
     })
 
