@@ -452,6 +452,7 @@ import multiprocessing as mp
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import traceback
 import uuid
@@ -551,7 +552,7 @@ def stdout_invariants(stdout: str) -> Dict[str, Any]:
 
 
 def _runtime_temp_root() -> Path:
-    root = Path(__file__).resolve().parents[2] / ".sctva_runtime"
+    root = Path(tempfile.gettempdir()) / "sctva_runtime"
     root.mkdir(parents=True, exist_ok=True)
     return root
 
