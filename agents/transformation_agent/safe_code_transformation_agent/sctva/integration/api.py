@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import tempfile
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
@@ -9,6 +11,7 @@ from typing import Any
 
 from flask import Blueprint, jsonify, request
 
+from ..constants import SUPPORTED_ACTIONS
 from ..agent import ContractValidationError, SafeCodeTransformationValidationAgent
 from .planner_adapter import PlannerAdapter, PlannerAdapterError
 
@@ -37,6 +40,146 @@ def _remove_legacy_result_artifacts() -> None:
         pass
 
 
+def _safe_relative_source_path(value: Any) -> str:
+    text = str(value or "").replace("\\", "/").strip()
+    if not text or Path(text).is_absolute():
+        return ""
+    parts = [part for part in text.split("/") if part and part != "."]
+    if not parts or any(part == ".." for part in parts):
+        return ""
+    return "/".join(parts)
+
+
+def _language_from_source_path(file_path: str) -> str:
+    suffix = Path(file_path).suffix.lower()
+    if suffix == ".py":
+        return "python"
+    if suffix in {".c", ".h"}:
+        return "c"
+    return "java"
+
+
+def _candidate_temp_roots() -> list[Path]:
+    roots = [
+        Path(tempfile.gettempdir()),
+        *(Path(value) for value in (os.getenv("TEMP"), os.getenv("TMP")) if value),
+    ]
+
+    local_app_data = os.getenv("LOCALAPPDATA")
+    if local_app_data:
+        roots.append(Path(local_app_data) / "Temp")
+
+    user_profile = os.getenv("USERPROFILE")
+    if user_profile:
+        roots.append(Path(user_profile) / "AppData" / "Local" / "Temp")
+
+    unique: dict[str, Path] = {}
+    for root in roots:
+        try:
+            unique[str(root.resolve())] = root
+        except OSError:
+            continue
+    return list(unique.values())
+
+
+def _cuqa_workspace_candidates() -> list[Path]:
+    roots: list[Path] = []
+
+    temp_entries: list[Path] = []
+    for temp_root in _candidate_temp_roots():
+        try:
+            temp_entries.extend(temp_root.iterdir())
+        except OSError:
+            continue
+
+    for base in temp_entries:
+        try:
+            if not base.is_dir() or not base.name.startswith(("cuqa_", "cuqa_gh_")):
+                continue
+        except OSError:
+            continue
+        extracted = base / "extracted"
+        candidates = [base]
+        try:
+            extracted_is_dir = extracted.is_dir()
+        except OSError:
+            extracted_is_dir = False
+        if extracted_is_dir:
+            candidates.append(extracted)
+            try:
+                candidates.extend(child for child in extracted.iterdir() if child.is_dir())
+            except OSError:
+                pass
+        roots.extend(candidates)
+
+    def mtime(path: Path) -> float:
+        try:
+            return path.stat().st_mtime
+        except OSError:
+            return 0.0
+
+    unique_roots: dict[str, Path] = {}
+    for root in roots:
+        try:
+            unique_roots[str(root.resolve())] = root
+        except OSError:
+            continue
+
+    return sorted(unique_roots.values(), key=mtime, reverse=True)
+
+
+def _find_cuqa_workspace_file_by_suffix(root: Path, safe_path: str) -> Path | None:
+    basename = safe_path.rsplit("/", 1)[-1]
+    suffix = f"/{safe_path.lower()}"
+
+    try:
+        candidates = root.rglob(basename)
+    except OSError:
+        return None
+
+    for candidate in candidates:
+        try:
+            if not candidate.is_file():
+                continue
+            resolved_root = root.resolve()
+            resolved_candidate = candidate.resolve()
+        except OSError:
+            continue
+        if resolved_root not in resolved_candidate.parents and resolved_candidate != resolved_root:
+            continue
+        normalized_candidate = str(resolved_candidate).replace("\\", "/").lower()
+        if normalized_candidate.endswith(suffix):
+            return resolved_candidate
+
+    return None
+
+
+def _find_cuqa_workspace_file(relative_path: str) -> Path | None:
+    safe_path = _safe_relative_source_path(relative_path)
+    if not safe_path:
+        return None
+
+    safe_parts = safe_path.split("/")
+    for root in _cuqa_workspace_candidates():
+        candidate = root.joinpath(*safe_parts)
+        try:
+            resolved_root = root.resolve()
+            resolved_candidate = candidate.resolve()
+        except OSError:
+            continue
+        if resolved_root not in resolved_candidate.parents and resolved_candidate != resolved_root:
+            continue
+        if resolved_candidate.is_file():
+            return resolved_candidate
+
+    for root in _cuqa_workspace_candidates():
+        found = _find_cuqa_workspace_file_by_suffix(root, safe_path)
+        if found is not None:
+            return found
+
+    return None
+
+
 def create_sctva_blueprint() -> Blueprint:
     """Create and return a Blueprint with SCTVA endpoints."""
     bp = Blueprint("sctva_api", __name__)
@@ -45,7 +188,80 @@ def create_sctva_blueprint() -> Blueprint:
 
     @bp.get("/sctva/health")
     def sctva_health() -> Any:
-        return jsonify({"status": "ok", "service": "sctva"}), 200
+        return jsonify(
+            {
+                "status": "ok",
+                "service": "sctva",
+                "implementation": "sctva-real-transformers",
+                "execution_contract_version": 2,
+                "supported_actions": sorted(SUPPORTED_ACTIONS),
+                "supported_capabilities": [
+                    "line_based_remove_dead_code",
+                    "source_range_extract_method",
+                    "c_safe_unsafe_function_replacement",
+                    "c_global_variable_encapsulation",
+                    "cuqa_temp_workspace_source_import",
+                    "sctva_internal_refactoring_detector",
+                    "multiline_statement_normalization",
+                ],
+            }
+        ), 200
+
+    @bp.post("/sctva/cuqa-sources")
+    def sctva_cuqa_sources() -> Any:
+        try:
+            payload = request.get_json(silent=True)
+            if not isinstance(payload, dict):
+                return jsonify({"error": "Invalid JSON payload."}), 400
+
+            raw_paths = payload.get("file_paths") or payload.get("files") or []
+            if not isinstance(raw_paths, list):
+                return jsonify({"error": "Field 'file_paths' must be a list."}), 400
+
+            files = []
+            missing = []
+            max_file_bytes = 5 * 1024 * 1024
+            for raw_path in raw_paths[:1000]:
+                safe_path = _safe_relative_source_path(raw_path)
+                if not safe_path:
+                    missing.append(str(raw_path or ""))
+                    continue
+
+                source_path = _find_cuqa_workspace_file(safe_path)
+                if source_path is None:
+                    missing.append(safe_path)
+                    continue
+
+                try:
+                    if source_path.stat().st_size > max_file_bytes:
+                        missing.append(safe_path)
+                        continue
+                    source_code = source_path.read_text(encoding="utf-8", errors="replace")
+                except OSError:
+                    missing.append(safe_path)
+                    continue
+
+                files.append(
+                    {
+                        "file_name": safe_path,
+                        "source_code": source_code,
+                        "language": _language_from_source_path(safe_path),
+                        "source_mode": "raw",
+                        "origin": "cuqa_temp_workspace",
+                    }
+                )
+
+            return jsonify(
+                {
+                    "files": files,
+                    "missing": missing,
+                    "imported": len(files),
+                    "total": len(raw_paths),
+                    "source": "cuqa_temp_workspace",
+                }
+            ), 200
+        except Exception as exc:
+            return jsonify({"error": f"Unable to import CUQA workspace sources: {exc}"}), 500
 
     @bp.post("/sctva/execute")
     def sctva_execute() -> Any:

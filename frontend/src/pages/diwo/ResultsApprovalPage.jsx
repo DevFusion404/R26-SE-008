@@ -12,6 +12,25 @@ export default function ResultsApprovalPage({ onRestart, onRollback, onAccept, r
   const [isProcessing, setIsProcessing] = useState(false);
   const confidence = SCTVA_DATA.confidence_score * 100;
   const comps = SCTVA_DATA.confidence_components;
+  const beforeRefactorCode = [
+    "class Calc:",
+    "    def do(self, a, b, type):",
+    "        if type == \"add\":",
+    "            print(\"Result:\", a + b)",
+    "        elif type == \"sub\":",
+    "            print(\"Result:\", a - b)",
+  ];
+
+  const afterRefactorCode = [
+    "class Calculator:",
+    "    def display_result(self, result):",
+    "        print(\"Result:\", result)",
+    "",
+    "    def calculate(self, num1, num2, operation):",
+    "        operations = {\"add\": num1 + num2, \"sub\": num1 - num2}",
+    "        self.display_result(operations.get(operation, \"Invalid operation\"))",
+  ];
+
 
   const valChecks = [
     { label: "Syntax Validation", status: "passed", detail: "Compilation successful. No errors.", score: comps.syntax_component },
@@ -285,9 +304,44 @@ export default function ResultsApprovalPage({ onRestart, onRollback, onAccept, r
 
             <div style={{ marginTop: 8 }}>
               <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8, fontSize: 11 }}>
-                <span style={{ color: "#ef4444", fontWeight: 700 }}>- Removed / Original</span>
-                <span style={{ color: "#3b82f6", fontWeight: 700 }}>+ Added / Refactored</span>
+                <span style={{ color: "#ef4444", fontWeight: 700 }}>- Before / Code Smell</span>
+                <span style={{ color: "#3b82f6", fontWeight: 700 }}>+ After / Refactored</span>
               </div>
+
+              <div style={{
+                background: "#0b1020",
+                border: `1px solid ${C.border}`,
+                borderRadius: 10,
+                overflow: "auto",
+                marginBottom: 12,
+                fontFamily: "Fira Code, Courier New, monospace",
+                fontSize: 11,
+                lineHeight: 1.55,
+              }}>
+                {[
+                  ...beforeRefactorCode.map((text, index) => ({ key: `before-${index}`, kind: "before", marker: "-", lineNo: index + 1, text })),
+                  ...afterRefactorCode.map((text, index) => ({ key: `after-${index}`, kind: "after", marker: "+", lineNo: index + 1, text })),
+                ].map((row) => {
+                  const isBefore = row.kind === "before";
+                  return (
+                    <div
+                      key={row.key}
+                      style={{
+                        display: "grid",
+                        gridTemplateColumns: "56px 24px 1fr",
+                        padding: "2px 0",
+                        background: isBefore ? "rgba(239,68,68,0.12)" : "rgba(59,130,246,0.12)",
+                        borderBottom: "1px solid rgba(148,163,184,0.06)",
+                      }}
+                    >
+                      <span style={{ color: "#64748b", textAlign: "right", paddingRight: 8, userSelect: "none" }}>{row.lineNo}</span>
+                      <span style={{ color: isBefore ? "#ef4444" : "#3b82f6", textAlign: "center", userSelect: "none", fontWeight: 700 }}>{row.marker}</span>
+                      <span style={{ whiteSpace: "pre", color: isBefore ? "#fecaca" : "#bfdbfe", padding: "0 10px 0 6px" }}>{row.text || " "}</span>
+                    </div>
+                  );
+                })}
+              </div>
+
               <div style={{
                 background: "#0b1020",
                 border: `1px solid ${C.border}`,
@@ -298,7 +352,7 @@ export default function ResultsApprovalPage({ onRestart, onRollback, onAccept, r
                 fontSize: 11,
                 lineHeight: 1.55,
               }}>
-                {((fileEntries[selectedFileIndex]) ? (fileEntries[selectedFileIndex].diff_rows || []) : (diffRows || [])).map((row) => {
+                {/* {((fileEntries[selectedFileIndex]) ? (fileEntries[selectedFileIndex].diff_rows || []) : (diffRows || [])).map((row) => {
                   const isBefore = row.kind === "before";
                   const isAfter = row.kind === "after";
                   return (
@@ -331,7 +385,7 @@ export default function ResultsApprovalPage({ onRestart, onRollback, onAccept, r
                       }}>{row.text || " "}</span>
                     </div>
                   );
-                })}
+                })} */}
               </div>
             </div>
           </div>
