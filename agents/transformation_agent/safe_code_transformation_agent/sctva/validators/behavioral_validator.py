@@ -29,7 +29,7 @@ from ..utils.metrics import normalized_count_similarity
 
 
 def _runtime_temp_root() -> Path:
-    root = Path(__file__).resolve().parents[2] / ".sctva_runtime"
+    root = Path(tempfile.gettempdir()) / "sctva_runtime"
     root.mkdir(parents=True, exist_ok=True)
     return root
 

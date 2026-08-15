@@ -4,7 +4,13 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-from ..constants import ACTION_FAULT_INJECTION, ACTION_NOOP
+from ..constants import (
+    ACTION_ENCAPSULATE_VARIABLE,
+    ACTION_EXTRACT_METHOD,
+    ACTION_FAULT_INJECTION,
+    ACTION_NOOP,
+    ACTION_REPLACE_UNSAFE_FUNCTION,
+)
 
 
 class PlannerAdapterError(ValueError):
@@ -247,101 +253,60 @@ class PlannerAdapter:
             }
 
         elif ref_key == "extract method":
-            old_name = target.get("method") or params.get("method")
+            target_method = target.get("method") or params.get("method")
 
-            if not old_name:
+            if not target_method:
                 raise PlannerAdapterError(
                     "extract method mapping requires target.method or parameters.method"
                 )
 
-            new_name = params.get("new_method_name") or f"{old_name}Core"
+            start_line, end_line = self._source_range_from_step(
+                step,
+                params=params,
+                target=target,
+            )
+            if start_line is None or end_line is None:
+                raise PlannerAdapterError(
+                    "extract method mapping requires executable source range "
+                    "(start_line/end_line or source_lines/lines)"
+                )
+
+            new_name = params.get("new_method_name") or params.get("extracted_method_name") or f"{target_method}Core"
 
             action = {
-                "action_type": "rename_symbol",
+                "action_type": ACTION_EXTRACT_METHOD,
                 "parameters": {
-                    "old_name": str(old_name),
-                    "new_name": self._safe_identifier(str(new_name)),
+                    "method": str(target_method),
+                    "new_method_name": self._safe_identifier(str(new_name)),
+                    "start_line": start_line,
+                    "end_line": end_line,
+                    "target_class": target.get("class") or params.get("source_class"),
                 },
             }
 
         elif ref_key == "extract class":
-            old_name = params.get("source_class") or target.get("class")
-
-            if not old_name:
-                raise PlannerAdapterError(
-                    "extract class mapping requires source_class/target.class"
-                )
-
-            new_name = params.get("new_class_name") or f"{old_name}Extracted"
-
-            action = {
-                "action_type": "rename_symbol",
-                "parameters": {
-                    "old_name": str(old_name),
-                    "new_name": self._safe_identifier(str(new_name)),
-                },
-            }
+            raise PlannerAdapterError(
+                "extract class requires coordinated multi-file class creation; "
+                "SCTVA will not simulate it with a rename"
+            )
 
         elif ref_key == "move method":
-            old_name = params.get("method") or target.get("method")
-
-            if not old_name:
-                raise PlannerAdapterError("move method mapping requires method name")
-
-            destination = params.get("destination_class")
-
-            if destination and str(destination).strip() != "<inferred_target_class>":
-                suffix = self._to_pascal_case(str(destination))
-            else:
-                suffix = "Moved"
-
-            new_name = f"{old_name}In{suffix}"
-
-            action = {
-                "action_type": "rename_symbol",
-                "parameters": {
-                    "old_name": str(old_name),
-                    "new_name": self._safe_identifier(new_name),
-                },
-            }
+            raise PlannerAdapterError(
+                "move method requires coordinated edits to source and destination classes; "
+                "SCTVA will not simulate it with a rename"
+            )
 
         elif ref_key == "replace conditional with polymorphism":
-            old_name = target.get("method") or params.get("method")
-
-            if not old_name:
-                raise PlannerAdapterError(
-                    "replace conditional with polymorphism requires a method target"
-                )
-
-            new_name = f"{old_name}Polymorphic"
-
-            action = {
-                "action_type": "rename_symbol",
-                "parameters": {
-                    "old_name": str(old_name),
-                    "new_name": self._safe_identifier(new_name),
-                },
-            }
+            raise PlannerAdapterError(
+                "replace conditional with polymorphism requires new strategy/subclass definitions; "
+                "SCTVA will not simulate it with a rename"
+            )
 
         elif ref_key == "introduce parameter object":
-            old_name = params.get("method") or target.get("method")
-
-            if not old_name:
-                raise PlannerAdapterError(
-                    "introduce parameter object mapping requires a method"
-                )
-
-            po_name = params.get("parameter_object_name")
-            suffix = self._to_pascal_case(str(po_name)) if po_name else "ParamObject"
-            new_name = f"{old_name}With{suffix}"
-
-            action = {
-                "action_type": "rename_symbol",
-                "parameters": {
-                    "old_name": str(old_name),
-                    "new_name": self._safe_identifier(new_name),
-                },
-            }
+            raise PlannerAdapterError(
+                "introduce parameter object requires a new parameter type and call-site updates; "
+                "SCTVA will not simulate it with a rename"
+            )
 
         elif ref_key in {
             "hide delegate",
@@ -351,23 +316,10 @@ class PlannerAdapter:
             "pull up method",
             "replace parameter with method call",
         }:
-            old_name = target.get("method") or target.get("class")
-
-            if not old_name:
-                raise PlannerAdapterError(
-                    f"{refactoring} mapping requires a method or class target"
-                )
-
-            suffix = self._to_pascal_case(ref_key.replace(" ", "_"))
-            new_name = f"{old_name}{suffix}"
-
-            action = {
-                "action_type": "rename_symbol",
-                "parameters": {
-                    "old_name": str(old_name),
-                    "new_name": self._safe_identifier(new_name),
-                },
-            }
+            raise PlannerAdapterError(
+                f"{refactoring} requires semantic multi-location edits; "
+                "SCTVA will not simulate it with a rename"
+            )
 
         elif ref_key in {
             "extract constant",
@@ -412,16 +364,55 @@ class PlannerAdapter:
 
         elif ref_key == "remove dead code":
             method = params.get("method") or target.get("method")
-            if not method:
+            source_line = self._source_line_from_step(step, params=params, target=target)
+            if not method and source_line is None:
                 raise PlannerAdapterError(
-                    "remove dead code mapping requires parameters.method or target.method"
+                    "remove dead code mapping requires parameters.method, target.method, or source line"
                 )
 
             action = {
                 "action_type": "remove_dead_code",
                 "parameters": {
-                    "method": str(method),
+                    "method": str(method or ""),
                     "class_name": target.get("class") or params.get("source_class"),
+                    "source_line": source_line,
+                },
+            }
+
+        elif ref_key == "replace unsafe function":
+            unsafe_function = params.get("unsafe_function") or target.get("method")
+            safe_alternative = params.get("safe_alternative")
+            if not unsafe_function or not safe_alternative:
+                raise PlannerAdapterError(
+                    "replace unsafe function mapping requires unsafe_function and safe_alternative"
+                )
+
+            action = {
+                "action_type": ACTION_REPLACE_UNSAFE_FUNCTION,
+                "parameters": {
+                    "unsafe_function": str(unsafe_function),
+                    "safe_alternative": str(safe_alternative),
+                    "source_line": self._source_line_from_step(step, params=params, target=target),
+                },
+            }
+
+        elif ref_key == "encapsulate variable":
+            variable_name = params.get("variable_name") or target.get("variable")
+            if not variable_name:
+                raise PlannerAdapterError(
+                    "encapsulate variable mapping requires parameters.variable_name"
+                )
+
+            action = {
+                "action_type": ACTION_ENCAPSULATE_VARIABLE,
+                "parameters": {
+                    "variable_name": str(variable_name),
+                    "getter_name": self._safe_identifier(
+                        str(params.get("getter_name") or f"get_{variable_name}")
+                    ),
+                    "setter_name": self._safe_identifier(
+                        str(params.get("setter_name") or f"set_{variable_name}")
+                    ),
                 },
             }
 
@@ -557,6 +548,53 @@ class PlannerAdapter:
                     return int(first.strip())
 
         return None
+
+    @staticmethod
+    def _source_range_from_step(
+        step: Dict[str, Any],
+        *,
+        params: Dict[str, Any],
+        target: Dict[str, Any],
+    ) -> tuple[Optional[int], Optional[int]]:
+        location = step.get("location") or {}
+        if not isinstance(location, dict):
+            location = {}
+
+        start_keys = ("start_line", "startLine", "source_line", "sourceLine", "line")
+        end_keys = ("end_line", "endLine", "target_line", "targetLine")
+
+        def as_int(value: Any) -> Optional[int]:
+            if isinstance(value, (int, float)):
+                return int(value)
+            if isinstance(value, str) and value.strip().isdigit():
+                return int(value.strip())
+            return None
+
+        for source in (params, target, location, step):
+            if not isinstance(source, dict):
+                continue
+
+            start = next((as_int(source.get(key)) for key in start_keys if as_int(source.get(key)) is not None), None)
+            end = next((as_int(source.get(key)) for key in end_keys if as_int(source.get(key)) is not None), None)
+            if start is not None and end is not None:
+                return (min(start, end), max(start, end))
+
+            for key in ("source_lines", "sourceLines", "lines", "line_range", "lineRange"):
+                values = source.get(key)
+                if isinstance(values, list) and values:
+                    parsed = [as_int(value) for value in values]
+                    parsed = [value for value in parsed if value is not None]
+                    if len(parsed) >= 2:
+                        return (min(parsed), max(parsed))
+                    if len(parsed) == 1:
+                        return (parsed[0], parsed[0])
+                if isinstance(values, dict):
+                    nested_start = as_int(values.get("start") or values.get("from"))
+                    nested_end = as_int(values.get("end") or values.get("to"))
+                    if nested_start is not None and nested_end is not None:
+                        return (min(nested_start, nested_end), max(nested_start, nested_end))
+
+        return (None, None)
 
     @staticmethod
     def _safe_identifier(name: str) -> str:

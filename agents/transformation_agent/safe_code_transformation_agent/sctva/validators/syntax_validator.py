@@ -63,7 +63,7 @@ class SyntaxValidator:
 
             elif language == "java":
                 if passed:
-                    passed, message = self._validate_java_heuristics(source_code, details)
+                    passed, message = self._validate_java(source_code, details)
 
                 if passed and require_compilation:
                     details["checks"].append("javac_compile")
@@ -77,7 +77,7 @@ class SyntaxValidator:
 
             elif language == "c":
                 if passed:
-                    passed, message = self._validate_c_heuristics(source_code, details)
+                    passed, message = self._validate_c(source_code, details)
 
                 if passed and require_compilation:
                     details["checks"].append("c_compile_only")
@@ -134,99 +134,94 @@ class SyntaxValidator:
 
         return True, "Python syntax validation passed."
 
-    def _validate_java_heuristics(self, source: str, details: dict) -> tuple[bool, str]:
+    def _validate_java(self, source: str, details: dict) -> tuple[bool, str]:
         details["checks"].extend(
             [
-                "java_lexical_scan",
-                "java_comment_string_aware_brackets",
+                "java_advanced_lexical_scan",
+                "java_comment_string_aware_delimiters",
                 "java_type_declaration",
                 "java_declaration_order",
-                "java_statement_terminators",
+                "java_multiline_statement_terminators",
             ]
         )
 
         scan_ok, scan_msg = self._scan_delimiters(source, language="java")
         if not scan_ok:
-            return self._syntax_failure(details, "Java syntax heuristic failed", scan_msg)
+            return self._syntax_failure(details, "Java", scan_msg)
 
         clean = self._strip_comments_and_literals(source)
         if not self._JAVA_TYPE_RE.search(clean):
-            return self._syntax_failure(details, "Java syntax heuristic failed", "no class/interface/enum/record declaration found.")
+            return self._syntax_failure(details, "Java", "no class/interface/enum/record declaration found.")
 
         order_ok, order_msg = self._check_java_declaration_order(clean)
         if not order_ok:
-            return self._syntax_failure(details, "Java syntax heuristic failed", order_msg)
+            return self._syntax_failure(details, "Java", order_msg)
+
+        nested_method = self._find_java_nested_method_declaration(clean)
+        if nested_method:
+            return self._syntax_failure(details, "Java", nested_method)
 
         malformed = self._find_malformed_assignment(clean)
         if malformed:
-            return self._syntax_failure(details, "Java syntax heuristic failed", malformed)
+            return self._syntax_failure(details, "Java", malformed)
 
         terminator_issue = self._find_java_terminator_issue(clean)
         if terminator_issue:
-            return self._syntax_failure(details, "Java syntax heuristic failed", terminator_issue)
+            return self._syntax_failure(details, "Java", terminator_issue)
 
         return True, "Java syntax validation passed."
 
-    def _validate_c_heuristics(self, source: str, details: dict) -> tuple[bool, str]:
+    def _validate_c(self, source: str, details: dict) -> tuple[bool, str]:
         details["checks"].extend(
             [
-                "c_lexical_scan",
-                "c_comment_string_aware_brackets",
-                "c_function_definition",
+                "c_advanced_lexical_scan",
+                "c_comment_string_aware_delimiters",
+                "c_translation_unit_shape",
                 "c_preprocessor_directives",
-                "c_statement_terminators",
+                "c_multiline_statement_terminators",
             ]
         )
 
         scan_ok, scan_msg = self._scan_delimiters(source, language="c")
         if not scan_ok:
-            return self._syntax_failure(details, "C syntax heuristic failed", scan_msg)
+            return self._syntax_failure(details, "C", scan_msg)
 
         clean = self._strip_comments_and_literals(source)
         clean_without_comments = strip_c_comments(source)
-        if not self._C_FUNCTION_RE.search(clean_without_comments):
-            return self._syntax_failure(details, "C syntax heuristic failed", "no function definition found.")
+        has_function_definition = bool(self._C_FUNCTION_RE.search(clean_without_comments))
+        if not has_function_definition and not self._looks_like_c_header_or_declaration_unit(clean_without_comments):
+            return self._syntax_failure(
+                details,
+                "C",
+                "no function definition or header/declaration constructs found.",
+            )
+        if not has_function_definition:
+            details["warnings"].append(
+                "No C function body found; validated as a header/declaration unit."
+            )
 
-        include_issue = self._find_c_preprocessor_issue(clean)
+        include_issue = self._find_c_preprocessor_issue(clean_without_comments)
         if include_issue:
-            return self._syntax_failure(details, "C syntax heuristic failed", include_issue)
+            return self._syntax_failure(details, "C", include_issue)
 
         malformed = self._find_malformed_assignment(clean)
         if malformed:
-            return self._syntax_failure(details, "C syntax heuristic failed", malformed)
+            return self._syntax_failure(details, "C", malformed)
 
         terminator_issue = self._find_c_terminator_issue(clean)
         if terminator_issue:
-            return self._syntax_failure(details, "C syntax heuristic failed", terminator_issue)
+            return self._syntax_failure(details, "C", terminator_issue)
 
-        if ";" not in clean_without_comments:
-            return self._syntax_failure(details, "C syntax heuristic failed", "no semicolon found.")
+        if ";" not in clean_without_comments and not self._is_preprocessor_only_unit(clean_without_comments):
+            return self._syntax_failure(details, "C", "no semicolon found.")
 
         return True, "C syntax validation passed."
 
     @staticmethod
-    def _syntax_failure(details: dict, prefix: str, reason: str) -> tuple[bool, str]:
-        message = f"{prefix}: {reason}"
+    def _syntax_failure(details: dict, language: str, reason: str) -> tuple[bool, str]:
+        message = f"{language} syntax validation failed: {reason}"
         details["diagnostics"].append({"severity": "error", "message": message})
         return False, message
-
-    @staticmethod
-    def _check_brackets(source: str) -> tuple[bool, str]:
-        stack = []
-        pairs = {")": "(", "]": "[", "}": "{"}
-        open_set = set(pairs.values())
-
-        for idx, char in enumerate(source):
-            if char in open_set:
-                stack.append((char, idx))
-            elif char in pairs:
-                if not stack or stack[-1][0] != pairs[char]:
-                    return False, f"unmatched '{char}' at index {idx}"
-                stack.pop()
-
-        if stack:
-            return False, f"unclosed bracket '{stack[-1][0]}'"
-        return True, "balanced"
 
     @classmethod
     def _scan_delimiters(cls, source: str, *, language: str) -> tuple[bool, str]:
@@ -415,19 +410,86 @@ class SyntaxValidator:
         line = clean_source[: match.start()].count("\n") + 1
         return f"malformed assignment or declaration near line {line}."
 
-    @staticmethod
-    def _find_java_terminator_issue(clean_source: str) -> str:
+    @classmethod
+    def _find_java_terminator_issue(cls, clean_source: str) -> str:
         statement_re = re.compile(r"^\s*(?:return|throw|break|continue)\b")
-        for line_no, raw_line in enumerate(clean_source.splitlines(), start=1):
+        delimiter_depth = 0
+        pending_line: int | None = None
+        pending_kind = ""
+        lines = clean_source.splitlines()
+        for index, raw_line in enumerate(lines):
+            line_no = index + 1
             line = raw_line.strip()
             if not line or line.startswith("@") or line.startswith("*"):
                 continue
+            previous_depth = delimiter_depth
+            delimiter_depth = max(0, delimiter_depth + cls._paren_bracket_delta(line))
+            is_complete = line.endswith((";", "{", "}", ":", ","))
+            is_continued = (
+                previous_depth > 0
+                or delimiter_depth > 0
+                or cls._continues_expression(line)
+                or cls._next_line_starts_expression_continuation(lines, index)
+            )
+            is_statement = bool(statement_re.match(line))
+            is_assignment = cls._has_assignment_operator(line) and not re.search(r"\b(?:if|while|for|switch|catch)\s*\(", line)
+
+            if pending_line is not None and is_complete and (is_statement or is_assignment):
+                if pending_kind == "statement":
+                    return f"statement missing semicolon near line {pending_line}."
+                return f"assignment or declaration missing semicolon near line {pending_line}."
+            if pending_line is not None and is_complete:
+                pending_line = None
+                pending_kind = ""
+                continue
+            if pending_line is not None and is_continued:
+                continue
+            if pending_line is not None:
+                if pending_kind == "statement":
+                    return f"statement missing semicolon near line {pending_line}."
+                return f"assignment or declaration missing semicolon near line {pending_line}."
+
             if line.endswith((";", "{", "}", ":", ",")):
                 continue
-            if statement_re.match(line):
+            if is_continued and (is_statement or is_assignment):
+                pending_line = line_no
+                pending_kind = "statement" if is_statement else "assignment"
+                continue
+            if is_continued:
+                continue
+            if is_statement:
                 return f"statement missing semicolon near line {line_no}."
-            if "=" in line and not re.search(r"\b(?:if|while|for|switch|catch)\s*\(", line):
+            if is_assignment:
                 return f"assignment or declaration missing semicolon near line {line_no}."
+        if pending_line is not None:
+            if pending_kind == "statement":
+                return f"statement missing semicolon near line {pending_line}."
+            return f"assignment or declaration missing semicolon near line {pending_line}."
+        return ""
+
+    @staticmethod
+    def _find_java_nested_method_declaration(clean_source: str) -> str:
+        method_re = re.compile(
+            r"^[ \t]*(?:(?:public|private|protected|static|final|synchronized|native)\s+)*"
+            r"[A-Za-z_][A-Za-z0-9_<>\[\].?]*\s+"
+            r"(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*\([^;{}]*\)\s*\{"
+        )
+        method_stack: list[int] = []
+        brace_depth = 0
+        for line_no, raw_line in enumerate(clean_source.splitlines(), start=1):
+            line = raw_line.strip()
+            if not line or line.startswith("@"):
+                continue
+            previous_depth = brace_depth
+            method_match = method_re.match(raw_line)
+            if method_match and method_stack:
+                return f"nested method declaration '{method_match.group('name')}' near line {line_no}."
+
+            brace_depth += raw_line.count("{") - raw_line.count("}")
+            if method_match:
+                method_stack.append(previous_depth + 1)
+            while method_stack and brace_depth < method_stack[-1]:
+                method_stack.pop()
         return ""
 
     @staticmethod
@@ -436,27 +498,159 @@ class SyntaxValidator:
             line = raw_line.strip()
             if not line.startswith("#"):
                 continue
-            if re.match(r"#\s*include\s*(?:<[^>]+>|\"[^\"]+\")\s*$", line):
+            if line.endswith("\\"):
                 continue
-            if re.match(r"#\s*(?:define|ifdef|ifndef|if|elif|else|endif|pragma|undef|error|warning)\b", line):
+            if re.match(r"#\s*include\s*(?:<[^>]+>|\"[^\"]+\"|[A-Za-z_][A-Za-z0-9_/.]*)\s*$", line):
                 continue
-            return f"malformed preprocessor directive near line {line_no}."
+            if re.match(r"#\s*(?:define|ifdef|ifndef|if|elif|else|endif|pragma|undef|error|warning|line)\b(?:\s+.*)?$", line):
+                continue
+            return f"invalid preprocessor directive syntax near line {line_no}."
         return ""
 
     @staticmethod
-    def _find_c_terminator_issue(clean_source: str) -> str:
+    def _looks_like_c_header_or_declaration_unit(source: str) -> bool:
+        stripped = source.strip()
+        if not stripped:
+            return False
+
+        patterns = (
+            r"(?m)^\s*#\s*(?:ifndef|ifdef|if|define|include|pragma)\b",
+            r"(?m)^\s*typedef\b[\s\S]*?;",
+            r"(?m)^\s*(?:extern\s+)?(?:struct|enum|union)\b[\s\S]*?;",
+            r"(?m)^\s*(?:extern\s+)?[A-Za-z_][A-Za-z0-9_\s\*]*\s+[A-Za-z_][A-Za-z0-9_]*\s*\([^;{}]*\)\s*;",
+            r"(?m)^\s*(?:extern\s+)?[A-Za-z_][A-Za-z0-9_\s\*]*\s+[A-Za-z_][A-Za-z0-9_]*\s*(?:\[[^\]]*\])?\s*;",
+            r"(?m)^\s*extern\s+\"C\"\s*\{",
+            r"(?m)^\s*(?:template\s*<[^>]+>\s*)?class\s+[A-Za-z_][A-Za-z0-9_]*\b",
+            r"(?m)^\s*namespace\s+[A-Za-z_][A-Za-z0-9_]*\b",
+        )
+        return any(re.search(pattern, stripped) for pattern in patterns)
+
+    @staticmethod
+    def _is_preprocessor_only_unit(source: str) -> bool:
+        meaningful = [
+            line.strip()
+            for line in source.splitlines()
+            if line.strip()
+        ]
+        return bool(meaningful) and all(line.startswith("#") for line in meaningful)
+
+    @classmethod
+    def _find_c_terminator_issue(cls, clean_source: str) -> str:
         statement_re = re.compile(r"^\s*(?:return|break|continue|goto)\b")
-        for line_no, raw_line in enumerate(clean_source.splitlines(), start=1):
+        delimiter_depth = 0
+        pending_line: int | None = None
+        pending_kind = ""
+        lines = clean_source.splitlines()
+        for index, raw_line in enumerate(lines):
+            line_no = index + 1
             line = raw_line.strip()
             if not line or line.startswith("#") or line.startswith("*"):
                 continue
+            previous_depth = delimiter_depth
+            delimiter_depth = max(0, delimiter_depth + cls._paren_bracket_delta(line))
+            is_complete = line.endswith((";", "{", "}", ":", ","))
+            is_continued = (
+                previous_depth > 0
+                or delimiter_depth > 0
+                or cls._continues_expression(line)
+                or cls._next_line_starts_expression_continuation(lines, index)
+            )
+            is_statement = bool(statement_re.match(line))
+            is_assignment = cls._has_assignment_operator(line) and not re.search(r"\b(?:if|while|for|switch)\s*\(", line)
+
+            if pending_line is not None and is_complete and (is_statement or is_assignment):
+                if pending_kind == "statement":
+                    return f"statement missing semicolon near line {pending_line}."
+                return f"assignment or declaration missing semicolon near line {pending_line}."
+            if pending_line is not None and is_complete:
+                pending_line = None
+                pending_kind = ""
+                continue
+            if pending_line is not None and is_continued:
+                continue
+            if pending_line is not None:
+                if pending_kind == "statement":
+                    return f"statement missing semicolon near line {pending_line}."
+                return f"assignment or declaration missing semicolon near line {pending_line}."
+
             if line.endswith((";", "{", "}", ":", ",")):
                 continue
-            if statement_re.match(line):
+            if is_continued and (is_statement or is_assignment):
+                pending_line = line_no
+                pending_kind = "statement" if is_statement else "assignment"
+                continue
+            if is_continued:
+                continue
+            if is_statement:
                 return f"statement missing semicolon near line {line_no}."
-            if "=" in line and not re.search(r"\b(?:if|while|for|switch)\s*\(", line):
+            if is_assignment:
                 return f"assignment or declaration missing semicolon near line {line_no}."
+        if pending_line is not None:
+            if pending_kind == "statement":
+                return f"statement missing semicolon near line {pending_line}."
+            return f"assignment or declaration missing semicolon near line {pending_line}."
         return ""
+
+    @staticmethod
+    def _paren_bracket_delta(line: str) -> int:
+        return line.count("(") + line.count("[") - line.count(")") - line.count("]")
+
+    @staticmethod
+    def _has_assignment_operator(line: str) -> bool:
+        return bool(re.search(r"(?<![=!<>+\-*/%&|^])=(?![=>])", line))
+
+    @staticmethod
+    def _continues_expression(line: str) -> bool:
+        stripped = line.rstrip()
+        return stripped.endswith(
+            (
+                ".",
+                "+",
+                "-",
+                "*",
+                "/",
+                "%",
+                "&&",
+                "||",
+                "?",
+                "=",
+                "==",
+                "!=",
+                "<",
+                ">",
+                "<=",
+                ">=",
+                "&",
+                "|",
+                "^",
+                "\\",
+            )
+        )
+
+    @staticmethod
+    def _next_line_starts_expression_continuation(lines: list[str], current_index: int) -> bool:
+        for next_line in lines[current_index + 1 :]:
+            stripped = next_line.strip()
+            if not stripped or stripped.startswith(("*", "//")):
+                continue
+            return stripped.startswith(
+                (
+                    ".",
+                    "+",
+                    "-",
+                    "*",
+                    "/",
+                    "%",
+                    "&&",
+                    "||",
+                    "?",
+                    ":",
+                    "&",
+                    "|",
+                    "^",
+                )
+            )
+        return False
 
     @staticmethod
     def _python_syntax_diagnostic(exc: SyntaxError) -> dict:

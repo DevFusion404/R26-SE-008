@@ -30,7 +30,7 @@ _C_CONTROL_FLOW_RE = re.compile(r"\b(if|for|while|switch|case|default|goto)\b")
 
 
 def _runtime_temp_root() -> Path:
-    root = Path(__file__).resolve().parents[2] / ".sctva_runtime"
+    root = Path(tempfile.gettempdir()) / "sctva_runtime"
     root.mkdir(parents=True, exist_ok=True)
     return root
 
@@ -134,7 +134,12 @@ def expected_c_transform_summary(actions: Sequence[RefactoringAction]) -> Dict[s
             normalized_name = _sanitize_constant_name(constant_name)
             if normalized_name in {"EXTRACTED_CONSTANT", "MAGIC_CONSTANT", "CONSTANT", "VALUE_CONSTANT"}:
                 normalized_name = _constant_name_from_value(literal_value)
-            expected_macros[normalized_name] = literal_value
+            unique_name = normalized_name
+            suffix = 2
+            while unique_name in expected_macros and expected_macros[unique_name] != literal_value:
+                unique_name = f"{normalized_name}_{suffix}"
+                suffix += 1
+            expected_macros[unique_name] = literal_value
 
     return {
         "expected_renames": expected_renames,
@@ -183,10 +188,11 @@ def compare_c_static_summaries(
     missing_macros: List[Dict[str, Any]] = []
     for name, value in expected_macros.items():
         actual = transformed_summary.get("macros", {}).get(name)
+        expected_value = _c_literal(value)
         if actual is None:
-            missing_macros.append({"name": name, "expected_value": value, "actual_value": None})
-        elif str(actual).strip() != str(value).strip():
-            missing_macros.append({"name": name, "expected_value": value, "actual_value": actual})
+            missing_macros.append({"name": name, "expected_value": expected_value, "actual_value": None})
+        elif str(actual).strip() != str(expected_value).strip():
+            missing_macros.append({"name": name, "expected_value": expected_value, "actual_value": actual})
 
     matched = not missing_functions and not unexpected_functions and not missing_macros
 
@@ -251,12 +257,32 @@ def _java_style_result(success: bool, return_value: str, return_type: str, stdou
 
 def _c_literal(value: Any) -> str:
     if isinstance(value, str):
-        return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+        return '"' + _escape_c_string(value) + '"'
     if isinstance(value, bool):
         return "1" if value else "0"
     if value is None:
         return "0"
     return str(value)
+
+
+def _escape_c_string(value: str) -> str:
+    escaped: list[str] = []
+    for char in value:
+        if char == "\\":
+            escaped.append("\\\\")
+        elif char == '"':
+            escaped.append('\\"')
+        elif char == "\n":
+            escaped.append("\\n")
+        elif char == "\r":
+            escaped.append("\\r")
+        elif char == "\t":
+            escaped.append("\\t")
+        elif char == "\0":
+            escaped.append("\\0")
+        else:
+            escaped.append(char)
+    return "".join(escaped)
 
 
 def build_c_runtime_harness(*, source_filename: str, target_function: str, args: Sequence[Any], returns_void: bool) -> str:

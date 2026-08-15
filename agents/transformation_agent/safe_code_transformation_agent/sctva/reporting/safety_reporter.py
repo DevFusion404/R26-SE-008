@@ -18,10 +18,17 @@ class SafetyReporter:
         transformation_log: List[TransformationLogEntry],
         validation_steps: List[ValidationStepResult],
         extra_warnings: List[str],
+        transformation_applied: bool = True,
     ) -> SafetyReport:
         validation_timestamps: Dict[str, Dict[str, object]] = {}
         risk_flags: List[str] = []
         human_messages: List[str] = []
+
+        if not transformation_applied and not rollback_occurred:
+            risk_flags.append("transformation_not_applied")
+            human_messages.append(
+                "No source-code change was applied; the requested transformation was not accepted."
+            )
 
         for step in validation_steps:
             validation_timestamps[step.name] = {
@@ -74,6 +81,8 @@ class SafetyReporter:
             summary = "Transformation rejected and rolled back to original source code."
             if rollback_reason:
                 human_messages.append(f"Rollback reason: {rollback_reason}")
+        elif not transformation_applied:
+            summary = "Transformation not applied; source code remained unchanged."
         else:
             summary = "Transformation accepted after all safety checks."
 
