@@ -96,6 +96,10 @@ class RDPAgent:
                 "model_name", "microsoft/codebert-base"
             )
             self.ml_scorer = MLScorer(model_name=model_name)
+            # Surface ML availability in the startup log immediately.
+            # If torch/transformers are missing, a clear WARNING is logged here
+            # rather than silently falling back to neutral scores on first request.
+            self.ml_scorer.startup_check()
         else:
             self.ml_scorer = None
 

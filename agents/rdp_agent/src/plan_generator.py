@@ -230,10 +230,40 @@ class PlanGenerator:
             params["new_method_name"] = f"extracted_{method}" if method else "extracted_block"
 
         elif name == "Introduce Constant":
-            # Pull the magic number value from details if available
             params["source_line"] = location.get("lines", [None])[0]
             if smell.details:
                 params["hint"] = smell.details
+
+            # Generate a meaningful constant_name so the transformation agent does NOT
+            # fall back to the ugly MAGIC_NUMBER_65 / MAGIC_NUMBER_75 pattern.
+            # Strategy:
+            #   1. Extract the numeric value from the smell message ("Magic number 65" → 65)
+            #   2. Use the method/entity name to build a domain prefix
+            #   3. Combine: e.g. "calculate_grade" + 65 → "GRADE_THRESHOLD_65"
+            #   4. Fall back to "CONSTANT_{value}" — still better than MAGIC_NUMBER_{value}
+            _num_match = re.search(r"[-+]?\d+(?:\.\d+)?", smell.details or "")
+            _raw_value = _num_match.group(0) if _num_match else None
+            _entity = (_loc("method") or _loc("class") or "").strip()
+
+            if _raw_value is not None:
+                _val_str = _raw_value.replace("-", "NEG_").replace(".", "_")
+
+                if _entity and _entity not in ("unknown", ""):
+                    # Turn snake_case/camelCase entity into SCREAMING_SNAKE prefix.
+                    # e.g. "calculate_grade" → "GRADE"
+                    # e.g. "checkStudentMarks"  → "STUDENT_MARKS"
+                    _words = re.sub(r"([A-Z])", r"_\1", _entity)   # camelCase split
+                    _words = re.sub(r"[^A-Za-z0-9]+", "_", _words)  # non-alnum → _
+                    _parts = [w.upper() for w in _words.split("_") if len(w) > 2]
+                    # Take last 1-2 meaningful words as prefix (most domain-specific)
+                    _prefix = "_".join(_parts[-2:]) if _parts else ""
+                    if _prefix:
+                        params["constant_name"] = f"{_prefix}_{_val_str}"
+                    else:
+                        params["constant_name"] = f"THRESHOLD_{_val_str}"
+                else:
+                    params["constant_name"] = f"CONSTANT_{_val_str}"
+
 
         elif name == "Move Method":
             cls = _loc("class")
