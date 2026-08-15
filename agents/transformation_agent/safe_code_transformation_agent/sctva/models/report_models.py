@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from .validation_step import ValidationStepResult
 
@@ -56,13 +56,17 @@ class SCTVAResult:
     language: str
     success: bool
     rollback_occurred: bool
-    confidence_score: float
+    confidence_score: Optional[float]
     refactored_code: str
     validation_syntax: ValidationStepResult
     validation_structural: ValidationStepResult
     validation_behavioral: ValidationStepResult
     safety_report: SafetyReport
     validation_invariant: ValidationStepResult | None = None
+    transformation_applied: bool = True
+    total_replacements: int = 0
+    confidence_applicable: bool = True
+    validation_score: Optional[float] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -70,8 +74,20 @@ class SCTVAResult:
             "language": self.language,
             "success": self.success,
             "rollback_occurred": self.rollback_occurred,
-            "confidence_score": round(max(0.0, min(1.0, self.confidence_score)), 4),
+            "confidence_score": (
+                round(max(0.0, min(1.0, self.confidence_score)), 4)
+                if isinstance(self.confidence_score, (int, float))
+                else None
+            ),
+            "confidence_applicable": self.confidence_applicable,
+            "validation_score": (
+                round(max(0.0, min(1.0, self.validation_score)), 4)
+                if isinstance(self.validation_score, (int, float))
+                else None
+            ),
             "refactored_code": self.refactored_code,
+            "transformation_applied": self.transformation_applied,
+            "total_replacements": self.total_replacements,
             "validation": {
                 "syntax": self.validation_syntax.to_dict(),
                 "structural": self.validation_structural.to_dict(),
