@@ -127,6 +127,8 @@ class SourceFileContract:
     file_name: str
     source_code: str
     language: Optional[str] = None
+    source_mode: str = "raw"
+    origin: str = ""
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any], *, index: int) -> "SourceFileContract":
@@ -149,19 +151,27 @@ class SourceFileContract:
                     f"Unsupported language '{language}' in source_files. Supported: {sorted(SUPPORTED_LANGUAGES)}"
                 )
 
+        source_mode = str(data.get("source_mode") or data.get("sourceMode") or "raw").strip().lower()
+        origin = str(data.get("origin") or "").strip().lower()
+
         return cls(
             file_name=file_name,
             source_code=source_code,
             language=language or None,
+            source_mode=source_mode or "raw",
+            origin=origin,
         )
 
     def to_dict(self) -> Dict[str, Any]:
         payload: Dict[str, Any] = {
             "file_name": self.file_name,
             "source_code": self.source_code,
+            "source_mode": self.source_mode,
         }
         if self.language:
             payload["language"] = self.language
+        if self.origin:
+            payload["origin"] = self.origin
         return payload
 
 
@@ -174,6 +184,7 @@ class ExecutionOptions:
     timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS
     require_compilation: bool = False
     rollback_on_behavior_failure: bool = True
+    enable_sctva_auto_refactoring: bool = True
 
     @classmethod
     def from_dict(cls, data: Optional[Dict[str, Any]]) -> "ExecutionOptions":
@@ -192,6 +203,7 @@ class ExecutionOptions:
             timeout_seconds=timeout,
             require_compilation=bool(data.get("require_compilation", False)),
             rollback_on_behavior_failure=bool(data.get("rollback_on_behavior_failure", True)),
+            enable_sctva_auto_refactoring=bool(data.get("enable_sctva_auto_refactoring", True)),
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -200,6 +212,8 @@ class ExecutionOptions:
             "enable_behavior_tests": self.enable_behavior_tests,
             "timeout_seconds": self.timeout_seconds,
             "require_compilation": self.require_compilation,
+            "rollback_on_behavior_failure": self.rollback_on_behavior_failure,
+            "enable_sctva_auto_refactoring": self.enable_sctva_auto_refactoring,
         }
 
 

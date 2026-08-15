@@ -683,6 +683,15 @@ def apply_extract_constant(
             source_line=source_line,
         ),
     )
+    if replacements == 0 and source_line is not None:
+        updated_code, replacements = _apply_transformer(
+            source_code,
+            _ExtractConstantTransformer(
+                literal_value=literal_value,
+                constant_name=preferred_name,
+                source_line=None,
+            ),
+        )
 
     # Safety guard:
     # If replacements happened but the constant was somehow not inserted by the
@@ -704,14 +713,254 @@ def apply_remove_dead_code(
     source_code: str,
     method_name: str,
     class_name: Optional[str] = None,
+    source_line: Optional[int] = None,
 ) -> Tuple[str, int]:
-    if not method_name:
-        raise ValueError("remove_dead_code requires 'method_name'.")
+    if not method_name and source_line is None:
+        raise ValueError("remove_dead_code requires 'method_name' or 'source_line'.")
+
+    if not method_name and source_line is not None:
+        return _remove_proven_dead_python_statement(source_code, source_line)
+
+    # A name-only planner instruction is not proof that a callable is dead.
+    # Limit deletion to private helpers with no references outside their own
+    # declaration. Public methods and magic methods may be external APIs.
+    if (
+        not method_name.startswith("_")
+        or (method_name.startswith("__") and method_name.endswith("__"))
+        or len(re.findall(rf"\b{re.escape(method_name)}\b", source_code)) != 1
+    ):
+        return source_code, 0
 
     return _apply_transformer(
         source_code,
         _RemoveDeadCodeTransformer(method_name, class_name),
     )
+
+
+def _iter_python_statement_suites(node: ast.AST):
+    for _field_name, value in ast.iter_fields(node):
+        if isinstance(value, list):
+            statements = [item for item in value if isinstance(item, ast.stmt)]
+            if statements and len(statements) == len(value):
+                yield value
+            for item in value:
+                if isinstance(item, ast.AST):
+                    yield from _iter_python_statement_suites(item)
+        elif isinstance(value, ast.AST):
+            yield from _iter_python_statement_suites(value)
+
+
+def _python_statement_span(statement: ast.stmt) -> tuple[int, int]:
+    start = int(getattr(statement, "lineno", 0) or 0)
+    end = int(getattr(statement, "end_lineno", start) or start)
+    return start, end
+
+
+def _is_side_effect_free_literal(expression: Optional[ast.AST]) -> bool:
+    if expression is None:
+        return False
+    try:
+        ast.literal_eval(expression)
+    except (ValueError, TypeError, SyntaxError, MemoryError, RecursionError):
+        return False
+    return True
+
+
+def _assigned_local_names(statement: ast.stmt) -> list[str]:
+    if isinstance(statement, ast.Assign):
+        targets = statement.targets
+        value = statement.value
+    elif isinstance(statement, ast.AnnAssign) and statement.value is not None:
+        targets = [statement.target]
+        value = statement.value
+    else:
+        return []
+
+    if not _is_side_effect_free_literal(value):
+        return []
+
+    names: list[str] = []
+    for target in targets:
+        if isinstance(target, ast.Name):
+            names.append(target.id)
+        else:
+            return []
+    return names
+
+
+def _enclosing_python_function(
+    statement: ast.stmt,
+    parents: dict[ast.AST, ast.AST],
+) -> Optional[ast.AST]:
+    current: Optional[ast.AST] = statement
+    while current is not None:
+        if isinstance(current, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            return current
+        current = parents.get(current)
+    return None
+
+
+def _remove_python_line_span(source_code: str, start_line: int, end_line: int) -> Tuple[str, int]:
+    lines = source_code.splitlines(keepends=True)
+    if start_line <= 0 or end_line < start_line or end_line > len(lines):
+        return source_code, 0
+    candidate = "".join(lines[: start_line - 1] + lines[end_line:])
+    try:
+        ast.parse(candidate)
+    except SyntaxError:
+        return source_code, 0
+    return candidate, 1
+
+
+def _remove_proven_dead_python_statement(source_code: str, source_line: int) -> Tuple[str, int]:
+    """Remove only AST-proven unreachable or unused local statements."""
+
+    try:
+        tree = ast.parse(source_code)
+    except SyntaxError:
+        return source_code, 0
+
+    parents = {
+        child: parent
+        for parent in ast.walk(tree)
+        for child in ast.iter_child_nodes(parent)
+    }
+
+    # Statements after an unconditional terminator in the same suite are
+    # unreachable. Remove the complete statement span, not an arbitrary line.
+    terminators = (ast.Return, ast.Raise, ast.Break, ast.Continue)
+    for suite in _iter_python_statement_suites(tree):
+        terminated = False
+        for statement in suite:
+            start_line, end_line = _python_statement_span(statement)
+            if terminated and start_line <= source_line <= end_line:
+                return _remove_python_line_span(source_code, start_line, end_line)
+            if isinstance(statement, terminators):
+                terminated = True
+
+    # A local assignment is removable only when its value is a literal (so
+    # evaluating it has no side effects) and the assigned name is never read.
+    candidates = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.stmt)
+        and _python_statement_span(node)[0] <= source_line <= _python_statement_span(node)[1]
+    ]
+    candidates.sort(key=lambda node: _python_statement_span(node)[1] - _python_statement_span(node)[0])
+    for statement in candidates:
+        names = _assigned_local_names(statement)
+        function = _enclosing_python_function(statement, parents)
+        if not names or function is None:
+            continue
+        loaded_names = {
+            node.id
+            for node in ast.walk(function)
+            if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)
+        }
+        if any(name in loaded_names for name in names):
+            continue
+        start_line, end_line = _python_statement_span(statement)
+        return _remove_python_line_span(source_code, start_line, end_line)
+
+    return source_code, 0
+
+
+def _line_indent(line: str) -> str:
+    return line[: len(line) - len(line.lstrip(" \t"))]
+
+
+def apply_extract_method(
+    source_code: str,
+    new_method_name: str,
+    start_line: int,
+    end_line: int,
+) -> Tuple[str, int]:
+    """Extract a return-oriented Python block into a nested helper function.
+
+    This intentionally supports only a behavior-preserving subset: the selected
+    range must be inside an existing indented block and end with a return
+    statement. The nested helper can close over local variables, so it avoids
+    unsafe parameter guessing.
+    """
+
+    if not new_method_name:
+        raise ValueError("extract_method requires 'new_method_name'.")
+    if start_line <= 0 or end_line < start_line:
+        raise ValueError("extract_method requires a valid line range.")
+
+    lines = source_code.splitlines(keepends=True)
+    if end_line > len(lines):
+        return source_code, 0
+
+    selected = lines[start_line - 1 : end_line]
+    meaningful = [line for line in selected if line.strip()]
+    if not meaningful:
+        return source_code, 0
+
+    if meaningful[0].lstrip().startswith(("def ", "async def ")):
+        return _extract_full_python_function(source_code, new_method_name, start_line, end_line)
+
+    block_indent = min((_line_indent(line) for line in meaningful), key=len)
+    if not block_indent:
+        return source_code, 0
+
+    last_statement = meaningful[-1].strip()
+    if not last_statement.startswith("return"):
+        return source_code, 0
+
+    helper_header = f"{block_indent}def {new_method_name}():\n"
+    helper_body = [
+        (f"{block_indent}    {line[len(block_indent):]}" if line.startswith(block_indent) else f"{block_indent}    {line.lstrip()}")
+        for line in selected
+    ]
+    if helper_body and helper_body[-1] and not helper_body[-1].endswith(("\n", "\r")):
+        helper_body[-1] += "\n"
+
+    replacement = [
+        helper_header,
+        *helper_body,
+        f"{block_indent}return {new_method_name}()\n",
+    ]
+
+    transformed = lines[: start_line - 1] + replacement + lines[end_line:]
+    return "".join(transformed), 1
+
+
+def _extract_full_python_function(
+    source_code: str,
+    new_method_name: str,
+    start_line: int,
+    end_line: int,
+) -> Tuple[str, int]:
+    lines = source_code.splitlines(keepends=True)
+    selected = lines[start_line - 1 : end_line]
+    if len(selected) < 2:
+        return source_code, 0
+
+    header = selected[0]
+    body = selected[1:]
+    meaningful_body = [line for line in body if line.strip()]
+    if not meaningful_body:
+        return source_code, 0
+
+    function_indent = _line_indent(header)
+    body_indent = min((_line_indent(line) for line in meaningful_body), key=len)
+    if len(body_indent) <= len(function_indent):
+        return source_code, 0
+
+    has_return = any(line.strip().startswith("return") for line in meaningful_body)
+    helper_header = f"{body_indent}def {new_method_name}():\n"
+    helper_body = [
+        (f"{body_indent}    {line[len(body_indent):]}" if line.startswith(body_indent) else f"{body_indent}    {line.lstrip()}")
+        for line in body
+    ]
+    call_line = (
+        f"{body_indent}return {new_method_name}()\n"
+        if has_return
+        else f"{body_indent}{new_method_name}()\n"
+    )
+    replacement = [header, helper_header, *helper_body, call_line]
+    return "".join(lines[: start_line - 1] + replacement + lines[end_line:]), 1
 
 
 def apply_inject_syntax_error(source_code: str) -> Tuple[str, int]:

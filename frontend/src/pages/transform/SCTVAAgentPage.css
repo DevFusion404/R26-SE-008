@@ -502,12 +502,21 @@
   color: #fecaca;
 }
 
+.sctva-file-tab.not-applied {
+  border-color: rgba(148, 163, 184, 0.35);
+  color: #cbd5e1;
+}
+
 .sctva-file-tab em {
   font-style: normal;
   font-size: 9px;
   letter-spacing: 0.03em;
   color: #fca5a5;
   text-transform: uppercase;
+}
+
+.sctva-file-tab.not-applied em {
+  color: #94a3b8;
 }
 
 .sctva-chip {
@@ -690,6 +699,12 @@
     conic-gradient(#3b82f6 var(--score), #1e293b 0);
   display: grid;
   place-items: center;
+}
+
+.sctva-confidence-ring.not-applicable {
+  background:
+    radial-gradient(circle at center, #101a2b 0 54%, transparent 55%),
+    conic-gradient(#475569 100%, #1e293b 0);
 }
 
 .sctva-ring-inner {
