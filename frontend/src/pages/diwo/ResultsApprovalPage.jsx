@@ -27,6 +27,8 @@ import { useMemo, useState } from "react";
 import { Badge, C, Card, Pill } from "./diwoTheme.jsx";
 import { CodeBlock, CodeSurface, DiffBlock, DiffLegend } from "./diffView.jsx";
 import { buildDiffRows } from "./sctvaApi";
+import { buildProjectArchive } from "./projectArchive";
+import { createZip, downloadBlob } from "./zipWriter";
 
 const VALIDATION_LABELS = {
   syntax: ["Syntax Validation", "Compilation / parse check of the transformed source."],
@@ -143,56 +145,72 @@ export default function ResultsApprovalPage({
   );
 
   // ── Commit actions — always write finalCode, never the rejected output ────
-  const saveTextFile = (filename, content) => {
-    try {
-      const blob = new Blob([content], { type: "text/plain;charset=utf-8" });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = filename;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      setTimeout(() => URL.revokeObjectURL(url), 1500);
-    } catch (e) {
-      console.error("Failed to save file", e);
-    }
-  };
-
   const decisionPayload = () => ({
     acceptedFiles: stagedEntries.map((f) => ({ ...f, after: f.finalCode })),
     revertedFiles: revertedEntries.map((f) => f.path),
   });
 
-  const handleAcceptAndDownload = () => {
+  /**
+   * Download one ZIP holding the whole project, not one file per click.
+   *
+   * The selected files carry their final code; every other file in the
+   * repository is read back from the CUQA workspace so the archive extracts
+   * as a complete project. If that structure is unreachable, the archive
+   * falls back to the selected files alone.
+   */
+  const handleAcceptAndDownload = async () => {
     if (stagedEntries.length === 0) {
       alert("Select at least one file to write before downloading.");
       return;
     }
 
-    stagedEntries.forEach((f, i) => {
-      const filename = f.path ? f.path.split("/").pop() : `refactored_${i + 1}.txt`;
-      saveTextFile(filename, f.finalCode);
-    });
+    setIsProcessing(true);
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+    const finalFiles = stagedEntries.map((f) => ({
+      path: f.path,
+      content: f.finalCode,
+      state: f.rejected ? "reverted_to_original" : "refactored",
+    }));
 
-    saveTextFile(
-      "diwo_refactored_metadata.json",
-      JSON.stringify(
-        {
-          savedAt: new Date().toISOString(),
-          request_id: sctva?.request_id || null,
-          confidence_score: sctva?.confidence_score ?? null,
-          written: stagedEntries.map((f) => ({
-            path: f.path,
-            state: f.rejected ? "reverted_to_original" : "refactored",
-          })),
-          reverted: revertedEntries.map((f) => f.path),
-        },
-        null,
-        2
-      )
-    );
+    const baseManifest = {
+      savedAt: new Date().toISOString(),
+      request_id: sctva?.request_id || null,
+      confidence_score: sctva?.confidence_score ?? null,
+      reverted: revertedEntries.map((f) => f.path),
+    };
 
+    let entries;
+    let manifest;
+
+    try {
+      const project = await buildProjectArchive({ finalFiles });
+      entries = project.entries;
+      manifest = { ...baseManifest, scope: "full_project", ...project.manifest };
+    } catch (e) {
+      console.warn("Full-project archive unavailable, packing selected files only", e);
+      entries = finalFiles.map((f) => ({ path: f.path, content: f.content }));
+      manifest = {
+        ...baseManifest,
+        scope: "selected_files_only",
+        scope_reason: e.message,
+        written: finalFiles.map((f) => ({ path: f.path, state: f.state })),
+      };
+    }
+
+    try {
+      const blob = await createZip([
+        ...entries,
+        { path: "REFACTORING_MANIFEST.json", content: JSON.stringify(manifest, null, 2) },
+      ]);
+      downloadBlob(blob, `diwo_project_${stamp}.zip`);
+    } catch (e) {
+      console.error("Failed to build the archive", e);
+      alert(`Could not build the ZIP archive: ${e.message}`);
+      setIsProcessing(false);
+      return;
+    }
+
+    setIsProcessing(false);
     setShowActionChoice(false);
     if (onAccept) onAccept(decisionPayload());
   };
@@ -716,9 +734,12 @@ export default function ResultsApprovalPage({
                 <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
                   <div style={{ fontSize: 24 }}>💾</div>
                   <div style={{ flex: 1 }}>
-                    <div style={{ fontWeight: 700, color: C.text, marginBottom: 4 }}>Download to Local Device</div>
+                    <div style={{ fontWeight: 700, color: C.text, marginBottom: 4 }}>
+                      {isProcessing ? "Building archive…" : "Download Project (.zip)"}
+                    </div>
                     <div style={{ fontSize: 12, color: C.textMuted }}>
-                      Save the final files to your downloads folder. You manage the repository yourself.
+                      One archive holding the whole project in its folder structure — your accepted
+                      changes applied, every other file as-is.
                     </div>
                   </div>
                 </div>

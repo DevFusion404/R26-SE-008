@@ -493,20 +493,49 @@ export default function DIWOAgentPage() {
     const all_paths = allFiles.map((f) => f.path || f.relative_path || f.file || f);
     const rejected_paths = all_paths.filter((p) => !accepted_paths.includes(p));
 
+    // The final source of every file, so the backend can build the downloadable
+    // archive. A rejected file contributes its original text; a rejected file
+    // whose original never arrived is left out entirely rather than shipping
+    // the change the developer declined.
+    const archive_files = allFiles
+      .filter((f) => !(f.decision === "reject" && !(f.before || "")))
+      .map((f) => {
+        const reverted = f.decision === "reject" && Boolean(f.before);
+        return {
+          path: f.path || f.relative_path || f.file || "",
+          content: reverted ? f.before : (f.after || f.refactored_code || ""),
+          state: reverted ? "reverted_to_original" : "refactored",
+        };
+      })
+      .filter((f) => f.path && f.content);
+
     addLog(
       `Developer committed ${written_paths.length} file(s): ${accepted_paths.length} refactored, ` +
       `${reverted_paths.length} reverted to original.`,
       "info"
     );
+
+    let archive = null;
     if (workflowId) {
       try {
-        await api.post(`/workflows/${workflowId}/transformation-decision`, {
+        const res = await api.post(`/workflows/${workflowId}/transformation-decision`, {
           decision: "accept",
           accepted_files: accepted_paths,
           rejected_files: reverted_paths,
           written_files: written_paths,
+          files: archive_files,
           feedback: { reason: "Accepted from frontend", rating: 5 },
         });
+        archive = res.archive || null;
+        if (archive) {
+          addLog(
+            `Refactored archive ready: ${archive.file_count} file(s), ` +
+            `${Math.round(archive.bytes / 1024)} KB.`,
+            "success"
+          );
+        } else if (res.archive_error) {
+          addLog(`Archive could not be built: ${res.archive_error}`, "warn");
+        }
       } catch (e) {
         addLog(`Backend accept call failed: ${e.message}`, "warn");
       }
@@ -516,6 +545,7 @@ export default function DIWOAgentPage() {
       ...(prev || {}),
       accepted_files: accepted_paths,
       rejected_files: rejected_paths,
+      archive,
     }));
 
     setPhase(4);

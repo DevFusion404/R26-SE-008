@@ -92,6 +92,93 @@ function DecisionButtons({ decision, onDecide, size = "sm" }) {
   );
 }
 
+/**
+ * Accept / Reject applied to every changed file at once.
+ *
+ * Accept All keeps the whole transformation; Reject All falls the entire set
+ * back to the original sources. Both are just a shortcut for setting the same
+ * per-file verdict on every file, so a single file can still be flipped
+ * afterwards without losing the rest.
+ */
+function BulkDecisionBar({ total, accepted, rejected, pending, onAcceptAll, onRejectAll, onClear }) {
+  const allAccepted = total > 0 && accepted === total;
+  const allRejected = total > 0 && rejected === total;
+
+  const railColor = allAccepted ? C.accent : allRejected ? C.danger : pending > 0 ? C.warn : C.info;
+
+  const message = allAccepted
+    ? `All ${total} refactored file(s) accepted — every change is carried forward.`
+    : allRejected
+      ? `All ${total} refactored file(s) rejected — every file falls back to its original source.`
+      : pending === 0
+        ? `Mixed decision — ${accepted} file(s) kept refactored, ${rejected} reverted to original.`
+        : `${pending} of ${total} refactored file(s) still need a decision.`;
+
+  const bulkButton = (label, color, active, onClick) => (
+    <button
+      onClick={onClick}
+      style={{
+        padding: "8px 18px",
+        borderRadius: 8,
+        fontSize: 12,
+        fontWeight: 700,
+        cursor: "pointer",
+        border: `1px solid ${active ? color : C.border}`,
+        background: active ? color : "transparent",
+        color: active ? "#000" : color,
+      }}
+    >
+      {label}
+    </button>
+  );
+
+  return (
+    <div
+      style={{
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "space-between",
+        gap: 14,
+        flexWrap: "wrap",
+        marginBottom: 16,
+        padding: "12px 16px",
+        borderRadius: 10,
+        background: C.panel,
+        border: `1px solid ${C.border}`,
+        borderLeft: `3px solid ${railColor}`,
+      }}
+    >
+      <div>
+        <div style={{ fontSize: 12, fontWeight: 700, color: C.text, marginBottom: 3 }}>
+          Decide on all files at once
+        </div>
+        <div style={{ fontSize: 12, color: railColor }}>{message}</div>
+      </div>
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+        {bulkButton("✓ Accept All", C.accent, allAccepted, onAcceptAll)}
+        {bulkButton("✕ Reject All", C.danger, allRejected, onRejectAll)}
+        {accepted + rejected > 0 && (
+          <button
+            onClick={onClear}
+            style={{
+              padding: "8px 14px",
+              borderRadius: 8,
+              fontSize: 12,
+              fontWeight: 700,
+              cursor: "pointer",
+              border: `1px solid ${C.border}`,
+              background: "transparent",
+              color: C.textMuted,
+            }}
+          >
+            Clear
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export default function TransformationApprovalPage({
   onComplete,
   transformationData,
@@ -228,6 +315,19 @@ export default function TransformationApprovalPage({
     });
   }, []);
 
+  // Bulk verdicts are the same per-file verdict written across every changed
+  // file, so an individual file can still be flipped afterwards.
+  const decideAll = useCallback(
+    (value) => {
+      setDecisions(
+        value === null
+          ? {}
+          : Object.fromEntries(changedFiles.map((f) => [f.path, value]))
+      );
+    },
+    [changedFiles]
+  );
+
   const acceptedPaths = changedFiles.filter((f) => decisions[f.path] === "accept").map((f) => f.path);
   const rejectedPaths = changedFiles.filter((f) => decisions[f.path] === "reject").map((f) => f.path);
   const pendingCount = changedFiles.length - acceptedPaths.length - rejectedPaths.length;
@@ -248,9 +348,15 @@ export default function TransformationApprovalPage({
         decoratedFiles[0] ||
         null;
 
+      // With everything rejected there is no accepted lead, so the top-level
+      // code must be the original — otherwise "Reject All" would still hand
+      // the refactored source downstream.
+      const leadReverted = lead?.decision === "reject" && Boolean(lead?.before);
+      const leadCode = leadReverted ? lead.before : lead?.after || result.refactored_code;
+
       onComplete({
-        refactored_code: lead?.after || result.refactored_code,
-        diff_rows: lead?.diff_rows || result.diff_rows,
+        refactored_code: leadCode,
+        diff_rows: leadReverted ? [] : lead?.diff_rows || result.diff_rows,
         files: decoratedFiles,
         accepted_files: acceptedPaths,
         rejected_files: rejectedPaths,
@@ -484,6 +590,19 @@ export default function TransformationApprovalPage({
             );
           })}
         </div>
+      )}
+
+      {/* ── Accept / reject every file at once ──────────────────────────── */}
+      {changedFiles.length > 1 && (
+        <BulkDecisionBar
+          total={changedFiles.length}
+          accepted={acceptedPaths.length}
+          rejected={rejectedPaths.length}
+          pending={pendingCount}
+          onAcceptAll={() => decideAll("accept")}
+          onRejectAll={() => decideAll("reject")}
+          onClear={() => decideAll(null)}
+        />
       )}
 
       {/* ── Refactored code ─────────────────────────────────────────────── */}
