@@ -87,6 +87,13 @@ def init_db(app):
         # quality_score and each smell's own fields (entity, start_line, ...).
         if "cuqa_report_json" not in existing_cols:
             conn.execute("ALTER TABLE workflows ADD COLUMN cuqa_report_json TEXT")
+        # The plan exactly as the RDP agent produced it, before approval
+        # reduced plan_json to the approved steps. Rolling back from the
+        # transformation stage restores it, so a step rejected on the first
+        # pass can be approved on the second — without it, going back would
+        # show only the steps that were already approved.
+        if "plan_full_json" not in existing_cols:
+            conn.execute("ALTER TABLE workflows ADD COLUMN plan_full_json TEXT")
 
     print("[DIWO] Database initialized.")
 

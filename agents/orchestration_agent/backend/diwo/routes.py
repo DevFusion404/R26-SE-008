@@ -68,11 +68,17 @@ def _parse_json_field(wf: dict, field: str):
     return json.loads(val) if isinstance(val, str) else val
 
 
-def _require_stage(wf: dict, expected: str):
-    """Return an error response if the workflow is not in the expected stage."""
-    if wf["status"] != expected:
+def _require_stage(wf: dict, *expected: str):
+    """Return an error response unless the workflow is in one of `expected`.
+
+    Several stages legitimately accept a request from more than one point in the
+    workflow — falling back from plan approval to smell review, for instance,
+    re-enters /select-smells while the stored stage is still 'plan_approval'.
+    """
+    if wf["status"] not in expected:
+        wanted = " or ".join(f"'{stage}'" for stage in expected)
         return _err(
-            f"Expected workflow stage '{expected}' but current stage is '{wf['status']}'."
+            f"Expected workflow stage {wanted} but current stage is '{wf['status']}'."
             " Reload the page to sync your session."
         )
     return None
@@ -782,6 +788,46 @@ def save_updated_report(wf_id):
         return _err(f"Failed to save report: {str(e)}", 500)
 
 
+@diwo_bp.route("/workflows/<wf_id>/reset-to-smell-review", methods=["POST"])
+def reset_to_smell_review(wf_id):
+    """Send the workflow back to Stage 1 after a fallback from plan approval.
+
+    The plan review screen's "Fallback to Smell Review" only moved the frontend;
+    the workflow row stayed at 'plan_approval', so the next /select-smells was
+    refused by the stage guard. This clears the plan and the stored selection so
+    the developer starts the stage from the full CUQA report again.
+    """
+    wf = get_workflow(wf_id)
+    if not wf:
+        return _err("Workflow not found.", 404)
+
+    previous = wf["status"]
+    if previous == "smell_review":
+        return jsonify({"status": "smell_review", "changed": False,
+                        "message": "Workflow is already in smell review."})
+
+    data = request.get_json(force=True, silent=True) or {}
+    reason = (data.get("feedback") or {}).get("reason") or data.get("reason") or "Developer fell back to smell review"
+
+    update_workflow(
+        wf_id,
+        status="smell_review",
+        plan_json=None,
+        selected_smells_json=None,
+        updated_smells_json=None,
+        planning_input_json=None,
+    )
+    log_event(wf_id, "smell_review", "reset_to_smell_review",
+              {"from_stage": previous, "reason": reason})
+
+    return jsonify({
+        "status": "smell_review",
+        "changed": True,
+        "from_stage": previous,
+        "message": "Workflow reset to smell review. The full CUQA report is selectable again.",
+    })
+
+
 @diwo_bp.route("/workflows/<wf_id>/select-smells", methods=["POST"])
 def select_smells(wf_id):
     """
@@ -789,14 +835,21 @@ def select_smells(wf_id):
     Body: { selected_ids: [str], feedback?: { reason?: str } }
 
     FIX [13,14]: Stage guard + list validation before any DB write.
+
+    'plan_approval' is accepted as well as 'smell_review': the plan approval
+    screen can fall back to smell review, and re-submitting a selection from
+    there simply replaces the plan. Rejecting it would strand the developer with
+    a stage error on a screen that offers the fallback button in the first place.
     """
     wf = get_workflow(wf_id)
     if not wf:
         return _err("Workflow not found.", 404)
 
-    err = _require_stage(wf, "smell_review")
+    err = _require_stage(wf, "smell_review", "plan_approval")
     if err:
         return err
+
+    replanning = wf["status"] == "plan_approval"
 
     data = request.get_json(force=True, silent=True) or {}
 
@@ -850,6 +903,7 @@ def select_smells(wf_id):
     log_event(wf_id, "smell_selection", "smells_selected",
               {"selected": selected_ids, "excluded": [s["id"] for s in excluded],
                "selection_mode": selection_mode,
+               "replanned_after_fallback": replanning,
                "selected_files": sorted({
                    s.get("location", {}).get("file") for s in selected
                    if s.get("location", {}).get("file")
@@ -867,7 +921,12 @@ def select_smells(wf_id):
         payload["updated_report"], selected, wf["target"], wf_id=wf_id
     )
 
-    update_workflow(wf_id, status="plan_approval", plan_json=json.dumps(plan))
+    # plan_full_json keeps the agent's plan before approval trims it down to the
+    # approved steps, so a rollback from transformation can offer every step for
+    # re-selection instead of only the ones approved last time.
+    plan_serialized = json.dumps(plan)
+    update_workflow(wf_id, status="plan_approval",
+                    plan_json=plan_serialized, plan_full_json=plan_serialized)
     log_event(wf_id, "plan_approval", "plan_generated",
               {"plan_id": plan.get("plan_id"),
                "steps": plan["summary"]["total_steps"],
@@ -957,18 +1016,72 @@ def plan_preference_update(wf_id):
         "updated_planning_report": updated_plan,
     })
 
+@diwo_bp.route("/workflows/<wf_id>/reset-to-plan-approval", methods=["POST"])
+def reset_to_plan_approval(wf_id):
+    """Send the workflow back to Stage 2 after a rollback from transformation.
+
+    Approval reduces plan_json to the approved steps, so simply flipping the
+    stage back would re-open plan review with the rejected steps already gone
+    and no way to reinstate them. plan_full_json — the plan as the RDP agent
+    produced it — is restored instead, and the simulated transformation result
+    is dropped so nothing stale is carried into the next run.
+    """
+    wf = get_workflow(wf_id)
+    if not wf:
+        return _err("Workflow not found.", 404)
+
+    previous = wf["status"]
+    full_plan = _parse_json_field(wf, "plan_full_json")
+    plan = full_plan or _parse_json_field(wf, "plan_json")
+
+    if not plan:
+        return _err("This workflow has no plan to go back to.", 400)
+
+    if previous == "plan_approval":
+        return jsonify({"status": "plan_approval", "changed": False, "plan": plan,
+                        "message": "Workflow is already in plan approval."})
+
+    data = request.get_json(force=True, silent=True) or {}
+    reason = (data.get("feedback") or {}).get("reason") or data.get("reason") or "Developer rolled back to plan approval"
+
+    update_workflow(
+        wf_id,
+        status="plan_approval",
+        plan_json=json.dumps(plan),
+        transformation_result_json=None,
+        metrics_after_json=None,
+    )
+    log_event(wf_id, "plan_approval", "reset_to_plan_approval",
+              {"from_stage": previous, "reason": reason,
+               "restored_steps": len(plan.get("steps") or []),
+               "restored_full_plan": bool(full_plan)})
+
+    return jsonify({
+        "status": "plan_approval",
+        "changed": True,
+        "from_stage": previous,
+        "plan": plan,
+        "restored_full_plan": bool(full_plan),
+        "message": "Workflow reset to plan approval. Re-select the steps and forward them again.",
+    })
+
+
 @diwo_bp.route("/workflows/<wf_id>/plan-decision", methods=["POST"])
 def plan_decision(wf_id):
     """
     Body: { decision: 'approve'|'reject'|'modify', modified_steps?: [...], feedback?: {...} }
 
     FIX [13,15]: Stage guard + decision enum validation.
+
+    'transformation' is accepted as well as 'plan_approval': Stage 3 offers a
+    rollback to plan review, and re-approving from there must not be refused
+    just because the stage reset did not reach the backend.
     """
     wf = get_workflow(wf_id)
     if not wf:
         return _err("Workflow not found.", 404)
 
-    err = _require_stage(wf, "plan_approval")
+    err = _require_stage(wf, "plan_approval", "transformation")
     if err:
         return err
 
