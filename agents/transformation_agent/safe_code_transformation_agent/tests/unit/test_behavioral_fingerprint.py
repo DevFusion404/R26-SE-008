@@ -264,6 +264,55 @@ public class Demo {
     assert result.details["runtime_unavailable_reason"] == "missing_java_dependencies"
 
 
+def test_java_dependency_classifier_accepts_missing_servlet_classpath():
+    fp = {
+        "success": False,
+        "exception_type": "CompilationError",
+        "exception_message_category": "javac_failed",
+        "stderr": (
+            "SignUpServlet.java:3: error: package javax.servlet.http does not exist\n"
+            "public class SignUpServlet extends HttpServlet {\n"
+            "                                   ^\n"
+            "symbol: class HttpServlet\n"
+        ),
+    }
+
+    assert BehavioralValidator._fingerprint_dependency_unavailable(fp, language="java") is True
+
+
+def test_java_dependency_classifier_accepts_declared_magic_in_servlet_dependency_error():
+    fp = {
+        "success": False,
+        "exception_type": "CompilationError",
+        "exception_message_category": "javac_failed",
+        "stderr": (
+            "SignUpServlet.java:53: error: cannot find symbol\n"
+            "        request.setAttribute(MAGIC_STRING_ERRORMESSAGE, \"Password Do Not Match!.\");\n"
+            "               ^\n"
+            "symbol:   method setAttribute(String,String)\n"
+            "location: variable request of type HttpServletRequest\n"
+        ),
+    }
+
+    assert BehavioralValidator._fingerprint_dependency_unavailable(fp, language="java") is True
+
+
+def test_java_dependency_classifier_rejects_unresolved_sctva_constant():
+    fp = {
+        "success": False,
+        "exception_type": "CompilationError",
+        "exception_message_category": "javac_failed",
+        "stderr": (
+            "OrderServlet.java:21: error: cannot find symbol\n"
+            "        String action = MAGIC_STRING_DELETE;\n"
+            "                        ^\n"
+            "symbol:   variable MAGIC_STRING_DELETE\n"
+        ),
+    }
+
+    assert BehavioralValidator._fingerprint_dependency_unavailable(fp, language="java") is False
+
+
 def test_java_real_compile_failure_still_fails_behavioral_validation():
     broken_java = """
 public class Demo {
