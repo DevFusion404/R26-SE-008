@@ -1311,7 +1311,7 @@ class BehavioralValidator:
             return False
 
         exception_type = str(fp.get("exception_type") or "")
-        message = "\n".join(
+        raw_message = "\n".join(
             str(fp.get(key) or "")
             for key in (
                 "exception_message_category",
@@ -1319,7 +1319,8 @@ class BehavioralValidator:
                 "stderr",
                 "stdout",
             )
-        ).lower()
+        )
+        message = raw_message.lower()
 
         if exception_type == "RuntimeUnavailable":
             return True
@@ -1338,15 +1339,56 @@ class BehavioralValidator:
         if language == "java":
             if exception_type != "CompilationError":
                 return False
+
+            unresolved_magic = re.search(
+                r"symbol:\s+(?:variable|class|interface|method)\s+MAGIC_[A-Z0-9_]*",
+                raw_message,
+            )
+            if unresolved_magic:
+                return False
+
+            missing_package = re.search(
+                r"package\s+[a-zA-Z_][\w.]*\s+does\s+not\s+exist",
+                message,
+            )
+            servlet_dependency_patterns = (
+                "package javax.servlet",
+                "package jakarta.servlet",
+                "symbol: class httpservlet",
+                "symbol:   class httpservlet",
+                "symbol: class httpservletrequest",
+                "symbol:   class httpservletrequest",
+                "symbol: class httpservletresponse",
+                "symbol:   class httpservletresponse",
+                "symbol: class requestdispatcher",
+                "symbol:   class requestdispatcher",
+                "symbol: class servletexception",
+                "symbol:   class servletexception",
+                "symbol: class webservlet",
+                "symbol:   class webservlet",
+                "cannot be converted to annotation",
+                "cannot be converted to throwable",
+                "location: variable request of type httpservletrequest",
+                "location: variable response of type httpservletresponse",
+                "location: variable dispatcher of type requestdispatcher",
+            )
+            if missing_package or any(pattern in message for pattern in servlet_dependency_patterns):
+                return True
+
             dependency_patterns = (
+                "package javax.servlet",
+                "package jakarta.servlet",
                 "package ",
                 " does not exist",
                 "cannot find symbol",
                 "symbol:   class ",
                 "symbol: class ",
+                "symbol:   interface ",
+                "symbol: interface ",
                 "class file for ",
                 "not found",
                 "cannot access ",
+                "bad class file",
             )
             syntax_patterns = (
                 "';' expected",

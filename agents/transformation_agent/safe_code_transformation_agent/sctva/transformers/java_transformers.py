@@ -13,7 +13,9 @@ import re
 from typing import Any, Optional, Tuple
 
 
-_TYPE_DECL_RE = re.compile(r"\b(class|interface|enum)\s+([A-Za-z_][A-Za-z0-9_]*)\s*\{")
+_TYPE_DECL_RE = re.compile(
+    r"\b(class|interface|enum)\s+([A-Za-z_][A-Za-z0-9_]*)\b[^{;]*\{"
+)
 _STATIC_FINAL_RE = re.compile(
     r"\bstatic\s+final\b[^;=]*\b([A-Za-z_][A-Za-z0-9_]*)\b\s*="
 )
@@ -84,6 +86,9 @@ def _normalize_constant_name(
     if cleaned in generic_names:
         return _constant_name_from_value(literal_value)
 
+    if isinstance(literal_value, str) and cleaned.startswith("MAGIC_NUMBER_"):
+        return _constant_name_from_value(literal_value)
+
     return cleaned
 
 
@@ -132,6 +137,188 @@ def _literal_pattern(literal_value: Any) -> re.Pattern[str]:
     return re.compile(escaped)
 
 
+def _mask_java_comments_and_literals(source_code: str) -> str:
+    result: list[str] = []
+    state = "code"
+    index = 0
+
+    while index < len(source_code):
+        char = source_code[index]
+        nxt = source_code[index + 1] if index + 1 < len(source_code) else ""
+
+        if state == "code":
+            if char == "/" and nxt == "/":
+                result.extend("  ")
+                state = "line_comment"
+                index += 2
+                continue
+            if char == "/" and nxt == "*":
+                result.extend("  ")
+                state = "block_comment"
+                index += 2
+                continue
+            if char == '"':
+                result.append(" ")
+                state = "string"
+                index += 1
+                continue
+            if char == "'":
+                result.append(" ")
+                state = "char"
+                index += 1
+                continue
+            result.append(char)
+            index += 1
+            continue
+
+        if state == "line_comment":
+            result.append("\n" if char == "\n" else " ")
+            if char == "\n":
+                state = "code"
+            index += 1
+            continue
+
+        if state == "block_comment":
+            if char == "*" and nxt == "/":
+                result.extend("  ")
+                state = "code"
+                index += 2
+                continue
+            result.append("\n" if char == "\n" else " ")
+            index += 1
+            continue
+
+        quote = '"' if state == "string" else "'"
+        if char == "\\":
+            result.append(" ")
+            if nxt:
+                result.append("\n" if nxt == "\n" else " ")
+            index += 2
+            continue
+
+        result.append("\n" if char == "\n" else " ")
+        if char == quote:
+            state = "code"
+        index += 1
+
+    return "".join(result)
+
+
+def _iter_java_string_literals(source_code: str) -> list[tuple[str, int, int, int]]:
+    literals: list[tuple[str, int, int, int]] = []
+    state = "code"
+    index = 0
+    start = 0
+    value: list[str] = []
+
+    while index < len(source_code):
+        char = source_code[index]
+        nxt = source_code[index + 1] if index + 1 < len(source_code) else ""
+
+        if state == "code":
+            if char == "/" and nxt == "/":
+                state = "line_comment"
+                index += 2
+                continue
+            if char == "/" and nxt == "*":
+                state = "block_comment"
+                index += 2
+                continue
+            if char == '"':
+                state = "string"
+                start = index
+                value = []
+            index += 1
+            continue
+
+        if state == "line_comment":
+            if char == "\n":
+                state = "code"
+            index += 1
+            continue
+
+        if state == "block_comment":
+            if char == "*" and nxt == "/":
+                state = "code"
+                index += 2
+                continue
+            index += 1
+            continue
+
+        if char == "\\":
+            if nxt:
+                value.append(_decode_java_string_escape(nxt))
+                index += 2
+                continue
+            index += 1
+            continue
+
+        if char == '"':
+            line_no = source_code.count("\n", 0, start) + 1
+            literals.append(("".join(value), line_no, start, index + 1))
+            state = "code"
+            index += 1
+            continue
+
+        value.append(char)
+        index += 1
+
+    return literals
+
+
+def _decode_java_string_escape(char: str) -> str:
+    escapes = {
+        "n": "\n",
+        "r": "\r",
+        "t": "\t",
+        "b": "\b",
+        "f": "\f",
+        "\\": "\\",
+        '"': '"',
+        "'": "'",
+    }
+    return escapes.get(char, f"\\{char}")
+
+
+def _coerce_numeric_string_literal(
+    source_code: str,
+    literal_value: Any,
+    source_line: Optional[int],
+) -> Any:
+    if source_line is None or not isinstance(literal_value, (int, float)):
+        return literal_value
+
+    literal_text = str(literal_value)
+    for value, line_no, _start, _end in _iter_java_string_literals(source_code):
+        if line_no == source_line and value.strip() == literal_text:
+            return value
+
+    global_matches = [
+        value
+        for value, _line_no, _start, _end in _iter_java_string_literals(source_code)
+        if value.strip() == literal_text
+    ]
+    if len(global_matches) == 1:
+        return global_matches[0]
+
+    return literal_value
+
+
+def _line_contains_literal_inside_java_string(
+    source_code: str,
+    literal_value: Any,
+    source_line: Optional[int],
+) -> bool:
+    if source_line is None or not isinstance(literal_value, (int, float)):
+        return False
+
+    literal_text = str(literal_value)
+    return any(
+        line_no == source_line and literal_text in value
+        for value, line_no, _start, _end in _iter_java_string_literals(source_code)
+    )
+
+
 def _should_skip_replacement(line: str, constant_name: str) -> bool:
     stripped = line.strip()
 
@@ -162,6 +349,29 @@ def _replace_literal(
     pattern = _literal_pattern(literal_value)
     lines = source_code.splitlines(keepends=True)
     replacements = 0
+
+    if not isinstance(literal_value, str):
+        masked_lines = _mask_java_comments_and_literals(source_code).splitlines(keepends=True)
+        for index, line in enumerate(lines, start=1):
+            if source_line is not None and index != source_line:
+                continue
+
+            if _should_skip_replacement(line, constant_name):
+                continue
+
+            masked_line = masked_lines[index - 1] if index <= len(masked_lines) else ""
+            matches = list(pattern.finditer(masked_line))
+            if not matches:
+                continue
+
+            updated = line
+            for match in reversed(matches):
+                updated = updated[: match.start()] + constant_name + updated[match.end() :]
+
+            replacements += len(matches)
+            lines[index - 1] = updated
+
+        return "".join(lines), replacements
 
     for index, line in enumerate(lines, start=1):
         if source_line is not None and index != source_line:
@@ -446,6 +656,13 @@ def apply_extract_constant(
     constant_name: Optional[str] = None,
     source_line: Optional[int] = None,
 ) -> Tuple[str, int]:
+    original_literal_value = literal_value
+    literal_value = _coerce_numeric_string_literal(source_code, literal_value, source_line)
+    protected_string_literal = _line_contains_literal_inside_java_string(
+        source_code,
+        original_literal_value,
+        source_line,
+    )
     normalized_name = _normalize_constant_name(constant_name, literal_value)
     preferred_name = _unique_constant_name(source_code, normalized_name)
 
@@ -455,7 +672,7 @@ def apply_extract_constant(
         preferred_name,
         source_line,
     )
-    if replacements == 0 and source_line is not None:
+    if replacements == 0 and source_line is not None and not protected_string_literal:
         transformed, replacements = _replace_literal(
             source_code,
             literal_value,
