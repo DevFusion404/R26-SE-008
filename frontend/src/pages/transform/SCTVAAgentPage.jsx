@@ -68,6 +68,8 @@ const PIPELINE_STAGES = [
 function pipelineLabel(status, stepNumber) {
   const prefix = status === 'completed'
     ? 'Completed'
+    : status === 'warn'
+      ? 'Warning'
     : status === 'active'
       ? 'In Progress'
       : status === 'failed'
@@ -88,8 +90,15 @@ function validationStageStatus(stepKey, validation, phase) {
     : stepKey === 'invariant'
       ? String(details.status || '')
       : '';
+  const numericScore = typeof step.score === 'number' ? step.score : Number.NaN;
 
-  if (reportedStatus.toLowerCase() === 'skipped') return 'failed';
+  if (reportedStatus.toLowerCase() === 'skipped') return 'pending';
+
+  if (Number.isFinite(numericScore)) {
+    if (numericScore > 0.9) return 'completed';
+    if (numericScore >= 0.5) return 'warn';
+    return 'failed';
+  }
 
   return step.passed ? 'completed' : 'failed';
 }
@@ -374,6 +383,12 @@ function normalizePathForMatch(value) {
 function pathBaseName(value) {
   const normalized = normalizePathForMatch(value);
   return normalized.split('/').filter(Boolean).pop() || normalized;
+}
+
+function inferParallelFileWorkers(fileCount) {
+  const count = Math.max(1, Number(fileCount) || 1);
+  const cores = Math.max(1, Number(window.navigator?.hardwareConcurrency) || 4);
+  return Math.max(1, Math.min(4, cores, count));
 }
 
 function firstStringValue(values) {
@@ -885,14 +900,28 @@ function ValidationChecklist({ validation }) {
         }
 
         const details = item.details || {};
+        const numericScore = typeof item.score === 'number' ? item.score : Number.NaN;
         const status = label === 'Behavioral Preservation'
           ? String(details.fingerprint_status || (item.passed ? 'passed' : 'failed'))
           : label === 'Invariant Mining'
             ? String(details.status || (item.passed ? 'passed' : 'failed'))
             : (item.passed ? 'passed' : 'failed');
 
-        const cls = status === 'passed' ? 'pass' : status === 'skipped' ? 'neutral' : 'fail';
-        const icon = status === 'passed' ? '' : status === 'skipped' ? 'o' : 'x';
+        let cls = status === 'passed' ? 'pass' : status === 'skipped' ? 'neutral' : 'fail';
+        let icon = status === 'passed' ? '' : status === 'skipped' ? 'o' : 'x';
+
+        if (status !== 'skipped' && Number.isFinite(numericScore)) {
+          if (numericScore > 0.9) {
+            cls = 'pass';
+            icon = '';
+          } else if (numericScore >= 0.5) {
+            cls = 'warn';
+            icon = '!';
+          } else {
+            cls = 'fail';
+            icon = 'x';
+          }
+        }
 
         const message = label === 'Behavioral Preservation'
           ? (details.fingerprint_summary || item.message || '')
@@ -2150,6 +2179,9 @@ export default function SCTVAAgentPage() {
   const activeSourceName = activeSource ? activeSource.name : '';
   const activeSourceCode = activeSource ? activeSource.code : '';
   const activeFileDisplay = activeFileName || activeSourceName || 'No file selected';
+  const confidenceFileDisplay = activeFileDisplay === 'No file selected'
+    ? activeFileDisplay
+    : activeFileDisplay.split(/[\\/]/).filter(Boolean).pop() || activeFileDisplay;
   const fileTabs = fileResults.length
     ? fileResults.map(item => ({
       name: item.file_name,
@@ -2518,6 +2550,7 @@ export default function SCTVAAgentPage() {
     try {
       executionOptions = {
         enable_sctva_auto_refactoring: true,
+        max_parallel_files: inferParallelFileWorkers(selectedExecutableFiles.length),
         ...SCTVAAgentService.parseJson(executionOptionsText || '{}'),
       };
     } catch (error) {
@@ -3213,7 +3246,7 @@ export default function SCTVAAgentPage() {
         </div>
 
         <div className="sctva-confidence-card">
-          <h2>{`Confidence Score · ${activeFileDisplay}`}</h2>
+          <h2>{`Confidence Score · ${confidenceFileDisplay}`}</h2>
 
           <div
             className={`sctva-confidence-ring ${confidenceApplicable ? '' : 'not-applicable'}`}
