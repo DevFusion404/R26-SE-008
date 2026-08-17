@@ -75,6 +75,99 @@ def test_java_extract_constant_falls_back_when_source_line_misses():
     assert "BASE" in transformed
 
 
+def test_java_extract_constant_converts_numeric_string_to_string_constant():
+    source = (
+        "public class T {\n"
+        "    void connect() {\n"
+        "        String pass = \"1234\";\n"
+        "    }\n"
+        "}\n"
+    )
+    transformed, count = java_transformers.apply_extract_constant(
+        source,
+        1234,
+        "EXTRACTED_CONSTANT",
+        source_line=3,
+    )
+    assert count == 1
+    assert 'private static final String MAGIC_STRING_N_1234 = "1234";' in transformed
+    assert "String pass = MAGIC_STRING_N_1234;" in transformed
+    assert 'String pass = "MAGIC_NUMBER_1234";' not in transformed
+
+
+def test_java_extract_constant_does_not_replace_number_inside_longer_string():
+    source = (
+        "public class T {\n"
+        "    void connect() {\n"
+        "        String url = \"jdbc:mysql://localhost:3306/contact\";\n"
+        "    }\n"
+        "}\n"
+    )
+    transformed, count = java_transformers.apply_extract_constant(
+        source,
+        3306,
+        "EXTRACTED_CONSTANT",
+        source_line=3,
+    )
+    assert count == 0
+    assert transformed == source
+
+
+def test_java_extract_constant_handles_numeric_string_after_prior_constant_insertion():
+    source = (
+        "public class T {\n"
+        "    void connect() {\n"
+        "        String url = \"jdbc:mysql://localhost:3306/contact\";\n"
+        "        String pass = \"1234\";\n"
+        "    }\n"
+        "}\n"
+    )
+    transformed, url_count = java_transformers.apply_extract_constant(
+        source,
+        "jdbc:mysql://localhost:3306/contact",
+        "EXTRACTED_CONSTANT",
+        source_line=3,
+    )
+    transformed, pass_count = java_transformers.apply_extract_constant(
+        transformed,
+        1234,
+        "MAGIC_NUMBER_1234",
+        source_line=4,
+    )
+
+    assert url_count == 1
+    assert pass_count == 1
+    assert "String url = MAGIC_STRING_JDBC_MYSQL___LOCALHOST_3;" in transformed
+    assert "String pass = MAGIC_STRING_N_1234;" in transformed
+    assert 'private static final String MAGIC_STRING_N_1234 = "1234";' in transformed
+    assert 'String pass = "MAGIC_NUMBER_1234";' not in transformed
+
+
+def test_java_extract_constant_inserts_constant_into_extending_class():
+    source = (
+        "package login;\n\n"
+        "public class SignUpServlet extends HttpServlet {\n"
+        "    void connect() {\n"
+        "        String url = \"jdbc:mysql://localhost:3306/contact\";\n"
+        "    }\n"
+        "}\n"
+    )
+    transformed, count = java_transformers.apply_extract_constant(
+        source,
+        "jdbc:mysql://localhost:3306/contact",
+        "EXTRACTED_CONSTANT",
+        source_line=5,
+    )
+
+    assert count == 1
+    assert (
+        "private static final String MAGIC_STRING_JDBC_MYSQL___LOCALHOST_3 = "
+        '"jdbc:mysql://localhost:3306/contact";'
+    ) in transformed
+    assert "String url = MAGIC_STRING_JDBC_MYSQL___LOCALHOST_3;" in transformed
+    assert "public class SignUpServlet extends HttpServlet {" in transformed
+
+
 def test_java_normalize_multiline_statement_extracts_sql_constant():
     source = (
         "import java.sql.PreparedStatement;\n"
