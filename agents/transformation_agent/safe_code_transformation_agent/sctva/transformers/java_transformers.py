@@ -1,7 +1,7 @@
 """Conservative text-based Java transformers for mock-safe execution.
 
 This module mirrors the Python transformer behavior where possible:
-- Introduce Constant generates stable names like MAGIC_NUMBER_6.
+- Introduce Constant generates stable names like CONSTANT_NUMBER_6.
 - Generic names like EXTRACTED_CONSTANT are normalized to value-based names.
 - Constants are inserted into the class body before use.
 - Replacements avoid touching existing constant declarations.
@@ -46,25 +46,36 @@ def _sanitize_identifier(value: str) -> str:
 
 def _constant_name_from_value(value: Any) -> str:
     if isinstance(value, bool):
-        return f"MAGIC_BOOL_{str(value).upper()}"
+        return f"CONSTANT_BOOL_{str(value).upper()}"
 
     if value is None:
-        return "MAGIC_NONE"
+        return "CONSTANT_NONE"
 
     if isinstance(value, int):
         if value < 0:
-            return f"MAGIC_NUMBER_NEG_{abs(value)}"
-        return f"MAGIC_NUMBER_{value}"
+            return f"CONSTANT_NUMBER_NEG_{abs(value)}"
+        return f"CONSTANT_NUMBER_{value}"
 
     if isinstance(value, float):
         text = str(value).replace("-", "NEG_").replace(".", "_")
-        return f"MAGIC_NUMBER_{_sanitize_identifier(text)}"
+        return f"CONSTANT_NUMBER_{_sanitize_identifier(text)}"
 
     if isinstance(value, str):
         short = value[:24]
-        return f"MAGIC_STRING_{_sanitize_identifier(short)}"
+        return f"CONSTANT_STRING_{_sanitize_identifier(short)}"
 
-    return "MAGIC_VALUE"
+    return "CONSTANT_VALUE"
+
+
+def _normalize_legacy_magic_name(cleaned: str, literal_value: Any) -> str:
+    if not cleaned.startswith("MAGIC_"):
+        return cleaned
+    if cleaned.startswith(("MAGIC_NUMBER_", "MAGIC_STRING_", "MAGIC_BOOL_")) or cleaned in {
+        "MAGIC_NONE",
+        "MAGIC_VALUE",
+    }:
+        return _constant_name_from_value(literal_value)
+    return f"CONSTANT_{cleaned[len('MAGIC_'):]}"
 
 
 def _normalize_constant_name(
@@ -86,7 +97,9 @@ def _normalize_constant_name(
     if cleaned in generic_names:
         return _constant_name_from_value(literal_value)
 
-    if isinstance(literal_value, str) and cleaned.startswith("MAGIC_NUMBER_"):
+    cleaned = _normalize_legacy_magic_name(cleaned, literal_value)
+
+    if isinstance(literal_value, str) and cleaned.startswith(("MAGIC_NUMBER_", "CONSTANT_NUMBER_")):
         return _constant_name_from_value(literal_value)
 
     return cleaned

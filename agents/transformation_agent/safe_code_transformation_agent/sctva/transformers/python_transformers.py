@@ -11,8 +11,8 @@ Why CST is used here:
 Main fix in this version:
 - Introduce Constant no longer uses the same generic EXTRACTED_CONSTANT name
   for every magic number.
-- It generates stable constant names such as MAGIC_NUMBER_6, MAGIC_NUMBER_50,
-  MAGIC_NUMBER_0_8.
+- It generates stable constant names such as CONSTANT_NUMBER_6, CONSTANT_NUMBER_50,
+    CONSTANT_NUMBER_0_8.
 - It inserts the constant assignment into the module before the replaced value
   is used.
 - It avoids replacing values inside existing constant assignments.
@@ -48,25 +48,36 @@ def _sanitize_identifier(value: str) -> str:
 
 def _constant_name_from_value(value: Any) -> str:
     if isinstance(value, bool):
-        return f"MAGIC_BOOL_{str(value).upper()}"
+        return f"CONSTANT_BOOL_{str(value).upper()}"
 
     if value is None:
-        return "MAGIC_NONE"
+        return "CONSTANT_NONE"
 
     if isinstance(value, int):
         if value < 0:
-            return f"MAGIC_NUMBER_NEG_{abs(value)}"
-        return f"MAGIC_NUMBER_{value}"
+            return f"CONSTANT_NUMBER_NEG_{abs(value)}"
+        return f"CONSTANT_NUMBER_{value}"
 
     if isinstance(value, float):
         text = str(value).replace("-", "NEG_").replace(".", "_")
-        return f"MAGIC_NUMBER_{_sanitize_identifier(text)}"
+        return f"CONSTANT_NUMBER_{_sanitize_identifier(text)}"
 
     if isinstance(value, str):
         short = value[:24]
-        return f"MAGIC_STRING_{_sanitize_identifier(short)}"
+        return f"CONSTANT_STRING_{_sanitize_identifier(short)}"
 
-    return "MAGIC_VALUE"
+    return "CONSTANT_VALUE"
+
+
+def _normalize_legacy_magic_name(cleaned: str, literal_value: Any) -> str:
+    if not cleaned.startswith("MAGIC_"):
+        return cleaned
+    if cleaned.startswith(("MAGIC_NUMBER_", "MAGIC_STRING_", "MAGIC_BOOL_")) or cleaned in {
+        "MAGIC_NONE",
+        "MAGIC_VALUE",
+    }:
+        return _constant_name_from_value(literal_value)
+    return f"CONSTANT_{cleaned[len('MAGIC_'):]}"
 
 
 def _normalize_constant_name(
@@ -94,6 +105,8 @@ def _normalize_constant_name(
 
     if cleaned in generic_names:
         return _constant_name_from_value(literal_value)
+
+    cleaned = _normalize_legacy_magic_name(cleaned, literal_value)
 
     return cleaned
 
@@ -457,11 +470,11 @@ class _ExtractConstantTransformer(cst.CSTTransformer):
 
         Without this guard, code like:
 
-            MAGIC_NUMBER_50 = 50
+            CONSTANT_NUMBER_50 = 50
 
         could be transformed into:
 
-            MAGIC_NUMBER_50 = MAGIC_NUMBER_50
+            CONSTANT_NUMBER_50 = CONSTANT_NUMBER_50
 
         which causes a NameError during module execution.
         """
@@ -645,8 +658,8 @@ def apply_extract_constant(
             plt.figure(figsize=(12, 6))
 
         Transformed:
-            MAGIC_NUMBER_6 = 6
-            plt.figure(figsize=(12, MAGIC_NUMBER_6))
+            CONSTANT_NUMBER_6 = 6
+            plt.figure(figsize=(12, CONSTANT_NUMBER_6))
 
     Parameters:
         source_code:
