@@ -185,6 +185,7 @@ class ExecutionOptions:
     require_compilation: bool = False
     rollback_on_behavior_failure: bool = True
     enable_sctva_auto_refactoring: bool = True
+    max_parallel_files: int = 0
 
     @classmethod
     def from_dict(cls, data: Optional[Dict[str, Any]]) -> "ExecutionOptions":
@@ -197,6 +198,17 @@ class ExecutionOptions:
         if not isinstance(timeout, int) or timeout <= 0:
             raise ContractValidationError("Field 'execution_options.timeout_seconds' must be a positive integer.")
 
+        try:
+            max_parallel_files = int(data.get("max_parallel_files", 0) or 0)
+        except (TypeError, ValueError) as exc:
+            raise ContractValidationError(
+                "Field 'execution_options.max_parallel_files' must be a non-negative integer."
+            ) from exc
+        if max_parallel_files < 0:
+            raise ContractValidationError(
+                "Field 'execution_options.max_parallel_files' must be a non-negative integer."
+            )
+
         return cls(
             strict_mode=bool(data.get("strict_mode", True)),
             enable_behavior_tests=bool(data.get("enable_behavior_tests", True)),
@@ -204,6 +216,7 @@ class ExecutionOptions:
             require_compilation=bool(data.get("require_compilation", False)),
             rollback_on_behavior_failure=bool(data.get("rollback_on_behavior_failure", True)),
             enable_sctva_auto_refactoring=bool(data.get("enable_sctva_auto_refactoring", True)),
+            max_parallel_files=max_parallel_files,
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -214,6 +227,7 @@ class ExecutionOptions:
             "require_compilation": self.require_compilation,
             "rollback_on_behavior_failure": self.rollback_on_behavior_failure,
             "enable_sctva_auto_refactoring": self.enable_sctva_auto_refactoring,
+            "max_parallel_files": self.max_parallel_files,
         }
 
 
