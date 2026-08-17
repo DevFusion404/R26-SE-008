@@ -38,7 +38,7 @@ from db.database import (
 from diwo.orchestrator import (
     generate_refactoring_plan, simulate_transformation,
     compute_metrics_before, compute_metrics_after, next_stage,
-    generate_updated_plan_report,
+    generate_updated_plan_report, build_approved_plan,
     normalize_cuqa_report, cuqa_report_to_smells, filter_cuqa_report,
     detect_primary_language, derive_target_name,
     build_rdp_plan_input, normalize_rdp_plan,
@@ -939,27 +939,59 @@ def plan_decision(wf_id):
 
     # ── Modify ───────────────────────────────────────────────────────────────
     if decision == "modify":
+        decisions = data.get("decisions")
         modified_steps = data.get("modified_steps")
-        if modified_steps is not None:
+
+        if isinstance(decisions, dict) and decisions:
+            # Preferred: the backend derives the approved plan itself, so the
+            # report the Transformation Agent receives cannot disagree with the
+            # verdicts recorded in the audit trail.
+            plan = build_approved_plan(plan, decisions)
+        elif modified_steps is not None:
             if not isinstance(modified_steps, list):
                 return _err("'modified_steps' must be a list of step objects.")
-            plan["steps"] = modified_steps
-            plan["summary"]["total_steps"] = len(modified_steps)
+            kept = {s.get("step_id") for s in modified_steps if isinstance(s, dict)}
+            plan = build_approved_plan(
+                plan,
+                {s.get("step_id"): ("approve" if s.get("step_id") in kept else "reject")
+                 for s in plan.get("steps") or []},
+            )
+
         update_workflow(wf_id, plan_json=json.dumps(plan))
-        log_event(wf_id, "plan_approval", "plan_modified",
-                  {"steps_after": len(plan["steps"])})
+        log_event(wf_id, "plan_approval", "plan_modified", {
+            "steps_after":  len(plan.get("steps") or []),
+            "approved_ids": (plan.get("approval") or {}).get("approved_step_ids"),
+            "rejected_ids": (plan.get("approval") or {}).get("rejected_step_ids"),
+        })
         save_feedback(wf_id, "plan_approval", "plan_modified",
                       reason=feedback.get("reason"), rating=feedback.get("rating"),
                       accepted=True)
+
+        # One feedback row per rejected step — a step-level rejection is a
+        # stronger training signal than the session-level approval.
+        for step in (plan.get("approval") or {}).get("rejected_step_ids") or []:
+            save_feedback(wf_id, "plan_approval", "plan_step_rejected",
+                          reason=f"Developer rejected plan step {step}.",
+                          accepted=False)
+
         return jsonify({
             "status":  "plan_approval",
             "plan":    plan,
-            "message": "Plan updated. Please approve to proceed.",
+            "message": "Plan reduced to the approved steps. Please approve to proceed.",
         })
 
     # ── Approve → trigger transformation ─────────────────────────────────────
+    # An approve can carry the decisions directly, so a caller that never sent
+    # a separate 'modify' still gets an approved-only plan persisted.
+    approve_decisions = data.get("decisions")
+    if isinstance(approve_decisions, dict) and approve_decisions:
+        plan = build_approved_plan(plan, approve_decisions)
+        update_workflow(wf_id, plan_json=json.dumps(plan))
+
     log_event(wf_id, "plan_approval", "plan_approved",
-              {"plan_id": plan.get("plan_id")})
+              {"plan_id": plan.get("plan_id"),
+               "steps": len(plan.get("steps") or []),
+               "approved_ids": (plan.get("approval") or {}).get("approved_step_ids")})
     save_feedback(wf_id, "plan_approval", "plan_approved",
                   reason=feedback.get("reason"), rating=feedback.get("rating"),
                   accepted=True)
@@ -980,12 +1012,16 @@ def plan_decision(wf_id):
 
     return jsonify({
         "status":               "transformation",
+        # The approved-only plan report. This is what the Safe Transformation
+        # Agent must execute — Stage 3 posts it to /sctva/execute, so a
+        # rejected step never reaches the transformer.
+        "approved_plan":        plan,
         "transformation_result": tr,
         "refactored_code":      tr.get("refactored_code", ""),
         "diff_rows":            tr.get("diff_rows", []),
         "files":                tr.get("files", []),
         "metrics_after":        metrics_after,
-        "message":              "Transformation applied. Please review results.",
+        "message":              "Plan approved. Forward the approved plan to the Transformation Agent.",
     })
 
 

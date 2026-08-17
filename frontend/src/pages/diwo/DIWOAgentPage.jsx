@@ -395,25 +395,41 @@ export default function DIWOAgentPage() {
         return;
       }
 
-      // Stage 3 executes exactly these steps against the Safe Transformation
-      // Agent, so keep them separate from the full plan the page rendered.
-      setApprovedPlan({ ...activePlan, steps: approvedSteps });
+      // The backend derives the approved-only plan from the decisions and
+      // persists it, so the report Stage 3 posts to /sctva/execute is the same
+      // one the audit trail records. The local filter below is only the
+      // fallback for an offline backend.
+      let approvedReport = { ...activePlan, steps: approvedSteps };
 
-      // If some steps rejected, modify first
       if (approvedSteps.length < (activePlan.steps || []).length) {
         const modRes = await api.post(`/workflows/${workflowId}/plan-decision`, {
           decision: "modify",
-          modified_steps: approvedSteps,
+          decisions,
           feedback: { reason: opinion || "Developer adjusted plan" },
         });
-        setPlanData(modRes.plan || activePlan);
+        if (modRes.plan) {
+          approvedReport = modRes.plan;
+          setPlanData(modRes.plan);
+        }
       }
 
-      // Then approve — backend triggers transformation synchronously
+      // Then approve — carries the decisions too, so an all-approved plan is
+      // still persisted with its approval block.
       const approveRes = await api.post(`/workflows/${workflowId}/plan-decision`, {
         decision: "approve",
+        decisions,
         feedback: { reason: opinion || "Approved in DIWO frontend", rating: 5 },
       });
+      if (approveRes.approved_plan) approvedReport = approveRes.approved_plan;
+
+      const forwarded = (approvedReport.steps || []).length;
+      addLog(
+        `Forwarding the approved plan (${forwarded} step(s), ` +
+        `${(approvedReport.approval?.rejected_step_ids || []).length} rejected) ` +
+        "to the Safe Transformation Agent.",
+        "success"
+      );
+      setApprovedPlan(approvedReport);
 
       // FIX [F4]: Store real backend transformation data
       const td = {

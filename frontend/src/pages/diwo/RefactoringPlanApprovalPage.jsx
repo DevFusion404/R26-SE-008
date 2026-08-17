@@ -26,7 +26,19 @@
  *
  * The displayed plan travels back up on approve (`onApprove({ plan })`) so the
  * parent forwards the exact steps the developer saw, not whichever copy its own
- * state happens to hold.
+ * state happens to hold. Only the steps marked "approve" are transformed —
+ * DIWOAgentPage filters on `decisions[step.step_id] === "approve"` before
+ * handing the plan to the Safe Transformation Agent.
+ *
+ * Approving a step is a LOCAL decision and never regenerates the plan.
+ * It used to: every click called onDecisionChange, which POSTed
+ * /plan-preference-update, and that endpoint drops rejected steps, re-sorts
+ * the rest, renumbers step_id from 1 and returns a new plan_id. The new
+ * plan_id tripped the reset below, so the approval the developer had just made
+ * was wiped a moment after it appeared — and the renumbering meant a decision
+ * key no longer pointed at the step it was made on. Preference changes (risk
+ * tolerance / impact focus) still ask the backend to re-rank, and decisions
+ * are carried across that by step identity rather than by position.
  */
 
 import { useState } from "react";
@@ -59,28 +71,56 @@ export default function RefactoringPlanApprovalPage({
       : null;
   const steps = currentPlan?.steps || [];
 
-  // Decisions are keyed by step_id, so they must not survive a different plan.
-  // Adjusted during render rather than in an effect — no cascading render, no
-  // stale first paint of the previous plan's approvals.
+  // A step's identity across plan revisions. step_id cannot be used: the
+  // preference re-ranker renumbers steps from 1, so step 1 of a new plan is
+  // usually a different refactoring than step 1 of the old one.
+  const identityOf = (step) =>
+    `${step.smell_id ?? ""}|${step.refactoring ?? ""}|${step.target?.file ?? ""}`;
+
+  // Decisions are keyed by step_id, which only means anything within one plan.
+  // When the plan is replaced, carry each decision over to the step it was
+  // actually made on instead of dropping the lot. Adjusted during render
+  // rather than in an effect — no cascading render, no stale first paint.
   const planKey = currentPlan ? `${origin}:${currentPlan.plan_id}` : null;
   const [prevPlanKey, setPrevPlanKey] = useState(planKey);
+  const [prevSteps, setPrevSteps] = useState(steps);
   if (planKey !== prevPlanKey) {
+    const byIdentity = new Map();
+    prevSteps.forEach((step) => {
+      const decision = decisions[step.step_id];
+      if (decision) byIdentity.set(identityOf(step), decision);
+    });
+
+    const carried = {};
+    steps.forEach((step) => {
+      const decision = byIdentity.get(identityOf(step));
+      if (decision) carried[step.step_id] = decision;
+    });
+
     setPrevPlanKey(planKey);
-    setDecisions({});
+    setPrevSteps(steps);
+    setDecisions(carried);
     setExpanded(new Set());
   }
 
-  const decide = (id, val) => setDecisions(prev => {
-    const next = { ...prev, [id]: val };
-    onDecisionChange?.({
-      decisions: next,
-      preferences: {
-        risk_tolerance: riskTolerance,
-        impact_focus: impactFocus,
-      },
-    });
-    return next;
-  });
+  /** Approve / reject one step. Local only — never regenerates the plan. */
+  const decide = (id, val) =>
+    setDecisions((prev) => (prev[id] === val ? prev : { ...prev, [id]: val }));
+
+  /**
+   * Ask the backend to re-rank the plan for a new preference. This is the only
+   * thing that replaces the plan mid-review, and decisions survive it via the
+   * identity carry-over above.
+   */
+  const applyPreferences = (next) => {
+    const preferences = {
+      risk_tolerance: next.riskTolerance ?? riskTolerance,
+      impact_focus: next.impactFocus ?? impactFocus,
+    };
+    if (next.riskTolerance !== undefined) setRiskTolerance(next.riskTolerance);
+    if (next.impactFocus !== undefined) setImpactFocus(next.impactFocus);
+    onDecisionChange?.({ decisions, preferences });
+  };
 
   const toggleExpanded = (id) => setExpanded(prev => {
     const next = new Set(prev);
@@ -204,16 +244,20 @@ export default function RefactoringPlanApprovalPage({
         }}>
           {allApproved ? "Deselect All" : "Select All"}
         </button>
-        <select value={riskTolerance} onChange={(e) => setRiskTolerance(e.target.value)} style={{
-          padding: "5px 10px", borderRadius: 8, fontSize: 11, background: C.panel, color: C.text, border: `1px solid ${C.border}`,
-        }}>
+        <select
+          value={riskTolerance}
+          onChange={(e) => applyPreferences({ riskTolerance: e.target.value })}
+          style={{ padding: "5px 10px", borderRadius: 8, fontSize: 11, background: C.panel, color: C.text, border: `1px solid ${C.border}` }}
+        >
           <option value="conservative">Risk: Conservative</option>
           <option value="balanced">Risk: Balanced</option>
           <option value="aggressive">Risk: Aggressive</option>
         </select>
-        <select value={impactFocus} onChange={(e) => setImpactFocus(e.target.value)} style={{
-          padding: "5px 10px", borderRadius: 8, fontSize: 11, background: C.panel, color: C.text, border: `1px solid ${C.border}`,
-        }}>
+        <select
+          value={impactFocus}
+          onChange={(e) => applyPreferences({ impactFocus: e.target.value })}
+          style={{ padding: "5px 10px", borderRadius: 8, fontSize: 11, background: C.panel, color: C.text, border: `1px solid ${C.border}` }}
+        >
           <option value="high">Impact: High</option>
           <option value="medium">Impact: Medium</option>
           <option value="low">Impact: Low</option>
@@ -323,12 +367,19 @@ export default function RefactoringPlanApprovalPage({
             ⚠ Review all {pending} pending steps to proceed
           </div>
         )}
-        <button onClick={submit} disabled={!canProceed} style={{
+        <button onClick={submit} disabled={!canProceed} title={
+          rejected > 0
+            ? `${approved} approved step(s) will be transformed; ${rejected} rejected step(s) are dropped from the plan.`
+            : `${approved} approved step(s) will be transformed.`
+        } style={{
           padding: "10px 24px", borderRadius: 8, fontWeight: 700, fontSize: 13, cursor: canProceed ? "pointer" : "not-allowed",
           background: canProceed ? C.accent : C.border, color: canProceed ? "#000" : C.textMuted, border: "none",
           boxShadow: canProceed ? `0 0 20px ${C.accentGlow}` : "none", transition: "all 0.2s"
         }}>
-          Forward to Transformation Agent → ({approved} approved)
+          Forward {approved} Approved Step{approved === 1 ? "" : "s"} to Transformation →
+          {rejected > 0 && (
+            <span style={{ fontWeight: 500, opacity: 0.75 }}> ({rejected} rejected, skipped)</span>
+          )}
         </button>
       </div>
     </div>

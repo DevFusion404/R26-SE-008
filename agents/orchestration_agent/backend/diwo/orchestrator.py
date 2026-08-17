@@ -509,6 +509,81 @@ def normalize_rdp_plan(plan: dict, plan_input: dict = None) -> dict:
     return normalized
 
 
+def build_approved_plan(plan: dict, decisions: dict) -> dict:
+    """Reduce an RDP plan to the steps the developer approved.
+
+    This is the plan report that goes to the Safe Transformation Agent, so it
+    must contain the approved steps and nothing else: a rejected step left in
+    the JSON would be mapped to an SCTVA action and executed.
+
+    The steps keep their original ``step_id`` so every action SCTVA reports
+    still traces back to the RDP plan the developer reviewed. The summary is
+    recomputed rather than carried over — leaving the original
+    ``total_steps`` on a reduced step list produces a report that contradicts
+    itself, which is exactly the kind of stale figure that hides a filtering
+    bug. What was rejected is recorded under ``approval`` instead of being
+    silently dropped.
+    """
+    steps = plan.get("steps") or []
+    decisions = decisions or {}
+
+    def verdict(step):
+        step_id = step.get("step_id")
+        return decisions.get(str(step_id)) or decisions.get(step_id)
+
+    approved = [s for s in steps if verdict(s) == "approve"]
+    rejected = [s for s in steps if verdict(s) == "reject"]
+    pending = [s for s in steps if verdict(s) not in ("approve", "reject")]
+
+    def ratings(step, *keys):
+        for key in keys:
+            value = step.get(key)
+            if isinstance(value, str) and value:
+                return value.lower()
+        return None
+
+    raw_summary = plan.get("summary")
+    summary = dict(raw_summary) if isinstance(raw_summary, dict) else {}
+    summary["total_steps"] = len(approved)
+    summary["high_impact"] = sum(
+        1 for s in approved if ratings(s, "expected_impact", "impact") == "high"
+    )
+    summary["risks"] = {
+        level: sum(1 for s in approved if ratings(s, "risk") == level)
+        for level in ("low", "medium", "high")
+    }
+
+    # Reducing an already-reduced plan must not erase what was rejected the
+    # first time: the second pass only sees the survivors, so its own rejected
+    # list would come back empty and the audit would lose the verdict.
+    prior = plan.get("approval") if isinstance(plan.get("approval"), dict) else {}
+    prior_rejected = [i for i in (prior.get("rejected_step_ids") or [])]
+    rejected_ids = prior_rejected + [
+        s.get("step_id") for s in rejected if s.get("step_id") not in prior_rejected
+    ]
+
+    updated = {
+        **plan,
+        "steps": approved,
+        "summary": summary,
+        "approval": {
+            "source_plan_id": prior.get("source_plan_id") or plan.get("plan_id"),
+            "approved_step_ids": [s.get("step_id") for s in approved],
+            "rejected_step_ids": rejected_ids,
+            "pending_step_ids": [s.get("step_id") for s in pending],
+            "approved_count": len(approved),
+            "rejected_count": len(rejected_ids),
+            "original_total_steps": prior.get("original_total_steps", len(steps)),
+            "decided_at": datetime.now(timezone.utc).isoformat(),
+        },
+    }
+
+    if isinstance(raw_summary, str) and raw_summary:
+        updated["summary_text"] = raw_summary
+
+    return updated
+
+
 def generate_refactoring_plan(selected_smells: list, target: str) -> dict:
     steps = []
     for i, smell in enumerate(selected_smells, start=1):
