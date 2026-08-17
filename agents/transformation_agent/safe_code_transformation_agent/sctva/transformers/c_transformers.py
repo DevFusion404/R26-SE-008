@@ -51,20 +51,31 @@ def _escape_c_string(value: str) -> str:
 
 def _constant_name_from_value(value: Any) -> str:
     if isinstance(value, bool):
-        return f"MAGIC_BOOL_{str(value).upper()}"
+        return f"CONSTANT_BOOL_{str(value).upper()}"
     if value is None:
-        return "MAGIC_NONE"
+        return "CONSTANT_NONE"
     if isinstance(value, int):
         if value < 0:
-            return f"MAGIC_NUMBER_NEG_{abs(value)}"
-        return f"MAGIC_NUMBER_{value}"
+            return f"CONSTANT_NUMBER_NEG_{abs(value)}"
+        return f"CONSTANT_NUMBER_{value}"
     if isinstance(value, float):
         text = str(value).replace("-", "NEG_").replace(".", "_")
         text = re.sub(r"[^A-Za-z0-9_]", "_", text).strip("_")
-        return f"MAGIC_NUMBER_{text}"
+        return f"CONSTANT_NUMBER_{text}"
     if isinstance(value, str):
-        return f"MAGIC_STRING_{_sanitize_identifier(value[:24])}"
-    return "MAGIC_VALUE"
+        return f"CONSTANT_STRING_{_sanitize_identifier(value[:24])}"
+    return "CONSTANT_VALUE"
+
+
+def _normalize_legacy_magic_name(cleaned: str, literal_value: Any) -> str:
+    if not cleaned.startswith("MAGIC_"):
+        return cleaned
+    if cleaned.startswith(("MAGIC_NUMBER_", "MAGIC_STRING_", "MAGIC_BOOL_")) or cleaned in {
+        "MAGIC_NONE",
+        "MAGIC_VALUE",
+    }:
+        return _constant_name_from_value(literal_value)
+    return f"CONSTANT_{cleaned[len('MAGIC_'):]}"
 
 
 def _normalize_constant_name(constant_name: Optional[str], literal_value: Any) -> str:
@@ -74,6 +85,7 @@ def _normalize_constant_name(constant_name: Optional[str], literal_value: Any) -
     cleaned = _sanitize_identifier(str(constant_name))
     if cleaned in {"EXTRACTED_CONSTANT", "MAGIC_CONSTANT", "CONSTANT", "VALUE_CONSTANT"}:
         return _constant_name_from_value(literal_value)
+    cleaned = _normalize_legacy_magic_name(cleaned, literal_value)
     return cleaned
 
 
