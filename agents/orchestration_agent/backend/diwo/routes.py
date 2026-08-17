@@ -331,6 +331,16 @@ def _plan_from_rdp(updated_report: dict, selected: list, target: str, wf_id: str
 
 
 def _resolve_selected_ids(all_smells: list, selected_files: list, selected_smells: list):
+    """Turn a file-wise and/or smell-wise selection into workflow smell ids.
+
+    File-wise selection takes every smell in the listed files. Smell-wise
+    selection is per smell: an entry carrying the smell's own `id` resolves
+    directly (that is what the UI sends), and an entry without one is matched on
+    file + type + line, falling back to file + type + entity. A smell's `line`
+    and its `location.lines[0]` can differ — CUQA reports both `line` and
+    `start_line` — so both are indexed, otherwise a descriptor built from the
+    report's `line` would never match a smell keyed on `start_line`.
+    """
     ids = []
 
     if selected_files:
@@ -341,27 +351,60 @@ def _resolve_selected_ids(all_smells: list, selected_files: list, selected_smell
         ])
 
     if selected_smells:
-        key_map = {}
+        known_ids = {smell.get("id") for smell in all_smells if smell.get("id")}
+        line_map = {}     # (file, type, line)   -> [ids]
+        entity_map = {}   # (file, type, entity) -> [ids]
+
         for smell in all_smells:
             loc = smell.get("location", {}) or {}
-            key = (
-                loc.get("file"),
-                smell.get("type"),
-                (loc.get("lines") or [0, 0])[0],
-            )
-            key_map[key] = smell.get("id")
+            file_path = loc.get("file") or smell.get("relative_path")
+            smell_type = smell.get("type")
+            lines = loc.get("lines") or []
+            candidates = {smell.get("line") or 0, (lines[0] if lines else 0) or 0}
+            for line in candidates:
+                line_map.setdefault((file_path, smell_type, line), []).append(smell.get("id"))
+            if smell.get("entity"):
+                entity_map.setdefault(
+                    (file_path, smell_type, smell["entity"]), []
+                ).append(smell.get("id"))
 
         for s in selected_smells:
+            if not isinstance(s, dict):
+                continue
+
+            explicit = s.get("id") or s.get("smell_id")
+            if explicit in known_ids:
+                ids.append(explicit)
+                continue
+
             file_path = s.get("file") or s.get("relative_path") or s.get("path")
-            key = (
-                file_path,
-                s.get("type"),
-                s.get("line") or 0,
-            )
-            if key in key_map:
-                ids.append(key_map[key])
+            smell_type = s.get("type")
+            matched = line_map.get((file_path, smell_type, s.get("line") or 0))
+            if not matched and s.get("entity"):
+                matched = entity_map.get((file_path, smell_type, s["entity"]))
+            if matched:
+                ids.extend(matched)
 
     return list(dict.fromkeys(ids))
+
+
+def _resolve_selection(all_smells: list, selected_ids: list,
+                       selected_files: list, selected_smells: list):
+    """Resolve the developer's selection, preferring explicit smell ids.
+
+    Ids that are not part of this workflow are dropped and the selection is
+    re-derived from the files / smell descriptors instead, so a smell-wise
+    selection made against a re-filtered report — where a smell's index inside
+    its file, and therefore its id, has shifted — is still honoured rather than
+    silently resolving to nothing.
+    """
+    known_ids = {smell.get("id") for smell in all_smells if smell.get("id")}
+    resolved = [sid for sid in (selected_ids or []) if sid in known_ids]
+
+    if len(resolved) < len(selected_ids or []) or not resolved:
+        resolved.extend(_resolve_selected_ids(all_smells, selected_files, selected_smells))
+
+    return list(dict.fromkeys(resolved))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -667,6 +710,7 @@ def smell_selection_pass(wf_id):
     selected_ids = data.get("selected_ids") or []
     selected_files = data.get("selected_files") or data.get("selected_file_paths") or []
     selected_smells = data.get("selected_smells") or []
+    selection_mode = data.get("selection_mode") or ("smell" if selected_ids and not selected_files else "file")
 
     if selected_ids and not isinstance(selected_ids, list):
         return _err("'selected_ids' must be a list of smell ID strings.")
@@ -675,12 +719,12 @@ def smell_selection_pass(wf_id):
     if selected_smells and not isinstance(selected_smells, list):
         return _err("'selected_smells' must be a list if provided.")
 
-    if not selected_ids:
-        selected_ids = _resolve_selected_ids(
-            _parse_json_field(wf, "smells_json") or [],
-            selected_files,
-            selected_smells,
-        )
+    selected_ids = _resolve_selection(
+        _parse_json_field(wf, "smells_json") or [],
+        selected_ids,
+        selected_files,
+        selected_smells,
+    )
 
     if not selected_ids:
         return _err("No smell IDs could be resolved from the selection. Send 'selected_ids', 'selected_files', or 'selected_smells'.")
@@ -691,6 +735,8 @@ def smell_selection_pass(wf_id):
     # confirm the selection before committing to it. Built, not sent.
     payload["rdp_plan_input"] = build_rdp_plan_input(payload["updated_report"])
     payload["status"] = "smell_review"
+    payload["selection_mode"] = selection_mode
+    payload["selected_ids"] = selected_ids
     return jsonify(payload)
 
 
@@ -758,6 +804,7 @@ def select_smells(wf_id):
     selected_ids = data.get("selected_ids")
     selected_files = data.get("selected_files") or data.get("selected_file_paths") or []
     selected_smells = data.get("selected_smells") or []
+    selection_mode = data.get("selection_mode") or ("file" if selected_files else "smell")
 
     if selected_ids is not None:
         if not isinstance(selected_ids, list):
@@ -773,13 +820,15 @@ def select_smells(wf_id):
     if selected_smells and not isinstance(selected_smells, list):
         return _err("'selected_smells' must be a list if provided.")
 
-    # If no smell IDs were sent, derive them from selected files or smell details.
-    if not selected_ids:
-        selected_ids = _resolve_selected_ids(
-            _parse_json_field(wf, "smells_json") or [],
-            selected_files,
-            selected_smells,
-        )
+    # Explicit ids win; anything unresolved falls back to the selected files or
+    # the per-smell descriptors (smell-wise selection sends no files, so the
+    # deselected smells of a partially selected file are not pulled back in).
+    selected_ids = _resolve_selection(
+        _parse_json_field(wf, "smells_json") or [],
+        selected_ids,
+        selected_files,
+        selected_smells,
+    )
 
     if not selected_ids:
         return _err("No smell IDs could be resolved from the selection. Send 'selected_ids', 'selected_files', or 'selected_smells'.")
@@ -799,7 +848,12 @@ def select_smells(wf_id):
     update_workflow(wf_id, status="smell_selection",
                     selected_smells_json=json.dumps(selected))
     log_event(wf_id, "smell_selection", "smells_selected",
-              {"selected": selected_ids, "excluded": [s["id"] for s in excluded]})
+              {"selected": selected_ids, "excluded": [s["id"] for s in excluded],
+               "selection_mode": selection_mode,
+               "selected_files": sorted({
+                   s.get("location", {}).get("file") for s in selected
+                   if s.get("location", {}).get("file")
+               })})
 
     for s in excluded:
         save_feedback(wf_id, "smell_selection", "smell_excluded",
@@ -833,6 +887,7 @@ def select_smells(wf_id):
         "rdp_url":         rdp_base_url(),
         "selected_ids":    selected_ids,
         "selected_files":   selected_files,
+        "selection_mode":   selection_mode,
         "updated_report":   payload["updated_report"],
         "planning_input":   planning_input,
         "message": (
