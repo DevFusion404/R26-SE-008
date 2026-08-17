@@ -178,26 +178,3 @@ def test_invariant_miner_skips_when_behavioral_fingerprinting_skipped():
     assert result.passed is True
     assert result.details["status"] == "skipped"
     assert result.details["mode"] == "skipped"
-
-
-def test_invariant_miner_handles_c_static_fingerprints():
-    miner = InvariantMiner()
-    step = _behavioral_step(
-        {
-            "fingerprint_status": "passed",
-            "c_results": [
-                {
-                    "name": "static_c_summary",
-                    "mode": "static_c_fingerprint",
-                    "original_fingerprint": {"function_count": 1, "macros": {}},
-                    "transformed_fingerprint": {"function_count": 1, "macros": {"MAGIC_NUMBER_0_12": "0.12"}},
-                    "comparison": {"matched": True, "reason": "static_summary_match"},
-                }
-            ],
-        }
-    )
-
-    result = miner.mine(language="c", behavioral_step=step, actions=[], strict_mode=False)
-
-    assert result.passed is True
-    assert "C static invariants preserved." in result.message

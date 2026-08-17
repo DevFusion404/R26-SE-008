@@ -446,124 +446,15 @@
 
 from __future__ import annotations
 
-import json
-import math
 import multiprocessing as mp
-import shutil
-import subprocess
 import sys
-import tempfile
 import time
 import traceback
-import uuid
 from io import StringIO
-from pathlib import Path
 from typing import Any, Dict, Optional
 
 
-def _safe_repr(value: Any, max_length: int = 500) -> str:
-    try:
-        rendered = repr(value)
-    except Exception:
-        rendered = f"<unrepresentable {type(value).__name__}>"
-    if len(rendered) > max_length:
-        return rendered[:max_length] + "...<truncated>"
-    return rendered
-
-
-def mine_value_invariants(value: Any) -> Dict[str, Any]:
-    invariants: Dict[str, Any] = {
-        "type": type(value).__name__,
-        "is_none": value is None,
-    }
-
-    try:
-        invariants["truthy"] = bool(value)
-    except Exception:
-        invariants["truthy"] = None
-
-    if isinstance(value, (int, float)) and not isinstance(value, bool):
-        numeric_value = float(value)
-        invariants["numeric"] = {
-            "finite": math.isfinite(numeric_value),
-            "min": numeric_value,
-            "max": numeric_value,
-            "sign": "negative" if numeric_value < 0 else "positive" if numeric_value > 0 else "zero",
-        }
-
-    if isinstance(value, str):
-        invariants["string"] = {
-            "length": len(value),
-            "empty": value == "",
-            "line_count": value.count("\n") + (1 if value else 0),
-        }
-
-    if isinstance(value, (list, tuple, set, frozenset, dict, str, bytes, bytearray)):
-        try:
-            invariants["size"] = {
-                "length": len(value),
-                "empty": len(value) == 0,
-            }
-        except Exception:
-            pass
-
-    if isinstance(value, (list, tuple, set, frozenset)) and value:
-        item_types = sorted({type(item).__name__ for item in value})
-        invariants["collection"] = {
-            "item_types": item_types,
-            "homogeneous": len(item_types) == 1,
-        }
-
-    if isinstance(value, dict):
-        invariants["mapping"] = {
-            "key_types": sorted({type(key).__name__ for key in value.keys()}),
-            "value_types": sorted({type(item).__name__ for item in value.values()}),
-            "keys_repr": sorted(_safe_repr(key, max_length=80) for key in value.keys()),
-        }
-
-    return invariants
-
-
-def mine_exception_invariants(exc: BaseException | str, message: str | None = None) -> Dict[str, Any]:
-    if isinstance(exc, BaseException):
-        exc_type = type(exc).__name__
-        exc_message = str(exc)
-    else:
-        exc_type = str(exc)
-        exc_message = message or ""
-
-    return {
-        "exception": {
-            "type": exc_type,
-            "message_category": exc_message[:200],
-            "has_message": bool(exc_message),
-        }
-    }
-
-
-def stdout_invariants(stdout: str) -> Dict[str, Any]:
-    return {
-        "stdout": {
-            "length": len(stdout),
-            "line_count": stdout.count("\n") + (1 if stdout else 0),
-            "empty": stdout == "",
-        }
-    }
-
-
-def _runtime_temp_root() -> Path:
-    root = Path(tempfile.gettempdir()) / "sctva_runtime"
-    root.mkdir(parents=True, exist_ok=True)
-    return root
-
-
-def _make_runtime_temp_dir(prefix: str) -> Path:
-    temp_path = _runtime_temp_root() / f"{prefix}_{uuid.uuid4().hex}"
-    temp_path.mkdir(parents=True, exist_ok=False)
-    return temp_path
-
-
-def _execute_python_test_case(source_code: str, test: dict) -> Dict[str, Any]:
+def _runner_callable(pipe, source_code: str, test: dict):
     out = StringIO()
     sys_stdout = sys.stdout
 
@@ -594,7 +485,7 @@ def _execute_python_test_case(source_code: str, test: dict) -> Dict[str, Any]:
 
         fingerprint = {
             "success": True,
-            "return_value_repr": _safe_repr(result),
+            "return_value_repr": repr(result),
             "return_type": type(result).__name__,
             "exception_type": None,
             "exception_message_category": None,
@@ -602,15 +493,10 @@ def _execute_python_test_case(source_code: str, test: dict) -> Dict[str, Any]:
             "execution_time_ms": duration,
             "timeout": False,
             "runtime_error_details": None,
-            "observed_invariants": {
-                "return": mine_value_invariants(result),
-                **stdout_invariants(out.getvalue()),
-            },
         }
 
     except Exception as exc:
         sys.stdout = sys_stdout
-        stdout = out.getvalue() if "out" in locals() else ""
 
         fingerprint = {
             "success": False,
@@ -618,21 +504,12 @@ def _execute_python_test_case(source_code: str, test: dict) -> Dict[str, Any]:
             "return_type": None,
             "exception_type": type(exc).__name__,
             "exception_message_category": str(exc)[:200],
-            "stdout": stdout,
+            "stdout": out.getvalue() if "out" in locals() else "",
             "execution_time_ms": 0,
             "timeout": False,
             "runtime_error_details": traceback.format_exc(),
-            "observed_invariants": {
-                **mine_exception_invariants(exc),
-                **stdout_invariants(stdout),
-            },
         }
 
-    return fingerprint
-
-
-def _runner_callable(pipe, source_code: str, test: dict):
-    fingerprint = _execute_python_test_case(source_code, test)
     try:
         pipe.send(fingerprint)
     except Exception:
@@ -651,15 +528,12 @@ class BehaviorFingerprintRunner:
         test: dict,
         timeout: Optional[float] = None,
     ) -> Dict[str, Any]:
-        timeout = self.default_timeout_seconds if timeout is None else timeout
+        timeout = timeout or self.default_timeout_seconds
 
-        try:
-            parent_conn, child_conn = mp.Pipe()
-            proc = mp.Process(target=_runner_callable, args=(child_conn, source_code, test))
-            proc.start()
-        except (OSError, PermissionError):
-            return self._run_python_test_subprocess(source_code, test, timeout)
+        parent_conn, child_conn = mp.Pipe()
+        proc = mp.Process(target=_runner_callable, args=(child_conn, source_code, test))
 
+        proc.start()
         start = time.perf_counter()
 
         finished = parent_conn.poll(timeout)
@@ -682,10 +556,6 @@ class BehaviorFingerprintRunner:
                 "execution_time_ms": int((time.perf_counter() - start) * 1000),
                 "timeout": True,
                 "runtime_error_details": "Process terminated due to timeout.",
-                "observed_invariants": {
-                    **mine_exception_invariants("TimeoutError", "timeout"),
-                    **stdout_invariants(""),
-                },
             }
 
         try:
@@ -701,108 +571,10 @@ class BehaviorFingerprintRunner:
                 "execution_time_ms": int((time.perf_counter() - start) * 1000),
                 "timeout": False,
                 "runtime_error_details": "Child process closed without sending result.",
-                "observed_invariants": {
-                    **mine_exception_invariants("RuntimeError", "no_output"),
-                    **stdout_invariants(""),
-                },
             }
 
         proc.join(0.1)
         return fingerprint
-
-    def _run_python_test_subprocess(
-        self,
-        source_code: str,
-        test: dict,
-        timeout: float,
-    ) -> Dict[str, Any]:
-        start = time.perf_counter()
-        temp_path = _make_runtime_temp_dir("python_fp")
-
-        try:
-            source_path = temp_path / "source.py.txt"
-            test_path = temp_path / "test.json"
-            result_path = temp_path / "fingerprint.json"
-
-            source_path.write_text(source_code, encoding="utf-8")
-            test_path.write_text(json.dumps(test), encoding="utf-8")
-
-            package_root = Path(__file__).resolve().parents[2]
-            runner = (
-                "import json, sys\n"
-                "from pathlib import Path\n"
-                f"sys.path.insert(0, {str(package_root)!r})\n"
-                "from sctva.validators.behavior_fingerprint import _execute_python_test_case\n"
-                "source = Path(sys.argv[1]).read_text(encoding='utf-8')\n"
-                "test = json.loads(Path(sys.argv[2]).read_text(encoding='utf-8'))\n"
-                "fingerprint = _execute_python_test_case(source, test)\n"
-                "Path(sys.argv[3]).write_text(json.dumps(fingerprint), encoding='utf-8')\n"
-            )
-
-            try:
-                completed = subprocess.run(
-                    [sys.executable, "-c", runner, str(source_path), str(test_path), str(result_path)],
-                    cwd=package_root,
-                    capture_output=True,
-                    text=True,
-                    timeout=timeout,
-                )
-            except subprocess.TimeoutExpired:
-                return {
-                    "success": False,
-                    "return_value_repr": None,
-                    "return_type": None,
-                    "exception_type": "TimeoutError",
-                    "exception_message_category": "timeout",
-                    "stdout": "",
-                    "execution_time_ms": int((time.perf_counter() - start) * 1000),
-                    "timeout": True,
-                    "runtime_error_details": "Process terminated due to timeout.",
-                    "observed_invariants": {
-                        **mine_exception_invariants("TimeoutError", "timeout"),
-                        **stdout_invariants(""),
-                    },
-                }
-
-            if completed.returncode != 0:
-                return {
-                    "success": False,
-                    "return_value_repr": None,
-                    "return_type": None,
-                    "exception_type": "RuntimeError",
-                    "exception_message_category": "subprocess_failed",
-                    "stdout": completed.stdout,
-                    "execution_time_ms": int((time.perf_counter() - start) * 1000),
-                    "timeout": False,
-                    "runtime_error_details": completed.stderr,
-                    "observed_invariants": {
-                        **mine_exception_invariants("RuntimeError", "subprocess_failed"),
-                        **stdout_invariants(completed.stdout),
-                    },
-                }
-
-            if not result_path.exists():
-                return {
-                    "success": False,
-                    "return_value_repr": None,
-                    "return_type": None,
-                    "exception_type": "RuntimeError",
-                    "exception_message_category": "no_output",
-                    "stdout": completed.stdout,
-                    "execution_time_ms": int((time.perf_counter() - start) * 1000),
-                    "timeout": False,
-                    "runtime_error_details": "Subprocess closed without writing fingerprint result.",
-                    "observed_invariants": {
-                        **mine_exception_invariants("RuntimeError", "no_output"),
-                        **stdout_invariants(completed.stdout),
-                    },
-                }
-
-            fingerprint = json.loads(result_path.read_text(encoding="utf-8"))
-            fingerprint["execution_time_ms"] = int((time.perf_counter() - start) * 1000)
-            return fingerprint
-        finally:
-            shutil.rmtree(temp_path, ignore_errors=True)
 
 
 def compare_fingerprints(orig: Dict[str, Any], trans: Dict[str, Any]) -> Dict[str, Any]:
@@ -848,9 +620,6 @@ def compare_fingerprints(orig: Dict[str, Any], trans: Dict[str, Any]) -> Dict[st
 
         if orig.get("return_value_repr") != trans.get("return_value_repr"):
             return {"matched": False, "reason": "return_value_mismatch"}
-
-        if orig.get("stdout") != trans.get("stdout"):
-            return {"matched": False, "reason": "stdout_mismatch"}
 
         return {"matched": True, "reason": "match"}
 

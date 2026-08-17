@@ -2,16 +2,14 @@
 
 from __future__ import annotations
 
-import os
-import tempfile
-import shutil
+import json
+import re
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Dict, Optional
 
 from flask import Blueprint, jsonify, request
 
-from ..constants import SUPPORTED_ACTIONS
 from ..agent import ContractValidationError, SafeCodeTransformationValidationAgent
 from .planner_adapter import PlannerAdapter, PlannerAdapterError
 
@@ -20,245 +18,95 @@ def _new_request_id() -> str:
     return "sctva_" + datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f")
 
 
-def _remove_legacy_result_artifacts() -> None:
-    """Remove old SCTVA disk artifacts without touching unrelated files."""
-    results_dir = Path(__file__).resolve().parents[2] / "results"
-    if not results_dir.exists() or not results_dir.is_dir():
-        return
-
-    for item in results_dir.iterdir():
-        if not item.name.startswith("refactored_code_"):
-            continue
-        if item.is_dir():
-            shutil.rmtree(item, ignore_errors=True)
-        else:
-            item.unlink(missing_ok=True)
-
-    try:
-        results_dir.rmdir()
-    except OSError:
-        pass
+def _results_dir() -> Path:
+    base_dir = Path(__file__).resolve().parents[2]
+    results = base_dir / "results"
+    results.mkdir(parents=True, exist_ok=True)
+    return results
 
 
-def _safe_relative_source_path(value: Any) -> str:
-    text = str(value or "").replace("\\", "/").strip()
-    if not text or Path(text).is_absolute():
-        return ""
-    parts = [part for part in text.split("/") if part and part != "."]
-    if not parts or any(part == ".." for part in parts):
-        return ""
-    return "/".join(parts)
+def _sanitize_name(value: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "_", value.strip())
+    return cleaned or "sctva_run"
 
 
-def _language_from_source_path(file_path: str) -> str:
-    suffix = Path(file_path).suffix.lower()
-    if suffix == ".py":
-        return "python"
-    if suffix in {".c", ".h"}:
-        return "c"
-    return "java"
-
-
-def _candidate_temp_roots() -> list[Path]:
-    roots = [
-        Path(tempfile.gettempdir()),
-        *(Path(value) for value in (os.getenv("TEMP"), os.getenv("TMP")) if value),
-    ]
-
-    local_app_data = os.getenv("LOCALAPPDATA")
-    if local_app_data:
-        roots.append(Path(local_app_data) / "Temp")
-
-    user_profile = os.getenv("USERPROFILE")
-    if user_profile:
-        roots.append(Path(user_profile) / "AppData" / "Local" / "Temp")
-
-    unique: dict[str, Path] = {}
-    for root in roots:
-        try:
-            unique[str(root.resolve())] = root
-        except OSError:
-            continue
-    return list(unique.values())
-
-
-def _cuqa_workspace_candidates() -> list[Path]:
-    roots: list[Path] = []
-
-    temp_entries: list[Path] = []
-    for temp_root in _candidate_temp_roots():
-        try:
-            temp_entries.extend(temp_root.iterdir())
-        except OSError:
-            continue
-
-    for base in temp_entries:
-        try:
-            if not base.is_dir() or not base.name.startswith(("cuqa_", "cuqa_gh_")):
-                continue
-        except OSError:
-            continue
-        extracted = base / "extracted"
-        candidates = [base]
-        try:
-            extracted_is_dir = extracted.is_dir()
-        except OSError:
-            extracted_is_dir = False
-        if extracted_is_dir:
-            candidates.append(extracted)
-            try:
-                candidates.extend(child for child in extracted.iterdir() if child.is_dir())
-            except OSError:
-                pass
-        roots.extend(candidates)
-
-    def mtime(path: Path) -> float:
-        try:
-            return path.stat().st_mtime
-        except OSError:
-            return 0.0
-
-    unique_roots: dict[str, Path] = {}
-    for root in roots:
-        try:
-            unique_roots[str(root.resolve())] = root
-        except OSError:
-            continue
-
-    return sorted(unique_roots.values(), key=mtime, reverse=True)
-
-
-def _find_cuqa_workspace_file_by_suffix(root: Path, safe_path: str) -> Path | None:
-    basename = safe_path.rsplit("/", 1)[-1]
-    suffix = f"/{safe_path.lower()}"
-
-    try:
-        candidates = root.rglob(basename)
-    except OSError:
+def _extract_java_public_type_name(source_code: str) -> Optional[str]:
+    match = re.search(
+        r"\bpublic\s+(?:class|interface|enum|record)\s+([A-Za-z_][A-Za-z0-9_]*)\b",
+        source_code,
+    )
+    if not match:
         return None
-
-    for candidate in candidates:
-        try:
-            if not candidate.is_file():
-                continue
-            resolved_root = root.resolve()
-            resolved_candidate = candidate.resolve()
-        except OSError:
-            continue
-        if resolved_root not in resolved_candidate.parents and resolved_candidate != resolved_root:
-            continue
-        normalized_candidate = str(resolved_candidate).replace("\\", "/").lower()
-        if normalized_candidate.endswith(suffix):
-            return resolved_candidate
-
-    return None
+    return match.group(1)
 
 
-def _find_cuqa_workspace_file(relative_path: str) -> Path | None:
-    safe_path = _safe_relative_source_path(relative_path)
-    if not safe_path:
-        return None
+def _save_execution_artifacts(result: Dict[str, Any]) -> Dict[str, Any]:
+    results = _results_dir()
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")
+    stem = f"refactored_code_{stamp}"
 
-    safe_parts = safe_path.split("/")
-    for root in _cuqa_workspace_candidates():
-        candidate = root.joinpath(*safe_parts)
-        try:
-            resolved_root = root.resolve()
-            resolved_candidate = candidate.resolve()
-        except OSError:
-            continue
-        if resolved_root not in resolved_candidate.parents and resolved_candidate != resolved_root:
-            continue
-        if resolved_candidate.is_file():
-            return resolved_candidate
+    result_json_path = results / f"{stem}.result.json"
+    result_json_path.write_text(
+        json.dumps(result, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
 
-    for root in _cuqa_workspace_candidates():
-        found = _find_cuqa_workspace_file_by_suffix(root, safe_path)
-        if found is not None:
-            return found
+    artifact_paths: Dict[str, Any] = {
+        "results_folder": str(results),
+        "result_json": str(result_json_path),
+    }
 
-    return None
+    file_results = result.get("file_results")
+    if isinstance(file_results, list) and file_results:
+        artifact_paths["file_artifacts"] = []
+        for idx, file_result in enumerate(file_results, start=1):
+            artifact_paths["file_artifacts"].append(
+                _save_artifacts_for_file(results, stem, file_result, idx)
+            )
+        return artifact_paths
+
+    artifact_paths.update(_save_artifacts_for_file(results, stem, result, 1))
+    return artifact_paths
 
 
-def _find_cuqa_workspace_files(relative_paths: list[Any]) -> dict[str, Path]:
-    """Resolve many CUQA workspace paths with one workspace scan.
+def _save_artifacts_for_file(
+    results: Path,
+    stem: str,
+    file_result: Dict[str, Any],
+    index: int,
+) -> Dict[str, str]:
+    language = str(file_result.get("language", "")).strip().lower()
+    file_name = str(file_result.get("file_name") or f"file_{index}").strip()
+    file_label = _sanitize_name(Path(file_name).stem or file_name)
+    file_stem = f"{stem}_{file_label}"
 
-    Large CUQA imports can include hundreds of files. Calling rglob once per
-    requested file makes import time grow quickly, so this bulk resolver does
-    direct path checks first and scans each candidate workspace only once for
-    suffix matches.
-    """
+    refactored_code_text = str(file_result.get("refactored_code", ""))
+    refactored_code_text = refactored_code_text.lstrip("\ufeff")
 
-    safe_paths: list[str] = []
-    seen: set[str] = set()
-    for raw_path in relative_paths:
-        safe_path = _safe_relative_source_path(raw_path)
-        if not safe_path or safe_path in seen:
-            continue
-        seen.add(safe_path)
-        safe_paths.append(safe_path)
+    artifact_paths: Dict[str, str] = {
+        "file_name": file_name,
+    }
 
-    if not safe_paths:
-        return {}
-
-    roots = _cuqa_workspace_candidates()
-    found: dict[str, Path] = {}
-
-    for safe_path in safe_paths:
-        safe_parts = safe_path.split("/")
-        for root in roots:
-            candidate = root.joinpath(*safe_parts)
-            try:
-                resolved_root = root.resolve()
-                resolved_candidate = candidate.resolve()
-            except OSError:
-                continue
-            if resolved_root not in resolved_candidate.parents and resolved_candidate != resolved_root:
-                continue
-            if resolved_candidate.is_file():
-                found[safe_path] = resolved_candidate
-                break
-
-    unresolved = [safe_path for safe_path in safe_paths if safe_path not in found]
-    if not unresolved:
-        return found
-
-    suffixes_by_basename: dict[str, list[tuple[str, str]]] = {}
-    for safe_path in unresolved:
-        basename = safe_path.rsplit("/", 1)[-1]
-        suffixes_by_basename.setdefault(basename.lower(), []).append(
-            (safe_path, f"/{safe_path.lower()}")
+    if language == "python":
+        refactored_code_path = results / f"{file_stem}.refactored.py"
+        refactored_code_path.write_text(
+            refactored_code_text,
+            encoding="utf-8",
         )
+        artifact_paths["refactored_code"] = str(refactored_code_path)
 
-    for root in roots:
-        try:
-            candidates = root.rglob("*")
-        except OSError:
-            continue
+    # Java: save only compile-ready file where class name matches file name.
+    elif language == "java":
+        public_type_name = _extract_java_public_type_name(refactored_code_text)
+        compile_ready_dir = results / f"{file_stem}.compile_ready"
+        compile_ready_dir.mkdir(parents=True, exist_ok=True)
+        class_name = public_type_name or "RefactoredOutput"
+        compile_ready_path = compile_ready_dir / f"{class_name}.java"
+        compile_ready_path.write_text(refactored_code_text, encoding="utf-8")
+        artifact_paths["compile_ready_java"] = str(compile_ready_path)
+        artifact_paths["refactored_code"] = str(compile_ready_path)
 
-        for candidate in candidates:
-            basename_entries = suffixes_by_basename.get(candidate.name.lower())
-            if not basename_entries:
-                continue
-            try:
-                if not candidate.is_file():
-                    continue
-                resolved_root = root.resolve()
-                resolved_candidate = candidate.resolve()
-            except OSError:
-                continue
-            if resolved_root not in resolved_candidate.parents and resolved_candidate != resolved_root:
-                continue
-
-            normalized_candidate = str(resolved_candidate).replace("\\", "/").lower()
-            for safe_path, suffix in basename_entries:
-                if safe_path not in found and normalized_candidate.endswith(suffix):
-                    found[safe_path] = resolved_candidate
-
-            if len(found) == len(safe_paths):
-                return found
-
-    return found
+    return artifact_paths
 
 
 def create_sctva_blueprint() -> Blueprint:
@@ -269,83 +117,7 @@ def create_sctva_blueprint() -> Blueprint:
 
     @bp.get("/sctva/health")
     def sctva_health() -> Any:
-        return jsonify(
-            {
-                "status": "ok",
-                "service": "sctva",
-                "implementation": "sctva-real-transformers",
-                "execution_contract_version": 2,
-                "supported_actions": sorted(SUPPORTED_ACTIONS),
-                "supported_capabilities": [
-                    "line_based_remove_dead_code",
-                    "source_range_extract_method",
-                    "c_safe_unsafe_function_replacement",
-                    "c_global_variable_encapsulation",
-                    "cuqa_temp_workspace_source_import",
-                    "sctva_internal_refactoring_detector",
-                    "multiline_statement_normalization",
-                ],
-            }
-        ), 200
-
-    @bp.post("/sctva/cuqa-sources")
-    def sctva_cuqa_sources() -> Any:
-        try:
-            payload = request.get_json(silent=True)
-            if not isinstance(payload, dict):
-                return jsonify({"error": "Invalid JSON payload."}), 400
-
-            raw_paths = payload.get("file_paths") or payload.get("files") or []
-            if not isinstance(raw_paths, list):
-                return jsonify({"error": "Field 'file_paths' must be a list."}), 400
-
-            files = []
-            missing = []
-            max_file_bytes = 5 * 1024 * 1024
-            requested_paths = raw_paths[:1000]
-            resolved_paths = _find_cuqa_workspace_files(requested_paths)
-
-            for raw_path in requested_paths:
-                safe_path = _safe_relative_source_path(raw_path)
-                if not safe_path:
-                    missing.append(str(raw_path or ""))
-                    continue
-
-                source_path = resolved_paths.get(safe_path)
-                if source_path is None:
-                    missing.append(safe_path)
-                    continue
-
-                try:
-                    if source_path.stat().st_size > max_file_bytes:
-                        missing.append(safe_path)
-                        continue
-                    source_code = source_path.read_text(encoding="utf-8", errors="replace")
-                except OSError:
-                    missing.append(safe_path)
-                    continue
-
-                files.append(
-                    {
-                        "file_name": safe_path,
-                        "source_code": source_code,
-                        "language": _language_from_source_path(safe_path),
-                        "source_mode": "raw",
-                        "origin": "cuqa_temp_workspace",
-                    }
-                )
-
-            return jsonify(
-                {
-                    "files": files,
-                    "missing": missing,
-                    "imported": len(files),
-                    "total": len(raw_paths),
-                    "source": "cuqa_temp_workspace",
-                }
-            ), 200
-        except Exception as exc:
-            return jsonify({"error": f"Unable to import CUQA workspace sources: {exc}"}), 500
+        return jsonify({"status": "ok", "service": "sctva"}), 200
 
     @bp.post("/sctva/execute")
     def sctva_execute() -> Any:
@@ -353,13 +125,13 @@ def create_sctva_blueprint() -> Blueprint:
             payload = request.get_json(silent=True)
             if not isinstance(payload, dict):
                 return jsonify({"error": "Invalid JSON payload."}), 400
-            _remove_legacy_result_artifacts()
             result = agent.execute(payload)
-            _remove_legacy_result_artifacts()
-            result["artifact_persistence"] = {
-                "mode": "browser_storage",
-                "backend_results_folder_disabled": True,
-            }
+            try:
+                result["saved_artifacts"] = _save_execution_artifacts(result)
+            except Exception as exc:
+                result["saved_artifacts"] = {
+                    "error": f"Failed to persist artifacts: {exc}",
+                }
             return jsonify(result), 200
         except ContractValidationError as exc:
             return jsonify({"error": str(exc)}), 400
@@ -396,13 +168,13 @@ def create_sctva_blueprint() -> Blueprint:
             # )
             # result = agent.execute(sctva_request)
 
-            _remove_legacy_result_artifacts()
             result = agent.execute(payload)
-            _remove_legacy_result_artifacts()
-            result["artifact_persistence"] = {
-                "mode": "browser_storage",
-                "backend_results_folder_disabled": True,
-            }
+            try:
+                result["saved_artifacts"] = _save_execution_artifacts(result)
+            except Exception as exc:
+                result["saved_artifacts"] = {
+                    "error": f"Failed to persist artifacts: {exc}",
+                }
             return jsonify(result), 200
 
         except PlannerAdapterError as exc:

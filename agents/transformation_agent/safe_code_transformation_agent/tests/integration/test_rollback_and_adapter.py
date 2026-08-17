@@ -35,7 +35,7 @@ def test_adapter_build_request_from_rdp():
                 "step_id": 1,
                 "refactoring": "Extract Method",
                 "target": {"method": "doWork"},
-                "parameters": {"new_method_name": "doWorkCore", "start_line": 1, "end_line": 1},
+                "parameters": {"new_method_name": "doWorkCore"},
             }
         ],
         "metadata": {"correlation_id": "c1"},
@@ -49,4 +49,4 @@ def test_adapter_build_request_from_rdp():
     )
 
     assert request["refactoring_plan"]["plan_id"] == "rdp_1"
-    assert request["refactoring_plan"]["actions"][0]["action_type"] == "extract_method"
+    assert request["refactoring_plan"]["actions"][0]["action_type"] == "rename_symbol"

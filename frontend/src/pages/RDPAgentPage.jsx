@@ -25,24 +25,13 @@ function loadSession() {
   } catch { return null; }
 }
 
-function saveSession(plan, sourceFileName) {
+function saveSession(plan, trace, sourceFileName) {
   try {
-    // Store ONLY the plan — NOT the trace.
-    // The trace can be several MB (ML scores, MCDA data for every smell candidate).
-    // Storing it causes storage quota errors after 2-3 plans.
-    const payload = JSON.stringify({
-      plan,
-      sourceFileName,
-      savedAt: new Date().toISOString(),
-    });
-    localStorage.setItem(RDP_SESSION_KEY, payload);
-  } catch (e) {
-    // QuotaExceededError — clear old session and try once more with just the plan
-    try {
-      localStorage.removeItem(RDP_SESSION_KEY);
-      localStorage.setItem(RDP_SESSION_KEY, JSON.stringify({ plan, sourceFileName, savedAt: new Date().toISOString() }));
-    } catch { /* give up silently */ }
-  }
+    localStorage.setItem(
+      RDP_SESSION_KEY,
+      JSON.stringify({ plan, trace, sourceFileName, savedAt: new Date().toISOString() })
+    );
+  } catch { /* storage quota exceeded — ignore */ }
 }
 
 function clearRdpSession() {
@@ -69,9 +58,7 @@ function appendRdpHistory(plan, sourceFileName) {
     refactorings: [...new Set((plan.steps || []).map(s => s.refactoring))].slice(0, 3),
     source_file:  sourceFileName || 'unknown',
     summary:      plan.summary || '',
-    // Do NOT store the full plan object in history — it bloats localStorage.
-    // The current active plan is always in rdp_last_session (single key, always overwritten).
-    // History is metadata-only for the Reports page display.
+    plan,
   };
   const updated = [entry, ...loadRdpHistory()].slice(0, MAX_HISTORY);
   saveRdpHistory(updated);
@@ -83,7 +70,7 @@ export default function RDPAgentPage({ repoLoaded, repoMeta, preloadedReport, on
   const [loading,           setLoading]           = useState(false);
   const [error,             setError]             = useState(null);
   const [plan,              setPlan]              = useState(() => loadSession()?.plan  ?? null);
-  const [trace,             setTrace]             = useState(null); // trace is never persisted (too large)
+  const [trace,             setTrace]             = useState(() => loadSession()?.trace ?? null);
   const [selectedFile,      setSelectedFile]      = useState(null);
   const [cuqaBannerVisible, setCuqaBannerVisible] = useState(false);
   // true when the shown plan came from localStorage (not freshly generated this session)
@@ -145,10 +132,9 @@ export default function RDPAgentPage({ repoLoaded, repoMeta, preloadedReport, on
       setPlan(result.plan);
       setTrace(result.trace);
 
-      // Persist to localStorage: session only (plan without trace — trace is too large)
-      // History stores metadata only (no full plan) to avoid quota errors.
+      // Persist to localStorage: session (for refresh restore) + history list
       const sourceFileName = file?.name || (result.plan?.target) || 'piped-from-cuqa';
-      saveSession(result.plan, sourceFileName);
+      saveSession(result.plan, result.trace, sourceFileName);
       appendRdpHistory(result.plan, sourceFileName);
       setSessionRestored(false); // this is a fresh generation
 
@@ -303,14 +289,7 @@ export default function RDPAgentPage({ repoLoaded, repoMeta, preloadedReport, on
               }}>② RDP {plan ? '✓' : loading ? '…' : '—'}</span>
             </div>
             <button
-              onClick={() => {
-                // Bug fix: closing the CUQA banner also clears the session so the
-                // Transformation Agent won't pick up this plan again on a future run.
-                setCuqaBannerVisible(false);
-                clearRdpSession();
-                setPlan(null);
-                setTrace(null);
-              }}
+              onClick={() => setCuqaBannerVisible(false)}
               style={{
                 background: 'none', border: 'none',
                 color: 'var(--text-muted)', cursor: 'pointer', fontSize: 16, lineHeight: 1,

@@ -5,44 +5,6 @@
 
 import { useState } from 'react';
 
-// ── C language helpers ──────────────────────────────────────────────────────
-const C_EXTENSIONS = ['.c', '.h'];
-
-function isCFile(step) {
-  const file = step?.target?.file || '';
-  return C_EXTENSIONS.some(ext => file.toLowerCase().endsWith(ext))
-    || (step?.target?.language || '').toLowerCase() === 'c';
-}
-
-const UNSAFE_SMELL_REFACTORINGS = new Set(['Replace Unsafe Function']);
-const GLOBAL_VAR_REFACTORINGS   = new Set(['Encapsulate Variable']);
-
-function LangBadge({ step }) {
-  if (!isCFile(step)) return null;
-  return (
-    <span style={{
-      display: 'inline-flex', alignItems: 'center', gap: 3,
-      padding: '1px 7px', borderRadius: 99,
-      background: 'rgba(249,115,22,0.12)', border: '1px solid rgba(249,115,22,0.3)',
-      fontSize: 10, fontWeight: 700, color: '#f97316',
-      marginLeft: 8, verticalAlign: 'middle',
-    }}>C</span>
-  );
-}
-
-function SecurityBadge({ step }) {
-  if (!UNSAFE_SMELL_REFACTORINGS.has(step.refactoring)) return null;
-  return (
-    <span style={{
-      display: 'inline-flex', alignItems: 'center', gap: 3,
-      padding: '1px 7px', borderRadius: 99,
-      background: 'rgba(239,68,68,0.10)', border: '1px solid rgba(239,68,68,0.30)',
-      fontSize: 10, fontWeight: 700, color: '#ef4444',
-      marginLeft: 6, verticalAlign: 'middle',
-    }}>⚠ Security</span>
-  );
-}
-
 export default function ResultsViewer({ plan, stats, onDownload, onCopy }) {
   const [showRawJson, setShowRawJson] = useState(false);
 
@@ -225,8 +187,6 @@ export default function ResultsViewer({ plan, stats, onDownload, onCopy }) {
                 <div>
                   <div style={{ fontSize: '13px', fontWeight: '600', marginBottom: '4px' }}>
                     {step.refactoring || 'Unnamed Refactoring'}
-                    <LangBadge step={step} />
-                    <SecurityBadge step={step} />
                   </div>
                   <div style={{ fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '8px' }}>
                     {step.explanation || 'No explanation provided'}
@@ -249,36 +209,6 @@ export default function ResultsViewer({ plan, stats, onDownload, onCopy }) {
                   {step.parameters && Object.keys(step.parameters).length > 0 && (
                     <div style={{ fontSize: '11px', marginTop: '8px', color: 'var(--text-secondary)' }}>
                       Parameters: {Object.entries(step.parameters).map(([k, v]) => `${k}: ${v}`).join(', ')}
-                    </div>
-                  )}
-
-                  {/* C Unsafe Function — security hint showing safe replacement */}
-                  {UNSAFE_SMELL_REFACTORINGS.has(step.refactoring) && step.parameters?.safe_alternative && (
-                    <div style={{
-                      marginTop: 8, padding: '6px 10px',
-                      background: 'rgba(239,68,68,0.06)', border: '1px solid rgba(239,68,68,0.2)',
-                      borderRadius: 4, fontSize: 11,
-                    }}>
-                      <span style={{ color: '#ef4444', fontWeight: 600 }}>Replace with: </span>
-                      <code style={{ color: '#fca5a5' }}>{step.parameters.safe_alternative}()</code>
-                    </div>
-                  )}
-
-                  {/* C Global Variable — show getter/setter that will be created */}
-                  {GLOBAL_VAR_REFACTORINGS.has(step.refactoring) && step.parameters?.variable_name && (
-                    <div style={{
-                      marginTop: 8, padding: '6px 10px',
-                      background: 'rgba(249,115,22,0.06)', border: '1px solid rgba(249,115,22,0.2)',
-                      borderRadius: 4, fontSize: 11,
-                    }}>
-                      <span style={{ color: '#f97316', fontWeight: 600 }}>Encapsulation plan: </span>
-                      <span style={{ color: 'var(--text-secondary)' }}>
-                        Create{' '}
-                        <code style={{ color: '#fb923c' }}>{step.parameters.getter_name}()</code>
-                        {' '}and{' '}
-                        <code style={{ color: '#fb923c' }}>{step.parameters.setter_name}()</code>
-                        {' '}for global <code style={{ color: '#fb923c' }}>{step.parameters.variable_name}</code>
-                      </span>
                     </div>
                   )}
                 </div>

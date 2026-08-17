@@ -88,33 +88,9 @@ class MLScorer:
                 import transformers  # noqa: F401
                 import torch  # noqa: F401
                 self._is_available = True
-            except ImportError as exc:
+            except ImportError:
                 self._is_available = False
-                logger.warning(
-                    "ML scoring (CodeBERT) is DISABLED — missing package: %s.\n"
-                    "  To enable ML scoring, install the required packages:\n"
-                    "    pip install torch --index-url https://download.pytorch.org/whl/cpu\n"
-                    "    pip install transformers>=4.30.0\n"
-                    "  Or run:  pip install -r requirements.txt\n"
-                    "  Falling back to neutral scores (0.5). "
-                    "Plan generation will still work normally.",
-                    exc,
-                )
         return self._is_available
-
-    def startup_check(self) -> None:
-        """Call this on agent boot to surface ML availability early.
-
-        Logs a prominent warning if ML scoring will be disabled so the developer
-        sees it in the startup log rather than discovering it silently later.
-        """
-        if not self.is_available():
-            # is_available() already logged the warning — nothing more to do.
-            return
-        logger.info(
-            "ML scoring (CodeBERT) is ENABLED — model '%s' will be loaded on first request.",
-            self._model_name,
-        )
 
     def _load_model(self) -> None:
         """Load CodeBERT tokenizer and model. Tries local cache first, then downloads."""
@@ -123,8 +99,7 @@ class MLScorer:
 
         if not self.is_available():
             raise RuntimeError(
-                "Cannot load ML model: 'transformers' and/or 'torch' are not installed.\n"
-                "Run:  pip install -r requirements.txt"
+                "Cannot load ML model: 'transformers' and/or 'torch' are not installed."
             )
         from transformers import AutoTokenizer, AutoModel  # type: ignore
         logger.info("Loading CodeBERT model '%s' …", self._model_name)
@@ -136,30 +111,14 @@ class MLScorer:
             self._model = AutoModel.from_pretrained(
                 self._model_name, use_safetensors=False, local_files_only=True
             )
-            logger.info("CodeBERT loaded from local cache.")
-        except Exception as cache_err:
-            logger.info(
-                "Local cache miss (%s); downloading '%s' from HuggingFace Hub — "
-                "this is ~500 MB and may take a few minutes on first run.",
-                cache_err, self._model_name,
+        except Exception:
+            logger.info("Local cache not found; downloading '%s'.", self._model_name)
+            self._tokenizer = AutoTokenizer.from_pretrained(
+                self._model_name, use_safetensors=False, local_files_only=False
             )
-            try:
-                self._tokenizer = AutoTokenizer.from_pretrained(
-                    self._model_name, use_safetensors=False, local_files_only=False
-                )
-                self._model = AutoModel.from_pretrained(
-                    self._model_name, use_safetensors=False, local_files_only=False
-                )
-            except Exception as download_err:
-                # Download failed (no internet, firewall, proxy, etc.)
-                # Raise so predict() can catch it and fall back to neutral scores
-                # while logging the real reason.
-                raise RuntimeError(
-                    f"Failed to download CodeBERT model '{self._model_name}': {download_err}\n"
-                    "Check your internet connection. If you are behind a firewall/proxy, "
-                    "pre-download the model and place it in the HuggingFace cache directory, "
-                    "or set ml_scoring.enabled: false in config.yaml to disable ML scoring."
-                ) from download_err
+            self._model = AutoModel.from_pretrained(
+                self._model_name, use_safetensors=False, local_files_only=False
+            )
 
         self._model.eval()
         logger.info("CodeBERT model loaded successfully.")

@@ -8,8 +8,7 @@ import time
 from collections import Counter
 from typing import Dict, List, Tuple
 
-from ..constants import DEFAULT_STRUCTURAL_THRESHOLD_C, DEFAULT_STRUCTURAL_THRESHOLD_JAVA, DEFAULT_STRUCTURAL_THRESHOLD_PYTHON
-from .c_support import compare_c_static_summaries, summarize_c_source
+from ..constants import DEFAULT_STRUCTURAL_THRESHOLD_JAVA, DEFAULT_STRUCTURAL_THRESHOLD_PYTHON
 from ..models import ValidationStepResult
 from ..utils.io_helpers import utc_now_iso
 from ..utils.metrics import (
@@ -36,9 +35,6 @@ class StructuralValidator:
         if language == "python":
             score, details = self._validate_python(original_code, transformed_code)
             threshold = DEFAULT_STRUCTURAL_THRESHOLD_PYTHON
-        elif language == "c":
-            score, details = self._validate_c(original_code, transformed_code)
-            threshold = DEFAULT_STRUCTURAL_THRESHOLD_C
         else:
             score, details = self._validate_java(original_code, transformed_code)
             threshold = DEFAULT_STRUCTURAL_THRESHOLD_JAVA
@@ -122,54 +118,6 @@ class StructuralValidator:
             "class_count_similarity": round(class_similarity, 4),
             "method_count_similarity": round(method_similarity, 4),
             "normalized_similarity": round(score, 4),
-        }
-
-    def _validate_c(self, original: str, transformed: str) -> Tuple[float, Dict[str, float]]:
-        original_summary = summarize_c_source(original)
-        transformed_summary = summarize_c_source(transformed)
-        comparison = compare_c_static_summaries(original, transformed, [])
-
-        orig_signatures = set(original_summary.get("function_signatures", []))
-        trans_signatures = set(transformed_summary.get("function_signatures", []))
-        signature_similarity = jaccard_similarity(orig_signatures, trans_signatures)
-
-        function_count_similarity = normalized_count_similarity(
-            int(original_summary.get("function_count", 0)),
-            int(transformed_summary.get("function_count", 0)),
-        )
-        return_count_similarity = normalized_count_similarity(
-            int(original_summary.get("return_count", 0)),
-            int(transformed_summary.get("return_count", 0)),
-        )
-        control_flow_similarity = normalized_count_similarity(
-            int(original_summary.get("control_flow_count", 0)),
-            int(transformed_summary.get("control_flow_count", 0)),
-        )
-
-        orig_macros = original_summary.get("macros", {})
-        trans_macros = transformed_summary.get("macros", {})
-        macro_similarity = jaccard_similarity(orig_macros.keys(), trans_macros.keys())
-
-        score = (
-            0.35 * signature_similarity
-            + 0.20 * function_count_similarity
-            + 0.20 * return_count_similarity
-            + 0.15 * control_flow_similarity
-            + 0.10 * macro_similarity
-        )
-
-        if comparison.get("matched"):
-            score = max(score, 0.6)
-
-        return score, {
-            "function_signature_similarity": round(signature_similarity, 4),
-            "function_count_similarity": round(function_count_similarity, 4),
-            "return_count_similarity": round(return_count_similarity, 4),
-            "control_flow_similarity": round(control_flow_similarity, 4),
-            "macro_name_similarity": round(macro_similarity, 4),
-            "normalized_similarity": round(score, 4),
-            "original_summary": original_summary,
-            "transformed_summary": transformed_summary,
         }
 
     @staticmethod

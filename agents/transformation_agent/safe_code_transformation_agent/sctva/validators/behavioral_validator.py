@@ -1,4 +1,4 @@
-"""Behavior-preservation checks for Python, Java, and C."""
+"""Behavior-preservation checks for Python and Java."""
 
 from __future__ import annotations
 
@@ -8,36 +8,16 @@ import shutil
 import subprocess
 import tempfile
 import time
-import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Sequence
 
-from .behavior_fingerprint import (
-    BehaviorFingerprintRunner,
-    compare_fingerprints,
-    mine_exception_invariants,
-    mine_value_invariants,
-    stdout_invariants,
-)
-from .c_support import validate_c_behavior
+from .behavior_fingerprint import BehaviorFingerprintRunner, compare_fingerprints
 
 from ..constants import KNOWN_UNSAFE_JAVA_ACTIONS
 from ..contracts import RefactoringAction
 from ..models import ValidationStepResult
 from ..utils.io_helpers import utc_now_iso
 from ..utils.metrics import normalized_count_similarity
-
-
-def _runtime_temp_root() -> Path:
-    root = Path(tempfile.gettempdir()) / "sctva_runtime"
-    root.mkdir(parents=True, exist_ok=True)
-    return root
-
-
-def _make_runtime_temp_dir(prefix: str) -> Path:
-    temp_path = _runtime_temp_root() / f"{prefix}_{uuid.uuid4().hex}"
-    temp_path.mkdir(parents=True, exist_ok=False)
-    return temp_path
 
 
 class BehavioralValidator:
@@ -64,8 +44,6 @@ class BehavioralValidator:
         enable_behavior_tests: bool,
         actions: Sequence[RefactoringAction],
         strict_mode: bool,
-        project_source_files: Sequence[Any] | None = None,
-        current_file_name: str | None = None,
     ) -> ValidationStepResult:
         start_iso = utc_now_iso()
         started = time.perf_counter()
@@ -95,24 +73,7 @@ class BehavioralValidator:
                 behavior_tests=behavior_tests,
                 actions=actions,
                 strict_mode=strict_mode,
-                project_source_files=project_source_files,
-                current_file_name=current_file_name,
             )
-        elif language.lower() == "c":
-            result = validate_c_behavior(
-                original_code=original_code,
-                transformed_code=transformed_code,
-                behavior_tests=behavior_tests,
-                actions=actions,
-                enable_behavior_tests=enable_behavior_tests,
-                timeout_seconds=self.DEFAULT_JAVA_TIMEOUT_SECONDS,
-                project_source_files=project_source_files,
-                current_file_name=current_file_name,
-            )
-            passed = result["passed"]
-            score = result["score"]
-            message = result["message"]
-            details = result["details"]
         else:
             passed, score, message, details = self._validate_java(
                 original_code=original_code,
@@ -120,8 +81,6 @@ class BehavioralValidator:
                 behavior_tests=behavior_tests,
                 actions=actions,
                 strict_mode=strict_mode,
-                project_source_files=project_source_files,
-                current_file_name=current_file_name,
             )
 
         return ValidationStepResult(
@@ -143,24 +102,15 @@ class BehavioralValidator:
         behavior_tests: List[Dict[str, Any]],
         actions: Sequence[RefactoringAction],
         strict_mode: bool,
-        project_source_files: Sequence[Any] | None = None,
-        current_file_name: str | None = None,
     ) -> tuple[bool, float, str, Dict[str, Any]]:
         runtime_tests = list(behavior_tests or [])
-        auto_generated = False
 
         if not runtime_tests:
-            runtime_tests = self._infer_python_runtime_tests_from_source(
+            return self._validate_python_static_fingerprints(
                 original_code=original_code,
+                transformed_code=transformed_code,
                 actions=actions,
             )
-            auto_generated = bool(runtime_tests)
-            if not runtime_tests:
-                return self._validate_python_static_fingerprints(
-                    original_code=original_code,
-                    transformed_code=transformed_code,
-                    actions=actions,
-                )
 
         runner = BehaviorFingerprintRunner(
             default_timeout_seconds=self.DEFAULT_PYTHON_TIMEOUT_SECONDS
@@ -169,32 +119,19 @@ class BehavioralValidator:
         fingerprints: List[Dict[str, Any]] = []
         failures: List[str] = []
         warnings: List[str] = []
-        if auto_generated:
-            warnings.append(
-                f"No explicit Python behavior_tests were provided, so {len(runtime_tests)} "
-                "safe runtime probe(s) were inferred from simple top-level functions."
-            )
         passed_count = 0
 
         for idx, test in enumerate(runtime_tests, start=1):
             name = str(test.get("name", test.get("test_id", f"test_{idx}")))
-            timeout = test.get("timeout_seconds")
-            if timeout is None:
-                timeout = test.get("timeout")
-            if timeout is None:
-                timeout = self.DEFAULT_PYTHON_TIMEOUT_SECONDS
-            timeout = float(timeout)
-            if timeout <= 0:
-                timeout = float(self.DEFAULT_PYTHON_TIMEOUT_SECONDS)
+            timeout = int(
+                test.get("timeout_seconds")
+                or test.get("timeout")
+                or self.DEFAULT_PYTHON_TIMEOUT_SECONDS
+            )
 
             try:
-                if "expression" in test or "original_expression" in test or "transformed_expression" in test:
-                    expression = str(test.get("expression") or test.get("original_expression"))
-                    transformed_expression = str(
-                        test.get("transformed_expression")
-                        or test.get("expression")
-                        or expression
-                    )
+                if "expression" in test:
+                    expression = str(test["expression"])
 
                     original_fp = runner.run_python_test(
                         original_code,
@@ -204,107 +141,64 @@ class BehavioralValidator:
 
                     transformed_fp = runner.run_python_test(
                         transformed_code,
-                        {"expression": transformed_expression},
+                        {"expression": expression},
                         timeout=timeout,
                     )
 
                     entry = {
                         "name": name,
                         "expression": expression,
-                        "transformed_expression": transformed_expression,
-                        "auto_generated": bool(test.get("auto_generated")),
                     }
 
                 else:
-                    original_fn_name = str(
-                        test.get("original_call")
-                        or test.get("call")
+                    fn_name = str(
+                        test.get("call")
                         or test.get("target_method")
                         or test.get("method")
-                        or ""
-                    ).strip()
-                    transformed_fn_name = str(
-                        test.get("transformed_call")
-                        or test.get("call")
-                        or test.get("target_method")
-                        or test.get("method")
-                        or original_fn_name
                         or ""
                     ).strip()
 
-                    if not original_fn_name or not transformed_fn_name:
+                    if not fn_name:
                         failures.append(f"{name}: missing call or target_method")
                         continue
 
                     args = test.get("args", []) or []
                     kwargs = test.get("kwargs", {}) or {}
 
-                    original_call_test = {
-                        "call": original_fn_name,
-                        "args": args,
-                        "kwargs": kwargs,
-                    }
-                    transformed_call_test = {
-                        "call": transformed_fn_name,
+                    call_test = {
+                        "call": fn_name,
                         "args": args,
                         "kwargs": kwargs,
                     }
 
                     original_fp = runner.run_python_test(
                         original_code,
-                        original_call_test,
+                        call_test,
                         timeout=timeout,
                     )
 
                     transformed_fp = runner.run_python_test(
                         transformed_code,
-                        transformed_call_test,
+                        call_test,
                         timeout=timeout,
                     )
 
                     entry = {
                         "name": name,
-                        "call": original_fn_name,
-                        "transformed_call": transformed_fn_name,
+                        "call": fn_name,
                         "args": args,
                         "kwargs": kwargs,
-                        "auto_generated": bool(test.get("auto_generated")),
                     }
 
                 comparison = compare_fingerprints(original_fp, transformed_fp)
-                dependency_unavailable = self._fingerprints_dependency_unavailable(
-                    original_fp,
-                    transformed_fp,
-                    language="python",
-                )
-                expected_failure = self._expected_failure(
-                    name=name,
-                    test=test,
-                    original_fp=original_fp,
-                    transformed_fp=transformed_fp,
-                )
-                if expected_failure:
-                    comparison = {"matched": False, "reason": expected_failure}
 
                 entry["original_fingerprint"] = original_fp
                 entry["transformed_fingerprint"] = transformed_fp
-                if dependency_unavailable:
-                    comparison = {
-                        "matched": False,
-                        "reason": "runtime_unavailable_due_to_dependencies",
-                    }
-
                 entry["comparison"] = comparison
-                if dependency_unavailable:
-                    entry["dependency_unavailable"] = True
 
                 fingerprints.append(entry)
 
-                if dependency_unavailable:
-                    warnings.append(
-                        f"{name}: Python runtime probe could not execute because imports/dependencies were unavailable."
-                    )
-                elif comparison.get("matched"):
+                if comparison.get("matched"):
                     passed_count += 1
                 else:
                     reason = comparison.get("reason", "fingerprint_mismatch")
@@ -324,26 +218,6 @@ class BehavioralValidator:
                 failures.append(f"{name}: runtime error {exc}")
 
         total = len(runtime_tests)
-        if fingerprints and all(item.get("dependency_unavailable") for item in fingerprints):
-            static_passed, static_score, static_message, static_details = self._validate_python_static_fingerprints(
-                original_code=original_code,
-                transformed_code=transformed_code,
-                actions=actions,
-            )
-            static_details["checks"] = [
-                "python_runtime_dependency_detection",
-                *static_details.get("checks", []),
-            ]
-            static_details["runtime_fingerprints"] = fingerprints
-            static_details["runtime_unavailable_reason"] = "missing_python_dependencies"
-            static_details["warnings"] = warnings + static_details.get("warnings", [])
-            static_details["fingerprint_status"] = "degraded_static_passed" if static_passed else "failed"
-            static_details["fingerprint_summary"] = (
-                "Python runtime probes could not execute because dependencies were unavailable; "
-                + static_details.get("fingerprint_summary", static_message)
-            )
-            return static_passed, min(static_score, 0.75), static_message, static_details
-
         passed = len(failures) == 0
         score = passed_count / total if total else 0.0
 
@@ -368,170 +242,6 @@ class BehavioralValidator:
                 ),
             },
         )
-
-    @classmethod
-    def _expected_failure(
-        cls,
-        *,
-        name: str,
-        test: Dict[str, Any],
-        original_fp: Dict[str, Any],
-        transformed_fp: Dict[str, Any],
-    ) -> str:
-        expected_marker = object()
-        expected = test.get("expected", expected_marker)
-        if expected is expected_marker:
-            expected = test.get("expected_return", expected_marker)
-        if expected is expected_marker:
-            expected = test.get("expected_value", expected_marker)
-        if expected is expected_marker:
-            return ""
-
-        expected_values = cls._expected_return_reprs(expected)
-        original_actual = str(original_fp.get("return_value_repr"))
-        transformed_actual = str(transformed_fp.get("return_value_repr"))
-
-        if original_fp.get("success") and original_actual not in expected_values:
-            return f"original_expected_value_mismatch:{name}"
-
-        if transformed_fp.get("success") and transformed_actual not in expected_values:
-            return f"transformed_expected_value_mismatch:{name}"
-
-        return ""
-
-    @staticmethod
-    def _expected_return_reprs(expected: Any) -> set[str]:
-        return {str(expected), repr(expected)}
-
-    def _infer_python_runtime_tests_from_source(
-        self,
-        *,
-        original_code: str,
-        actions: Sequence[RefactoringAction],
-    ) -> List[Dict[str, Any]]:
-        if not self._python_source_safe_for_auto_runtime(original_code):
-            return []
-
-        try:
-            tree = ast.parse(original_code)
-        except SyntaxError:
-            return []
-
-        rename_map: Dict[str, str] = {}
-        for action in actions:
-            if getattr(action, "action_type", "") != "rename_symbol":
-                continue
-            old_name = str(action.parameters.get("old_name") or "").strip()
-            new_name = str(action.parameters.get("new_name") or "").strip()
-            if old_name and new_name:
-                rename_map[old_name] = new_name
-
-        inferred: List[Dict[str, Any]] = []
-        for node in tree.body:
-            if not isinstance(node, ast.FunctionDef):
-                continue
-            if node.name.startswith("_"):
-                continue
-
-            args = self._python_args_for_auto_probe(node)
-            if args is None:
-                continue
-
-            inferred.append(
-                {
-                    "name": f"auto_python_{node.name}",
-                    "original_call": node.name,
-                    "transformed_call": rename_map.get(node.name, node.name),
-                    "args": args,
-                    "timeout_seconds": self.DEFAULT_PYTHON_TIMEOUT_SECONDS,
-                    "auto_generated": True,
-                }
-            )
-
-            if len(inferred) >= self.AUTO_PROBE_LIMIT:
-                break
-
-        return inferred
-
-    @staticmethod
-    def _python_source_safe_for_auto_runtime(source_code: str) -> bool:
-        try:
-            tree = ast.parse(source_code)
-        except SyntaxError:
-            return False
-
-        safe_import_roots = {"math", "statistics", "decimal", "fractions", "datetime", "re", "string"}
-        for node in tree.body:
-            if isinstance(node, ast.Import):
-                for alias in node.names:
-                    if alias.name.split(".", 1)[0] not in safe_import_roots:
-                        return False
-            elif isinstance(node, ast.ImportFrom):
-                module = (node.module or "").split(".", 1)[0]
-                if module and module not in safe_import_roots:
-                    return False
-            elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Assign, ast.AnnAssign)):
-                continue
-            elif isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant):
-                continue
-            else:
-                return False
-
-        return True
-
-    def _python_args_for_auto_probe(self, node: ast.FunctionDef) -> List[Any] | None:
-        args = node.args
-        if args.vararg or args.kwarg or args.kwonlyargs:
-            return None
-
-        positional = list(args.args)
-        defaults = list(args.defaults)
-        required_count = len(positional) - len(defaults)
-        rendered: List[Any] = []
-
-        for index, arg in enumerate(positional):
-            default_index = index - required_count
-            if default_index >= 0:
-                literal = self._literal_value(defaults[default_index])
-                if literal["literal"]:
-                    rendered.append(literal["value"])
-                    continue
-
-            value = self._python_default_arg_for_annotation(arg.annotation)
-            if value is None and index < required_count:
-                return None
-            rendered.append(value)
-
-        return rendered
-
-    @staticmethod
-    def _python_default_arg_for_annotation(annotation: ast.AST | None) -> Any:
-        if annotation is None:
-            return None
-
-        name = ""
-        if isinstance(annotation, ast.Name):
-            name = annotation.id
-        elif isinstance(annotation, ast.Constant):
-            name = str(annotation.value)
-        elif isinstance(annotation, ast.Subscript) and isinstance(annotation.value, ast.Name):
-            name = annotation.value.id
-
-        name = name.lower()
-        if name == "int":
-            return 0
-        if name == "float":
-            return 0.0
-        if name == "str":
-            return "sample"
-        if name == "bool":
-            return False
-        if name in {"list", "sequence", "tuple", "set"}:
-            return []
-        if name in {"dict", "mapping"}:
-            return {}
-
-        return None
 
     def _validate_python_static_fingerprints(
         self,
@@ -945,7 +655,6 @@ class BehavioralValidator:
             for name in name_loads
             if (
                 name.startswith("MAGIC_")
-                or name.startswith("CONSTANT_")
                 or name == "EXTRACTED_CONSTANT"
             )
         }
@@ -962,7 +671,7 @@ class BehavioralValidator:
                 else "unresolved_magic_constant_names"
             ),
             "original": {
-                "rule": "Every used MAGIC_*, CONSTANT_*, or EXTRACTED_CONSTANT name must be declared as a module constant.",
+                "rule": "Every used MAGIC_* or EXTRACTED_CONSTANT name must be declared as a module constant.",
             },
             "transformed": {
                 "module_constants": sorted(module_constants),
@@ -977,7 +686,7 @@ class BehavioralValidator:
         text = re.sub(r"[^A-Za-z0-9_]", "_", text)
 
         if not text:
-            return "CONSTANT_VALUE"
+            return "MAGIC_VALUE"
 
         if text[0].isdigit():
             text = f"N_{text}"
@@ -986,25 +695,25 @@ class BehavioralValidator:
 
     def _constant_name_from_value(self, value: Any) -> str:
         if isinstance(value, bool):
-            return f"CONSTANT_BOOL_{str(value).upper()}"
+            return f"MAGIC_BOOL_{str(value).upper()}"
 
         if value is None:
-            return "CONSTANT_NONE"
+            return "MAGIC_NONE"
 
         if isinstance(value, int):
             if value < 0:
-                return f"CONSTANT_NUMBER_NEG_{abs(value)}"
-            return f"CONSTANT_NUMBER_{value}"
+                return f"MAGIC_NUMBER_NEG_{abs(value)}"
+            return f"MAGIC_NUMBER_{value}"
 
         if isinstance(value, float):
             text = str(value).replace("-", "NEG_").replace(".", "_")
-            return f"CONSTANT_NUMBER_{self._sanitize_constant_name(text)}"
+            return f"MAGIC_NUMBER_{self._sanitize_constant_name(text)}"
 
         if isinstance(value, str):
             short = value[:24]
-            return f"CONSTANT_STRING_{self._sanitize_constant_name(short)}"
+            return f"MAGIC_STRING_{self._sanitize_constant_name(short)}"
 
-        return "CONSTANT_VALUE"
+        return "MAGIC_VALUE"
 
     def _validate_java(
         self,
@@ -1014,19 +723,15 @@ class BehavioralValidator:
         behavior_tests: List[Dict[str, Any]],
         actions: Sequence[RefactoringAction],
         strict_mode: bool,
-        project_source_files: Sequence[Any] | None = None,
-        current_file_name: str | None = None,
     ) -> tuple[bool, float, str, Dict[str, Any]]:
         checks: List[str] = []
         failures: List[str] = []
         warnings: List[str] = []
         component_scores: List[float] = []
         java_results: List[Dict[str, Any]] = []
-        dependency_unavailable_count = 0
 
         original_code = original_code.lstrip("\ufeff")
         transformed_code = transformed_code.lstrip("\ufeff")
-        project_sources = self._normalize_project_source_files(project_source_files)
 
         checks.append("unsafe_action_guard")
 
@@ -1179,8 +884,6 @@ class BehavioralValidator:
                 target_method=original_method,
                 args=args,
                 timeout_seconds=timeout_seconds,
-                project_source_files=project_sources,
-                current_file_name=current_file_name,
             )
 
             transformed_fp = self._run_java_runtime_probe(
@@ -1189,31 +892,9 @@ class BehavioralValidator:
                 target_method=transformed_method,
                 args=args,
                 timeout_seconds=timeout_seconds,
-                project_source_files=project_sources,
-                current_file_name=current_file_name,
             )
 
             comparison = compare_fingerprints(original_fp, transformed_fp)
-            dependency_unavailable = self._fingerprints_dependency_unavailable(
-                original_fp,
-                transformed_fp,
-                language="java",
-            )
-            expected_failure = self._expected_failure(
-                name=name,
-                test=test,
-                original_fp=original_fp,
-                transformed_fp=transformed_fp,
-            )
-            if expected_failure:
-                comparison = {"matched": False, "reason": expected_failure}
-                dependency_unavailable = False
-
-            if dependency_unavailable:
-                comparison = {
-                    "matched": False,
-                    "reason": "runtime_unavailable_due_to_dependencies",
-                }
 
             java_results.append(
                 {
@@ -1228,68 +909,16 @@ class BehavioralValidator:
                     "original_fingerprint": original_fp,
                     "transformed_fingerprint": transformed_fp,
                     "comparison": comparison,
-                    "dependency_unavailable": dependency_unavailable,
                 }
             )
 
-            if dependency_unavailable:
-                dependency_unavailable_count += 1
-                warnings.append(
-                    f"{name}: Java runtime probe could not execute because project or external dependencies were unavailable."
-                )
-                remaining_tests = runtime_tests[idx:]
-                if remaining_tests and not failures:
-                    warnings.append(
-                        f"Skipped {len(remaining_tests)} remaining Java runtime probe(s) "
-                        "after dependency-unavailable compilation was confirmed; "
-                        "static behavioral fallback still ran."
-                    )
-                    for remaining_index, remaining in enumerate(remaining_tests, start=idx + 1):
-                        remaining_name = str(
-                            remaining.get("name")
-                            or remaining.get("test_id")
-                            or f"java_probe_{remaining_index}"
-                        )
-                        java_results.append(
-                            {
-                                "name": remaining_name,
-                                "status": "skipped",
-                                "auto_generated": bool(remaining.get("auto_generated")),
-                                "reason": "dependency_unavailable_after_preflight",
-                                "dependency_unavailable": True,
-                            }
-                        )
-                        dependency_unavailable_count += 1
-                    break
-            elif comparison.get("matched"):
+            if comparison.get("matched"):
                 component_scores.append(1.0)
             else:
                 component_scores.append(0.0)
                 failures.append(
                     f"{name}: {comparison.get('reason', 'fingerprint_mismatch')}"
                 )
-
-        if java_results and dependency_unavailable_count == len(java_results) and not failures:
-            static_passed, static_score, static_message, static_details = self._validate_java_static_fingerprints(
-                original_code=original_code,
-                transformed_code=transformed_code,
-                actions=actions,
-                return_similarity=return_similarity,
-            )
-            static_details["checks"] = [
-                *checks,
-                "java_runtime_dependency_detection",
-                *static_details.get("checks", []),
-            ]
-            static_details["warnings"] = warnings + static_details.get("warnings", [])
-            static_details["java_results"] = java_results
-            static_details["runtime_unavailable_reason"] = "missing_java_dependencies"
-            static_details["fingerprint_status"] = "degraded_static_passed" if static_passed else "failed"
-            static_details["fingerprint_summary"] = (
-                "Java runtime probes could not execute because dependencies were unavailable; "
-                + static_details.get("fingerprint_summary", static_message)
-            )
-            return static_passed, min(static_score, 0.75), static_message, static_details
 
         passed = len(failures) == 0
         score = sum(component_scores) / len(component_scores) if component_scores else 0.6
@@ -1316,362 +945,6 @@ class BehavioralValidator:
                 ),
             },
         )
-
-    @classmethod
-    def _fingerprints_dependency_unavailable(
-        cls,
-        original_fp: Dict[str, Any],
-        transformed_fp: Dict[str, Any],
-        *,
-        language: str,
-    ) -> bool:
-        return (
-            cls._fingerprint_dependency_unavailable(original_fp, language=language)
-            and cls._fingerprint_dependency_unavailable(transformed_fp, language=language)
-        )
-
-    @staticmethod
-    def _fingerprint_dependency_unavailable(fp: Dict[str, Any], *, language: str) -> bool:
-        if fp.get("success"):
-            return False
-
-        exception_type = str(fp.get("exception_type") or "")
-        raw_message = "\n".join(
-            str(fp.get(key) or "")
-            for key in (
-                "exception_message_category",
-                "runtime_error_details",
-                "stderr",
-                "stdout",
-            )
-        )
-        message = raw_message.lower()
-
-        if exception_type == "RuntimeUnavailable":
-            return True
-
-        if language == "python":
-            return exception_type in {"ModuleNotFoundError", "ImportError"} or any(
-                pattern in message
-                for pattern in (
-                    "no module named",
-                    "cannot import name",
-                    "importerror",
-                    "modulenotfounderror",
-                )
-            )
-
-        if language == "java":
-            if exception_type != "CompilationError":
-                return False
-
-            unresolved_magic = re.search(
-                r"symbol:\s+(?:variable|class|interface|method)\s+(?:MAGIC|CONSTANT)_[A-Z0-9_]*",
-                raw_message,
-            )
-            if unresolved_magic:
-                return False
-
-            missing_package = re.search(
-                r"package\s+[a-zA-Z_][\w.]*\s+does\s+not\s+exist",
-                message,
-            )
-            servlet_dependency_patterns = (
-                "package javax.servlet",
-                "package jakarta.servlet",
-                "symbol: class httpservlet",
-                "symbol:   class httpservlet",
-                "symbol: class httpservletrequest",
-                "symbol:   class httpservletrequest",
-                "symbol: class httpservletresponse",
-                "symbol:   class httpservletresponse",
-                "symbol: class requestdispatcher",
-                "symbol:   class requestdispatcher",
-                "symbol: class servletexception",
-                "symbol:   class servletexception",
-                "symbol: class webservlet",
-                "symbol:   class webservlet",
-                "cannot be converted to annotation",
-                "cannot be converted to throwable",
-                "location: variable request of type httpservletrequest",
-                "location: variable response of type httpservletresponse",
-                "location: variable dispatcher of type requestdispatcher",
-            )
-            if missing_package or any(pattern in message for pattern in servlet_dependency_patterns):
-                return True
-
-            dependency_patterns = (
-                "package javax.servlet",
-                "package jakarta.servlet",
-                "package ",
-                " does not exist",
-                "cannot find symbol",
-                "symbol:   class ",
-                "symbol: class ",
-                "symbol:   interface ",
-                "symbol: interface ",
-                "class file for ",
-                "not found",
-                "cannot access ",
-                "bad class file",
-            )
-            syntax_patterns = (
-                "';' expected",
-                "illegal start of",
-                "not a statement",
-                "reached end of file",
-                "missing return statement",
-                "incompatible types",
-                "unclosed string literal",
-            )
-            return any(pattern in message for pattern in dependency_patterns) and not any(
-                pattern in message for pattern in syntax_patterns
-            )
-
-        if language == "c":
-            if exception_type not in {"CompilationError", "RuntimeUnavailable"}:
-                return False
-            dependency_patterns = (
-                "no such file or directory",
-                "file not found",
-                "cannot find",
-                "fatal error:",
-                "undefined reference",
-                "ld returned",
-            )
-            syntax_patterns = (
-                "expected ';'",
-                "expected expression",
-                "expected declaration",
-                "syntax error",
-                "undeclared",
-                "too few arguments",
-                "too many arguments",
-            )
-            return exception_type == "RuntimeUnavailable" or (
-                any(pattern in message for pattern in dependency_patterns)
-                and not any(pattern in message for pattern in syntax_patterns)
-            )
-
-        return False
-
-    @staticmethod
-    def _normalize_project_source_files(project_source_files: Sequence[Any] | None) -> List[Dict[str, str]]:
-        normalized: List[Dict[str, str]] = []
-        for item in project_source_files or []:
-            if isinstance(item, dict):
-                file_name = str(item.get("file_name") or item.get("name") or item.get("path") or "")
-                source_code = str(item.get("source_code") or item.get("code") or "")
-                language = str(item.get("language") or "").lower()
-            else:
-                file_name = str(getattr(item, "file_name", "") or getattr(item, "name", ""))
-                source_code = str(getattr(item, "source_code", "") or getattr(item, "code", ""))
-                language = str(getattr(item, "language", "") or "").lower()
-
-            if file_name and source_code:
-                normalized.append(
-                    {
-                        "file_name": file_name.replace("\\", "/"),
-                        "source_code": source_code,
-                        "language": language,
-                    }
-                )
-
-        return normalized
-
-    def _validate_java_static_fingerprints(
-        self,
-        *,
-        original_code: str,
-        transformed_code: str,
-        actions: Sequence[RefactoringAction],
-        return_similarity: float,
-    ) -> tuple[bool, float, str, Dict[str, Any]]:
-        original_summary = self._java_static_summary(original_code)
-        transformed_summary = self._java_static_summary(transformed_code)
-        comparison = self._compare_java_static_compatibility(
-            original_summary,
-            transformed_summary,
-            actions,
-        )
-
-        matched = bool(comparison.get("matched"))
-        score = (0.6 * (1.0 if matched else 0.0)) + (0.4 * return_similarity)
-        return (
-            matched,
-            round(score, 4),
-            (
-                "Java static behavioral fallback passed."
-                if matched
-                else "Java static behavioral fallback failed."
-            ),
-            {
-                "checks": ["java_static_behavioral_fallback"],
-                "failures": [] if matched else [comparison.get("reason", "java_static_summary_mismatch")],
-                "warnings": [
-                    "Used Java static behavioral fallback because runtime probes could not execute with available dependencies."
-                ],
-                "return_similarity": round(return_similarity, 4),
-                "static_comparison": comparison,
-                "fingerprint_status": "passed" if matched else "failed",
-                "fingerprint_summary": (
-                    "Java static behavioral fallback passed."
-                    if matched
-                    else "Java static behavioral fallback failed."
-                ),
-                "java_results": [
-                    {
-                        "name": "static_java_summary",
-                        "mode": "static_java_fingerprint",
-                        "original_fingerprint": original_summary,
-                        "transformed_fingerprint": transformed_summary,
-                        "comparison": comparison,
-                    }
-                ],
-            },
-        )
-
-    def _java_static_summary(self, source_code: str) -> Dict[str, Any]:
-        source_code = source_code.lstrip("\ufeff")
-        clean = self._strip_java_comments_and_literals(source_code)
-        class_names = self._extract_java_class_names(clean)
-        methods: Dict[str, Dict[str, Any]] = {}
-
-        for class_name in class_names:
-            for candidate in self._extract_java_method_candidates(
-                original_code=clean,
-                class_name=class_name,
-            ):
-                method_name = candidate["name"]
-                if method_name == class_name:
-                    continue
-                body = self._extract_java_method_body(clean, class_name, method_name)
-                methods[f"{class_name}.{method_name}"] = {
-                    "class_name": class_name,
-                    "method_name": method_name,
-                    "param_types": candidate.get("param_types", []),
-                    "return_count": len(re.findall(r"\breturn\b", body)),
-                    "throw_count": len(re.findall(r"\bthrow\b", body)),
-                    "branch_count": len(re.findall(r"\b(?:if|for|while|switch|case|catch)\b", body)),
-                }
-
-        return {
-            "class_names": class_names,
-            "method_count": len(methods),
-            "methods": methods,
-            "return_count": len(re.findall(r"\breturn\b", clean)),
-            "throw_count": len(re.findall(r"\bthrow\b", clean)),
-        }
-
-    def _compare_java_static_compatibility(
-        self,
-        original_summary: Dict[str, Any],
-        transformed_summary: Dict[str, Any],
-        actions: Sequence[RefactoringAction],
-    ) -> Dict[str, Any]:
-        class_renames: Dict[str, str] = {}
-        method_renames: Dict[str, str] = {}
-        original_classes = set(original_summary.get("class_names", []))
-
-        for action in actions:
-            if getattr(action, "action_type", "") != "rename_symbol":
-                continue
-            old_name = str(action.parameters.get("old_name") or "").strip()
-            new_name = str(action.parameters.get("new_name") or "").strip()
-            if not old_name or not new_name:
-                continue
-            if old_name in original_classes:
-                class_renames[old_name] = new_name
-            else:
-                method_renames[old_name] = new_name
-
-        original_methods = dict(original_summary.get("methods", {}))
-        transformed_methods = dict(transformed_summary.get("methods", {}))
-        transformed_by_pair = {
-            (item.get("class_name"), item.get("method_name")): item
-            for item in transformed_methods.values()
-        }
-        missing_methods = []
-        changed_methods = []
-
-        for method_key, original_method in original_methods.items():
-            original_class = original_method.get("class_name")
-            original_method_name = original_method.get("method_name")
-            expected_class = class_renames.get(str(original_class), original_class)
-            expected_method = method_renames.get(str(original_method_name), original_method_name)
-            transformed_method = transformed_by_pair.get((expected_class, expected_method))
-            if not transformed_method:
-                missing_methods.append(
-                    {
-                        "original_method": method_key,
-                        "expected_class": expected_class,
-                        "expected_method": expected_method,
-                    }
-                )
-                continue
-
-            for field in ("param_types", "return_count", "throw_count"):
-                if original_method.get(field) != transformed_method.get(field):
-                    changed_methods.append(
-                        {
-                            "method": method_key,
-                            "expected_method": f"{expected_class}.{expected_method}",
-                            "field": field,
-                            "original": original_method.get(field),
-                            "transformed": transformed_method.get(field),
-                        }
-                    )
-
-        matched = not missing_methods and not changed_methods
-        return {
-            "matched": matched,
-            "reason": "java_static_summary_preserved" if matched else "java_static_summary_mismatch",
-            "original": {
-                "method_count": original_summary.get("method_count", 0),
-                "methods": original_methods,
-                "class_renames": class_renames,
-                "method_renames": method_renames,
-            },
-            "transformed": {
-                "method_count": transformed_summary.get("method_count", 0),
-                "methods": transformed_methods,
-                "missing_methods": missing_methods,
-                "changed_methods": changed_methods,
-            },
-        }
-
-    @staticmethod
-    def _strip_java_comments_and_literals(source: str) -> str:
-        return re.sub(
-            r"/\*.*?\*/|//.*?$|\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*'",
-            lambda match: "\n" * match.group(0).count("\n") if match.group(0).startswith(("/*", "//")) else "0",
-            source,
-            flags=re.MULTILINE | re.DOTALL,
-        )
-
-    def _extract_java_method_body(self, source_code: str, class_name: str, method_name: str) -> str:
-        class_match = re.search(
-            rf"\bclass\s+{re.escape(class_name)}\b[^{{]*\{{",
-            source_code,
-        )
-        if not class_match:
-            return ""
-        class_start = class_match.end() - 1
-        class_end = self._find_matching_brace(source_code, class_start)
-        if class_end == -1:
-            return ""
-        class_body = source_code[class_start + 1 : class_end]
-        method_match = re.search(
-            rf"\b{re.escape(method_name)}\s*\([^)]*\)\s*(?:throws\s+[A-Za-z0-9_.,\s]+)?\{{",
-            class_body,
-        )
-        if not method_match:
-            return ""
-        body_start = method_match.end() - 1
-        body_end = self._find_matching_brace(class_body, body_start)
-        if body_end == -1:
-            return ""
-        return class_body[body_start + 1 : body_end]
 
     @staticmethod
     def _extract_java_runtime_tests(
@@ -2091,8 +1364,6 @@ class BehavioralValidator:
         target_method: str,
         args: List[Any] | None = None,
         timeout_seconds: int,
-        project_source_files: Sequence[Dict[str, str]] | None = None,
-        current_file_name: str | None = None,
     ) -> Dict[str, Any]:
         java_exe = shutil.which("java")
         javac_exe = shutil.which("javac")
@@ -2108,10 +1379,6 @@ class BehavioralValidator:
                 "execution_time_ms": 0,
                 "timeout": False,
                 "runtime_error_details": "java/javac not available",
-                "observed_invariants": {
-                    **mine_exception_invariants("RuntimeUnavailable", "java_runtime_unavailable"),
-                    **stdout_invariants(""),
-                },
             }
 
         source_code = source_code.lstrip("\ufeff")
@@ -2122,19 +1389,13 @@ class BehavioralValidator:
             target_class_name = f"{package_name}.{target_class_name}"
         args = args or []
 
-        temp_path = _make_runtime_temp_dir("java_fp")
-        try:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
 
             source_path = temp_path / f"{class_name}.java"
             harness_path = temp_path / "JavaRuntimeProbeHarness.java"
 
             source_path.write_text(source_code, encoding="utf-8")
-            project_java_paths = self._write_java_project_sources(
-                temp_path=temp_path,
-                source_code=source_code,
-                project_source_files=project_source_files,
-                current_file_name=current_file_name,
-            )
 
             harness_path.write_text(
                 self._build_java_runtime_probe_harness(
@@ -2148,14 +1409,8 @@ class BehavioralValidator:
             started = time.perf_counter()
 
             try:
-                compile_args = [javac_exe, source_path.name, harness_path.name]
-                compile_args.extend(
-                    str(path.relative_to(temp_path)).replace("\\", "/")
-                    for path in project_java_paths
-                    if path.name != source_path.name or path.read_text(encoding="utf-8") != source_code
-                )
                 compile_proc = subprocess.run(
-                    compile_args,
+                    [javac_exe, source_path.name, harness_path.name],
                     cwd=temp_path,
                     capture_output=True,
                     text=True,
@@ -2172,10 +1427,6 @@ class BehavioralValidator:
                     "execution_time_ms": int((time.perf_counter() - started) * 1000),
                     "timeout": True,
                     "runtime_error_details": "javac timed out.",
-                    "observed_invariants": {
-                        **mine_exception_invariants("TimeoutError", "javac_timeout"),
-                        **stdout_invariants(""),
-                    },
                 }
 
             if compile_proc.returncode != 0:
@@ -2218,11 +1469,6 @@ class BehavioralValidator:
                         ]
                         compile_args.extend(
                             str(path.relative_to(temp_path)).replace("\\", "/")
-                            for path in project_java_paths
-                            if path.exists()
-                        )
-                        compile_args.extend(
-                            str(path.relative_to(temp_path)).replace("\\", "/")
                             for path in stub_paths
                         )
 
@@ -2248,10 +1494,6 @@ class BehavioralValidator:
                                 "execution_time_ms": int((time.perf_counter() - started) * 1000),
                                 "timeout": False,
                                 "runtime_error_details": compile_proc.stderr,
-                                "observed_invariants": {
-                                    **mine_exception_invariants("CompilationError", "javac_failed"),
-                                    **stdout_invariants(compile_proc.stdout or ""),
-                                },
                             }
                     else:
                         return {
@@ -2265,10 +1507,6 @@ class BehavioralValidator:
                             "execution_time_ms": int((time.perf_counter() - started) * 1000),
                             "timeout": False,
                             "runtime_error_details": compile_proc.stderr,
-                            "observed_invariants": {
-                                **mine_exception_invariants("CompilationError", "javac_failed"),
-                                **stdout_invariants(compile_proc.stdout or ""),
-                            },
                         }
                 else:
                     return {
@@ -2282,10 +1520,6 @@ class BehavioralValidator:
                         "execution_time_ms": int((time.perf_counter() - started) * 1000),
                         "timeout": False,
                         "runtime_error_details": compile_proc.stderr,
-                        "observed_invariants": {
-                            **mine_exception_invariants("CompilationError", "javac_failed"),
-                            **stdout_invariants(compile_proc.stdout or ""),
-                        },
                     }
 
             try:
@@ -2304,14 +1538,10 @@ class BehavioralValidator:
                     "exception_type": "TimeoutError",
                     "exception_message_category": "java_probe_timeout",
                     "stdout": "",
-                        "execution_time_ms": int((time.perf_counter() - started) * 1000),
-                        "timeout": True,
-                        "runtime_error_details": "Java runtime probe timed out.",
-                        "observed_invariants": {
-                            **mine_exception_invariants("TimeoutError", "java_probe_timeout"),
-                            **stdout_invariants(""),
-                        },
-                    }
+                    "execution_time_ms": int((time.perf_counter() - started) * 1000),
+                    "timeout": True,
+                    "runtime_error_details": "Java runtime probe timed out.",
+                }
 
             stdout_raw = (run_proc.stdout or "").strip()
 
@@ -2327,10 +1557,6 @@ class BehavioralValidator:
                     "execution_time_ms": int((time.perf_counter() - started) * 1000),
                     "timeout": False,
                     "runtime_error_details": run_proc.stderr,
-                    "observed_invariants": {
-                        **mine_exception_invariants("RuntimeError", "java_probe_failed"),
-                        **stdout_invariants(stdout_raw),
-                    },
                 }
 
             lines = [line.strip() for line in stdout_raw.splitlines() if line.strip()]
@@ -2350,10 +1576,6 @@ class BehavioralValidator:
                     "execution_time_ms": int((time.perf_counter() - started) * 1000),
                     "timeout": False,
                     "runtime_error_details": message,
-                    "observed_invariants": {
-                        **mine_exception_invariants(exception_type, message),
-                        **stdout_invariants(stdout_raw),
-                    },
                 }
 
             return_type = "unknown"
@@ -2374,63 +1596,7 @@ class BehavioralValidator:
                 "execution_time_ms": int((time.perf_counter() - started) * 1000),
                 "timeout": False,
                 "runtime_error_details": None,
-                "observed_invariants": {
-                    "return": mine_value_invariants(return_value),
-                    **stdout_invariants(return_value),
-                },
             }
-        finally:
-            shutil.rmtree(temp_path, ignore_errors=True)
-
-    def _write_java_project_sources(
-        self,
-        *,
-        temp_path: Path,
-        source_code: str,
-        project_source_files: Sequence[Dict[str, str]] | None,
-        current_file_name: str | None,
-    ) -> List[Path]:
-        written: List[Path] = []
-        current_norm = self._normalize_project_path(current_file_name or "")
-        source_norm = source_code.strip()
-
-        for item in project_source_files or []:
-            file_name = str(item.get("file_name") or "")
-            if not file_name.lower().endswith(".java"):
-                continue
-
-            item_source = str(item.get("source_code") or "").lstrip("\ufeff")
-            if not item_source.strip():
-                continue
-
-            item_norm = self._normalize_project_path(file_name)
-            if current_norm and item_norm == current_norm:
-                continue
-            if item_source.strip() == source_norm:
-                continue
-
-            try:
-                item_class = self._extract_java_class_name(item_source)
-            except ValueError:
-                continue
-
-            package_name = self._extract_java_package(item_source)
-            target_dir = temp_path
-            if package_name:
-                target_dir = temp_path / package_name.replace(".", "/")
-                target_dir.mkdir(parents=True, exist_ok=True)
-
-            target_path = target_dir / f"{item_class}.java"
-            if target_path.exists():
-                continue
-            target_path.write_text(item_source, encoding="utf-8")
-            written.append(target_path)
-
-        return written
-
-    @staticmethod
-    def _normalize_project_path(value: str) -> str:
-        return str(value or "").replace("\\", "/").strip().lower()
 
     @staticmethod
     def _java_string_array(values: List[Any]) -> str:

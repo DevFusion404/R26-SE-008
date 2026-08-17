@@ -127,8 +127,6 @@ class SourceFileContract:
     file_name: str
     source_code: str
     language: Optional[str] = None
-    source_mode: str = "raw"
-    origin: str = ""
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any], *, index: int) -> "SourceFileContract":
@@ -151,27 +149,19 @@ class SourceFileContract:
                     f"Unsupported language '{language}' in source_files. Supported: {sorted(SUPPORTED_LANGUAGES)}"
                 )
 
-        source_mode = str(data.get("source_mode") or data.get("sourceMode") or "raw").strip().lower()
-        origin = str(data.get("origin") or "").strip().lower()
-
         return cls(
             file_name=file_name,
             source_code=source_code,
             language=language or None,
-            source_mode=source_mode or "raw",
-            origin=origin,
         )
 
     def to_dict(self) -> Dict[str, Any]:
         payload: Dict[str, Any] = {
             "file_name": self.file_name,
             "source_code": self.source_code,
-            "source_mode": self.source_mode,
         }
         if self.language:
             payload["language"] = self.language
-        if self.origin:
-            payload["origin"] = self.origin
         return payload
 
 
@@ -184,8 +174,6 @@ class ExecutionOptions:
     timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS
     require_compilation: bool = False
     rollback_on_behavior_failure: bool = True
-    enable_sctva_auto_refactoring: bool = True
-    max_parallel_files: int = 0
 
     @classmethod
     def from_dict(cls, data: Optional[Dict[str, Any]]) -> "ExecutionOptions":
@@ -198,25 +186,12 @@ class ExecutionOptions:
         if not isinstance(timeout, int) or timeout <= 0:
             raise ContractValidationError("Field 'execution_options.timeout_seconds' must be a positive integer.")
 
-        try:
-            max_parallel_files = int(data.get("max_parallel_files", 0) or 0)
-        except (TypeError, ValueError) as exc:
-            raise ContractValidationError(
-                "Field 'execution_options.max_parallel_files' must be a non-negative integer."
-            ) from exc
-        if max_parallel_files < 0:
-            raise ContractValidationError(
-                "Field 'execution_options.max_parallel_files' must be a non-negative integer."
-            )
-
         return cls(
             strict_mode=bool(data.get("strict_mode", True)),
             enable_behavior_tests=bool(data.get("enable_behavior_tests", True)),
             timeout_seconds=timeout,
             require_compilation=bool(data.get("require_compilation", False)),
             rollback_on_behavior_failure=bool(data.get("rollback_on_behavior_failure", True)),
-            enable_sctva_auto_refactoring=bool(data.get("enable_sctva_auto_refactoring", True)),
-            max_parallel_files=max_parallel_files,
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -225,9 +200,6 @@ class ExecutionOptions:
             "enable_behavior_tests": self.enable_behavior_tests,
             "timeout_seconds": self.timeout_seconds,
             "require_compilation": self.require_compilation,
-            "rollback_on_behavior_failure": self.rollback_on_behavior_failure,
-            "enable_sctva_auto_refactoring": self.enable_sctva_auto_refactoring,
-            "max_parallel_files": self.max_parallel_files,
         }
 
 
@@ -277,11 +249,6 @@ class SCTVARequestContract:
 
         if source_files and not isinstance(source_code, str):
             source_code = ""
-
-        if not source_files and isinstance(source_code, str) and not source_code.strip():
-            raise ContractValidationError(
-                "Field 'source_code' must be a non-empty string when 'source_files' is not provided."
-            )
 
         plan = RefactoringPlanContract.from_dict(data.get("refactoring_plan", {}))
         options = ExecutionOptions.from_dict(data.get("execution_options"))

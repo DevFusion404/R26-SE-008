@@ -80,13 +80,6 @@ def init_db(app):
             conn.execute("ALTER TABLE workflows ADD COLUMN updated_smells_json TEXT")
         if "planning_input_json" not in existing_cols:
             conn.execute("ALTER TABLE workflows ADD COLUMN planning_input_json TEXT")
-        # The CUQA quality report as served by POST /api/cuqa/quality-report.
-        # Kept verbatim so the updated report handed to the RDP agent can be a
-        # filtered copy of it — same shape, same fields — instead of being
-        # rebuilt from the flattened smell list, which loses per-file metrics,
-        # quality_score and each smell's own fields (entity, start_line, ...).
-        if "cuqa_report_json" not in existing_cols:
-            conn.execute("ALTER TABLE workflows ADD COLUMN cuqa_report_json TEXT")
 
     print("[DIWO] Database initialized.")
 

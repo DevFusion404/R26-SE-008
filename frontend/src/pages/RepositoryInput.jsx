@@ -165,7 +165,6 @@ export default function RepositoryInput({ onLoaded }) {
   // ── ZIP upload ─────────────────────────────────────────────────────────────
   async function handleZip(file) {
     if (!file?.name.endsWith('.zip')) { setError('Only .zip files supported.'); return; }
-    if (file.size > 500 * 1024 * 1024) { setError('ZIP file size exceeds the 500MB limit.'); return; }
     setError(null); setSuccess(null); setDetectedLangs(null); setLoading(true);
 
     const form = new FormData();
@@ -287,7 +286,7 @@ export default function RepositoryInput({ onLoaded }) {
             >
               <span className="upload-zone-icon">📁</span>
               <div className="upload-zone-title">Drag &amp; Drop or Upload ZIP</div>
-              <div className="upload-zone-sub">Local projects up to 500MB</div>
+              <div className="upload-zone-sub">Local projects up to 250MB</div>
               <input ref={fileRef} type="file" accept=".zip" style={{ display: 'none' }}
                 onChange={e => handleZip(e.target.files?.[0])} />
             </div>

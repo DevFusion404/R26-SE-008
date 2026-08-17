@@ -233,13 +233,6 @@ tmp/
 temp/
 cuqa_tmp/
 
-# ── DIWO orchestration backend runtime artefacts ─────────────
-# Written per workflow while the agent runs: saved smell reports
-# (POST /workflows/<id>/save-updated-report) and the downloadable
-# ZIP archives (POST /workflows/<id>/transformation-decision).
-# Both folders are recreated on demand, so nothing needs committing.
-agents/orchestration_agent/backend/reports/
-
 # ── OS artefacts ──────────────────────────────────────────────
 .DS_Store
 Thumbs.db
