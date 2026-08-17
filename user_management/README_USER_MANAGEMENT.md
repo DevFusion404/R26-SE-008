@@ -2,7 +2,7 @@
 
 A Flask + Supabase backend for user registration, authentication, profile management, and role-based access control.
 
-**Port:** `6000`
+**Port:** `5005`
 
 ---
 
@@ -31,14 +31,14 @@ SUPABASE_URL=https://wxebfbtigzebnddjkmgw.supabase.co
 SUPABASE_KEY=sb_publishable_QUxnqlGguhqUzohAS8TWtg_o06huL7T
 SECRET_KEY=super-secret-jwt-key-change-in-production
 JWT_SECRET=super-secret-jwt-key-change-in-production
-PORT=6000
+PORT=5005
 ```
 
 ### 5. Run the server
 ```powershell
 python app.py
 ```
-The service will start at `http://localhost:6000`.
+The service will start at `http://localhost:5005`.
 
 ---
 
@@ -64,6 +64,10 @@ create table public.profiles (
 -- Allow authenticated users to read/update their own profile
 alter table public.profiles enable row level security;
 
+create policy "Users can insert their own profile"
+  on public.profiles for insert
+  with check (auth.uid() = id);
+
 create policy "Users can view their own profile"
   on public.profiles for select
   using (auth.uid() = id);
@@ -75,11 +79,9 @@ create policy "Users can update their own profile"
 create policy "Admins can view all profiles"
   on public.profiles for select
   using (
-    exists (
-      select 1 from public.profiles
-      where id = auth.uid() and role = 'admin'
-    )
+    ((auth.jwt() -> 'user_metadata') ->> 'role') = 'admin'
   );
+
 
 create policy "Service role can do everything"
   on public.profiles
@@ -104,7 +106,7 @@ create trigger profiles_updated_at
 
 ## API Reference
 
-Base URL: `http://localhost:6000`
+Base URL: `http://localhost:5005`
 
 ### Public Endpoints (no auth required)
 
@@ -137,14 +139,14 @@ Base URL: `http://localhost:6000`
 
 ### Register
 ```bash
-curl -X POST http://localhost:6000/api/auth/register \
+curl -X POST http://localhost:5005/api/auth/register \
   -H "Content-Type: application/json" \
   -d '{"email":"john@example.com","password":"Secret123","full_name":"John Doe","role":"user"}'
 ```
 
 ### Login
 ```bash
-curl -X POST http://localhost:6000/api/auth/login \
+curl -X POST http://localhost:5005/api/auth/login \
   -H "Content-Type: application/json" \
   -d '{"email":"john@example.com","password":"Secret123"}'
 ```
@@ -152,13 +154,13 @@ Save the `access_token` from the response for subsequent requests.
 
 ### Get Profile
 ```bash
-curl -X GET http://localhost:6000/api/auth/profile \
+curl -X GET http://localhost:5005/api/auth/profile \
   -H "Authorization: Bearer <access_token>"
 ```
 
 ### Update Profile
 ```bash
-curl -X PUT http://localhost:6000/api/auth/profile \
+curl -X PUT http://localhost:5005/api/auth/profile \
   -H "Authorization: Bearer <access_token>" \
   -H "Content-Type: application/json" \
   -d '{"full_name":"John Updated"}'
@@ -166,25 +168,25 @@ curl -X PUT http://localhost:6000/api/auth/profile \
 
 ### Logout
 ```bash
-curl -X POST http://localhost:6000/api/auth/logout \
+curl -X POST http://localhost:5005/api/auth/logout \
   -H "Authorization: Bearer <access_token>"
 ```
 
 ### Delete Account
 ```bash
-curl -X DELETE http://localhost:6000/api/auth/account \
+curl -X DELETE http://localhost:5005/api/auth/account \
   -H "Authorization: Bearer <access_token>"
 ```
 
 ### List All Users (Admin)
 ```bash
-curl -X GET http://localhost:6000/api/auth/users \
+curl -X GET http://localhost:5005/api/auth/users \
   -H "Authorization: Bearer <admin_access_token>"
 ```
 
 ### Change User Role (Admin)
 ```bash
-curl -X PUT http://localhost:6000/api/auth/users/<target_user_id>/role \
+curl -X PUT http://localhost:5005/api/auth/users/<target_user_id>/role \
   -H "Authorization: Bearer <admin_access_token>" \
   -H "Content-Type: application/json" \
   -d '{"role":"admin"}'
@@ -207,24 +209,24 @@ Roles are stored in the `profiles.role` column. The JWT token carries role metad
 
 ```
 user_management/
-├── app.py                          # Flask app entry point (port 6000)
-├── requirements.txt                # Python dependencies
-├── .env                            # Environment variables
-├── config/
-│   ├── __init__.py
-│   └── supabase_client.py          # Shared Supabase client instance
-├── models/
-│   ├── __init__.py
-│   └── user_model.py               # Validation helpers
-├── middleware/
-│   ├── __init__.py
-│   └── auth_middleware.py          # JWT decorators: require_auth, require_admin
-├── services/
-│   ├── __init__.py
-│   └── user_service.py             # Business logic (Auth + profiles table)
-└── routes/
-    ├── __init__.py
-    └── user_routes.py              # Flask Blueprint (/api/auth/*)
+â”œâ”€â”€ app.py                          # Flask app entry point (port 5005)
+â”œâ”€â”€ requirements.txt                # Python dependencies
+â”œâ”€â”€ .env                            # Environment variables
+â”œâ”€â”€ config/
+â”‚   â”œâ”€â”€ __init__.py
+â”‚   â””â”€â”€ supabase_client.py          # Shared Supabase client instance
+â”œâ”€â”€ models/
+â”‚   â”œâ”€â”€ __init__.py
+â”‚   â””â”€â”€ user_model.py               # Validation helpers
+â”œâ”€â”€ middleware/
+â”‚   â”œâ”€â”€ __init__.py
+â”‚   â””â”€â”€ auth_middleware.py          # JWT decorators: require_auth, require_admin
+â”œâ”€â”€ services/
+â”‚   â”œâ”€â”€ __init__.py
+â”‚   â””â”€â”€ user_service.py             # Business logic (Auth + profiles table)
+â””â”€â”€ routes/
+    â”œâ”€â”€ __init__.py
+    â””â”€â”€ user_routes.py              # Flask Blueprint (/api/auth/*)
 ```
 
 ---
@@ -241,7 +243,7 @@ user_management/
 
 - Replace `JWT_SECRET` / `SECRET_KEY` with a strong random value (e.g. `openssl rand -hex 32`)
 - Set `FLASK_ENV=production`
-- Run with Gunicorn: `gunicorn -w 4 -b 0.0.0.0:6000 app:app`
+- Run with Gunicorn: `gunicorn -w 4 -b 0.0.0.0:5005 app:app`
 - Enable Supabase Row Level Security (RLS) policies (SQL provided above)
 
 ---
@@ -258,9 +260,9 @@ This service is containerized for easy deployment and local execution.
    ```
 
 2. **Run the container**:
-   Pass your local `.env` configuration file to run on port 6000:
+   Pass your local `.env` configuration file to run on port 5005:
    ```bash
-   docker run -p 6000:6000 --env-file .env user-management-service
+   docker run -p 5005:5005 --env-file .env user-management-service
    ```
 
 ### Docker Compose
@@ -271,5 +273,5 @@ Alternatively, start the service using Docker Compose:
 docker compose up -d --build
 ```
 
-The container automatically mounts port `6000` to your host machine and loads settings from the local `.env` file.
+The container automatically mounts port `5005` to your host machine and loads settings from the local `.env` file.
 

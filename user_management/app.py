@@ -1,4 +1,4 @@
-﻿"""
+"""
 app.py
 Flask application entry point for the User Management service.
 Runs on port 6000.
@@ -83,7 +83,7 @@ def create_app() -> Flask:
 app = create_app()
 
 if __name__ == "__main__":
-    port = int(os.getenv("PORT", 6000))
+    port = int(os.getenv("PORT", 5005))
     debug = os.getenv("FLASK_ENV", "development") == "development"
     print(f"[user-management] Starting on http://0.0.0.0:{port}  (debug={debug})")
     app.run(host="0.0.0.0", port=port, debug=debug)

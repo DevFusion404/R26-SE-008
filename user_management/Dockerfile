@@ -1,15 +1,15 @@
-# Build & Run Instructions
+ï»¿# Build & Run Instructions
 # -------------------------------------------------------------
 # Build:
 #   docker build -t user-management-service .
 #
 # Run:
-#   docker run -p 6000:6000 \
+#   docker run -p 5005:5005 \
 #     --env-file .env \
 #     user-management-service
 # -------------------------------------------------------------
 
-# Stage 1 — Builder
+# Stage 1 â€” Builder
 FROM python:3.11-slim AS builder
 
 WORKDIR /install
@@ -22,7 +22,7 @@ RUN pip install --no-cache-dir --prefix=/install/packages -r requirements.txt
 
 
 # -------------------------------------------------------------
-# Stage 2 — Runtime
+# Stage 2 â€” Runtime
 # Copy over dependencies and application code.
 # -------------------------------------------------------------
 FROM python:3.11-slim AS runtime
@@ -51,14 +51,14 @@ ENV PYTHONUNBUFFERED=1
 ENV PYTHONDONTWRITEBYTECODE=1
 
 # Expose the API port
-EXPOSE 6000
+EXPOSE 5005
 
 # Switch to the non-root user
 USER usermgt
 
 # Serve the application using gunicorn
 CMD ["python", "-m", "gunicorn", \
-     "--bind", "0.0.0.0:6000", \
+     "--bind", "0.0.0.0:5005", \
      "--workers", "4", \
      "--threads", "2", \
      "--timeout", "60", \

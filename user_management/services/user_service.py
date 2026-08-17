@@ -1,4 +1,4 @@
-﻿"""
+"""
 services/user_service.py
 Business logic layer: wraps Supabase Auth + profiles table operations.
 """
@@ -120,8 +120,22 @@ def login(email: str, password: str) -> dict:
         user = auth_resp.user
         session = auth_resp.session
 
-        # Fetch role from profiles
-        role = _extract_role_from_profile(user.id)
+        # Fetch role and profile details from database profiles table
+        try:
+            profile_resp = supabase.table(PROFILES_TABLE).select("*").eq("id", user.id).single().execute()
+            profile = profile_resp.data if profile_resp.data else {
+                "id": user.id,
+                "email": user.email,
+                "full_name": user.user_metadata.get("full_name", "User"),
+                "role": role,
+            }
+        except Exception:
+            profile = {
+                "id": user.id,
+                "email": user.email,
+                "full_name": user.user_metadata.get("full_name", "User"),
+                "role": role,
+            }
 
         return _ok({
             "user": {
@@ -129,7 +143,7 @@ def login(email: str, password: str) -> dict:
                 "email": user.email,
                 "email_confirmed": user.email_confirmed_at is not None,
             },
-            "role": role,
+            "profile": profile,
             "session": {
                 "access_token": session.access_token,
                 "refresh_token": session.refresh_token,
