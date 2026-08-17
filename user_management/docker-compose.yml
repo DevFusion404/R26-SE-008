@@ -1,0 +1,16 @@
+version: '3.8'
+
+services:
+  user-management:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: user-management-service:latest
+    container_name: user-management-app
+    ports:
+      - "6000:6000"
+    env_file:
+      - .env
+    environment:
+      - FLASK_ENV=production
+    restart: unless-stopped
