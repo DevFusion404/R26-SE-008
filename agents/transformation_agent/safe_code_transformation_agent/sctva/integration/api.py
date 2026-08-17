@@ -180,6 +180,87 @@ def _find_cuqa_workspace_file(relative_path: str) -> Path | None:
     return None
 
 
+def _find_cuqa_workspace_files(relative_paths: list[Any]) -> dict[str, Path]:
+    """Resolve many CUQA workspace paths with one workspace scan.
+
+    Large CUQA imports can include hundreds of files. Calling rglob once per
+    requested file makes import time grow quickly, so this bulk resolver does
+    direct path checks first and scans each candidate workspace only once for
+    suffix matches.
+    """
+
+    safe_paths: list[str] = []
+    seen: set[str] = set()
+    for raw_path in relative_paths:
+        safe_path = _safe_relative_source_path(raw_path)
+        if not safe_path or safe_path in seen:
+            continue
+        seen.add(safe_path)
+        safe_paths.append(safe_path)
+
+    if not safe_paths:
+        return {}
+
+    roots = _cuqa_workspace_candidates()
+    found: dict[str, Path] = {}
+
+    for safe_path in safe_paths:
+        safe_parts = safe_path.split("/")
+        for root in roots:
+            candidate = root.joinpath(*safe_parts)
+            try:
+                resolved_root = root.resolve()
+                resolved_candidate = candidate.resolve()
+            except OSError:
+                continue
+            if resolved_root not in resolved_candidate.parents and resolved_candidate != resolved_root:
+                continue
+            if resolved_candidate.is_file():
+                found[safe_path] = resolved_candidate
+                break
+
+    unresolved = [safe_path for safe_path in safe_paths if safe_path not in found]
+    if not unresolved:
+        return found
+
+    suffixes_by_basename: dict[str, list[tuple[str, str]]] = {}
+    for safe_path in unresolved:
+        basename = safe_path.rsplit("/", 1)[-1]
+        suffixes_by_basename.setdefault(basename.lower(), []).append(
+            (safe_path, f"/{safe_path.lower()}")
+        )
+
+    for root in roots:
+        try:
+            candidates = root.rglob("*")
+        except OSError:
+            continue
+
+        for candidate in candidates:
+            basename_entries = suffixes_by_basename.get(candidate.name.lower())
+            if not basename_entries:
+                continue
+            try:
+                if not candidate.is_file():
+                    continue
+                resolved_root = root.resolve()
+                resolved_candidate = candidate.resolve()
+            except OSError:
+                continue
+            if resolved_root not in resolved_candidate.parents and resolved_candidate != resolved_root:
+                continue
+
+            normalized_candidate = str(resolved_candidate).replace("\\", "/").lower()
+            for safe_path, suffix in basename_entries:
+                if safe_path not in found and normalized_candidate.endswith(suffix):
+                    found[safe_path] = resolved_candidate
+
+            if len(found) == len(safe_paths):
+                return found
+
+    return found
+
+
 def create_sctva_blueprint() -> Blueprint:
     """Create and return a Blueprint with SCTVA endpoints."""
     bp = Blueprint("sctva_api", __name__)
@@ -221,13 +302,16 @@ def create_sctva_blueprint() -> Blueprint:
             files = []
             missing = []
             max_file_bytes = 5 * 1024 * 1024
-            for raw_path in raw_paths[:1000]:
+            requested_paths = raw_paths[:1000]
+            resolved_paths = _find_cuqa_workspace_files(requested_paths)
+
+            for raw_path in requested_paths:
                 safe_path = _safe_relative_source_path(raw_path)
                 if not safe_path:
                     missing.append(str(raw_path or ""))
                     continue
 
-                source_path = _find_cuqa_workspace_file(safe_path)
+                source_path = resolved_paths.get(safe_path)
                 if source_path is None:
                     missing.append(safe_path)
                     continue

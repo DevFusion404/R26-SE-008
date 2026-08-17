@@ -50,6 +50,30 @@ def test_cuqa_temp_workspace_lookup_matches_suffix_with_repo_prefix(monkeypatch,
     assert found.resolve() == source_file.resolve()
 
 
+def test_cuqa_bulk_workspace_lookup_resolves_multiple_files(monkeypatch, tmp_sctva_dir):
+    workspace = tmp_sctva_dir / "cuqa_789" / "extracted" / "repo"
+    java_file = workspace / "src" / "main" / "java" / "web" / "OrderServlet.java"
+    c_file = workspace / "examples" / "ini_dump.c"
+    java_file.parent.mkdir(parents=True)
+    c_file.parent.mkdir(parents=True)
+    java_file.write_text("class OrderServlet {}\n", encoding="utf-8")
+    c_file.write_text("int dumper(void) { return 0; }\n", encoding="utf-8")
+
+    monkeypatch.setattr(api_module.tempfile, "gettempdir", lambda: str(tmp_sctva_dir))
+
+    found = api_module._find_cuqa_workspace_files(
+        [
+            "src/main/java/web/OrderServlet.java",
+            "examples/ini_dump.c",
+            "../unsafe.java",
+        ]
+    )
+
+    assert found["src/main/java/web/OrderServlet.java"].resolve() == java_file.resolve()
+    assert found["examples/ini_dump.c"].resolve() == c_file.resolve()
+    assert "../unsafe.java" not in found
+
+
 def test_cuqa_temp_workspace_lookup_rejects_unsafe_paths(monkeypatch, tmp_sctva_dir):
     monkeypatch.setattr(api_module.tempfile, "gettempdir", lambda: str(tmp_sctva_dir))
 

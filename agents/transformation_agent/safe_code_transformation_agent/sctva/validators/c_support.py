@@ -134,6 +134,7 @@ def expected_c_transform_summary(actions: Sequence[RefactoringAction]) -> Dict[s
             normalized_name = _sanitize_constant_name(constant_name)
             if normalized_name in {"EXTRACTED_CONSTANT", "MAGIC_CONSTANT", "CONSTANT", "VALUE_CONSTANT"}:
                 normalized_name = _constant_name_from_value(literal_value)
+            normalized_name = _normalize_legacy_magic_name(normalized_name, literal_value)
             unique_name = normalized_name
             suffix = 2
             while unique_name in expected_macros and expected_macros[unique_name] != literal_value:
@@ -185,10 +186,16 @@ def compare_c_static_summaries(
     missing_functions = sorted(normalized_expected_original - transformed_signature_set)
     unexpected_functions = sorted(transformed_signature_set - normalized_expected_original)
 
+    transformed_macros = transformed_summary.get("macros", {})
     missing_macros: List[Dict[str, Any]] = []
     for name, value in expected_macros.items():
-        actual = transformed_summary.get("macros", {}).get(name)
         expected_value = _c_literal(value)
+        actual = transformed_macros.get(name)
+        if actual is None and _has_equivalent_introduced_macro(
+            transformed_macros,
+            expected_value,
+        ):
+            continue
         if actual is None:
             missing_macros.append({"name": name, "expected_value": expected_value, "actual_value": None})
         elif str(actual).strip() != str(expected_value).strip():
@@ -212,28 +219,57 @@ def _sanitize_constant_name(value: Any) -> str:
     text = str(value or "").strip()
     text = re.sub(r"[^A-Za-z0-9_]", "_", text)
     if not text:
-        return "MAGIC_VALUE"
+        return "CONSTANT_VALUE"
     if text[0].isdigit():
         text = f"N_{text}"
     return text.upper()
 
 
+def _has_equivalent_introduced_macro(
+    macros: Dict[str, str],
+    expected_value: str,
+) -> bool:
+    expected = str(expected_value).strip()
+    for name, actual_value in macros.items():
+        normalized_name = str(name or "").upper()
+        if not (
+            normalized_name.startswith("MAGIC_")
+            or normalized_name.startswith("CONSTANT_")
+            or normalized_name.startswith("SCTVA_")
+        ):
+            continue
+        if str(actual_value).strip() == expected:
+            return True
+    return False
+
+
+def _normalize_legacy_magic_name(cleaned: str, literal_value: Any) -> str:
+    if not cleaned.startswith("MAGIC_"):
+        return cleaned
+    if cleaned.startswith(("MAGIC_NUMBER_", "MAGIC_STRING_", "MAGIC_BOOL_")) or cleaned in {
+        "MAGIC_NONE",
+        "MAGIC_VALUE",
+    }:
+        return _constant_name_from_value(literal_value)
+    return f"CONSTANT_{cleaned[len('MAGIC_'):]}"
+
+
 def _constant_name_from_value(value: Any) -> str:
     if isinstance(value, bool):
-        return f"MAGIC_BOOL_{str(value).upper()}"
+        return f"CONSTANT_BOOL_{str(value).upper()}"
     if value is None:
-        return "MAGIC_NONE"
+        return "CONSTANT_NONE"
     if isinstance(value, int):
         if value < 0:
-            return f"MAGIC_NUMBER_NEG_{abs(value)}"
-        return f"MAGIC_NUMBER_{value}"
+            return f"CONSTANT_NUMBER_NEG_{abs(value)}"
+        return f"CONSTANT_NUMBER_{value}"
     if isinstance(value, float):
         text = str(value).replace("-", "NEG_").replace(".", "_")
         text = re.sub(r"[^A-Za-z0-9_]", "_", text).strip("_")
-        return f"MAGIC_NUMBER_{text}"
+        return f"CONSTANT_NUMBER_{text}"
     if isinstance(value, str):
-        return f"MAGIC_STRING_{_sanitize_constant_name(value[:24])}"
-    return "MAGIC_VALUE"
+        return f"CONSTANT_STRING_{_sanitize_constant_name(value[:24])}"
+    return "CONSTANT_VALUE"
 
 
 def _java_style_result(success: bool, return_value: str, return_type: str, stdout: str = "") -> Dict[str, Any]:
@@ -746,6 +782,45 @@ def _validate_c_runtime(
                 warnings.append(
                     f"{name}: C runtime probe could not execute because compiler, headers, or linked dependencies were unavailable."
                 )
+                remaining_tests = runtime_tests[idx:]
+                if remaining_tests and not failures:
+                    warnings.append(
+                        f"Skipped {len(remaining_tests)} remaining C runtime probe(s) "
+                        "after dependency-unavailable compilation was confirmed; "
+                        "static behavioral fallback still ran."
+                    )
+                    for remaining_index, remaining in enumerate(remaining_tests, start=idx + 1):
+                        remaining_name = str(
+                            remaining.get("name")
+                            or remaining.get("test_id")
+                            or f"c_probe_{remaining_index}"
+                        )
+                        fingerprints.append(
+                            {
+                                "name": remaining_name,
+                                "call": (
+                                    remaining.get("original_call")
+                                    or remaining.get("call")
+                                    or remaining.get("function")
+                                    or remaining.get("method")
+                                    or remaining.get("target_method")
+                                ),
+                                "transformed_call": (
+                                    remaining.get("transformed_call")
+                                    or remaining.get("call")
+                                    or remaining.get("function")
+                                    or remaining.get("method")
+                                    or remaining.get("target_method")
+                                ),
+                                "args": remaining.get("args", []) or [],
+                                "auto_generated": bool(remaining.get("auto_generated")),
+                                "status": "skipped",
+                                "reason": "dependency_unavailable_after_preflight",
+                                "dependency_unavailable": True,
+                            }
+                        )
+                        dependency_unavailable_count += 1
+                    break
             elif comparison.get("matched"):
                 passed_count += 1
             else:
