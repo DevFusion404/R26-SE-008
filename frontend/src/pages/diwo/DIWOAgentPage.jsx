@@ -272,14 +272,24 @@ export default function DIWOAgentPage() {
           }))
         );
 
+        // Smell-wise selection is per smell, so the file paths are deliberately
+        // left out: the backend expands a file path to every smell inside it,
+        // which would undo the smells the developer just deselected.
+        const selectionMode = selection.selection_mode === "smell" ? "smell" : "file";
+
         const res = await api.post(`/workflows/${workflowId}/select-smells`, {
           selected_ids: selectedIds,
-          selected_files: selectedFiles,
+          ...(selectionMode === "smell" ? {} : { selected_files: selectedFiles }),
           selected_smells: selectedSmells,
-          feedback: { reason: "Selected in DIWO frontend" },
+          selection_mode: selectionMode,
+          feedback: { reason: `Selected in DIWO frontend (${selectionMode}-wise)` },
         });
 
-        addLog(`${report.summary?.selected_count ?? 0} file(s) approved; selection persisted.`, "success");
+        addLog(
+          `${report.summary?.selected_count ?? 0} smell(s) across ${selectedFiles.length} file(s) approved ` +
+          `(${selectionMode}-wise selection); selection persisted.`,
+          "success"
+        );
         applyPlanResponse(res);
         setWorkflow((prev) => ({
           ...(prev || {}),
