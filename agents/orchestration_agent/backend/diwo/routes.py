@@ -38,12 +38,16 @@ from db.database import (
 from diwo.orchestrator import (
     generate_refactoring_plan, simulate_transformation,
     compute_metrics_before, compute_metrics_after, next_stage,
-    generate_updated_plan_report,
-    normalize_cuqa_report, cuqa_report_to_smells,
+    generate_updated_plan_report, build_approved_plan,
+    normalize_cuqa_report, cuqa_report_to_smells, filter_cuqa_report,
     detect_primary_language, derive_target_name,
+    build_rdp_plan_input, normalize_rdp_plan,
 )
 from diwo.cuqa_client import (
     CUQAError, cuqa_base_url, fetch_quality_report, probe_cuqa,
+)
+from diwo.rdp_client import (
+    RDPError, generate_plan as rdp_generate_plan, probe_rdp, rdp_base_url,
 )
 
 diwo_bp = Blueprint("diwo", __name__)
@@ -273,6 +277,59 @@ def _store_refactored_archive(wf_id: str, files: list, meta: dict):
     }
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Planning hand-off to the RDP agent
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _plan_from_rdp(updated_report: dict, selected: list, target: str, wf_id: str = None):
+    """Generate the refactoring plan for the developer's smell selection.
+
+    The updated report — every analysed file, but only the smells the developer
+    kept — is forwarded to the RDP agent's POST /generate, which is the agent
+    that owns planning. The local generator in orchestrator.py stays only as
+    the offline fallback, and the response always says which one produced the
+    plan so a fallback is never mistaken for real RDP output.
+
+    Returns (plan, trace, source, warning).
+    """
+    rdp_input = build_rdp_plan_input(updated_report)
+
+    if not rdp_input["files"]:
+        warning = (
+            "The selection contains no code smells, so the RDP agent was not called."
+        )
+        return generate_refactoring_plan(selected, target), {}, "diwo_local_fallback", warning
+
+    try:
+        result = rdp_generate_plan(rdp_input)
+    except RDPError as exc:
+        if wf_id:
+            log_event(wf_id, "plan_approval", "rdp_plan_failed",
+                      {"rdp_url": rdp_base_url(), "status": exc.status, "reason": exc.message},
+                      actor="system")
+        return (
+            generate_refactoring_plan(selected, target),
+            {},
+            "diwo_local_fallback",
+            exc.message,
+        )
+
+    plan = normalize_rdp_plan(result["plan"], rdp_input)
+
+    if wf_id:
+        log_event(wf_id, "plan_approval", "rdp_plan_generated", {
+            "rdp_url":       rdp_base_url(),
+            "plan_id":       plan.get("plan_id"),
+            "target":        plan.get("target"),
+            "steps":         plan["summary"]["total_steps"],
+            "files_sent":    len(rdp_input["files"]),
+            "smells_sent":   rdp_input["summary"]["total_code_smells"],
+            "smells_skipped": len(result["trace"].get("plan_generation", {}).get("skipped_smells", [])),
+        }, actor="system")
+
+    return plan, result["trace"], "rdp_agent", None
+
+
 def _resolve_selected_ids(all_smells: list, selected_files: list, selected_smells: list):
     ids = []
 
@@ -362,13 +419,23 @@ def start_workflow():
     }), 201
 
 
-def _persist_new_workflow(target: str, language: str, smells: list, source: str = "client"):
-    """Create the workflow row, seed metrics_before, and log the start event."""
+def _persist_new_workflow(target: str, language: str, smells: list,
+                          source: str = "client", cuqa_report: dict = None):
+    """Create the workflow row, seed metrics_before, and log the start event.
+
+    `cuqa_report` is stored verbatim when the workflow was seeded from the CUQA
+    agent, so the updated report can later be produced by filtering it instead
+    of rebuilding one from the flattened smells.
+    """
     wf_id          = f"wf_{uuid.uuid4().hex[:10]}"
     metrics_before = compute_metrics_before(smells)
 
     create_workflow(wf_id, target, language, smells)
-    update_workflow(wf_id, metrics_before_json=json.dumps(metrics_before))
+    update_workflow(
+        wf_id,
+        metrics_before_json=json.dumps(metrics_before),
+        cuqa_report_json=json.dumps(cuqa_report) if cuqa_report else None,
+    )
     log_event(wf_id, "smell_review", "workflow_started",
               {"target": target, "language": language,
                "smell_count": len(smells), "source": source})
@@ -396,6 +463,12 @@ def _cuqa_error_response(exc: CUQAError):
 def cuqa_status():
     """Is the CUQA agent up, and does it have a repository loaded?"""
     return jsonify(probe_cuqa())
+
+
+@diwo_bp.route("/rdp/status", methods=["GET"])
+def rdp_status():
+    """Is the RDP agent up? Planning is forwarded to it at POST /generate."""
+    return jsonify(probe_rdp())
 
 
 @diwo_bp.route("/cuqa/quality-report", methods=["GET", "POST"])
@@ -470,7 +543,9 @@ def start_workflow_from_cuqa():
     target   = data.get("target") or derive_target_name(report)
     language = data.get("language") or detect_primary_language(report)
 
-    wf_id, metrics_before = _persist_new_workflow(target, language, smells, source="cuqa")
+    wf_id, metrics_before = _persist_new_workflow(
+        target, language, smells, source="cuqa", cuqa_report=report
+    )
     log_event(wf_id, "smell_review", "cuqa_report_ingested", {
         "cuqa_url":       cuqa_base_url(),
         "report_type":    report.get("report_type"),
@@ -539,7 +614,18 @@ def _build_smell_selection_payload(wf, selected_ids, selected_files=None):
             upd["selected_at"] = now_iso()
         updated_smells.append(upd)
 
-    updated_report = _build_report_from_smells(all_smells, wf.get("target"), selected_ids=selected_ids)
+    # Prefer filtering the stored CUQA report: it keeps the exact shape
+    # /api/cuqa/quality-report serves, so the report that reaches the RDP agent
+    # carries the same metrics, quality scores and per-smell fields CUQA
+    # produced. _build_report_from_smells is the fallback for workflows created
+    # from a client-supplied smell list, which never had a report to store.
+    stored_report = _parse_json_field(wf, "cuqa_report_json")
+    if stored_report:
+        updated_report = filter_cuqa_report(stored_report, selected_ids)
+    else:
+        updated_report = _build_report_from_smells(
+            all_smells, wf.get("target"), selected_ids=selected_ids
+        )
     updated_report["workflow_id"] = wf.get("id")
     updated_report["generated_at"] = now_iso()
 
@@ -564,7 +650,14 @@ def _build_smell_selection_payload(wf, selected_ids, selected_files=None):
 
 @diwo_bp.route("/workflows/<wf_id>/smell-selection-pass", methods=["POST"])
 def smell_selection_pass(wf_id):
-    """Return the updated code smell JSON without advancing the workflow."""
+    """Preview the updated code smell JSON without advancing the workflow.
+
+    Report only — no plan. The Code Smell Review stage calls this to show what
+    the selection looks like, then the same selection goes through
+    /select-smells, which is where the RDP agent is called exactly once. This
+    endpoint deliberately does not plan: doing so would put two POSTs to
+    /generate in every smell-selection flow.
+    """
     wf = get_workflow(wf_id)
     if not wf:
         return _err("Workflow not found.", 404)
@@ -593,8 +686,11 @@ def smell_selection_pass(wf_id):
         return _err("No smell IDs could be resolved from the selection. Send 'selected_ids', 'selected_files', or 'selected_smells'.")
 
     payload = _build_smell_selection_payload(wf, selected_ids, selected_files)
-    payload["plan"] = generate_refactoring_plan(payload["selected"], wf["target"])
-    payload["status"] = "plan_approval"
+
+    # What /select-smells would forward to the RDP agent, so the developer can
+    # confirm the selection before committing to it. Built, not sent.
+    payload["rdp_plan_input"] = build_rdp_plan_input(payload["updated_report"])
+    payload["status"] = "smell_review"
     return jsonify(payload)
 
 
@@ -711,11 +807,17 @@ def select_smells(wf_id):
                       reason=feedback.get("reason", "Developer choice"),
                       accepted=False)
 
-    # Generate the refactoring plan (still useful as a quick local plan preview)
-    plan = generate_refactoring_plan(selected, wf["target"])
+    # Forward the updated report — every file, but only the smells the
+    # developer kept — to the RDP agent, which owns plan generation.
+    plan, trace, plan_source, plan_warning = _plan_from_rdp(
+        payload["updated_report"], selected, wf["target"], wf_id=wf_id
+    )
+
     update_workflow(wf_id, status="plan_approval", plan_json=json.dumps(plan))
     log_event(wf_id, "plan_approval", "plan_generated",
-              {"plan_id": plan["plan_id"], "steps": plan["summary"]["total_steps"]},
+              {"plan_id": plan.get("plan_id"),
+               "steps": plan["summary"]["total_steps"],
+               "source": plan_source},
               actor="system")
 
     return jsonify({
@@ -723,11 +825,21 @@ def select_smells(wf_id):
         "selected_count":  len(selected),
         "excluded_count":  len(excluded),
         "plan":            plan,
+        # RDP's decision trace: impact / risk / MCDA scores live here, not on
+        # the steps, so the approval page needs it to explain each choice.
+        "trace":           trace,
+        "plan_source":     plan_source,
+        "plan_warning":    plan_warning,
+        "rdp_url":         rdp_base_url(),
         "selected_ids":    selected_ids,
         "selected_files":   selected_files,
         "updated_report":   payload["updated_report"],
         "planning_input":   planning_input,
-        "message":         "Refactoring plan generated. Please review and approve.",
+        "message": (
+            "Refactoring plan generated by the RDP agent. Please review and approve."
+            if plan_source == "rdp_agent"
+            else f"RDP agent unavailable ({plan_warning}); showing a local fallback plan."
+        ),
     })
 
 
@@ -827,27 +939,59 @@ def plan_decision(wf_id):
 
     # ── Modify ───────────────────────────────────────────────────────────────
     if decision == "modify":
+        decisions = data.get("decisions")
         modified_steps = data.get("modified_steps")
-        if modified_steps is not None:
+
+        if isinstance(decisions, dict) and decisions:
+            # Preferred: the backend derives the approved plan itself, so the
+            # report the Transformation Agent receives cannot disagree with the
+            # verdicts recorded in the audit trail.
+            plan = build_approved_plan(plan, decisions)
+        elif modified_steps is not None:
             if not isinstance(modified_steps, list):
                 return _err("'modified_steps' must be a list of step objects.")
-            plan["steps"] = modified_steps
-            plan["summary"]["total_steps"] = len(modified_steps)
+            kept = {s.get("step_id") for s in modified_steps if isinstance(s, dict)}
+            plan = build_approved_plan(
+                plan,
+                {s.get("step_id"): ("approve" if s.get("step_id") in kept else "reject")
+                 for s in plan.get("steps") or []},
+            )
+
         update_workflow(wf_id, plan_json=json.dumps(plan))
-        log_event(wf_id, "plan_approval", "plan_modified",
-                  {"steps_after": len(plan["steps"])})
+        log_event(wf_id, "plan_approval", "plan_modified", {
+            "steps_after":  len(plan.get("steps") or []),
+            "approved_ids": (plan.get("approval") or {}).get("approved_step_ids"),
+            "rejected_ids": (plan.get("approval") or {}).get("rejected_step_ids"),
+        })
         save_feedback(wf_id, "plan_approval", "plan_modified",
                       reason=feedback.get("reason"), rating=feedback.get("rating"),
                       accepted=True)
+
+        # One feedback row per rejected step — a step-level rejection is a
+        # stronger training signal than the session-level approval.
+        for step in (plan.get("approval") or {}).get("rejected_step_ids") or []:
+            save_feedback(wf_id, "plan_approval", "plan_step_rejected",
+                          reason=f"Developer rejected plan step {step}.",
+                          accepted=False)
+
         return jsonify({
             "status":  "plan_approval",
             "plan":    plan,
-            "message": "Plan updated. Please approve to proceed.",
+            "message": "Plan reduced to the approved steps. Please approve to proceed.",
         })
 
     # ── Approve → trigger transformation ─────────────────────────────────────
+    # An approve can carry the decisions directly, so a caller that never sent
+    # a separate 'modify' still gets an approved-only plan persisted.
+    approve_decisions = data.get("decisions")
+    if isinstance(approve_decisions, dict) and approve_decisions:
+        plan = build_approved_plan(plan, approve_decisions)
+        update_workflow(wf_id, plan_json=json.dumps(plan))
+
     log_event(wf_id, "plan_approval", "plan_approved",
-              {"plan_id": plan.get("plan_id")})
+              {"plan_id": plan.get("plan_id"),
+               "steps": len(plan.get("steps") or []),
+               "approved_ids": (plan.get("approval") or {}).get("approved_step_ids")})
     save_feedback(wf_id, "plan_approval", "plan_approved",
                   reason=feedback.get("reason"), rating=feedback.get("rating"),
                   accepted=True)
@@ -868,12 +1012,16 @@ def plan_decision(wf_id):
 
     return jsonify({
         "status":               "transformation",
+        # The approved-only plan report. This is what the Safe Transformation
+        # Agent must execute — Stage 3 posts it to /sctva/execute, so a
+        # rejected step never reaches the transformer.
+        "approved_plan":        plan,
         "transformation_result": tr,
         "refactored_code":      tr.get("refactored_code", ""),
         "diff_rows":            tr.get("diff_rows", []),
         "files":                tr.get("files", []),
         "metrics_after":        metrics_after,
-        "message":              "Transformation applied. Please review results.",
+        "message":              "Plan approved. Forward the approved plan to the Transformation Agent.",
     })
 
 

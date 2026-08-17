@@ -7,34 +7,51 @@
  * Decision & Planning (RDP) agent and let the developer approve or reject each
  * step before it reaches the Safe Transformation Agent.
  *
+ * This page does NOT call the RDP agent. Planning is owned by the DIWO
+ * backend: POST /workflows/<id>/select-smells forwards the *updated* smell
+ * report — the developer's selection, with deselected smells and now-empty
+ * files removed — to POST http://localhost:5000/generate, and returns the
+ * plan, the decision trace and which agent produced it.
+ *
+ * The page used to POST /generate a second time from the browser, built from
+ * `workflow.updated_report || cuqaReport`. Whenever `updated_report` was
+ * missing that fell back to the FULL report, so every deselected smell came
+ * back and the plan on screen disagreed with the one the backend had stored.
+ * One request, one plan, one source of truth — hence `planData` only.
+ *
  * Data source, in priority order:
- *   1. Live RDP plan — POST http://localhost:5000/generate with the report the
- *      developer approved in Stage 1 (see rdpApi.generateRefactoringPlan).
- *      This is the authoritative plan: once it loads it stays on screen, so a
- *      backend preference update cannot swap the plan out mid-review.
- *   2. `planData` prop — the plan the DIWO backend returned with the smell
- *      selection. Used when the RDP agent is unreachable or has no report.
- *   3. Bundled sample plan (diwoData.PLAN_DATA) — only if the developer opts in
- *      after a failure, and it is labelled as sample data in the UI.
+ *   1. `planData` — the plan the backend returned with the smell selection.
+ *   2. Bundled sample plan (diwoData.PLAN_DATA) — only if the developer opts
+ *      in after a failure, and it is labelled as sample data in the UI.
  *
  * The displayed plan travels back up on approve (`onApprove({ plan })`) so the
  * parent forwards the exact steps the developer saw, not whichever copy its own
- * state happens to hold.
+ * state happens to hold. Only the steps marked "approve" are transformed —
+ * DIWOAgentPage filters on `decisions[step.step_id] === "approve"` before
+ * handing the plan to the Safe Transformation Agent.
+ *
+ * Approving a step is a LOCAL decision and never regenerates the plan.
+ * It used to: every click called onDecisionChange, which POSTed
+ * /plan-preference-update, and that endpoint drops rejected steps, re-sorts
+ * the rest, renumbers step_id from 1 and returns a new plan_id. The new
+ * plan_id tripped the reset below, so the approval the developer had just made
+ * was wiped a moment after it appeared — and the renumbering meant a decision
+ * key no longer pointed at the step it was made on. Preference changes (risk
+ * tolerance / impact focus) still ask the backend to re-rank, and decisions
+ * are carried across that by step identity rather than by position.
  */
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useState } from "react";
 import { PLAN_DATA } from "./data/diwoData";
 import { C, Card, Badge, Pill, impactColor, riskColor, severityColor } from "./diwoTheme.jsx";
-import { generateRefactoringPlan, RDP_GENERATE_URL, RDP_BASE } from "./rdpApi";
 
 export default function RefactoringPlanApprovalPage({
   onApprove,
   onFallback,
   planData,
-  report,
-  fullReport,
+  planMeta,
+  loading = false,
   onDecisionChange,
-  onPlanLoaded,
 }) {
   const [decisions, setDecisions] = useState({});
   const [opinion, setOpinion] = useState("");
@@ -43,79 +60,67 @@ export default function RefactoringPlanApprovalPage({
   const [riskTolerance, setRiskTolerance] = useState("balanced");
   const [impactFocus, setImpactFocus] = useState("high");
   const [expanded, setExpanded] = useState(() => new Set());
-
-  // ── RDP plan loading ───────────────────────────────────────────────────────
-  const [generated, setGenerated] = useState(null);   // { plan, trace, rdpUrl, ... }
-  const [loading, setLoading] = useState(Boolean(report));
-  const [loadError, setLoadError] = useState(null);
   const [useSample, setUseSample] = useState(false);
 
-  // Kept in a ref so an inline parent callback cannot re-trigger the request.
-  const onPlanLoadedRef = useRef(onPlanLoaded);
-  useEffect(() => {
-    onPlanLoadedRef.current = onPlanLoaded;
-  });
-
-  const applyPlan = useCallback((result) => {
-    setGenerated(result);
-    setUseSample(false);
-    setLoadError(null);
-    setLoading(false);
-    onPlanLoadedRef.current?.(result);
-  }, []);
-
-  const applyLoadError = useCallback((error) => {
-    if (error.name === "AbortError") return;   // unmounted / superseded
-    setLoadError(error);
-    setLoading(false);
-  }, []);
-
-  /** Manual regenerate — runs from an event handler, so setState is safe here. */
-  const reloadPlan = useCallback(() => {
-    if (!report) return;
-    setLoading(true);
-    setLoadError(null);
-    generateRefactoringPlan({ report, fullReport }).then(applyPlan).catch(applyLoadError);
-  }, [report, fullReport, applyPlan, applyLoadError]);
-
-  // Initial load. `loading` already starts as Boolean(report), so the effect
-  // only has to resolve the request — nothing is set synchronously.
-  useEffect(() => {
-    if (!report) return undefined;
-    const controller = new AbortController();
-    generateRefactoringPlan({ report, fullReport, signal: controller.signal })
-      .then(applyPlan)
-      .catch(applyLoadError);
-    return () => controller.abort();
-  }, [report, fullReport, applyPlan, applyLoadError]);
-
   // ── Resolve the plan actually being rendered ───────────────────────────────
-  const currentPlan = generated?.plan || planData || (useSample ? PLAN_DATA : null);
-  const origin = generated ? "rdp" : planData ? "workflow" : useSample ? "sample" : null;
+  const currentPlan = planData || (useSample ? PLAN_DATA : null);
+  const origin = planData
+    ? (planMeta?.plan_source === "rdp_agent" ? "rdp" : "workflow")
+    : useSample
+      ? "sample"
+      : null;
   const steps = currentPlan?.steps || [];
 
-  // Decisions are keyed by step_id, so they must not survive a different plan.
-  // Adjusted during render rather than in an effect — no cascading render, no
-  // stale first paint of the previous plan's approvals.
+  // A step's identity across plan revisions. step_id cannot be used: the
+  // preference re-ranker renumbers steps from 1, so step 1 of a new plan is
+  // usually a different refactoring than step 1 of the old one.
+  const identityOf = (step) =>
+    `${step.smell_id ?? ""}|${step.refactoring ?? ""}|${step.target?.file ?? ""}`;
+
+  // Decisions are keyed by step_id, which only means anything within one plan.
+  // When the plan is replaced, carry each decision over to the step it was
+  // actually made on instead of dropping the lot. Adjusted during render
+  // rather than in an effect — no cascading render, no stale first paint.
   const planKey = currentPlan ? `${origin}:${currentPlan.plan_id}` : null;
   const [prevPlanKey, setPrevPlanKey] = useState(planKey);
+  const [prevSteps, setPrevSteps] = useState(steps);
   if (planKey !== prevPlanKey) {
+    const byIdentity = new Map();
+    prevSteps.forEach((step) => {
+      const decision = decisions[step.step_id];
+      if (decision) byIdentity.set(identityOf(step), decision);
+    });
+
+    const carried = {};
+    steps.forEach((step) => {
+      const decision = byIdentity.get(identityOf(step));
+      if (decision) carried[step.step_id] = decision;
+    });
+
     setPrevPlanKey(planKey);
-    setDecisions({});
+    setPrevSteps(steps);
+    setDecisions(carried);
     setExpanded(new Set());
   }
 
-  const decide = (id, val) => setDecisions(prev => {
-    const next = { ...prev, [id]: val };
-    onDecisionChange?.({
-      decisions: next,
-      preferences: {
-        risk_tolerance: riskTolerance,
-        impact_focus: impactFocus,
-      },
-    });
-    return next;
-  });
+  /** Approve / reject one step. Local only — never regenerates the plan. */
+  const decide = (id, val) =>
+    setDecisions((prev) => (prev[id] === val ? prev : { ...prev, [id]: val }));
+
+  /**
+   * Ask the backend to re-rank the plan for a new preference. This is the only
+   * thing that replaces the plan mid-review, and decisions survive it via the
+   * identity carry-over above.
+   */
+  const applyPreferences = (next) => {
+    const preferences = {
+      risk_tolerance: next.riskTolerance ?? riskTolerance,
+      impact_focus: next.impactFocus ?? impactFocus,
+    };
+    if (next.riskTolerance !== undefined) setRiskTolerance(next.riskTolerance);
+    if (next.impactFocus !== undefined) setImpactFocus(next.impactFocus);
+    onDecisionChange?.({ decisions, preferences });
+  };
 
   const toggleExpanded = (id) => setExpanded(prev => {
     const next = new Set(prev);
@@ -136,20 +141,16 @@ export default function RefactoringPlanApprovalPage({
 
   // ── Loading / error states ─────────────────────────────────────────────────
   if (loading && !currentPlan) {
-    return <LoadingState />;
+    return <LoadingState rdpUrl={planMeta?.rdp_url} />;
   }
 
   if (!currentPlan) {
     return (
       <ErrorState
-        error={loadError}
-        canRetry={Boolean(report)}
-        onRetry={reloadPlan}
+        warning={planMeta?.plan_warning}
+        rdpUrl={planMeta?.rdp_url}
         onFallback={onFallback}
-        onUseSample={() => {
-          setUseSample(true);
-          setLoadError(null);
-        }}
+        onUseSample={() => setUseSample(true)}
       />
     );
   }
@@ -183,14 +184,7 @@ export default function RefactoringPlanApprovalPage({
 
   return (
     <div>
-      <SourceBanner
-        origin={origin}
-        meta={generated}
-        loading={loading}
-        error={loadError}
-        canRefresh={Boolean(report)}
-        onRefresh={reloadPlan}
-      />
+      <SourceBanner origin={origin} meta={planMeta} />
 
       <Card style={{ marginBottom: 20 }} glow={C.accentGlow}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: 12 }}>
@@ -250,16 +244,20 @@ export default function RefactoringPlanApprovalPage({
         }}>
           {allApproved ? "Deselect All" : "Select All"}
         </button>
-        <select value={riskTolerance} onChange={(e) => setRiskTolerance(e.target.value)} style={{
-          padding: "5px 10px", borderRadius: 8, fontSize: 11, background: C.panel, color: C.text, border: `1px solid ${C.border}`,
-        }}>
+        <select
+          value={riskTolerance}
+          onChange={(e) => applyPreferences({ riskTolerance: e.target.value })}
+          style={{ padding: "5px 10px", borderRadius: 8, fontSize: 11, background: C.panel, color: C.text, border: `1px solid ${C.border}` }}
+        >
           <option value="conservative">Risk: Conservative</option>
           <option value="balanced">Risk: Balanced</option>
           <option value="aggressive">Risk: Aggressive</option>
         </select>
-        <select value={impactFocus} onChange={(e) => setImpactFocus(e.target.value)} style={{
-          padding: "5px 10px", borderRadius: 8, fontSize: 11, background: C.panel, color: C.text, border: `1px solid ${C.border}`,
-        }}>
+        <select
+          value={impactFocus}
+          onChange={(e) => applyPreferences({ impactFocus: e.target.value })}
+          style={{ padding: "5px 10px", borderRadius: 8, fontSize: 11, background: C.panel, color: C.text, border: `1px solid ${C.border}` }}
+        >
           <option value="high">Impact: High</option>
           <option value="medium">Impact: Medium</option>
           <option value="low">Impact: Low</option>
@@ -369,12 +367,19 @@ export default function RefactoringPlanApprovalPage({
             ⚠ Review all {pending} pending steps to proceed
           </div>
         )}
-        <button onClick={submit} disabled={!canProceed} style={{
+        <button onClick={submit} disabled={!canProceed} title={
+          rejected > 0
+            ? `${approved} approved step(s) will be transformed; ${rejected} rejected step(s) are dropped from the plan.`
+            : `${approved} approved step(s) will be transformed.`
+        } style={{
           padding: "10px 24px", borderRadius: 8, fontWeight: 700, fontSize: 13, cursor: canProceed ? "pointer" : "not-allowed",
           background: canProceed ? C.accent : C.border, color: canProceed ? "#000" : C.textMuted, border: "none",
           boxShadow: canProceed ? `0 0 20px ${C.accentGlow}` : "none", transition: "all 0.2s"
         }}>
-          Forward to Transformation Agent → ({approved} approved)
+          Forward {approved} Approved Step{approved === 1 ? "" : "s"} to Transformation →
+          {rejected > 0 && (
+            <span style={{ fontWeight: 500, opacity: 0.75 }}> ({rejected} rejected, skipped)</span>
+          )}
         </button>
       </div>
     </div>
@@ -455,14 +460,16 @@ const ORIGIN_LABEL = {
   sample: "Sample plan (bundled data — RDP agent unavailable)",
 };
 
-function SourceBanner({ origin, meta, loading, error, canRefresh, onRefresh }) {
+function SourceBanner({ origin, meta }) {
   const color = origin === "rdp" ? C.accent : origin === "workflow" ? C.info : C.warn;
 
+  // Everything shown here comes from the /select-smells response — the page
+  // never contacts the RDP agent, so it reports what the backend did.
   const details = [];
   if (origin === "rdp") {
-    details.push(RDP_BASE);
-    if (meta?.filesPlanned) details.push(`${meta.filesPlanned} file(s)`);
-    if (meta?.smellsSubmitted) details.push(`${meta.smellsSubmitted} smell(s) submitted`);
+    if (meta?.rdp_url) details.push(meta.rdp_url);
+    if (meta?.files_sent) details.push(`${meta.files_sent} file(s)`);
+    if (typeof meta?.smells_sent === "number") details.push(`${meta.smells_sent} selected smell(s) sent`);
   }
 
   return (
@@ -480,38 +487,26 @@ function SourceBanner({ origin, meta, loading, error, canRefresh, onRefresh }) {
               {details.join(" · ")}
             </div>
           )}
-          {error && (
-            <div style={{ fontSize: 11, color: C.danger, marginTop: 2 }}>
-              RDP agent unavailable: {error.message}
+          {meta?.plan_warning && (
+            <div style={{ fontSize: 11, color: C.warn, marginTop: 2 }}>
+              RDP agent unavailable: {meta.plan_warning}
             </div>
           )}
         </div>
       </div>
-      {canRefresh && (
-        <button
-          onClick={onRefresh}
-          disabled={loading}
-          style={{
-            padding: "6px 14px", borderRadius: 8, fontSize: 12, fontWeight: 600,
-            background: C.panel, color: loading ? C.textMuted : C.textSub,
-            border: `1px solid ${C.border}`, cursor: loading ? "wait" : "pointer", flexShrink: 0,
-          }}
-        >
-          {loading ? "Planning…" : "↻ Regenerate plan"}
-        </button>
-      )}
     </div>
   );
 }
 
-function LoadingState() {
+function LoadingState({ rdpUrl }) {
   return (
     <Card style={{ textAlign: "center", padding: "48px 24px" }}>
       <div style={{ fontSize: 13, fontWeight: 700, color: C.text, marginBottom: 8 }}>
         Generating the refactoring plan…
       </div>
       <div style={{ fontSize: 12, color: C.textMuted, marginBottom: 20 }}>
-        POST {RDP_GENERATE_URL} · interpreting smells, scoring candidates (MCDA), sequencing steps
+        The DIWO backend is forwarding your selected smells to {rdpUrl || "the RDP agent"}
+        {" "}· interpreting smells, scoring candidates (MCDA), sequencing steps
       </div>
       <div style={{ height: 4, borderRadius: 4, background: C.border, overflow: "hidden", maxWidth: 320, margin: "0 auto" }}>
         <div style={{ height: "100%", width: "40%", background: C.gradient, animation: "diwoSlide 1.1s ease-in-out infinite" }} />
@@ -521,24 +516,24 @@ function LoadingState() {
   );
 }
 
-function ErrorState({ error, canRetry, onRetry, onUseSample, onFallback }) {
-  const noSmells = error?.status === 422;
+function ErrorState({ warning, rdpUrl, onUseSample, onFallback }) {
+  const nothingToPlan = /no code smells|nothing to plan|not called/i.test(warning || "");
 
-  const hint = noSmells
+  const hint = nothingToPlan
     ? "Every selected file came through without smells. Go back to Code Smell Review and approve files that still have detected smells."
-    : "Start the Refactoring Planning agent before running the DIWO workflow:  cd agents/rdp_agent && python app.py  (serves http://localhost:5000)";
+    : `Start the Refactoring Planning agent before running the DIWO workflow:  cd agents/rdp_agent && python app.py  (serves ${rdpUrl || "http://localhost:5000"})`;
 
   return (
     <Card style={{ padding: "32px 28px", borderColor: `${C.danger}50` }}>
       <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
-        <Badge label={noSmells ? "NOTHING TO PLAN" : "RDP UNAVAILABLE"} color={C.danger} />
+        <Badge label={nothingToPlan ? "NOTHING TO PLAN" : "NO PLAN AVAILABLE"} color={C.danger} />
         <span style={{ fontSize: 14, fontWeight: 700, color: C.text }}>
           Could not load the refactoring plan
         </span>
       </div>
 
       <div style={{ fontSize: 12, color: C.textSub, lineHeight: 1.6, marginBottom: 12 }}>
-        {error?.message || "No plan was supplied by the workflow and the RDP agent was not contacted."}
+        {warning || "The workflow returned no plan for this smell selection."}
       </div>
 
       <div style={{
@@ -549,15 +544,6 @@ function ErrorState({ error, canRetry, onRetry, onUseSample, onFallback }) {
       </div>
 
       <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-        {canRetry && (
-          <button onClick={onRetry} style={{
-            padding: "9px 20px", borderRadius: 8, fontSize: 13, fontWeight: 700,
-            background: C.accent, color: "#000", border: "none", cursor: "pointer",
-            boxShadow: `0 0 16px ${C.accentGlow}`,
-          }}>
-            ↻ Retry
-          </button>
-        )}
         <button onClick={onFallback} style={{
           padding: "9px 20px", borderRadius: 8, fontSize: 13, fontWeight: 600,
           background: `${C.danger}15`, color: C.danger, border: `1px solid ${C.danger}30`, cursor: "pointer",
