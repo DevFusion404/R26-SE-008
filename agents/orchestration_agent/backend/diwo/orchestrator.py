@@ -178,6 +178,65 @@ def normalize_cuqa_report(payload: dict) -> dict:
     }
 
 
+def filter_cuqa_report(report: dict, selected_ids) -> dict:
+    """Narrow a CUQA quality report down to the developer's selected smells.
+
+    The result is the *same JSON shape* POST /api/cuqa/quality-report serves:
+    every file keeps its language, its full metrics block and its
+    quality_score, and every surviving smell keeps all of its own fields
+    (entity, start_line, end_line, ...). Only the code_smells lists shrink.
+
+    That matters because this report is what /select-smells forwards to the
+    RDP agent. Rebuilding it from DIWO's flattened smell list — as
+    _build_report_from_smells does — drops the richer metrics and every
+    smell's `entity`, and reports quality_score 0, so RDP plans against
+    weaker input than CUQA actually produced.
+
+    Smell ids are recomputed exactly as cuqa_report_to_smells() assigns them
+    (`<relative_path>:<line>:<index>`), so a selection made against the
+    flattened list resolves here without a lookup table.
+    """
+    selected = set(selected_ids or [])
+    files = []
+    kept_ids = []
+    total_smells = 0
+
+    for file_report in report.get("files") or []:
+        rel_path = file_report.get("relative_path") or file_report.get("file") or "unknown"
+
+        kept = []
+        for idx, smell in enumerate(file_report.get("code_smells") or []):
+            total_smells += 1
+            smell_id = f"{rel_path}:{smell.get('line') or 0}:{idx}"
+            if selected and smell_id not in selected:
+                continue
+            kept.append(dict(smell))
+            kept_ids.append(smell_id)
+
+        smell_summary = {"high": 0, "medium": 0, "low": 0}
+        for smell in kept:
+            smell_summary[_normalize_severity(smell.get("severity"))] += 1
+
+        entry = dict(file_report)
+        entry["code_smells"] = kept
+        entry["smell_summary"] = smell_summary
+        files.append(entry)
+
+    summary = _summarize_files(files)
+    summary["selected_smell_ids"] = kept_ids
+    summary["selected_count"] = len(kept_ids)
+    summary["excluded_count"] = max(0, total_smells - len(kept_ids))
+    summary["selected_file_count"] = sum(1 for f in files if f.get("code_smells"))
+
+    return {
+        **report,
+        "files": files,
+        "summary": summary,
+        "filtered": True,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
 def cuqa_report_to_smells(report: dict) -> list:
     """Flatten a normalized CUQA report into the DIWO smell list.
 
@@ -315,6 +374,139 @@ REFACTORING_MAP.update({
     "GlobalVariable":        ("Encapsulate Field", "medium", "medium"),
     "LargeHeaderFile":       ("Extract Class", "medium", "medium"),
 })
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# RDP Agent hand-off
+# ─────────────────────────────────────────────────────────────────────────────
+
+def build_rdp_plan_input(updated_report: dict) -> dict:
+    """Narrow the updated smell report down to what the RDP agent should plan.
+
+    The report keeps every analysed file so the developer can see what was
+    excluded, but only the selected smells survive the filter. Files left with
+    no smells are dropped here for two reasons:
+
+      * RDP would skip them anyway, and
+      * RDP takes ``files[0]["file"]`` as the plan's target, so an unselected
+        file sitting first would name the whole plan after itself.
+
+    `file` is set to the repository-relative path rather than the bare
+    filename: RDP copies it into every step's ``parameters.source_file``, and
+    the Transformation stage resolves that path against the CUQA workspace.
+    """
+    files = []
+    for entry in (updated_report or {}).get("files") or []:
+        smells = entry.get("code_smells") or []
+        if not smells:
+            continue
+
+        relative_path = entry.get("relative_path") or entry.get("file") or "unknown"
+        files.append({**entry, "file": relative_path, "relative_path": relative_path})
+
+    # Recompute every total from the files actually being sent. Carrying the
+    # report's own figures through would leave the payload self-contradicting —
+    # a summary describing files that are not in it.
+    summary = dict((updated_report or {}).get("summary") or {})
+    summary.update(_summarize_files(files))
+
+    payload = {"files": files, "summary": summary}
+    if (updated_report or {}).get("repo_name"):
+        payload["repo_name"] = updated_report["repo_name"]
+    return payload
+
+
+def _relative_path_index(plan_input: dict) -> dict:
+    """Map basename -> repo-relative path, for names that are unambiguous.
+
+    RDP reduces every path to its basename while translating the report
+    (``file_path.split("/")[-1]`` in rdp_agent/app.py), so the plan comes back
+    naming "Helper.java" where the report said "src/util/Helper.java". The
+    Transformation stage resolves those paths against the CUQA workspace, so
+    the folders are put back here.
+
+    Names that appear on more than one path are left alone: guessing between
+    two different Helper.java would point a refactoring at the wrong file.
+    """
+    counts = {}
+    for entry in (plan_input or {}).get("files") or []:
+        path = entry.get("relative_path") or entry.get("file") or ""
+        if not path:
+            continue
+        base = path.replace("\\", "/").rsplit("/", 1)[-1]
+        counts.setdefault(base, set()).add(path)
+
+    return {base: next(iter(paths)) for base, paths in counts.items() if len(paths) == 1}
+
+
+def _restore_relative_paths(plan: dict, index: dict) -> dict:
+    """Put repo-relative paths back onto a plan's steps."""
+    if not index:
+        return plan
+
+    def upgrade(value):
+        if not isinstance(value, str) or "/" in value or "\\" in value:
+            return value
+        return index.get(value, value)
+
+    for step in plan.get("steps") or []:
+        target = step.get("target")
+        if isinstance(target, dict) and target.get("file"):
+            target["file"] = upgrade(target["file"])
+
+        params = step.get("parameters")
+        if isinstance(params, dict) and params.get("source_file"):
+            params["source_file"] = upgrade(params["source_file"])
+
+        location = step.get("location")
+        if isinstance(location, dict) and location.get("file"):
+            location["file"] = upgrade(location["file"])
+
+    if isinstance(plan.get("target"), str):
+        plan["target"] = upgrade(plan["target"])
+
+    return plan
+
+
+def normalize_rdp_plan(plan: dict, plan_input: dict = None) -> dict:
+    """Reshape an RDP plan into the structure the DIWO workflow expects.
+
+    RDP serializes ``summary`` as a human-readable string; every other stage
+    here reads ``plan["summary"]["total_steps"]``. The text is preserved under
+    ``summary_text`` so nothing is lost.
+
+    When ``plan_input`` is supplied, the repo-relative paths RDP flattened to
+    basenames are restored so later stages can find the files again.
+    """
+    plan = _restore_relative_paths(dict(plan), _relative_path_index(plan_input))
+
+    steps = plan.get("steps") or []
+    raw_summary = plan.get("summary")
+
+    summary = dict(raw_summary) if isinstance(raw_summary, dict) else {}
+    summary["total_steps"] = len(steps)
+
+    def _rating(step, *keys):
+        for key in keys:
+            value = step.get(key)
+            if isinstance(value, str) and value:
+                return value.lower()
+        return None
+
+    summary.setdefault(
+        "high_impact",
+        sum(1 for s in steps if _rating(s, "expected_impact", "impact") == "high"),
+    )
+    summary.setdefault(
+        "risks",
+        {level: sum(1 for s in steps if _rating(s, "risk") == level)
+         for level in ("low", "medium", "high")},
+    )
+
+    normalized = {**plan, "steps": steps, "summary": summary, "source": "rdp_agent"}
+    if isinstance(raw_summary, str) and raw_summary:
+        normalized["summary_text"] = raw_summary
+    return normalized
 
 
 def generate_refactoring_plan(selected_smells: list, target: str) -> dict:
