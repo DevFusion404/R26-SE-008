@@ -24,7 +24,6 @@ import json
 import io
 import os
 import subprocess
-import tempfile
 import shutil
 import zipfile
 from pathlib import Path
@@ -1433,170 +1432,319 @@ def audit_logs(wf_id):
 # Git Integration: Apply Files & Push to GitHub
 # ─────────────────────────────────────────────────────────────────────────────
 
+# ─────────────────────────────────────────────────────────────────────────────
+# GitHub integration — apply the refactored project to a branch
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Remote repositories are cloned here, not into a temp dir: GitHub Desktop has
+# to be able to open the same working copy afterwards, and a second run on the
+# same repository should reuse the clone instead of downloading it again.
+DIWO_CLONE_ROOT = Path.home() / "DIWO" / "repos"
+
+GIT_TIMEOUT = 300
+
+
+def _git(args, cwd=None, timeout=GIT_TIMEOUT):
+    """Run one git command. Returns (ok, stdout, stderr) and never raises."""
+    try:
+        proc = subprocess.run(
+            ["git", *args],
+            cwd=str(cwd) if cwd else None,
+            capture_output=True,
+            timeout=timeout,
+        )
+        return (
+            proc.returncode == 0,
+            proc.stdout.decode("utf-8", errors="replace").strip(),
+            proc.stderr.decode("utf-8", errors="replace").strip(),
+        )
+    except FileNotFoundError:
+        return False, "", "git is not installed or not on PATH."
+    except subprocess.TimeoutExpired:
+        return False, "", f"git {' '.join(args)} timed out after {timeout}s."
+
+
+def _is_remote_repo(value: str) -> bool:
+    """A clone URL rather than a filesystem path.
+
+    `file://` counts: git clones it happily, but Path() would treat the URL text
+    as a directory name and the repository would never be found.
+    """
+    lowered = value.lower()
+    return lowered.startswith(("http://", "https://", "git@", "ssh://", "file://"))
+
+
+def _repo_name_from_url(url: str) -> str:
+    """`https://github.com/user/my-repo.git` -> `my-repo`."""
+    cleaned = url.rstrip("/")
+    if cleaned.endswith(".git"):
+        cleaned = cleaned[:-4]
+    tail = cleaned.replace(":", "/").split("/")[-1]
+    return _safe_archive_path(tail, "repository").replace("/", "_") or "repository"
+
+
+def _web_url_for_remote(url: str) -> str:
+    """Browser URL for a clone URL, so the response can link to the branch."""
+    cleaned = url.strip()
+    if cleaned.startswith("git@"):                       # git@github.com:user/repo.git
+        host, _, path = cleaned[4:].partition(":")
+        cleaned = f"https://{host}/{path}"
+    if cleaned.startswith("ssh://git@"):
+        cleaned = "https://" + cleaned[len("ssh://git@"):]
+    if cleaned.endswith(".git"):
+        cleaned = cleaned[:-4]
+    return cleaned if cleaned.startswith("http") else ""
+
+
+def _default_remote_branch(repo_path: Path) -> str:
+    """The remote's own HEAD, so a work branch is cut from the right place."""
+    ok, out, _ = _git(["symbolic-ref", "--short", "refs/remotes/origin/HEAD"], cwd=repo_path)
+    if ok and out:
+        return out.split("/", 1)[-1]
+    for candidate in ("main", "master"):
+        ok, _, _ = _git(["rev-parse", "--verify", f"refs/remotes/origin/{candidate}"], cwd=repo_path)
+        if ok:
+            return candidate
+    return "main"
+
+
+def _open_github_desktop(repo_path: Path):
+    """Open GitHub Desktop on `repo_path`. Returns (opened, detail).
+
+    The old command was `start github -- -r "<path>"`, which cmd reads as
+    title="github", command="--" — the path never reached GitHub Desktop, so it
+    opened on whatever repository was last selected and the refactored changes
+    appeared to be missing. `start "" github "<path>"` passes the repository as
+    the argument it actually is, and the direct executable is the fallback for
+    when the `github` shim is not on PATH.
+    """
+    target = str(repo_path)
+
+    if os.name == "nt":
+        attempts = [
+            ["cmd", "/c", "start", "", "github", target],
+            [str(Path(os.environ.get("LOCALAPPDATA", "")) / "GitHubDesktop" / "GitHubDesktop.exe"), target],
+        ]
+    else:
+        attempts = [["github", target], ["open", "-a", "GitHub Desktop", target]]
+
+    errors = []
+    for cmd in attempts:
+        if not cmd[0]:
+            continue
+        try:
+            subprocess.Popen(cmd, cwd=target)
+            return True, f"Launched: {' '.join(cmd[:2])}"
+        except Exception as exc:                      # not installed / not on PATH
+            errors.append(f"{cmd[0]}: {exc}")
+
+    return False, "; ".join(errors) or "GitHub Desktop could not be launched."
+
+
+def _prepare_repository(repository: str):
+    """Resolve the request's repository to a local working copy.
+
+    A URL is cloned (once) into DIWO_CLONE_ROOT and re-fetched on later runs; a
+    filesystem path is used where it is. Returns (repo_path, info) or (None, error).
+    """
+    if _is_remote_repo(repository):
+        DIWO_CLONE_ROOT.mkdir(parents=True, exist_ok=True)
+        repo_path = DIWO_CLONE_ROOT / _repo_name_from_url(repository)
+
+        if (repo_path / ".git").exists():
+            ok, _, err = _git(["fetch", "origin", "--prune"], cwd=repo_path)
+            if not ok:
+                return None, f"Could not fetch the existing clone at {repo_path}: {err}"
+        else:
+            if repo_path.exists():
+                shutil.rmtree(repo_path, ignore_errors=True)
+            ok, _, err = _git(["clone", repository, str(repo_path)])
+            if not ok:
+                return None, (
+                    f"Could not clone {repository}: {err} — check the URL, and that you have "
+                    "access to the repository (a private repo needs credentials configured for git)."
+                )
+
+        return repo_path, {"remote": True, "clone_url": repository, "base_branch": _default_remote_branch(repo_path)}
+
+    repo_path = Path(repository).expanduser().resolve()
+    if not (repo_path / ".git").exists():
+        return None, f"Not a git repository: {repo_path}"
+
+    ok, out, _ = _git(["remote", "get-url", "origin"], cwd=repo_path)
+    return repo_path, {"remote": False, "clone_url": out if ok else "", "base_branch": None}
+
+
 @diwo_bp.route("/diwo/apply-and-push", methods=["POST"])
 def apply_and_push():
     """
-    Apply refactored files to local repository, create a branch, and open GitHub Desktop.
-    
-    Request body:
-    {
-      "files": [{ "path": "file/path.java", "after": "code content" }, ...],
-      "branch_name": "refactoring/my-changes",
-      "repository_path": "/path/to/repo"
-    }
+    Write the refactored project into a git repository, on its own branch.
+
+    Body:
+      {
+        "files":           [{ path, after|content }, ...],   # the WHOLE project
+        "branch_name":     "refactoring/diwo-changes",
+        "repository_path": "https://github.com/user/repo"  |  "C:/path/to/repo",
+        "commit_message":  "...",       optional
+        "commit":          true,        optional (default true)
+        "push":            true         optional (default true when a remote exists)
+      }
+
+    `files` is the same entry list the "Download Project (.zip)" action packs:
+    every project file, with the accepted refactorings replacing the originals
+    in place. Sending only the refactored files would leave a freshly cloned
+    repository holding nothing else.
     """
-    data = request.get_json() or {}
-    
-    # Validate inputs
-    files = data.get("files", [])
-    branch_name = data.get("branch_name", "").strip()
-    repo_path = data.get("repository_path", "").strip()
-    
-    if not files:
-        return _err("No files provided", 400)
+    data = request.get_json(force=True, silent=True) or {}
+
+    files = data.get("files") or []
+    branch_name = str(data.get("branch_name") or "").strip()
+    repository = str(data.get("repository_path") or "").strip()
+    commit_message = str(data.get("commit_message") or "").strip() or (
+        f"refactor: DIWO agent changes on {branch_name or 'diwo branch'}"
+    )
+    want_commit = data.get("commit", True) is not False
+    want_push = data.get("push", True) is not False
+
+    if not isinstance(files, list) or not files:
+        return _err("No files provided.", 400)
     if not branch_name:
-        return _err("Branch name required", 400)
-    if not repo_path:
-        return _err("Repository path required", 400)
-    if not isinstance(files, list):
-        return _err("Files must be a list", 400)
-    
-    try:
-        # If the user provided a remote URL (https://, http://, git@, or contains github.com),
-        # clone it into a temporary directory so we can apply changes locally.
-        repo_path_str = repo_path
-        is_remote = False
-        if isinstance(repo_path_str, str):
-            lp = repo_path_str.lower()
-            if lp.startswith("http://") or lp.startswith("https://") or lp.startswith("git@") or ("github.com" in lp and ":" in repo_path_str) or ("github.com" in lp and "/" in repo_path_str):
-                is_remote = True
+        return _err("Branch name required.", 400)
+    if not repository:
+        return _err("Repository path or GitHub URL required.", 400)
 
-        temp_clone_dir = None
-        if is_remote:
-            try:
-                temp_clone_dir = Path(tempfile.mkdtemp(prefix="diwo_repo_"))
-                subprocess.run(["git", "clone", repo_path_str, str(temp_clone_dir)], check=True, capture_output=True)
-                repo_path = temp_clone_dir
-            except subprocess.CalledProcessError as e:
-                # Cleanup on failure
-                try:
-                    if temp_clone_dir and temp_clone_dir.exists():
-                        shutil.rmtree(temp_clone_dir)
-                except Exception:
-                    pass
-                return _err(f"Failed to clone remote repository: {e.stderr.decode('utf-8', errors='ignore')}", 400)
+    repo_path, info = _prepare_repository(repository)
+    if repo_path is None:
+        return _err(info, 400)
+
+    # ── Branch ───────────────────────────────────────────────────────────────
+    if info["remote"]:
+        # Cut the work branch from the remote's current head, so a second run
+        # does not stack on top of the previous run's commit.
+        base = info["base_branch"]
+        ok, _, err = _git(["checkout", "-B", branch_name, f"origin/{base}"], cwd=repo_path)
+        if not ok:
+            ok, _, err = _git(["checkout", "-B", branch_name], cwd=repo_path)
+        if not ok:
+            return _err(f"Could not create branch '{branch_name}': {err}", 500)
+    else:
+        exists, _, _ = _git(["rev-parse", "--verify", branch_name], cwd=repo_path)
+        ok, _, err = _git(["checkout", branch_name] if exists else ["checkout", "-b", branch_name], cwd=repo_path)
+        if not ok:
+            return _err(
+                f"Could not check out branch '{branch_name}': {err} — commit or stash the "
+                "repository's current changes first.",
+                500,
+            )
+
+    # ── Write the project ────────────────────────────────────────────────────
+    written_files = []
+    for entry in files:
+        if not isinstance(entry, dict):
+            continue
+        rel = str(entry.get("path") or "").strip().replace("\\", "/").lstrip("/")
+        if not rel:
+            continue
+        content = entry.get("after")
+        if content is None:
+            content = entry.get("content") or ""
+
+        target = (repo_path / rel).resolve()
+        # Compare resolved parents so "src/../../etc/passwd" cannot escape, and
+        # a path that merely shares a prefix ("/repo-backup") is not accepted.
+        if repo_path != target and repo_path not in target.parents:
+            return _err(f"Path traversal detected: {rel}", 400)
+
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with open(target, "w", encoding="utf-8", newline="") as handle:
+            handle.write(content)
+        written_files.append(rel)
+
+    if not written_files:
+        return _err("None of the provided files had a usable path.", 400)
+
+    # ── Stage ────────────────────────────────────────────────────────────────
+    ok, _, err = _git(["add", "-A"], cwd=repo_path)
+    if not ok:
+        return _err(f"Failed to stage changes: {err}", 500)
+
+    ok, staged_out, _ = _git(["diff", "--cached", "--name-only"], cwd=repo_path)
+    staged_files = [line.strip() for line in staged_out.splitlines() if line.strip()] if ok else []
+
+    # ── Commit ───────────────────────────────────────────────────────────────
+    committed = False
+    commit_sha = ""
+    commit_error = ""
+    if want_commit and staged_files:
+        ok, _, err = _git(["commit", "-m", commit_message], cwd=repo_path)
+
+        # A machine with no git identity cannot commit at all. For a clone DIWO
+        # created it can set one itself — scoped to that clone, never --global,
+        # and never touching a repository the developer already had.
+        if not ok and info["remote"] and "user.email" in (err or "").lower():
+            _git(["config", "user.email", "diwo-agent@localhost"], cwd=repo_path)
+            _git(["config", "user.name", "DIWO Agent"], cwd=repo_path)
+            ok, _, err = _git(["commit", "-m", commit_message], cwd=repo_path)
+
+        if ok:
+            committed = True
+            _, commit_sha, _ = _git(["rev-parse", "--short", "HEAD"], cwd=repo_path)
         else:
-            repo_path = Path(repo_path).resolve()
+            commit_error = err or "git commit failed."
 
-        # Ensure git repo exists
-        if not (repo_path / ".git").exists():
-            # If we cloned a remote, inform the user; otherwise it's a bad path
-            if is_remote:
-                return _err(f"Cloned repository did not contain a .git folder: {repo_path}", 400)
-            return _err(f"Not a git repository: {repo_path}", 400)
-        
-        # Write files to repository and track what's written
-        written_files = []
-        for file_obj in files:
-            file_path = file_obj.get("path", "")
-            content = file_obj.get("after", "")
+    # ── Push ─────────────────────────────────────────────────────────────────
+    has_origin, _, _ = _git(["remote", "get-url", "origin"], cwd=repo_path)
+    pushed = False
+    push_error = ""
+    if want_push and committed and has_origin:
+        ok, _, err = _git(["push", "-u", "origin", branch_name], cwd=repo_path)
+        if ok:
+            pushed = True
+        else:
+            push_error = (
+                f"{err} — the branch is committed locally, so you can push it from GitHub Desktop "
+                "once credentials are available."
+            )
+    elif want_push and not has_origin:
+        push_error = "This repository has no 'origin' remote, so the branch stays local."
+    elif want_push and not committed:
+        push_error = commit_error or "Nothing was committed, so there was nothing to push."
 
-            if not file_path:
-                continue
+    opened, launch_detail = _open_github_desktop(repo_path)
 
-            # Normalize file path to avoid absolute paths interfering with join
-            file_path = str(file_path).lstrip("/\\")
+    web_url = _web_url_for_remote(info.get("clone_url") or "")
+    branch_url = f"{web_url}/tree/{branch_name}" if (web_url and pushed) else ""
 
-            # Prevent path traversal
-            target_file = (repo_path / file_path).resolve()
-            if not str(target_file).startswith(str(repo_path)):
-                return _err(f"Path traversal detected: {file_path}", 400)
+    if committed and pushed:
+        message = f"Branch '{branch_name}' committed and pushed to origin."
+    elif committed:
+        message = f"Branch '{branch_name}' committed locally."
+    elif staged_files:
+        message = f"Changes staged on '{branch_name}' — review and commit in GitHub Desktop."
+    else:
+        message = f"Branch '{branch_name}' is up to date; the project already matches these files."
 
-            # Create parent directories
-            target_file.parent.mkdir(parents=True, exist_ok=True)
-
-            # Write file
-            with open(target_file, "w", encoding="utf-8") as f:
-                f.write(content)
-
-            written_files.append(str(target_file.relative_to(repo_path)))
-        
-        # Create or checkout the branch
-        # If branch exists, checkout; otherwise create new branch
-        try:
-            # Check if branch exists
-            res = subprocess.run(["git", "rev-parse", "--verify", branch_name], cwd=str(repo_path), capture_output=True)
-            if res.returncode == 0:
-                subprocess.run(["git", "checkout", branch_name], cwd=str(repo_path), check=True, capture_output=True)
-            else:
-                subprocess.run(["git", "checkout", "-b", branch_name], cwd=str(repo_path), check=True, capture_output=True)
-        except subprocess.CalledProcessError as e:
-            return _err(f"Failed to create or checkout branch: {e.stderr.decode('utf-8', errors='ignore')}", 500)
-
-        # Stage all changes
-        try:
-            # Use git add -A to ensure all changes (including deletes) are staged
-            add_proc = subprocess.run(["git", "add", "-A"], cwd=str(repo_path), check=True, capture_output=True)
-            add_stdout = add_proc.stdout.decode('utf-8', errors='ignore')
-            add_stderr = add_proc.stderr.decode('utf-8', errors='ignore')
-        except subprocess.CalledProcessError as e:
-            return _err(f"Failed to stage changes: {e.stderr.decode('utf-8', errors='ignore')}", 500)
-
-        # Get staged files via git diff --cached --name-only
-        staged_files = []
-        try:
-            diff_proc = subprocess.run(["git", "diff", "--cached", "--name-only"], cwd=str(repo_path), check=True, capture_output=True)
-            diff_out = diff_proc.stdout.decode('utf-8', errors='ignore').strip()
-            if diff_out:
-                staged_files = [line.strip() for line in diff_out.splitlines() if line.strip()]
-        except subprocess.CalledProcessError:
-            staged_files = []
-        
-        # Open GitHub Desktop asynchronously (don't block on this)
-        github_desktop_opened = False
-        try:
-            if os.name == "nt":  # Windows
-                # Use start command to open GitHub Desktop with the repository
-                subprocess.Popen(
-                    f'start github -- -r "{repo_path}"',
-                    shell=True,
-                    creationflags=subprocess.CREATE_NEW_CONSOLE if os.name == "nt" else 0
-                )
-                github_desktop_opened = True
-            else:  # macOS / Linux
-                # Try github command directly
-                subprocess.Popen(["github", str(repo_path)])
-                github_desktop_opened = True
-        except Exception as launch_error:
-            # GitHub Desktop may not be installed or in PATH
-            print(f"Warning: Could not open GitHub Desktop: {launch_error}")
-        
-        resp = {
-            "status": "success",
-            "message": f"Files applied to branch '{branch_name}' and staged for commit",
-            "branch": branch_name,
-            "repository": str(repo_path),
-            "github_desktop_opened": github_desktop_opened,
-            "staged_files": staged_files,
-        }
-        # Include written files and git add output if available for diagnostics
-        try:
-            resp["written_files"] = written_files
-        except Exception:
-            resp["written_files"] = []
-        try:
-            resp["git_add_stdout"] = add_stdout
-            resp["git_add_stderr"] = add_stderr
-        except Exception:
-            resp["git_add_stdout"] = resp["git_add_stderr"] = ""
-
-        return jsonify(resp), 200
-    
-    except subprocess.CalledProcessError as e:
-        error_msg = e.stderr.decode("utf-8") if e.stderr else str(e)
-        return _err(f"Git operation failed: {error_msg}", 500)
-    except Exception as e:
-        return _err(f"Error: {str(e)}", 500)
+    return jsonify({
+        "status": "success",
+        "message": message,
+        "branch": branch_name,
+        "base_branch": info.get("base_branch"),
+        "repository": str(repo_path),
+        "cloned": bool(info["remote"]),
+        "clone_url": info.get("clone_url") or "",
+        "branch_url": branch_url,
+        "written_files": written_files,
+        "written_count": len(written_files),
+        "staged_files": staged_files,
+        "committed": committed,
+        "commit_sha": commit_sha,
+        "commit_message": commit_message if committed else "",
+        "commit_error": commit_error,
+        "pushed": pushed,
+        "push_error": push_error,
+        "github_desktop_opened": opened,
+        "github_desktop_detail": launch_detail,
+    }), 200
 
 
 # ─────────────────────────────────────────────────────────────────────────────

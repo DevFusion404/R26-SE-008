@@ -350,6 +350,9 @@ export default function ResultsApprovalPage({
   const [showActionChoice, setShowActionChoice] = useState(false);
   const [branchName, setBranchName] = useState("refactoring/diwo-changes");
   const [repoPath, setRepoPath] = useState(repositoryPath || "");
+  const [commitMessage, setCommitMessage] = useState("refactor: apply DIWO agent refactorings");
+  const [pushToOrigin, setPushToOrigin] = useState(true);
+  const [pushStatus, setPushStatus] = useState("");
   const [isProcessing, setIsProcessing] = useState(false);
 
   // ── Resolve each file to the code that will actually be written ───────────
@@ -528,63 +531,101 @@ export default function ResultsApprovalPage({
     if (onAccept) onAccept(decisionPayload());
   };
 
+  /**
+   * Write the refactored project onto a branch of a git repository.
+   *
+   * The payload is the SAME entry list the ZIP download packs: the whole
+   * project, with the accepted refactorings replacing the originals in place.
+   * Sending only the changed files — what this did before — left a freshly
+   * cloned repository holding those files and nothing else, and told the user
+   * nothing about whether the branch was actually committed or pushed.
+   */
   const handlePushToGitHub = async () => {
     if (!branchName.trim()) {
-      alert("Please enter a branch name");
+      alert("Please enter a branch name.");
       return;
     }
-    if (!repoPath || repoPath.trim() === "") {
-      alert("Repository path is required. Please provide the path to your Git repository.");
+    if (!repoPath.trim()) {
+      alert("Enter a GitHub repository URL or the path to a local clone.");
       return;
     }
     if (stagedEntries.length === 0) {
-      alert("Select at least one file to write before sharing to GitHub Desktop.");
+      alert("Select at least one file to write before sharing to GitHub.");
       return;
     }
 
     setIsProcessing(true);
+    setPushStatus("Collecting the full project…");
+
+    const finalFiles = stagedEntries.map((f) => ({
+      path: f.path,
+      content: f.finalCode,
+      state: f.rejected ? "reverted_to_original" : "refactored",
+    }));
+
+    // Whole project when the workspace is reachable; the accepted files alone
+    // if it is not — writing a partial set into an existing clone still leaves
+    // every other file in place, so it degrades sensibly.
+    let payloadFiles;
+    let scope;
     try {
+      const project = await buildProjectArchive({ finalFiles });
+      payloadFiles = project.entries.map((e) => ({ path: e.path, after: e.content }));
+      scope = `full project (${project.entries.length} files, ${project.stats.replacedInPlace} replaced)`;
+    } catch (e) {
+      console.warn("Full-project push unavailable, sending selected files only", e);
+      payloadFiles = finalFiles.map((f) => ({ path: f.path, after: f.content }));
+      scope = `selected files only (${payloadFiles.length}) — ${e.message}`;
+    }
+
+    try {
+      setPushStatus(`Writing ${payloadFiles.length} file(s) to '${branchName}'…`);
       const response = await fetch("/api/diwo/apply-and-push", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          // `after` is what the backend writes to disk, so hand it finalCode:
-          // a rejected file is written back as its original source.
-          files: stagedEntries.map((f) => ({ path: f.path, after: f.finalCode })),
-          branch_name: branchName,
+          files: payloadFiles,
+          branch_name: branchName.trim(),
           repository_path: repoPath.trim(),
+          commit_message: commitMessage.trim() || `refactor: DIWO agent changes (${branchName.trim()})`,
+          commit: true,
+          push: pushToOrigin,
         }),
       });
 
+      const result = await response.json().catch(() => ({}));
       if (!response.ok) {
-        let errorMessage = `Backend error: ${response.statusText}`;
-        try {
-          const errorData = await response.json();
-          errorMessage = errorData.error || errorMessage;
-        } catch {
-          errorMessage = `HTTP ${response.status}: ${response.statusText}`;
-        }
-        throw new Error(errorMessage);
+        throw new Error(result.error || `HTTP ${response.status}: ${response.statusText}`);
       }
 
-      const result = await response.json();
-      const staged = result.staged_files || [];
-      const repoOpened = result.github_desktop_opened ? "\n\nGitHub Desktop should be opening now." : "";
-      let message = `✓ Branch '${branchName}' created and files applied to repository:\n${result.repository}${repoOpened}\n\n`;
-      message +=
-        staged.length > 0
-          ? `Staged files (${staged.length}):\n${staged.map((s) => ` - ${s}`).join("\n")}` +
-            "\n\nPlease review and commit in GitHub Desktop."
-          : "No staged files were detected. Check repository path and file paths.";
-      alert(message);
+      const lines = [
+        result.message,
+        "",
+        `Repository: ${result.repository}${result.cloned ? " (clone of your GitHub URL)" : ""}`,
+        `Branch:     ${result.branch}${result.base_branch ? ` (from ${result.base_branch})` : ""}`,
+        `Written:    ${result.written_count} file(s) — ${scope}`,
+        `Changed:    ${(result.staged_files || []).length} file(s) differ from the branch`,
+      ];
+      if (result.committed) lines.push(`Commit:     ${result.commit_sha}`);
+      if (result.commit_error) lines.push(`Commit failed: ${result.commit_error}`);
+      if (result.pushed) lines.push(`Pushed:     ${result.branch_url || "origin/" + result.branch}`);
+      if (result.push_error) lines.push(`Not pushed: ${result.push_error}`);
+      lines.push(
+        result.github_desktop_opened
+          ? "\nGitHub Desktop is opening on this repository."
+          : `\nGitHub Desktop could not be launched (${result.github_desktop_detail || "not installed"}). Open the repository above manually.`
+      );
+
+      alert(lines.join("\n"));
 
       setShowActionChoice(false);
       if (onAccept) onAccept({ ...decisionPayload(), githubResult: result });
     } catch (error) {
       console.error("Failed to push to GitHub:", error);
-      alert(`Error: ${error.message}`);
+      alert(`Could not write the branch: ${error.message}`);
     } finally {
       setIsProcessing(false);
+      setPushStatus("");
     }
   };
 
@@ -1159,36 +1200,71 @@ export default function ResultsApprovalPage({
                   <div style={{ flex: 1 }}>
                     <div style={{ fontWeight: 700, color: C.text }}>Push to GitHub</div>
                     <div style={{ fontSize: 12, color: C.textMuted }}>
-                      Create a branch and open GitHub Desktop for review &amp; commit.
+                      Writes the whole project — your accepted changes applied, every other file
+                      as-is — onto its own branch, commits it, and opens GitHub Desktop there.
                     </div>
                   </div>
                 </div>
+
                 <div style={{ marginBottom: 10 }}>
-                  <label style={{ fontSize: 12, color: C.textMuted, display: "block", marginBottom: 4 }}>Repository Path</label>
+                  <label style={{ fontSize: 12, color: C.textMuted, display: "block", marginBottom: 4 }}>
+                    GitHub repository URL or local clone path
+                  </label>
                   <input
                     type="text"
                     value={repoPath}
                     onChange={(e) => setRepoPath(e.target.value)}
-                    placeholder="C:\\Users\\YourUser\\path\\to\\repo"
-                    style={{ width: "100%", padding: "8px 12px", borderRadius: 6, background: C.bg, border: `1px solid ${C.border}`, color: C.text, fontSize: 12, marginBottom: 10, boxSizing: "border-box" }}
+                    placeholder="https://github.com/user/repo.git  —  or  C:\\Users\\You\\repo"
+                    style={{ width: "100%", padding: "8px 12px", borderRadius: 6, background: C.bg, border: `1px solid ${C.border}`, color: C.text, fontSize: 12, boxSizing: "border-box" }}
                   />
+                  <div style={{ fontSize: 10, color: C.textMuted, marginTop: 4, lineHeight: 1.5 }}>
+                    A URL is cloned once into <span style={{ fontFamily: "monospace" }}>~/DIWO/repos/</span> and
+                    reused on later runs, so GitHub Desktop can open the same working copy.
+                  </div>
                 </div>
+
                 <div style={{ marginBottom: 10 }}>
-                  <label style={{ fontSize: 12, color: C.textMuted, display: "block", marginBottom: 4 }}>Branch Name</label>
+                  <label style={{ fontSize: 12, color: C.textMuted, display: "block", marginBottom: 4 }}>Branch name</label>
                   <input
                     type="text"
                     value={branchName}
                     onChange={(e) => setBranchName(e.target.value)}
                     placeholder="e.g., refactoring/diwo-changes"
-                    style={{ width: "100%", padding: "8px 12px", borderRadius: 6, background: C.bg, border: `1px solid ${C.border}`, color: C.text, fontSize: 12, marginBottom: 10, boxSizing: "border-box" }}
+                    style={{ width: "100%", padding: "8px 12px", borderRadius: 6, background: C.bg, border: `1px solid ${C.border}`, color: C.text, fontSize: 12, boxSizing: "border-box" }}
                   />
                 </div>
+
+                <div style={{ marginBottom: 10 }}>
+                  <label style={{ fontSize: 12, color: C.textMuted, display: "block", marginBottom: 4 }}>Commit message</label>
+                  <input
+                    type="text"
+                    value={commitMessage}
+                    onChange={(e) => setCommitMessage(e.target.value)}
+                    placeholder="refactor: apply DIWO agent refactorings"
+                    style={{ width: "100%", padding: "8px 12px", borderRadius: 6, background: C.bg, border: `1px solid ${C.border}`, color: C.text, fontSize: 12, boxSizing: "border-box" }}
+                  />
+                </div>
+
+                <label style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12, cursor: "pointer" }}>
+                  <input
+                    type="checkbox"
+                    checked={pushToOrigin}
+                    onChange={(e) => setPushToOrigin(e.target.checked)}
+                    style={{ accentColor: C.accent, cursor: "pointer" }}
+                  />
+                  <span style={{ fontSize: 12, color: C.textSub }}>
+                    Push the branch to <span style={{ fontFamily: "monospace" }}>origin</span> after committing
+                  </span>
+                </label>
+
                 <button
                   onClick={handlePushToGitHub}
                   disabled={isProcessing}
                   style={{ width: "100%", padding: "8px 12px", borderRadius: 6, background: C.accent, color: "#000", border: "none", fontWeight: 700, fontSize: 12, cursor: isProcessing ? "not-allowed" : "pointer", opacity: isProcessing ? 0.6 : 1 }}
                 >
-                  {isProcessing ? "Processing..." : "✓ Create Branch & Open GitHub Desktop"}
+                  {isProcessing
+                    ? pushStatus || "Processing…"
+                    : `✓ Commit${pushToOrigin ? " & Push" : ""} Branch, then open GitHub Desktop`}
                 </button>
               </div>
 
