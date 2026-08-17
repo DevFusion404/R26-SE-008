@@ -21,12 +21,14 @@ FIXES APPLIED:
 
 import uuid
 import json
+import io
 import os
 import subprocess
 import tempfile
 import shutil
+import zipfile
 from pathlib import Path
-from flask import Blueprint, request, jsonify
+from flask import Blueprint, request, jsonify, send_file
 
 from db.database import (
     create_workflow, get_workflow, update_workflow, list_workflows,
@@ -37,6 +39,11 @@ from diwo.orchestrator import (
     generate_refactoring_plan, simulate_transformation,
     compute_metrics_before, compute_metrics_after, next_stage,
     generate_updated_plan_report,
+    normalize_cuqa_report, cuqa_report_to_smells,
+    detect_primary_language, derive_target_name,
+)
+from diwo.cuqa_client import (
+    CUQAError, cuqa_base_url, fetch_quality_report, probe_cuqa,
 )
 
 diwo_bp = Blueprint("diwo", __name__)
@@ -143,6 +150,129 @@ def _build_report_from_smells(smells: list, repo_name: str, selected_ids=None):
     }
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Refactored-source archive
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Guard rails so a malformed payload cannot exhaust memory building an archive.
+MAX_ARCHIVE_FILES = 2000
+MAX_ARCHIVE_BYTES = 50 * 1024 * 1024
+
+
+def _archives_dir() -> Path:
+    directory = Path(__file__).parent.parent / "reports" / "archives"
+    directory.mkdir(parents=True, exist_ok=True)
+    return directory
+
+
+def _archive_path(wf_id: str) -> Path:
+    """One archive per workflow; a new accept overwrites the previous one."""
+    return _archives_dir() / f"{wf_id}.zip"
+
+
+def _safe_archive_path(value, fallback: str = "file") -> str:
+    """Normalize a repo-relative path so extraction cannot escape its folder.
+
+    Drops drive letters, leading slashes and every '..' segment, and keeps the
+    remaining folders so 'src/util/Helper.java' extracts back into src/util/.
+    """
+    text = str(value or "").replace("\\", "/")
+    if len(text) > 1 and text[1] == ":":
+        text = text[2:]
+    parts = [p for p in text.split("/") if p and p not in (".", "..")]
+    return "/".join(parts) or fallback
+
+
+def _build_refactored_archive(wf_id: str, files: list, meta: dict):
+    """Zip the final source of each file, preserving its folder structure.
+
+    `files` is a list of {path, content, state} objects — `content` is already
+    the code the developer settled on, so a rejected file arrives holding its
+    original source and lands in the archive that way.
+
+    Returns (bytes, manifest) or raises ValueError with a reportable message.
+    """
+    if not isinstance(files, list):
+        raise ValueError("'files' must be a list of {path, content} objects.")
+    if len(files) > MAX_ARCHIVE_FILES:
+        raise ValueError(f"Too many files for one archive (limit {MAX_ARCHIVE_FILES}).")
+
+    entries = []
+    used_names = set()
+    total_bytes = 0
+
+    for index, item in enumerate(files, start=1):
+        if not isinstance(item, dict):
+            continue
+
+        content = item.get("content")
+        if content is None:
+            content = item.get("after") or item.get("refactored_code") or ""
+        if not isinstance(content, str) or content == "":
+            continue
+
+        total_bytes += len(content.encode("utf-8"))
+        if total_bytes > MAX_ARCHIVE_BYTES:
+            raise ValueError(f"Archive exceeds the {MAX_ARCHIVE_BYTES // (1024 * 1024)} MB limit.")
+
+        name = _safe_archive_path(
+            item.get("path") or item.get("file") or item.get("relative_path"),
+            f"file-{index}",
+        )
+
+        # Two entries cannot share a name or the archive silently loses one.
+        if name in used_names:
+            stem, dot, ext = name.rpartition(".")
+            base, suffix = (stem, f".{ext}") if dot else (name, "")
+            counter = 2
+            while f"{base}({counter}){suffix}" in used_names:
+                counter += 1
+            name = f"{base}({counter}){suffix}"
+        used_names.add(name)
+
+        entries.append({
+            "path": name,
+            "content": content,
+            "state": item.get("state") or ("reverted_to_original"
+                                           if item.get("decision") == "reject" else "refactored"),
+        })
+
+    if not entries:
+        raise ValueError("None of the supplied files carried any content to archive.")
+
+    manifest = {
+        "workflow_id": wf_id,
+        "generated_at": now_iso(),
+        **{k: v for k, v in (meta or {}).items() if v is not None},
+        "files": [{"path": e["path"], "state": e["state"]} for e in entries],
+        "file_count": len(entries),
+    }
+
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        for entry in entries:
+            archive.writestr(entry["path"], entry["content"])
+        archive.writestr("REFACTORING_MANIFEST.json", json.dumps(manifest, indent=2))
+
+    return buffer.getvalue(), manifest
+
+
+def _store_refactored_archive(wf_id: str, files: list, meta: dict):
+    """Build the archive and keep it on disk so it can be downloaded later."""
+    payload, manifest = _build_refactored_archive(wf_id, files, meta)
+    target = _archive_path(wf_id)
+    target.write_bytes(payload)
+
+    return payload, {
+        "filename": f"diwo_refactored_{wf_id}.zip",
+        "file_count": manifest["file_count"],
+        "bytes": len(payload),
+        "generated_at": manifest["generated_at"],
+        "url": f"/api/workflows/{wf_id}/refactored-archive",
+        "files": manifest["files"],
+    }
+
+
 def _resolve_selected_ids(all_smells: list, selected_files: list, selected_smells: list):
     ids = []
 
@@ -222,19 +352,148 @@ def start_workflow():
         if not s.get("type"):
             return _err(f"smells[{idx}] is missing required field 'type'.")
 
-    wf_id          = f"wf_{uuid.uuid4().hex[:10]}"
-    metrics_before = compute_metrics_before(smells)
-
-    create_workflow(wf_id, target, language, smells)
-    update_workflow(wf_id, metrics_before_json=json.dumps(metrics_before))
-    log_event(wf_id, "smell_review", "workflow_started",
-              {"target": target, "language": language, "smell_count": len(smells)})
+    wf_id, metrics_before = _persist_new_workflow(target, language, smells)
 
     return jsonify({
         "workflow_id":     wf_id,
         "status":          "smell_review",
         "message":         "Workflow started. Developer can now review detected smells.",
         "metrics_before":  metrics_before,
+    }), 201
+
+
+def _persist_new_workflow(target: str, language: str, smells: list, source: str = "client"):
+    """Create the workflow row, seed metrics_before, and log the start event."""
+    wf_id          = f"wf_{uuid.uuid4().hex[:10]}"
+    metrics_before = compute_metrics_before(smells)
+
+    create_workflow(wf_id, target, language, smells)
+    update_workflow(wf_id, metrics_before_json=json.dumps(metrics_before))
+    log_event(wf_id, "smell_review", "workflow_started",
+              {"target": target, "language": language,
+               "smell_count": len(smells), "source": source})
+
+    return wf_id, metrics_before
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Stage 1 – CUQA Agent ingestion (live quality report)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _cuqa_error_response(exc: CUQAError):
+    """Pass CUQA's own status through so the UI can tell 'not running' from
+    'running but no repository loaded'."""
+    status = exc.status if 400 <= exc.status < 600 else 502
+    payload = {
+        "error":     exc.message,
+        "cuqa_url":  cuqa_base_url(),
+        "reachable": exc.status != 503,
+    }
+    return jsonify(payload), status
+
+
+@diwo_bp.route("/cuqa/status", methods=["GET"])
+def cuqa_status():
+    """Is the CUQA agent up, and does it have a repository loaded?"""
+    return jsonify(probe_cuqa())
+
+
+@diwo_bp.route("/cuqa/quality-report", methods=["GET", "POST"])
+def cuqa_quality_report():
+    """
+    Proxy the CUQA agent's POST /api/quality-report (default localhost:8080)
+    and return it in the shape the DIWO frontend renders.
+
+    Body / query (optional): { file_path: "relative/path/File.py" }
+    Omit file_path to report on the whole loaded workspace.
+    """
+    data = request.get_json(force=True, silent=True) or {}
+    file_path = data.get("file_path") or request.args.get("file_path")
+
+    try:
+        payload = fetch_quality_report(file_path)
+    except CUQAError as exc:
+        return _cuqa_error_response(exc)
+
+    try:
+        report = normalize_cuqa_report(payload)
+    except ValueError as exc:
+        return _err(f"Unexpected CUQA response shape: {exc}", 502)
+
+    smells = cuqa_report_to_smells(report)
+
+    return jsonify({
+        "status":      "ok",
+        "source":      "cuqa",
+        "cuqa_url":    cuqa_base_url(),
+        "report_type": report.get("report_type", "repository"),
+        "report":      report,
+        "smells":      smells,
+        "smell_count": len(smells),
+        "language":    detect_primary_language(report),
+    })
+
+
+@diwo_bp.route("/workflows/from-cuqa", methods=["POST"])
+def start_workflow_from_cuqa():
+    """
+    Start a DIWO workflow from the CUQA agent's live quality report instead of
+    a client-supplied smell list.
+
+    Body (all optional):
+      { file_path?: str, target?: str, language?: str }
+
+    Returns the same fields as POST /workflows plus the CUQA report itself, so
+    the frontend can render the real Agent 1 output in the Code Smell Review
+    stage without a second round trip.
+    """
+    data = request.get_json(force=True, silent=True) or {}
+
+    try:
+        payload = fetch_quality_report(data.get("file_path"))
+    except CUQAError as exc:
+        return _cuqa_error_response(exc)
+
+    try:
+        report = normalize_cuqa_report(payload)
+    except ValueError as exc:
+        return _err(f"Unexpected CUQA response shape: {exc}", 502)
+
+    smells = cuqa_report_to_smells(report)
+    if not smells:
+        return _err(
+            "The CUQA quality report contains no code smells, so there is nothing "
+            "to refactor. Load a repository with detectable smells in the CUQA agent.",
+            400,
+        )
+
+    target   = data.get("target") or derive_target_name(report)
+    language = data.get("language") or detect_primary_language(report)
+
+    wf_id, metrics_before = _persist_new_workflow(target, language, smells, source="cuqa")
+    log_event(wf_id, "smell_review", "cuqa_report_ingested", {
+        "cuqa_url":       cuqa_base_url(),
+        "report_type":    report.get("report_type"),
+        "repo_name":      report.get("repo_name"),
+        "files_analyzed": report.get("summary", {}).get("files_analyzed", 0),
+        "smell_count":    len(smells),
+    }, actor="system")
+
+    return jsonify({
+        "workflow_id":    wf_id,
+        "status":         "smell_review",
+        "source":         "cuqa",
+        "cuqa_url":       cuqa_base_url(),
+        "target":         target,
+        "language":       language,
+        "report":         report,
+        "smells":         smells,
+        "smell_count":    len(smells),
+        "metrics_before": metrics_before,
+        "message": (
+            f"Workflow started from the CUQA quality report: "
+            f"{report.get('summary', {}).get('files_analyzed', 0)} file(s), {len(smells)} smell(s)."
+        ),
     }), 201
 
 
@@ -625,7 +884,25 @@ def plan_decision(wf_id):
 @diwo_bp.route("/workflows/<wf_id>/transformation-decision", methods=["POST"])
 def transformation_decision(wf_id):
     """
-    Body: { decision: 'accept'|'rollback', feedback?: {...} }
+    Body: {
+      decision: 'accept'|'rollback',
+      accepted_files?: [path],   # kept as refactored
+      rejected_files?: [path],   # reverted to their original source
+      written_files?:  [path],   # everything actually written out
+      files?: [{ path, content, state? }],   # final source of each file
+      download?: 'zip',          # respond with the archive instead of JSON
+      feedback?: {...}
+    }
+
+    The per-file lists come from the developer's Accept/Reject verdict in the
+    transformation stage. A rejected file is written back as its original
+    source, so recording the split is what makes the audit trail say which
+    files were actually refactored and which were reverted.
+
+    When `files` carries the final source of each file, the archive is built
+    and kept on disk. The JSON response then points at it via
+    `archive.url` (GET /api/workflows/<id>/refactored-archive), or send
+    `download: "zip"` to get the archive bytes straight back from this call.
 
     FIX [13,16]: Stage guard + decision enum validation.
     """
@@ -661,12 +938,90 @@ def transformation_decision(wf_id):
         })
 
     # Accept → move to comparison
-    update_workflow(wf_id, status="comparison")
+    def _paths(key):
+        value = data.get(key) or []
+        return [str(p) for p in value if isinstance(p, (str, int))] if isinstance(value, list) else []
+
+    accepted_files = _paths("accepted_files")
+    rejected_files = _paths("rejected_files")
+    written_files  = _paths("written_files") or accepted_files
+
+    tr = _parse_json_field(wf, "transformation_result_json") or {}
+    tr["file_decisions"] = {
+        "accepted": accepted_files,
+        "rejected_reverted": rejected_files,
+        "written": written_files,
+    }
+
+    # Build the downloadable archive when the caller supplied file contents.
+    archive_bytes = None
+    archive_info = None
+    archive_error = None
+    supplied_files = data.get("files")
+
+    if supplied_files:
+        try:
+            archive_bytes, archive_info = _store_refactored_archive(
+                wf_id,
+                supplied_files,
+                {
+                    "target": wf.get("target"),
+                    "language": wf.get("language"),
+                    "accepted_files": accepted_files,
+                    "rejected_files": rejected_files,
+                },
+            )
+            tr["archive"] = archive_info
+        except ValueError as exc:
+            archive_error = str(exc)
+        except OSError as exc:
+            archive_error = f"Could not write the archive to disk: {exc}"
+
+    update_workflow(wf_id,
+                    status="comparison",
+                    transformation_result_json=json.dumps(tr))
+
     log_event(wf_id, "comparison", "transformation_accepted",
-              {"rating": feedback.get("rating")})
+              {"rating": feedback.get("rating"),
+               "accepted_files": accepted_files,
+               "rejected_files": rejected_files,
+               "written_files": written_files})
     save_feedback(wf_id, "comparison", "transformation_accepted",
                   reason=feedback.get("reason"), rating=feedback.get("rating"),
                   accepted=True)
+
+    # One feedback row per reverted file: the Feedback Manager trains on
+    # rejections, and a file-level reject is a stronger signal than the
+    # session-level accept above.
+    for path in rejected_files:
+        log_event(wf_id, "comparison", "refactoring_reverted", {"file": path})
+        save_feedback(wf_id, "comparison", "refactoring_reverted",
+                      reason=f"Developer rejected the refactoring of {path}; "
+                             "file reverted to its original source.",
+                      accepted=False)
+
+    if archive_info:
+        log_event(wf_id, "comparison", "archive_built",
+                  {"file_count": archive_info["file_count"], "bytes": archive_info["bytes"]},
+                  actor="system")
+    elif archive_error:
+        log_event(wf_id, "comparison", "archive_failed", {"reason": archive_error}, actor="system")
+
+    # `download: "zip"` returns the archive itself, for callers that want the
+    # file straight from this request rather than a follow-up GET.
+    if str(data.get("download") or "").lower() == "zip":
+        if archive_bytes is None:
+            return _err(
+                archive_error or
+                "Send the final source of each file in 'files' to download an archive.",
+                400,
+            )
+        return send_file(
+            io.BytesIO(archive_bytes),
+            mimetype="application/zip",
+            as_attachment=True,
+            download_name=archive_info["filename"],
+        )
 
     metrics_before = _parse_json_field(wf, "metrics_before_json")
     metrics_after  = _parse_json_field(wf, "metrics_after_json")
@@ -675,8 +1030,40 @@ def transformation_decision(wf_id):
         "status":          "comparison",
         "metrics_before":  metrics_before,
         "metrics_after":   metrics_after,
+        "accepted_files":  accepted_files,
+        "rejected_files":  rejected_files,
+        "written_files":   written_files,
+        "archive":         archive_info,
+        "archive_error":   archive_error,
         "message":         "Changes accepted. View comparison report.",
     })
+
+
+@diwo_bp.route("/workflows/<wf_id>/refactored-archive", methods=["GET"])
+def download_refactored_archive(wf_id):
+    """Download the ZIP built when the transformation was accepted.
+
+    Entry names are the repo-relative paths, so extracting the archive
+    reproduces the project's folder structure. Rejected files are present as
+    their original source, matching what was recorded in file_decisions.
+    """
+    wf = get_workflow(wf_id)
+    if not wf:
+        return _err("Workflow not found.", 404)
+
+    path = _archive_path(wf_id)
+    if not path.exists():
+        return _err(
+            "No archive has been built for this workflow. Accept the transformation with the "
+            "file contents in 'files' first.",
+            404,
+        )
+
+    tr = _parse_json_field(wf, "transformation_result_json") or {}
+    filename = (tr.get("archive") or {}).get("filename") or f"diwo_refactored_{wf_id}.zip"
+
+    return send_file(path, mimetype="application/zip",
+                     as_attachment=True, download_name=filename)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

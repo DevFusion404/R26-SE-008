@@ -16,6 +16,7 @@ Transitions are gated: each stage requires an explicit developer action.
 import uuid
 import json
 import random
+from pathlib import Path
 from typing import Optional
 from datetime import datetime, timezone
 
@@ -51,6 +52,221 @@ def next_stage(current: str) -> str:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Agent 1 ingestion: CUQA quality report → DIWO smell model
+#
+# The CUQA agent (FastAPI, port 8080) answers POST /api/quality-report with
+# either a repository report or a single-file report. Everything downstream in
+# DIWO — workflow creation, metrics, plan generation, the updated report the
+# frontend renders — works on the flat "smell" shape produced here.
+# ─────────────────────────────────────────────────────────────────────────────
+
+SEVERITIES = ("high", "medium", "low")
+
+# CUQA smell types that describe a class rather than a single method.
+CLASS_LEVEL_SMELLS = {
+    "LargeClass", "LazyClass", "PrimitiveObsession",
+    "InappropriateIntimacy", "SpeculativeGenerality", "GodClass",
+}
+
+# CUQA smell types whose `entity` is a method/function name.
+METHOD_LEVEL_SMELLS = {
+    "LongMethod", "LongFunction", "TooManyParameters", "SwitchStatements",
+    "MessageChains", "FeatureEnvy", "DuplicateCode", "DataClumps",
+    "BareExcept", "DeadCode",
+}
+
+# Extra per-smell fields CUQA emits that the planner and the UI can use.
+SMELL_METRIC_FIELDS = (
+    "cyclomatic_complexity", "parameter_count", "method_count",
+    "primitive_field_count", "chain_length", "nesting_depth",
+    "external_field_accesses", "self_field_accesses",
+)
+
+
+def _normalize_severity(value) -> str:
+    severity = str(value or "low").lower()
+    return severity if severity in SEVERITIES else "low"
+
+
+def _summarize_files(files: list) -> dict:
+    """Rebuild the CUQA summary block from a list of file reports."""
+    severity_totals = {"high": 0, "medium": 0, "low": 0}
+    for file_report in files:
+        for smell in file_report.get("code_smells") or []:
+            severity_totals[_normalize_severity(smell.get("severity"))] += 1
+
+    scored = [f for f in files if isinstance(f.get("quality_score"), (int, float))]
+    average = sum(f["quality_score"] for f in scored) / len(scored) if scored else 0
+
+    return {
+        "files_analyzed": len(files),
+        "total_lines_of_code": sum(
+            (f.get("metrics") or {}).get("lines_of_code", 0) for f in files
+        ),
+        "total_code_smells": sum(severity_totals.values()),
+        "smell_severity": severity_totals,
+        "average_quality_score": round(average, 1),
+    }
+
+
+def normalize_cuqa_report(payload: dict) -> dict:
+    """Coerce any CUQA quality-report payload into one repository-shaped report.
+
+    Accepts the raw envelope ({"type": ..., "report": ...}) as returned by
+    POST /api/quality-report, a bare repository report, or a single-file report.
+    Guarantees every file entry carries relative_path, language, metrics,
+    code_smells, smell_summary and quality_score so the frontend can render it
+    without defensive checks.
+    """
+    if not isinstance(payload, dict):
+        raise ValueError("CUQA payload must be a JSON object.")
+
+    report = payload.get("report") if isinstance(payload.get("report"), dict) else payload
+
+    if isinstance(report.get("files"), list):
+        raw_files = report["files"]
+        repo_name = report.get("repo_name") or payload.get("repo_name")
+    else:
+        # Single-file report — wrap it so callers only handle one shape.
+        raw_files = [report]
+        repo_name = report.get("relative_path") or report.get("file")
+
+    files = []
+    for raw in raw_files:
+        if not isinstance(raw, dict):
+            continue
+
+        rel_path = (raw.get("relative_path") or raw.get("file") or "unknown").replace("\\", "/")
+        metrics = dict(raw.get("metrics") or {})
+        metrics.setdefault("filename", Path(rel_path).name)
+
+        smells = []
+        for smell in raw.get("code_smells") or []:
+            if not isinstance(smell, dict):
+                continue
+            entry = dict(smell)
+            entry["severity"] = _normalize_severity(smell.get("severity"))
+            entry["type"] = smell.get("type") or "Unknown"
+            smells.append(entry)
+
+        smell_summary = {"high": 0, "medium": 0, "low": 0}
+        for smell in smells:
+            smell_summary[smell["severity"]] += 1
+
+        files.append({
+            "file": raw.get("file") or Path(rel_path).name,
+            "relative_path": rel_path,
+            "language": (raw.get("language") or Path(rel_path).suffix.lstrip(".") or "unknown").lower(),
+            "metrics": metrics,
+            "code_smells": smells,
+            "smell_summary": smell_summary,
+            "quality_score": raw.get("quality_score", 100),
+            **({"error": raw["error"]} if raw.get("error") else {}),
+        })
+
+    summary = report.get("summary")
+    if not isinstance(summary, dict) or "total_code_smells" not in summary:
+        summary = _summarize_files(files)
+
+    return {
+        "summary": summary,
+        "files": files,
+        "repo_name": repo_name,
+        "source": "cuqa",
+        "report_type": payload.get("type", "repository"),
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def cuqa_report_to_smells(report: dict) -> list:
+    """Flatten a normalized CUQA report into the DIWO smell list.
+
+    The id format is `<relative_path>:<line>:<index>` — the same key the DIWO
+    frontend and _resolve_selected_ids() use, so file- or smell-level selection
+    resolves back to these ids without a lookup table.
+    """
+    smells = []
+
+    for file_report in report.get("files") or []:
+        rel_path = file_report.get("relative_path") or file_report.get("file") or "unknown"
+        file_metrics = file_report.get("metrics") or {}
+        class_fallback = Path(rel_path).stem
+
+        for idx, smell in enumerate(file_report.get("code_smells") or []):
+            smell_type = smell.get("type") or "Unknown"
+            entity = smell.get("entity")
+            line = smell.get("line") or 0
+            start_line = smell.get("start_line") or line
+            end_line = smell.get("end_line") or start_line
+
+            if smell_type in CLASS_LEVEL_SMELLS:
+                target_class, target_method = entity or class_fallback, None
+            elif smell_type in METHOD_LEVEL_SMELLS:
+                target_class, target_method = class_fallback, entity
+            else:
+                target_class, target_method = class_fallback, None
+
+            metrics = {
+                "lines_of_code": file_metrics.get("lines_of_code", 0),
+                "blank_lines": file_metrics.get("blank_lines", 0),
+                "comment_lines": file_metrics.get("comment_lines", 0),
+                "functions": file_metrics.get("functions", 0),
+                "classes": file_metrics.get("classes", 0),
+                "quality_score": file_report.get("quality_score", 100),
+            }
+            for field in SMELL_METRIC_FIELDS:
+                if smell.get(field) is not None:
+                    metrics[field] = smell[field]
+
+            smells.append({
+                "id": f"{rel_path}:{line}:{idx}",
+                "type": smell_type,
+                "severity": _normalize_severity(smell.get("severity")),
+                "message": smell.get("message", ""),
+                "line": line,
+                "entity": entity,
+                "language": file_report.get("language", "unknown"),
+                "relative_path": rel_path,
+                "quality_score": file_report.get("quality_score", 100),
+                "location": {
+                    "file": rel_path,
+                    "class": target_class,
+                    "method": target_method,
+                    "lines": [start_line, end_line],
+                },
+                "metrics": metrics,
+                "source": "cuqa",
+            })
+
+    return smells
+
+
+def detect_primary_language(report: dict) -> str:
+    """Most common language among the analysed files (defaults to 'java')."""
+    counts = {}
+    for file_report in report.get("files") or []:
+        language = (file_report.get("language") or "").lower()
+        if language and language != "unknown":
+            counts[language] = counts.get(language, 0) + 1
+
+    if not counts:
+        return "java"
+    return max(counts.items(), key=lambda item: item[1])[0]
+
+
+def derive_target_name(report: dict) -> str:
+    """Workflow target label: the repo name, or the single file analysed."""
+    repo_name = report.get("repo_name")
+    if repo_name:
+        return str(repo_name)
+
+    files = report.get("files") or []
+    if len(files) == 1:
+        return files[0].get("relative_path") or files[0].get("file") or "cuqa_workspace"
+    return "cuqa_workspace"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Simulated Agent 2: Refactoring Plan Generator
 # In a real system this calls the Refactoring Planning Agent over REST.
 # ─────────────────────────────────────────────────────────────────────────────
@@ -72,6 +288,33 @@ REFACTORING_MAP = {
     "Lazy Class":           ("Inline Class", "low", "low"),
     "Speculative Generality": ("Collapse Hierarchy", "medium", "medium"),
 }
+
+# CUQA emits PascalCase smell types (LongMethod) rather than the spaced names
+# above, and adds C-specific ones. Same (refactoring, risk, impact) contract.
+REFACTORING_MAP.update({
+    "LongMethod":            ("Extract Method", "low", "high"),
+    "LongFunction":          ("Extract Method", "low", "high"),
+    "TooManyParameters":     ("Introduce Parameter Object", "low", "high"),
+    "SwitchStatements":      ("Replace Conditional with Polymorphism", "high", "high"),
+    "MessageChains":         ("Hide Delegate", "low", "medium"),
+    "LargeClass":            ("Extract Class", "medium", "high"),
+    "LazyClass":             ("Inline Class", "low", "low"),
+    "PrimitiveObsession":    ("Replace Data Value with Object", "low", "medium"),
+    "InappropriateIntimacy": ("Move Method", "medium", "medium"),
+    "SpeculativeGenerality": ("Collapse Hierarchy", "medium", "medium"),
+    "DuplicateCode":         ("Extract Method", "low", "high"),
+    "FeatureEnvy":           ("Move Method", "medium", "high"),
+    "DataClumps":            ("Extract Class", "medium", "medium"),
+    "DeadCode":              ("Remove Dead Code", "low", "medium"),
+    "MagicNumber":           ("Replace Magic Number with Symbolic Constant", "low", "medium"),
+    "BareExcept":            ("Replace Bare Except with Specific Exception", "low", "medium"),
+    "Comments":              ("Rename Method", "low", "low"),
+    # C-specific (CUQA c_ast_parser)
+    "DeepNesting":           ("Replace Nested Conditional with Guard Clauses", "medium", "high"),
+    "UnsafeFunctionUsage":   ("Replace Unsafe Call with Safe Variant", "medium", "high"),
+    "GlobalVariable":        ("Encapsulate Field", "medium", "medium"),
+    "LargeHeaderFile":       ("Extract Class", "medium", "medium"),
+})
 
 
 def generate_refactoring_plan(selected_smells: list, target: str) -> dict:
@@ -126,6 +369,17 @@ def _build_parameters(refactoring, cls, method, lines, metrics):
         return {"source_class": cls, "method": method, "destination_class": "<inferred>"}
     if refactoring == "Introduce Parameter Object":
         return {"method": method, "parameter_object_name": f"{method}Params"}
+    if refactoring == "Remove Dead Code":
+        return {"target_class": cls, "target_method": method, "source_lines": lines}
+    if refactoring == "Replace Magic Number with Symbolic Constant":
+        return {"source_lines": lines, "constant_name": "EXTRACTED_CONSTANT"}
+    if refactoring == "Replace Nested Conditional with Guard Clauses":
+        return {"target_method": method, "source_lines": lines,
+                "nesting_depth": metrics.get("nesting_depth")}
+    if refactoring == "Replace Unsafe Call with Safe Variant":
+        return {"target_function": method or cls, "source_lines": lines}
+    if refactoring == "Encapsulate Field":
+        return {"target_class": cls, "field": method or cls}
     return {"target_class": cls, "target_method": method}
 
 

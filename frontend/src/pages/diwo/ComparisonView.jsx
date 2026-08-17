@@ -3,6 +3,8 @@ import {
   RadarChart, Radar, PolarGrid, PolarAngleAxis,
   BarChart, Bar, XAxis, YAxis, Tooltip, Legend, ResponsiveContainer, Cell
 } from "recharts";
+import { createZip, downloadBlob, normalizeZipPath } from "./zipWriter";
+import { buildProjectArchive, resolveWorkflowFiles } from "./projectArchive";
 
 function MetricBar({ label, before, after, unit = "", higherIsBetter = true, cardStyle }) {
   const improved = higherIsBetter ? after > before : after < before;
@@ -98,6 +100,127 @@ export function ComparisonView({ workflow, workflowId: propWorkflowId, language:
   useEffect(() => {
     setSelectedFileIndex(0);
   }, [workflow?.files]);
+
+  // ── Download the final sources as one archive ────────────────────────────
+  const [zipping, setZipping] = useState(false);
+
+  /**
+   * The code that leaves this page per file, honouring the Stage 3 verdict:
+   * an accepted file ships its refactored source, a rejected one ships the
+   * original it was reverted to. Same rule the Results stage applies before
+   * writing to disk, so the archive matches what a commit would contain.
+   */
+  const finalCodeFor = (f) => {
+    const before = f.before ?? "";
+    const after = f.after ?? f.refactored_code ?? "";
+    return f.decision === "reject" && before ? before : after;
+  };
+
+  // A rejected file whose original never reached the frontend cannot be
+  // reverted, and shipping its refactored source would hand the developer the
+  // change they just turned down. Leave it out instead: the repository on disk
+  // still holds the untouched original.
+  const isUnrevertable = (f) => f.decision === "reject" && !(f.before ?? "");
+
+  const omittedFiles = files.filter(isUnrevertable);
+
+  const downloadableFiles = files.filter((f) => {
+    if (isUnrevertable(f)) return false;
+    const code = finalCodeFor(f);
+    return typeof code === "string" && code.length > 0;
+  });
+
+  const [zipStatus, setZipStatus] = useState(null);
+  const [archiveSummary, setArchiveSummary] = useState(null);
+
+  /**
+   * Download the whole project as one ZIP.
+   *
+   * The refactored files come from the workflow; every other file in the
+   * repository is read back from the CUQA workspace so the archive is a
+   * complete, runnable project rather than a handful of loose sources. If the
+   * project structure cannot be reached, it falls back to the changed files
+   * alone and says so.
+   */
+  const handleDownloadZip = async () => {
+    if (downloadableFiles.length === 0 || zipping) return;
+    setZipping(true);
+    setArchiveSummary(null);
+
+    const workflowId = propWorkflowId || workflow?.id || workflow?.workflow_id || "session";
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+    const finalFiles = resolveWorkflowFiles(files);
+
+    const baseManifest = {
+      workflow_id: workflowId,
+      target: workflow?.target || null,
+      language: propLanguage || workflow?.language || null,
+      generated_at: new Date().toISOString(),
+      sctva_request_id: workflow?.sctva?.request_id || null,
+      confidence_score: workflow?.sctva?.confidence_score ?? null,
+      omitted: omittedFiles.map((f) => ({
+        path: normalizeZipPath(f.path || f.file || "file"),
+        reason: "rejected, and the original source was not available to revert to",
+      })),
+    };
+
+    let entries;
+    let manifest;
+    let summary;
+
+    try {
+      setZipStatus("Reading project structure…");
+      const project = await buildProjectArchive({
+        finalFiles,
+        onProgress: ({ phase, done, total }) => {
+          if (phase === "sources") setZipStatus(`Reading project files… ${done}/${total}`);
+          else if (phase === "zipping") setZipStatus("Compressing archive…");
+        },
+      });
+
+      entries = project.entries;
+      manifest = { ...baseManifest, scope: "full_project", ...project.manifest };
+      summary = { scope: "full_project", ...project.stats };
+    } catch (e) {
+      // CUQA down, no repository loaded, project too large — still give the
+      // developer the changed files rather than nothing.
+      console.warn("Full-project archive unavailable, falling back to changed files", e);
+      setZipStatus("Project structure unavailable — packing changed files…");
+
+      entries = finalFiles.map((f) => ({ path: f.path, content: f.content }));
+      manifest = {
+        ...baseManifest,
+        scope: "changed_files_only",
+        scope_reason: e.message,
+        files: finalFiles.map((f) => ({ path: f.path, state: f.state })),
+      };
+      summary = {
+        scope: "changed_files_only",
+        reason: e.message,
+        included: entries.length,
+        refactored: finalFiles.filter((f) => f.state === "refactored").length,
+        reverted: finalFiles.filter((f) => f.state === "reverted_to_original").length,
+      };
+    }
+
+    try {
+      entries = [
+        ...entries,
+        { path: "REFACTORING_MANIFEST.json", content: JSON.stringify(manifest, null, 2) },
+      ];
+      const blob = await createZip(entries);
+      downloadBlob(blob, `diwo_project_${workflowId}_${stamp}.zip`);
+      setArchiveSummary({ ...summary, bytes: blob.size });
+    } catch (e) {
+      console.error("Failed to build the archive", e);
+      alert(`Could not build the ZIP archive: ${e.message}`);
+    } finally {
+      setZipping(false);
+      setZipStatus(null);
+    }
+  };
+
+  const revertedCount = downloadableFiles.filter((f) => f.decision === "reject").length;
 
   const generateSummaryReport = () => {
     const workflowId = propWorkflowId || workflow?.id || workflow?.workflow_id || "N/A";
@@ -648,7 +771,7 @@ export function ComparisonView({ workflow, workflowId: propWorkflowId, language:
       {/* <button className="primary-btn complete-btn" onClick={() => onComplete && onComplete(notes)} disabled={loading}>
         {loading ? "Completing..." : "✓ Complete Workflow"}
       </button> */}
-      <div style={{ display: "flex", gap: 12, marginTop: 16, flexWrap: "wrap" }}>
+      <div style={{ display: "flex", gap: 12, marginTop: 16, flexWrap: "wrap", alignItems: "center" }}>
   <button
     className="secondary-btn"
     onClick={generateSummaryReport}
@@ -667,6 +790,28 @@ export function ComparisonView({ workflow, workflowId: propWorkflowId, language:
   </button>
 
   <button
+    className="secondary-btn"
+    onClick={handleDownloadZip}
+    disabled={loading || zipping || downloadableFiles.length === 0}
+    title={
+      downloadableFiles.length === 0
+        ? "No refactored files are attached to this session."
+        : "Download the whole project as one ZIP — refactored files applied, everything else as-is."
+    }
+    style={{
+      padding: "10px 18px",
+      borderRadius: 10,
+      border: `1px solid ${downloadableFiles.length === 0 ? "#334155" : "rgba(34,197,94,0.45)"}`,
+      background: downloadableFiles.length === 0 ? "#1e293b" : "linear-gradient(180deg, rgba(34,197,94,0.16), rgba(15,23,42,0.95))",
+      color: downloadableFiles.length === 0 ? "#64748b" : "#86efac",
+      fontWeight: 700,
+      cursor: loading || zipping || downloadableFiles.length === 0 ? "not-allowed" : "pointer",
+    }}
+  >
+    {zipping ? (zipStatus || "Building archive…") : `⬇ Download Project (.zip)`}
+  </button>
+
+  <button
     className="primary-btn complete-btn"
     onClick={() => onComplete && onComplete(notes)}
     disabled={loading}
@@ -674,6 +819,74 @@ export function ComparisonView({ workflow, workflowId: propWorkflowId, language:
     {loading ? "Completing..." : "✓ Complete Workflow"}
   </button>
 </div>
+
+      {downloadableFiles.length > 0 && !archiveSummary && (
+        <div style={{ marginTop: 10, fontSize: 12, color: "#94a3b8" }}>
+          The archive packs the whole project in its original folder structure: {downloadableFiles.length}{" "}
+          changed file(s) applied
+          {revertedCount > 0 && (
+            <span style={{ color: "#fca5a5" }}>
+              {" "}({revertedCount} rejected, included as their original source)
+            </span>
+          )}
+          , every other file copied from the workspace unchanged.
+          {omittedFiles.length > 0 && (
+            <span style={{ color: "#fdba74" }}>
+              {" "}{omittedFiles.length} rejected file(s) had no original to revert to, so the
+              workspace copy is used instead.
+            </span>
+          )}
+        </div>
+      )}
+
+      {archiveSummary && (
+        <div
+          style={{
+            marginTop: 10,
+            padding: "10px 14px",
+            borderRadius: 10,
+            border: `1px solid ${archiveSummary.scope === "full_project" ? "rgba(34,197,94,0.35)" : "rgba(249,115,22,0.35)"}`,
+            background: "#0f172a",
+            fontSize: 12,
+            color: "#cbd5e1",
+          }}
+        >
+          {archiveSummary.scope === "full_project" ? (
+            <>
+              <strong style={{ color: "#86efac" }}>Project archive downloaded</strong>
+              {archiveSummary.repoName ? ` — ${archiveSummary.repoName}` : ""} ·{" "}
+              {archiveSummary.included} file(s), {Math.round((archiveSummary.bytes || 0) / 1024)} KB
+              <div style={{ marginTop: 4, color: "#94a3b8" }}>
+                {archiveSummary.replacedInPlace} file(s) replaced in place ·{" "}
+                {archiveSummary.refactored} refactored · {archiveSummary.reverted} reverted to original ·{" "}
+                {archiveSummary.unchanged} unchanged
+                {archiveSummary.binarySkipped > 0 && (
+                  <span style={{ color: "#fdba74" }}>
+                    {" "}· {archiveSummary.binarySkipped} binary file(s) skipped
+                  </span>
+                )}
+                {archiveSummary.unreadable > 0 && (
+                  <span style={{ color: "#fdba74" }}>
+                    {" "}· {archiveSummary.unreadable} unreadable
+                  </span>
+                )}
+              </div>
+              {archiveSummary.addedOutsideTree > 0 && (
+                <div style={{ marginTop: 4, color: "#fdba74" }}>
+                  {archiveSummary.addedOutsideTree} refactored file(s) had no counterpart in the
+                  project tree and were added separately — check their paths in the manifest.
+                </div>
+              )}
+            </>
+          ) : (
+            <>
+              <strong style={{ color: "#fdba74" }}>Changed files only</strong> —{" "}
+              {archiveSummary.included} file(s) downloaded. The full project could not be assembled:{" "}
+              {archiveSummary.reason}
+            </>
+          )}
+        </div>
+      )}
 
     </div>
   );

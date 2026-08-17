@@ -70,9 +70,12 @@ const PHASE_DESCRIPTIONS = [
 
 // ─── Smell builder ────────────────────────────────────────────────────────────
 /**
- * FIX [F1]: Converts CUQA_DATA.files into the smell format the backend expects.
- * When a real file-upload endpoint exists, this function is replaced by the
- * response from POST /api/analyse.
+ * Converts CUQA_DATA.files into the smell format the backend expects.
+ *
+ * This is the OFFLINE fallback only. The normal path is
+ * POST /workflows/from-cuqa, where the backend pulls the live quality report
+ * from the CUQA agent (POST http://localhost:8080/api/quality-report) and seeds
+ * the workflow from it — see bootstrapWorkflow() below.
  */
 function buildBackendSmells() {
   const smells = [];
@@ -104,7 +107,10 @@ export default function DIWOAgentPage() {
   const [phase, setPhase]         = useState(0);
   const [workflowId, setWorkflowId]           = useState(null);
   const [workflowLanguage, setWorkflowLanguage] = useState("java");
+  const [cuqaReport, setCuqaReport]           = useState(null);   // live Agent 1 report
   const [planData, setPlanData]               = useState(null);
+  // Only the steps the developer approved — this is what Stage 3 sends to SCTVA.
+  const [approvedPlan, setApprovedPlan]       = useState(null);
   const [transformationData, setTransformationData] = useState(null);
   const [metricsBeforeApi, setMetricsBeforeApi]     = useState(null);
   const [metricsAfterApi, setMetricsAfterApi]       = useState(null);
@@ -121,10 +127,37 @@ export default function DIWOAgentPage() {
     ]);
 
   // ── On mount: create backend workflow ─────────────────────────────────────
+  /**
+   * Preferred path: POST /workflows/from-cuqa — the DIWO backend calls the CUQA
+   * agent's POST /api/quality-report, normalizes it, and seeds the workflow with
+   * the real detected smells. The same report is handed to Stage 1 so the file
+   * paths the developer selects always resolve against the workflow's smells.
+   *
+   * Fallback: the bundled sample report via POST /workflows, so the flow stays
+   * usable when the CUQA agent is not running or has no repository loaded.
+   */
   useEffect(() => {
     (async () => {
+      setBackendBusy(true);
       try {
-        setBackendBusy(true);
+        try {
+          const res = await api.post("/workflows/from-cuqa", {});
+          setWorkflowId(res.workflow_id);
+          setWorkflowLanguage(res.language || "java");
+          setMetricsBeforeApi(res.metrics_before || null);
+          setCuqaReport(res.report || null);
+          addLog(
+            `CUQA report ingested from ${res.cuqa_url || "CUQA agent"}: ` +
+            `${res.report?.summary?.files_analyzed ?? 0} file(s), ${res.smell_count ?? 0} smell(s)`,
+            "success"
+          );
+          addLog(`Backend workflow created: ${res.workflow_id} (target: ${res.target})`, "success");
+          return;
+        } catch (e) {
+          // FIX [F3]: Surface the reason; do not silently fall to mock.
+          addLog(`Live CUQA ingestion unavailable: ${e.message}`, "warn");
+        }
+
         const smells = buildBackendSmells();
         const res = await api.post("/workflows", {
           target: "ECommerceSystem.java",
@@ -134,15 +167,29 @@ export default function DIWOAgentPage() {
         setWorkflowId(res.workflow_id);
         setWorkflowLanguage("java");
         setMetricsBeforeApi(res.metrics_before || null);
-        addLog(`Backend workflow created: ${res.workflow_id}`, "success");
+        addLog(`Backend workflow created from sample report: ${res.workflow_id}`, "warn");
       } catch (e) {
-        // FIX [F3]: Surface error; do not silently fall to mock.
-        addLog(`Backend unavailable: ${e.message}. Running in offline mode.`, "warn");
+        addLog(`Backend unavailable: ${e.message}. Running in offline mode.`, "danger");
       } finally {
         setBackendBusy(false);
       }
     })();
   }, []);
+
+  /**
+   * Stage 1 fetched (or re-analyzed) the CUQA report on its own — either
+   * because /workflows/from-cuqa failed on mount, or because the developer
+   * pressed "Re-analyze". Log it; the page keeps ownership of that copy so a
+   * re-analyze is not overwritten by the report the parent already holds.
+   */
+  const handleCuqaReportLoaded = (result) => {
+    const summary = result?.report?.summary || {};
+    addLog(
+      `CUQA report loaded (${result?.via === "cuqa-direct" ? "direct" : "via backend"}): ` +
+      `${summary.files_analyzed ?? 0} file(s), ${summary.total_code_smells ?? 0} smell(s)`,
+      "info"
+    );
+  };
 
   // ── Stage 0 → 1: Smell selection ─────────────────────────────────────────
   const handleSmellsSelected = async (selection) => {
@@ -243,6 +290,21 @@ export default function DIWOAgentPage() {
     }
   };
 
+  /**
+   * Stage 2 generated its plan straight from the RDP agent
+   * (POST http://localhost:5000/generate). Keep the parent's copy in sync so the
+   * approval call forwards the same steps the developer is looking at.
+   */
+  const handlePlanGenerated = ({ plan, filesPlanned, smellsSubmitted, rdpUrl }) => {
+    setPlanData(plan);
+    addLog(
+      `Refactoring plan ${plan.plan_id} generated by RDP agent (${rdpUrl}): ` +
+      `${plan.steps?.length ?? 0} step(s) from ${smellsSubmitted ?? 0} smell(s) in ${filesPlanned ?? 0} file(s)` +
+      (plan.skipped_smells?.length ? `, ${plan.skipped_smells.length} skipped` : ""),
+      "success"
+    );
+  };
+
   // ── Stage 1 → 2: Plan approval ────────────────────────────────────────────
   const handlePlanDecisionChange = async ({ decisions, preferences }) => {
     if (!workflowId || !planData || backendBusy) return;
@@ -266,22 +328,26 @@ export default function DIWOAgentPage() {
     }
   };
 
-  const handlePlanApproved = async ({ decisions, opinion }) => {
+  const handlePlanApproved = async ({ decisions, opinion, plan }) => {
     if (backendBusy) return; // FIX [F2]
+
+    // The page hands back the plan it rendered (RDP-generated or workflow copy),
+    // so the approved steps always match what the developer reviewed.
+    const activePlan = plan || planData;
 
     const approved = Object.values(decisions).filter((d) => d === "approve").length;
     const rejected = Object.values(decisions).filter((d) => d === "reject").length;
     addLog(`${approved} steps approved, ${rejected} rejected — forwarding to Transformation Agent`, "success");
     if (opinion) addLog(`Developer note: "${opinion.slice(0, 80)}"`, "info");
 
-    if (!workflowId || !planData) {
+    if (!workflowId || !activePlan) {
       addLog("No backend session — cannot submit plan. Check backend connection.", "danger");
       return;
     }
 
     try {
       setBackendBusy(true);
-      const approvedSteps = (planData.steps || []).filter(
+      const approvedSteps = (activePlan.steps || []).filter(
         (s) => decisions[s.step_id] === "approve"
       );
 
@@ -290,14 +356,18 @@ export default function DIWOAgentPage() {
         return;
       }
 
+      // Stage 3 executes exactly these steps against the Safe Transformation
+      // Agent, so keep them separate from the full plan the page rendered.
+      setApprovedPlan({ ...activePlan, steps: approvedSteps });
+
       // If some steps rejected, modify first
-      if (approvedSteps.length < (planData.steps || []).length) {
+      if (approvedSteps.length < (activePlan.steps || []).length) {
         const modRes = await api.post(`/workflows/${workflowId}/plan-decision`, {
           decision: "modify",
           modified_steps: approvedSteps,
           feedback: { reason: opinion || "Developer adjusted plan" },
         });
-        setPlanData(modRes.plan || planData);
+        setPlanData(modRes.plan || activePlan);
       }
 
       // Then approve — backend triggers transformation synchronously
@@ -319,7 +389,7 @@ export default function DIWOAgentPage() {
       setWorkflow((prev) => ({
         ...(prev || {}),
         plan_approval_summary: {
-          total_steps: (planData?.steps || []).length || 0,
+          total_steps: (activePlan?.steps || []).length || 0,
           approved_count: approved,
           rejected_count: rejected,
         },
@@ -337,13 +407,44 @@ export default function DIWOAgentPage() {
 
   // ── Stage 2 → 3: Transformation complete ─────────────────────────────────
   /**
-   * FIX [F4]: Called by TransformationApprovalPage once its progress animation
-   * finishes. At this point transformationData already holds real backend data.
+   * FIX [F4]: Called by TransformationApprovalPage with the result it is
+   * showing — the Safe Transformation Agent's own output when SCTVA ran, the
+   * DIWO backend's simulated result when the developer fell back to it.
    */
-  const handleTransformComplete = () => {
-    addLog("Safe Code Transformation Agent completed. Confidence: 100%", "success");
+  const handleTransformComplete = (payload = {}) => {
+    const td = payload.refactored_code || (payload.files || []).length
+      ? payload
+      : (transformationData || {});
+    const sctva = td.sctva || null;
 
-    const td = transformationData || {};
+    if (sctva) {
+      const confidence = typeof sctva.confidence_score === "number"
+        ? `${(sctva.confidence_score * 100).toFixed(1)}%`
+        : "not applicable";
+      addLog(
+        `Safe Code Transformation Agent completed (${sctva.agent_url}): ` +
+        `${sctva.file_summary?.applied ?? 0}/${sctva.file_summary?.total ?? 0} file(s) changed, ` +
+        `${sctva.total_replacements ?? 0} replacement(s), confidence ${confidence}` +
+        (sctva.rollback_occurred ? " — rollback performed" : ""),
+        sctva.rollback_occurred ? "warn" : "success"
+      );
+    } else {
+      addLog("Transformation stage completed with the DIWO backend's simulated result.", "warn");
+    }
+
+    const acceptedFiles = td.accepted_files || [];
+    const rejectedFiles = td.rejected_files || [];
+    if (acceptedFiles.length || rejectedFiles.length) {
+      addLog(
+        `Developer reviewed the transformed files: ${acceptedFiles.length} accepted, ` +
+        `${rejectedFiles.length} rejected.`,
+        rejectedFiles.length ? "warn" : "success"
+      );
+      rejectedFiles.forEach((path) => addLog(`Rejected refactoring of ${path}`, "warn"));
+    }
+
+    setTransformationData(td);
+
     const before = metricsBeforeApi || {
       cyclomatic_complexity: 35, code_duplication_pct: 18,
       maintainability_index: 65, total_smells: CUQA_DATA.summary.total_code_smells,
@@ -361,32 +462,80 @@ export default function DIWOAgentPage() {
       improvements: { complexity_reduced_by: 11, duplication_reduced_by: 9, maintainability_gained: 17 },
     };
 
-    setWorkflow({
+    setWorkflow((prev) => ({
+      ...(prev || {}),
       metrics_before:  before,
       metrics_after:   after,
       refactored_code: td.refactored_code || "",
       diff_rows:       td.diff_rows || [],
       files:           td.files || [],
-    });
+      sctva,
+      // Stage 3's per-file verdict, kept apart from the Results stage's own
+      // accept list so the two decisions stay distinguishable in the audit.
+      transformation_accepted_files: acceptedFiles,
+      transformation_rejected_files: rejectedFiles,
+    }));
     setPhase(3);
   };
 
   // ── Stage 3: Accept → go to comparison ───────────────────────────────────
   const handleAccept = async (payload = {}) => {
     const acceptedEntries = Array.isArray(payload.acceptedFiles) ? payload.acceptedFiles : [];
-    const accepted_paths = acceptedEntries.map((f) => f.path || f.relative_path || f.file || f);
+    const written_paths = acceptedEntries.map((f) => f.path || f.relative_path || f.file || f);
+    // Files the developer rejected in Stage 3 were reverted to their original
+    // source before being written, so report them separately from files that
+    // were simply left out of this commit.
+    const reverted_paths = Array.isArray(payload.revertedFiles)
+      ? payload.revertedFiles
+      : (workflow?.transformation_rejected_files || []);
+    const accepted_paths = written_paths.filter((p) => !reverted_paths.includes(p));
     const allFiles = (workflow?.files && workflow.files.length > 0) ? workflow.files : (transformationData?.files || []);
     const all_paths = allFiles.map((f) => f.path || f.relative_path || f.file || f);
     const rejected_paths = all_paths.filter((p) => !accepted_paths.includes(p));
 
-    addLog("Developer accepted changes. Moving to comparison view.", "info");
+    // The final source of every file, so the backend can build the downloadable
+    // archive. A rejected file contributes its original text; a rejected file
+    // whose original never arrived is left out entirely rather than shipping
+    // the change the developer declined.
+    const archive_files = allFiles
+      .filter((f) => !(f.decision === "reject" && !(f.before || "")))
+      .map((f) => {
+        const reverted = f.decision === "reject" && Boolean(f.before);
+        return {
+          path: f.path || f.relative_path || f.file || "",
+          content: reverted ? f.before : (f.after || f.refactored_code || ""),
+          state: reverted ? "reverted_to_original" : "refactored",
+        };
+      })
+      .filter((f) => f.path && f.content);
+
+    addLog(
+      `Developer committed ${written_paths.length} file(s): ${accepted_paths.length} refactored, ` +
+      `${reverted_paths.length} reverted to original.`,
+      "info"
+    );
+
+    let archive = null;
     if (workflowId) {
       try {
-        await api.post(`/workflows/${workflowId}/transformation-decision`, {
+        const res = await api.post(`/workflows/${workflowId}/transformation-decision`, {
           decision: "accept",
           accepted_files: accepted_paths,
+          rejected_files: reverted_paths,
+          written_files: written_paths,
+          files: archive_files,
           feedback: { reason: "Accepted from frontend", rating: 5 },
         });
+        archive = res.archive || null;
+        if (archive) {
+          addLog(
+            `Refactored archive ready: ${archive.file_count} file(s), ` +
+            `${Math.round(archive.bytes / 1024)} KB.`,
+            "success"
+          );
+        } else if (res.archive_error) {
+          addLog(`Archive could not be built: ${res.archive_error}`, "warn");
+        }
       } catch (e) {
         addLog(`Backend accept call failed: ${e.message}`, "warn");
       }
@@ -396,6 +545,7 @@ export default function DIWOAgentPage() {
       ...(prev || {}),
       accepted_files: accepted_paths,
       rejected_files: rejected_paths,
+      archive,
     }));
 
     setPhase(4);
@@ -419,12 +569,17 @@ export default function DIWOAgentPage() {
         addLog(`Backend rollback failed: ${e.message}`, "warn");
       }
     }
+    // Drop the approved steps so the next approval re-runs SCTVA from scratch.
+    setApprovedPlan(null);
+    setTransformationData(null);
     setPhase(1);
   };
 
   // ── Restart ───────────────────────────────────────────────────────────────
   const handleRestart = () => {
     addLog("New refactoring session initiated.", "info");
+    setApprovedPlan(null);
+    setTransformationData(null);
     setPhase(0);
   };
 
@@ -465,12 +620,16 @@ export default function DIWOAgentPage() {
             <CodeSmellApprovalPage
               workflowId={workflowId}
               onProceed={handleSmellsSelected}
-              reportData={workflow?.updated_report || null}
+              reportData={workflow?.updated_report || cuqaReport || null}
+              onReportLoaded={handleCuqaReportLoaded}
             />
           )}
           {phase === 1 && (
             <RefactoringPlanApprovalPage
               planData={planData}
+              report={workflow?.updated_report || cuqaReport || null}
+              fullReport={cuqaReport}
+              onPlanLoaded={handlePlanGenerated}
               onDecisionChange={handlePlanDecisionChange}
               onApprove={handlePlanApproved}
               onFallback={() => { addLog("Developer fell back to Smell Review.", "warn"); setPhase(0); }}
@@ -478,6 +637,8 @@ export default function DIWOAgentPage() {
           )}
           {phase === 2 && (
             <TransformationApprovalPage
+              plan={approvedPlan || planData}
+              language={workflowLanguage}
               transformationData={transformationData}
               onComplete={handleTransformComplete}
             />
@@ -490,6 +651,7 @@ export default function DIWOAgentPage() {
               refactoredCode={workflow?.refactored_code}
               diffRows={workflow?.diff_rows}
               files={workflow?.files}
+              sctva={workflow?.sctva}
             />
           )}
           {phase === 4 && (
