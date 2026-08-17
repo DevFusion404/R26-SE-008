@@ -17,7 +17,7 @@
  *  [F7] DIWOAgentService path corrected to relative import for portability.
  */
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import AuditSidebar from "./AuditSidebar";
 import CodeSmellApprovalPage from "./CodeSmellApprovalPage";
 import RefactoringPlanApprovalPage from "./RefactoringPlanApprovalPage";
@@ -736,6 +736,23 @@ export default function DIWOAgentPage() {
     setPhase(1);
   };
 
+  /**
+   * What each earlier stage decided, handed to the Results page so it can draw
+   * the project tree and account for every smell CUQA found: the full analysed
+   * report, the selection that survived Stage 1, the plan before approval and
+   * the approved-only plan. Memoised so the classification is not redone on
+   * every unrelated re-render (a new audit log line, say).
+   */
+  const projectContext = useMemo(
+    () => ({
+      analysedReport: cuqaReport,
+      selectedReport: workflow?.updated_report || null,
+      plan: preApprovalPlan || planData,
+      approvedPlan: approvedPlan || planData,
+    }),
+    [cuqaReport, workflow?.updated_report, preApprovalPlan, planData, approvedPlan]
+  );
+
   // ── Restart ───────────────────────────────────────────────────────────────
   const handleRestart = () => {
     addLog("New refactoring session initiated.", "info");
@@ -813,6 +830,7 @@ export default function DIWOAgentPage() {
               diffRows={workflow?.diff_rows}
               files={workflow?.files}
               sctva={workflow?.sctva}
+              projectContext={projectContext}
             />
           )}
           {phase === 4 && (

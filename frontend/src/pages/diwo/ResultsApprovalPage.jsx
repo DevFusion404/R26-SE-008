@@ -47,6 +47,287 @@ const COMPONENT_LABELS = [
 const pct = (value, dp = 1) =>
   typeof value === "number" && Number.isFinite(value) ? `${(value * 100).toFixed(dp)}%` : "—";
 
+// ─── Project outcome model ───────────────────────────────────────────────────
+/**
+ * Where each analysed file ended up after the four stages. The order below is
+ * the order the pipeline drops a file: detected → selected → planned →
+ * approved → transformed → accepted. A file is labelled by the first gate it
+ * failed to pass, so "why was this smell never fixed?" has one answer per file.
+ */
+const OUTCOMES = {
+  refactored: {
+    label: "Refactored",
+    color: C.accent,
+    hint: "Smells detected, selected, planned, transformed and kept.",
+  },
+  change_rejected: {
+    label: "Change rejected",
+    color: C.danger,
+    hint: "SCTVA refactored it, but the change was rejected in the Transformation stage — the file is reverted to its original.",
+  },
+  no_change: {
+    label: "No change produced",
+    color: C.textMuted,
+    hint: "Approved steps ran, but the agent returned this file unchanged.",
+  },
+  not_transformed: {
+    label: "Not transformed",
+    color: C.warn,
+    hint: "Steps were approved, but the file never came back from the Transformation stage (no readable source, or the run skipped it).",
+  },
+  plan_rejected: {
+    label: "Plan rejected",
+    color: C.warn,
+    hint: "Smells were selected, but every planned step for this file was rejected in Plan Approval.",
+  },
+  not_planned: {
+    label: "No plan produced",
+    color: C.info,
+    hint: "Smells were selected, but the RDP agent produced no refactoring step for this file.",
+  },
+  not_selected: {
+    label: "Not selected",
+    color: "#ec4899",
+    hint: "Code smells were detected, but the file was not selected in Code Smell Review.",
+  },
+  clean: {
+    label: "No smells",
+    color: C.textMuted,
+    hint: "Analysed by CUQA and no code smells were detected.",
+  },
+};
+
+const norm = (value = "") => String(value).replace(/\\/g, "/");
+
+const countBy = (steps, pick) => {
+  const map = new Map();
+  (steps || []).forEach((step) => {
+    const key = norm(pick(step) || "");
+    if (!key) return;
+    map.set(key, (map.get(key) || 0) + 1);
+  });
+  return map;
+};
+
+/**
+ * Fold the four stages into one row per analysed file.
+ *
+ * Sources: the CUQA report (every file analysed, with its smells), the filtered
+ * report the smell selection produced, the plan before approval, the approved
+ * plan, and the per-file verdicts from the Transformation stage.
+ */
+function classifyProject({ analysedReport, selectedReport, plan, approvedPlan }, fileEntries) {
+  const analysed = analysedReport?.files || [];
+  const haveSelection = Boolean(selectedReport?.files);
+  const havePlan = Boolean(plan?.steps || approvedPlan?.steps);
+
+  const selectedSmellsByFile = new Map();
+  (selectedReport?.files || []).forEach((f) =>
+    selectedSmellsByFile.set(norm(f.relative_path || f.file), (f.code_smells || []).length)
+  );
+
+  const plannedByFile = countBy(plan?.steps, (s) => s.target?.file);
+  const approvedByFile = countBy(approvedPlan?.steps, (s) => s.target?.file);
+  const transformedByPath = new Map(fileEntries.map((f) => [norm(f.path), f]));
+
+  const rows = analysed.map((f) => {
+    const path = norm(f.relative_path || f.file || "unknown");
+    const smells = (f.code_smells || []).length;
+    const selected = haveSelection ? selectedSmellsByFile.get(path) ?? 0 : smells;
+    const planned = plannedByFile.get(path) || 0;
+    const approvedSteps = approvedByFile.get(path) || 0;
+    const entry = transformedByPath.get(path) || null;
+
+    let outcome;
+    if (smells === 0) outcome = "clean";
+    else if (selected === 0) outcome = "not_selected";
+    else if (havePlan && planned === 0 && approvedSteps === 0) outcome = "not_planned";
+    else if (havePlan && approvedSteps === 0) outcome = "plan_rejected";
+    else if (entry?.rejected) outcome = "change_rejected";
+    else if (entry?.changed) outcome = "refactored";
+    else if (entry) outcome = "no_change";
+    else outcome = "not_transformed";
+
+    return {
+      path,
+      name: path.split("/").pop(),
+      language: f.language || "",
+      quality_score: f.quality_score,
+      smells,
+      selected,
+      planned,
+      approvedSteps,
+      outcome,
+      severities: (f.code_smells || []).reduce((acc, s) => {
+        acc[s.severity] = (acc[s.severity] || 0) + 1;
+        return acc;
+      }, {}),
+    };
+  });
+
+  // Files SCTVA touched that CUQA never reported (rare, but they must not
+  // vanish from a view whose job is to account for every file).
+  const known = new Set(rows.map((r) => r.path));
+  fileEntries.forEach((f) => {
+    const path = norm(f.path);
+    if (known.has(path)) return;
+    rows.push({
+      path,
+      name: path.split("/").pop(),
+      language: "",
+      smells: 0,
+      selected: 0,
+      planned: 0,
+      approvedSteps: 0,
+      outcome: f.rejected ? "change_rejected" : f.changed ? "refactored" : "no_change",
+      severities: {},
+      unreported: true,
+    });
+  });
+
+  rows.sort((a, b) => a.path.localeCompare(b.path));
+
+  const withSmells = rows.filter((r) => r.smells > 0);
+  const of = (...outcomes) => withSmells.filter((r) => outcomes.includes(r.outcome));
+
+  return {
+    rows,
+    withSmells,
+    refactored: of("refactored"),
+    notSelected: of("not_selected"),
+    planDropped: of("plan_rejected", "not_planned"),
+    changeRejected: of("change_rejected", "no_change", "not_transformed"),
+    totals: {
+      analysed: rows.length,
+      smellFiles: withSmells.length,
+      smells: withSmells.reduce((n, r) => n + r.smells, 0),
+      smellsSelected: withSmells.reduce((n, r) => n + r.selected, 0),
+      smellsRefactored: withSmells
+        .filter((r) => r.outcome === "refactored")
+        .reduce((n, r) => n + r.selected, 0),
+    },
+  };
+}
+
+/** Nest a flat list of rows into folder nodes for the tree view. */
+function buildTree(rows) {
+  const root = { name: "", dirs: new Map(), files: [] };
+
+  rows.forEach((row) => {
+    const parts = row.path.split("/").filter(Boolean);
+    const fileName = parts.pop() || row.path;
+    let node = root;
+    parts.forEach((part) => {
+      if (!node.dirs.has(part)) node.dirs.set(part, { name: part, dirs: new Map(), files: [] });
+      node = node.dirs.get(part);
+    });
+    node.files.push({ ...row, name: fileName });
+  });
+
+  return root;
+}
+
+function TreeNode({ node, depth = 0, onSelect, selectedPath }) {
+  const dirs = Array.from(node.dirs.values()).sort((a, b) => a.name.localeCompare(b.name));
+  const files = [...node.files].sort((a, b) => a.name.localeCompare(b.name));
+
+  return (
+    <>
+      {dirs.map((dir) => (
+        <div key={`dir-${dir.name}-${depth}`}>
+          <div style={{
+            display: "flex", alignItems: "center", gap: 6,
+            padding: "3px 4px", paddingLeft: 4 + depth * 14,
+            fontSize: 11, color: C.textMuted, fontFamily: "monospace",
+          }}>
+            <span>📁</span>
+            <span style={{ fontWeight: 700 }}>{dir.name}</span>
+          </div>
+          <TreeNode node={dir} depth={depth + 1} onSelect={onSelect} selectedPath={selectedPath} />
+        </div>
+      ))}
+
+      {files.map((file) => {
+        const outcome = OUTCOMES[file.outcome] || OUTCOMES.clean;
+        const isSelected = selectedPath === file.path;
+        return (
+          <div
+            key={file.path}
+            title={`${file.path}\n${outcome.label} — ${outcome.hint}`}
+            onClick={onSelect ? () => onSelect(file) : undefined}
+            style={{
+              display: "flex", alignItems: "center", gap: 8,
+              padding: "4px 6px", paddingLeft: 4 + depth * 14,
+              marginLeft: 2, marginBottom: 2, borderRadius: 5,
+              cursor: onSelect ? "pointer" : "default",
+              background: isSelected ? `${C.accent}14` : file.smells > 0 ? `${outcome.color}0c` : "transparent",
+              // Every file that CUQA flagged carries a red rail, whatever
+              // happened to it afterwards; the badge says how it ended up.
+              borderLeft: `3px solid ${file.smells > 0 ? C.danger : "transparent"}`,
+              border: `1px solid ${isSelected ? C.accent : "transparent"}`,
+            }}
+          >
+            <span style={{ fontSize: 10 }}>{file.smells > 0 ? "🔴" : "📄"}</span>
+            <span style={{
+              fontSize: 11, fontFamily: "monospace", color: file.smells > 0 ? C.text : C.textMuted,
+              overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flexShrink: 1, minWidth: 0,
+            }}>
+              {file.name}
+            </span>
+            {file.smells > 0 && (
+              <span style={{ fontSize: 9, color: C.danger, flexShrink: 0 }}>
+                {file.smells} smell{file.smells > 1 ? "s" : ""}
+              </span>
+            )}
+            {/* A clean file needs no verdict — badging every one of them would
+                bury the handful that actually went through the pipeline. */}
+            {file.outcome !== "clean" && (
+              <span style={{ marginLeft: "auto", flexShrink: 0 }}>
+                <Badge label={outcome.label} color={outcome.color} />
+              </span>
+            )}
+          </div>
+        );
+      })}
+    </>
+  );
+}
+
+/** One bordered tree panel: a titled, scrollable folder view of some rows. */
+function TreePanel({ title, subtitle, color, rows, empty, onSelect, selectedPath, maxHeight = 420 }) {
+  const tree = useMemo(() => buildTree(rows), [rows]);
+
+  return (
+    <div style={{
+      background: C.panel, border: `1px solid ${color}55`, borderRadius: 10,
+      overflow: "hidden", display: "flex", flexDirection: "column", minWidth: 0,
+    }}>
+      <div style={{
+        padding: "10px 14px", background: `${color}12`,
+        borderBottom: `2px solid ${color}`, borderLeft: `4px solid ${color}`,
+      }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+          <span style={{ fontSize: 13, fontWeight: 800, color: C.text }}>{title}</span>
+          <Badge label={`${rows.length} file${rows.length === 1 ? "" : "s"}`} color={color} />
+        </div>
+        {subtitle && (
+          <div style={{ fontSize: 11, color: C.textMuted, marginTop: 4, lineHeight: 1.5 }}>{subtitle}</div>
+        )}
+      </div>
+
+      <div style={{ padding: 8, overflow: "auto", maxHeight }}>
+        {rows.length === 0 ? (
+          <div style={{ fontSize: 11, color: C.textMuted, padding: "14px 8px", textAlign: "center" }}>
+            {empty}
+          </div>
+        ) : (
+          <TreeNode node={tree} onSelect={onSelect} selectedPath={selectedPath} />
+        )}
+      </div>
+    </div>
+  );
+}
+
 export default function ResultsApprovalPage({
   onRestart,
   onRollback,
@@ -56,8 +337,14 @@ export default function ResultsApprovalPage({
   files = [],
   sctva = null,
   repositoryPath = "",
+  // { analysedReport, selectedReport, plan, approvedPlan } — everything the
+  // earlier stages decided, so this page can account for every analysed file.
+  projectContext = null,
 }) {
-  const [tab, setTab] = useState("summary");
+  // Opens on the project tree: "what happened to every smell" is the question
+  // this stage exists to answer. Falls back to the first available tab when the
+  // page is rendered without the earlier stages' data.
+  const [tab, setTab] = useState("tree");
   const [selectedFileIndex, setSelectedFileIndex] = useState(0);
   const [view, setView] = useState("final");
   const [showActionChoice, setShowActionChoice] = useState(false);
@@ -116,6 +403,32 @@ export default function ResultsApprovalPage({
     }
     return initial;
   });
+
+  // Every analysed file, folded through the four stages. Null when the page is
+  // rendered without the earlier stages' data (a direct/offline render).
+  const project = useMemo(
+    () => (projectContext ? classifyProject(projectContext, fileEntries) : null),
+    [projectContext, fileEntries]
+  );
+
+  const tabs = [
+    ...(project ? [["tree", `Project Tree (${project.totals.smellFiles} smell file(s))`]] : []),
+    ["code", "Refactored Code"],
+    ["validation", "Validation Report"],
+    ["summary", "Summary"],
+    ["invariants", "Invariants"],
+  ];
+  // The tree tab disappears without projectContext, so never leave `tab`
+  // pointing at a tab that is not on screen.
+  const activeTab = tabs.some(([key]) => key === tab) ? tab : tabs[0][0];
+
+  /** Jump from a tree row to that file in the Refactored Code tab. */
+  const openFileInCodeTab = (row) => {
+    const idx = fileEntries.findIndex((f) => norm(f.path) === norm(row.path));
+    if (idx === -1) return;
+    setSelectedFileIndex(idx);
+    setTab("code");
+  };
 
   const activeFile = fileEntries[selectedFileIndex] || fileEntries[0] || null;
   const acceptedEntries = fileEntries.filter((f) => !f.rejected && f.changed);
@@ -315,12 +628,7 @@ export default function ResultsApprovalPage({
 
       {/* ── Tabs ──────────────────────────────────────────────────────────── */}
       <div style={{ display: "flex", gap: 4, marginBottom: 16, borderBottom: `1px solid ${C.border}` }}>
-        {[
-          ["summary", "Summary"],
-          ["validation", "Validation Report"],
-          ["code", "Refactored Code"],
-          ["invariants", "Invariants"],
-        ].map(([key, label]) => (
+        {tabs.map(([key, label]) => (
           <button
             key={key}
             onClick={() => setTab(key)}
@@ -331,8 +639,8 @@ export default function ResultsApprovalPage({
               fontWeight: 700,
               cursor: "pointer",
               border: "none",
-              background: tab === key ? C.accent : "transparent",
-              color: tab === key ? "#000" : C.textMuted,
+              background: activeTab === key ? C.accent : "transparent",
+              color: activeTab === key ? "#000" : C.textMuted,
             }}
           >
             {label}
@@ -341,7 +649,7 @@ export default function ResultsApprovalPage({
       </div>
 
       {/* ── Summary ───────────────────────────────────────────────────────── */}
-      {tab === "summary" && (
+      {activeTab === "summary" && (
         <div style={{ display: "grid", gridTemplateColumns: "repeat(2,1fr)", gap: 10 }}>
           {[
             ["Files Transformed", fileEntries.length, ""],
@@ -415,7 +723,7 @@ export default function ResultsApprovalPage({
       )}
 
       {/* ── Validation report ─────────────────────────────────────────────── */}
-      {tab === "validation" && (
+      {activeTab === "validation" && (
         <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
           {fileEntries.length > 1 && (
             <div style={{ fontSize: 12, color: C.textMuted, marginBottom: 2 }}>
@@ -516,8 +824,108 @@ export default function ResultsApprovalPage({
         </div>
       )}
 
+      {/* ── Project tree ──────────────────────────────────────────────────── */}
+      {activeTab === "tree" && project && (
+        <div>
+          {/* What happened to the smells CUQA found, in one line each. */}
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 10, marginBottom: 16 }}>
+            {[
+              { label: "Files analysed", val: project.totals.analysed, color: C.textSub },
+              { label: "Files with smells", val: project.totals.smellFiles, color: C.danger },
+              { label: "Refactored", val: project.refactored.length, color: C.accent },
+              { label: "Not selected", val: project.notSelected.length, color: OUTCOMES.not_selected.color },
+              { label: "Plan dropped", val: project.planDropped.length, color: C.warn },
+              { label: "Change not kept", val: project.changeRejected.length, color: C.danger },
+            ].map(({ label, val, color }) => (
+              <div key={label} style={{ background: C.panel, border: `1px solid ${C.border}`, borderLeft: `3px solid ${color}`, borderRadius: 8, padding: "12px 14px" }}>
+                <div style={{ fontSize: 22, fontWeight: 800, color, fontFamily: "monospace" }}>{val}</div>
+                <div style={{ fontSize: 10, color: C.textMuted, textTransform: "uppercase", letterSpacing: 1, marginTop: 2 }}>{label}</div>
+              </div>
+            ))}
+          </div>
+
+          <Card style={{ marginBottom: 16, padding: "14px 18px" }}>
+            <div style={{ fontSize: 12, color: C.textSub, lineHeight: 1.7 }}>
+              CUQA detected <b style={{ color: C.danger }}>{project.totals.smells}</b> smell(s) across{" "}
+              <b style={{ color: C.danger }}>{project.totals.smellFiles}</b> file(s).{" "}
+              <b style={{ color: C.accent }}>{project.totals.smellsSelected}</b> were selected for refactoring, and{" "}
+              <b style={{ color: C.accent }}>{project.refactored.length}</b> file(s) came through the pipeline
+              refactored and kept.{" "}
+              <b style={{ color: C.warn }}>{project.withSmells.length - project.refactored.length}</b> file(s)
+              with smells were <b>not</b> refactored — the trees below say where each one stopped.
+            </div>
+            <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginTop: 12 }}>
+              {Object.entries(OUTCOMES)
+                .filter(([key]) => key !== "clean")
+                .map(([key, o]) => (
+                  <span key={key} title={o.hint}>
+                    <Badge label={o.label} color={o.color} />
+                  </span>
+                ))}
+              <span style={{ fontSize: 11, color: C.textMuted }}>
+                🔴 red rail = CUQA detected code smells in that file
+              </span>
+            </div>
+          </Card>
+
+          {/* Full project on the left; the files that never made it through on
+              the right, one tree per stage that dropped them. */}
+          <div style={{ display: "grid", gridTemplateColumns: "minmax(320px, 1.2fr) minmax(300px, 1fr)", gap: 12, alignItems: "start" }}>
+            <TreePanel
+              title="Whole project"
+              subtitle="Every file CUQA analysed, in its folder structure. Files with detected smells carry a red rail; the badge is where the file ended up. Click a refactored file to open it in the Refactored Code tab."
+              color={C.info}
+              rows={project.rows}
+              empty="No analysed files were reported."
+              onSelect={openFileInCodeTab}
+              selectedPath={activeFile ? norm(activeFile.path) : null}
+              maxHeight={560}
+            />
+
+            <div style={{ display: "flex", flexDirection: "column", gap: 12, minWidth: 0 }}>
+              <TreePanel
+                title="Refactored"
+                subtitle="Smells detected, selected, planned, approved, transformed and kept."
+                color={C.accent}
+                rows={project.refactored}
+                empty="No file was refactored and kept."
+                onSelect={openFileInCodeTab}
+                selectedPath={activeFile ? norm(activeFile.path) : null}
+                maxHeight={200}
+              />
+              <TreePanel
+                title="Smells found, not selected"
+                subtitle="Detected in Code Smell Review but left out of the selection, so they never reached the planner."
+                color={OUTCOMES.not_selected.color}
+                rows={project.notSelected}
+                empty="Every file with smells was selected."
+                maxHeight={200}
+              />
+              <TreePanel
+                title="Dropped at planning"
+                subtitle="Selected, but the plan steps were rejected in Plan Approval — or the RDP agent produced no step for the file."
+                color={C.warn}
+                rows={project.planDropped}
+                empty="No selected file was dropped at planning."
+                maxHeight={200}
+              />
+              <TreePanel
+                title="Change not kept"
+                subtitle="Reached the Transformation stage but was rejected there, came back unchanged, or never returned from the agent."
+                color={C.danger}
+                rows={project.changeRejected}
+                empty="Every transformed file was kept."
+                onSelect={openFileInCodeTab}
+                selectedPath={activeFile ? norm(activeFile.path) : null}
+                maxHeight={200}
+              />
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* ── Refactored code ───────────────────────────────────────────────── */}
-      {tab === "code" && (
+      {activeTab === "code" && (
         <div style={{ display: "flex", gap: 12, alignItems: "flex-start" }}>
           <div style={{ width: 270, flexShrink: 0, maxHeight: 460, overflow: "auto", background: C.panel, border: `1px solid ${C.border}`, borderRadius: 8, padding: 8 }}>
             <div style={{ fontSize: 11, color: C.textMuted, textTransform: "uppercase", letterSpacing: 1, marginBottom: 8, padding: "0 4px" }}>
@@ -647,7 +1055,7 @@ export default function ResultsApprovalPage({
       )}
 
       {/* ── Invariants ────────────────────────────────────────────────────── */}
-      {tab === "invariants" && (
+      {activeTab === "invariants" && (
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
           <div style={{ fontSize: 12, color: C.textSub, marginBottom: 4 }}>
             {invariantDetails?.summary ||
