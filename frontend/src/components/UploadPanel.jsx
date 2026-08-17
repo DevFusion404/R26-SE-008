@@ -28,6 +28,10 @@ export default function UploadPanel({ onLoaded }) {
       setError('Please upload a .zip file.');
       return;
     }
+    if (file.size > 500 * 1024 * 1024) {
+      setError('ZIP file size exceeds the 500MB limit.');
+      return;
+    }
     setError(null);
     setSuccess(null);
     setLoading(true);

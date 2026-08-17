@@ -197,11 +197,13 @@ class _PythonSmellVisitor(pyast.NodeVisitor):
             )
 
         if len(real_args) > 5:
+            # FIX-01: parameter_count
             # FIX-02: start_line / end_line
             self._add(
                 "TooManyParameters",
                 f"Function '{node.name}' has {len(real_args)} parameters (>5)",
                 node.lineno, "medium", entity=node.name,
+                parameter_count=len(real_args),
                 start_line=node.lineno,
                 end_line=end_line,
             )
