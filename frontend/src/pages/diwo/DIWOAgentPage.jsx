@@ -17,7 +17,7 @@
  *  [F7] DIWOAgentService path corrected to relative import for portability.
  */
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import AuditSidebar from "./AuditSidebar";
 import CodeSmellApprovalPage from "./CodeSmellApprovalPage";
 import RefactoringPlanApprovalPage from "./RefactoringPlanApprovalPage";
@@ -117,6 +117,9 @@ export default function DIWOAgentPage() {
   const [planMeta, setPlanMeta]               = useState(null);
   // Only the steps the developer approved — this is what Stage 3 sends to SCTVA.
   const [approvedPlan, setApprovedPlan]       = useState(null);
+  // The plan as Stage 2 rendered it, kept so a rollback from Stage 3 can offer
+  // every step again — approval trims planData down to the approved ones.
+  const [preApprovalPlan, setPreApprovalPlan] = useState(null);
   const [transformationData, setTransformationData] = useState(null);
   const [metricsBeforeApi, setMetricsBeforeApi]     = useState(null);
   const [metricsAfterApi, setMetricsAfterApi]       = useState(null);
@@ -405,6 +408,11 @@ export default function DIWOAgentPage() {
         return;
       }
 
+      // Approving replaces planData with the approved-only plan, so keep the
+      // plan as reviewed: rolling back from Stage 3 restores it and the
+      // developer can re-approve a step they rejected on the first pass.
+      setPreApprovalPlan(activePlan);
+
       // The backend derives the approved-only plan from the decisions and
       // persists it, so the report Stage 3 posts to /sctva/execute is the same
       // one the audit trail records. The local filter below is only the
@@ -616,6 +624,29 @@ export default function DIWOAgentPage() {
     setPhase(4);
   };
 
+  // ── Back to Plan Approval ─────────────────────────────────────────────────
+  /**
+   * Put the workflow back into plan approval and return the plan to re-review.
+   * Shared by the Stage 3 rollback and the Transformation page's own rollback,
+   * because both land the developer on plan approval and both would otherwise
+   * leave the backend on a stage that refuses the next /plan-decision.
+   */
+  const resetBackendToPlanApproval = async (reason) => {
+    let restored = preApprovalPlan || planData;
+    if (!workflowId) return restored;
+
+    try {
+      const res = await api.post(`/workflows/${workflowId}/reset-to-plan-approval`, {
+        feedback: { reason },
+      });
+      if (res.plan) restored = res.plan;
+      addLog("Workflow reset to plan approval in backend.", "info");
+    } catch (e) {
+      addLog(`Backend reset failed: ${e.message}`, "warn");
+    }
+    return restored;
+  };
+
   // ── Stage 3: Rollback ─────────────────────────────────────────────────────
   /**
    * FIX [F5]: Await the backend rollback before changing phase so the DB is
@@ -634,11 +665,93 @@ export default function DIWOAgentPage() {
         addLog(`Backend rollback failed: ${e.message}`, "warn");
       }
     }
+
+    // The rollback leaves the workflow at 'rolled_back', but this lands the
+    // developer back on plan approval — so put the stage (and the untrimmed
+    // plan) back too, or re-approving would be refused by the stage guard.
+    const restored = await resetBackendToPlanApproval("Rollback from results review");
+    if (restored) setPlanData(restored);
+
     // Drop the approved steps so the next approval re-runs SCTVA from scratch.
     setApprovedPlan(null);
     setTransformationData(null);
+    setMetricsAfterApi(null);
     setPhase(1);
   };
+
+  // ── Stage 1 → 0: Fallback to Smell Review ─────────────────────────────────
+  /**
+   * Moving the UI back to Stage 1 is not enough: the workflow row is still at
+   * 'plan_approval', and /select-smells guards on the stage, so the next
+   * selection came back as "Expected workflow stage 'smell_review'…". Reset the
+   * backend first, then drop the plan and the *filtered* report — otherwise
+   * Stage 1 re-opens showing only the smells that survived the last selection,
+   * with no way to put an excluded one back.
+   */
+  const handleFallbackToSmellReview = async () => {
+    addLog("Developer fell back to Smell Review.", "warn");
+
+    if (workflowId) {
+      try {
+        await api.post(`/workflows/${workflowId}/reset-to-smell-review`, {
+          feedback: { reason: "Fallback from plan approval" },
+        });
+        addLog("Workflow reset to smell review in backend.", "info");
+      } catch (e) {
+        addLog(`Backend reset failed: ${e.message}`, "warn");
+      }
+    }
+
+    setPlanData(null);
+    setPlanMeta(null);
+    setApprovedPlan(null);
+    setWorkflow((prev) => ({
+      ...(prev || {}),
+      updated_report: null,
+      planning_input: null,
+      smell_selection_summary: null,
+    }));
+    setPhase(0);
+  };
+
+  // ── Stage 2 → 1: Rollback to Plan Approval ────────────────────────────────
+  /**
+   * Stage 3 sends the approved plan straight to SCTVA, so the way to change
+   * what gets transformed is to go back and re-decide the steps. Reset the
+   * backend stage first (plan-decision guards on 'plan_approval'), then restore
+   * the plan as it was *before* approval trimmed it to the approved steps —
+   * otherwise the rejected steps would be missing and could never be reinstated.
+   */
+  const handleBackToPlanApproval = async () => {
+    addLog("Developer rolled back to Plan Approval to re-select steps.", "warn");
+
+    const restored = await resetBackendToPlanApproval(
+      "Rollback from transformation to re-select plan steps"
+    );
+
+    if (restored) setPlanData(restored);
+    setApprovedPlan(null);
+    setTransformationData(null);
+    setMetricsAfterApi(null);
+    setPhase(1);
+  };
+
+  /**
+   * What each earlier stage decided, handed to the Results page so it can draw
+   * the project tree and account for every smell CUQA found: the full analysed
+   * report, the selection that survived Stage 1, the plan before approval and
+   * the approved-only plan. Memoised so the classification is not redone on
+   * every unrelated re-render (a new audit log line, say).
+   */
+  const projectContext = useMemo(
+    () => ({
+      analysedReport: cuqaReport,
+      selectedReport: workflow?.updated_report || null,
+      plan: preApprovalPlan || planData,
+      approvedPlan: approvedPlan || planData,
+    }),
+    [cuqaReport, workflow?.updated_report, preApprovalPlan, planData, approvedPlan]
+  );
 
   // ── Restart ───────────────────────────────────────────────────────────────
   const handleRestart = () => {
@@ -696,7 +809,7 @@ export default function DIWOAgentPage() {
               loading={backendBusy && !planData}
               onDecisionChange={handlePlanDecisionChange}
               onApprove={handlePlanApproved}
-              onFallback={() => { addLog("Developer fell back to Smell Review.", "warn"); setPhase(0); }}
+              onFallback={handleFallbackToSmellReview}
             />
           )}
           {phase === 2 && (
@@ -705,6 +818,7 @@ export default function DIWOAgentPage() {
               language={workflowLanguage}
               transformationData={transformationData}
               onComplete={handleTransformComplete}
+              onBackToPlan={handleBackToPlanApproval}
             />
           )}
           {phase === 3 && (
@@ -716,6 +830,7 @@ export default function DIWOAgentPage() {
               diffRows={workflow?.diff_rows}
               files={workflow?.files}
               sctva={workflow?.sctva}
+              projectContext={projectContext}
             />
           )}
           {phase === 4 && (

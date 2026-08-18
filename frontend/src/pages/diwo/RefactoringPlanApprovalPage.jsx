@@ -400,7 +400,7 @@ function FilePathBar({ file, color, children }) {
       position: "sticky", top: 0, zIndex: 1,
     }}>
       <span style={{
-        fontSize: 18, fontWeight: 700, color, letterSpacing: 1,
+        fontSize: 16, fontWeight: 700, color, letterSpacing: 1,
         textTransform: "uppercase", flexShrink: 0,
       }}>
         File Path
@@ -408,7 +408,7 @@ function FilePathBar({ file, color, children }) {
       <span
         title={file}
         style={{
-          fontSize: 18, fontWeight: 700, color: C.text, fontFamily: "monospace",
+          fontSize: 16, fontWeight: 700, color: C.text, fontFamily: "monospace",
           overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
           minWidth: 0, flexShrink: 1,
         }}
@@ -465,7 +465,7 @@ function PlanFileGroup({ group, decisions, expanded, onDecide, onDecideGroup, on
               transition: "all 0.2s",
             }}
           >
-            ✓ Approve File
+           All ✓ 
           </button>
           <button
             onClick={() => onDecideGroup(group, "reject")}
@@ -476,7 +476,7 @@ function PlanFileGroup({ group, decisions, expanded, onDecide, onDecideGroup, on
               transition: "all 0.2s",
             }}
           >
-            ✕ Reject File
+            All ✕
           </button>
         </div>
       </FilePathBar>

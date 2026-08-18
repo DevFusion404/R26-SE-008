@@ -179,8 +179,36 @@ function BulkDecisionBar({ total, accepted, rejected, pending, onAcceptAll, onRe
   );
 }
 
+/**
+ * Rollback to Stage 2. The approved plan is what SCTVA executes, so changing
+ * what gets transformed means going back and re-deciding the steps; the parent
+ * restores the untrimmed plan and re-runs this page with the new selection.
+ */
+function BackToPlanButton({ onBackToPlan, label = "← Rollback to Plan Approval" }) {
+  if (!onBackToPlan) return null;
+  return (
+    <button
+      onClick={onBackToPlan}
+      title="Go back to the refactoring plan, re-select the steps, and run the transformation again"
+      style={{
+        padding: "10px 22px",
+        borderRadius: 8,
+        fontWeight: 700,
+        fontSize: 13,
+        cursor: "pointer",
+        background: `${C.warn}15`,
+        color: C.warn,
+        border: `1px solid ${C.warn}40`,
+      }}
+    >
+      {label}
+    </button>
+  );
+}
+
 export default function TransformationApprovalPage({
   onComplete,
+  onBackToPlan,
   transformationData,
   plan,
   language = "java",
@@ -445,6 +473,7 @@ export default function TransformationApprovalPage({
                 Continue with the DIWO backend's simulated result
               </button>
             )}
+            <BackToPlanButton onBackToPlan={onBackToPlan} label="← Back to Plan Approval" />
           </div>
         </Card>
       </div>
@@ -503,6 +532,12 @@ export default function TransformationApprovalPage({
         <div style={{ marginTop: 24, fontSize: 11, color: C.textMuted, textAlign: "center" }}>
           Safe Code Transformation & Validation Agent · {SCTVA_BASE}/sctva/execute
         </div>
+
+        {onBackToPlan && (
+          <div style={{ marginTop: 18 }}>
+            <BackToPlanButton onBackToPlan={onBackToPlan} label="← Cancel & Re-select Plan Steps" />
+          </div>
+        )}
       </div>
     );
   }
@@ -817,7 +852,9 @@ export default function TransformationApprovalPage({
               : "Simulated by the DIWO backend"}
           </div>
         </div>
-        <div style={{ textAlign: "right" }}>
+        <div style={{ textAlign: "right", display: "flex", gap: 12, alignItems: "flex-start", flexWrap: "wrap", justifyContent: "flex-end" }}>
+          <BackToPlanButton onBackToPlan={onBackToPlan} />
+          <div>
           <button
             onClick={handleContinue}
             disabled={pendingCount > 0}
@@ -840,6 +877,7 @@ export default function TransformationApprovalPage({
               Accept or reject {pendingCount} more file(s) to continue.
             </div>
           )}
+          </div>
         </div>
       </div>
     </div>
