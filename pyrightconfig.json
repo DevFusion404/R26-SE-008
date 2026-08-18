@@ -1,0 +1,9 @@
+{
+  "extraPaths": [
+    "agents/cuqa_agent/src",
+    "agents/cuqa_agent",
+    "agents/rdp_agent",
+    "agents/orchestration_agent",
+    "agents/transformation_agent"
+  ]
+}
