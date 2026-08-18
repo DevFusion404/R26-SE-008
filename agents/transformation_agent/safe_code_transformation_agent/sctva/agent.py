@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -53,11 +54,13 @@ class SafeCodeTransformationValidationAgent:
     def execute_request(self, request: SCTVARequestContract) -> Dict[str, Any]:
         """Execute validated request contract."""
         file_entries = self._collect_source_files(request)
+        action_scope = self._build_action_scope_index(request.refactoring_plan.actions)
+        project_file_payloads = [item.to_dict() for item in file_entries]
 
-        file_results: List[Dict[str, Any]] = []
-        for file_entry in file_entries:
-            plan_actions = self._actions_for_file(
+        def run_file(index: int, file_entry: SourceFileContract) -> tuple[int, Dict[str, Any] | None]:
+            plan_actions = self._actions_for_file_from_scope(
                 request.refactoring_plan.actions,
+                action_scope,
                 file_entry.file_name,
             )
             local_actions = self._local_actions_for_file(
@@ -67,15 +70,39 @@ class SafeCodeTransformationValidationAgent:
             )
             actions = [*plan_actions, *local_actions]
             if not actions:
-                continue
+                return index, None
 
             file_result = self._execute_single_file(
                 request=request,
                 file_entry=file_entry,
                 actions=actions,
-                project_files=file_entries,
+                project_files=project_file_payloads,
             )
-            file_results.append(file_result)
+            return index, file_result
+
+        indexed_results: Dict[int, Dict[str, Any]] = {}
+        max_workers = self._parallel_file_workers(request, len(file_entries))
+
+        if max_workers <= 1:
+            for index, file_entry in enumerate(file_entries):
+                result_index, file_result = run_file(index, file_entry)
+                if file_result is not None:
+                    indexed_results[result_index] = file_result
+        else:
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = {
+                    executor.submit(run_file, index, file_entry): index
+                    for index, file_entry in enumerate(file_entries)
+                }
+                for future in as_completed(futures):
+                    result_index, file_result = future.result()
+                    if file_result is not None:
+                        indexed_results[result_index] = file_result
+
+        file_results = [
+            indexed_results[index]
+            for index in sorted(indexed_results)
+        ]
 
         if not file_results:
             raise ContractValidationError("No source files matched the refactoring plan targets.")
@@ -356,6 +383,73 @@ class SafeCodeTransformationValidationAgent:
                 effective_actions.append(action)
         return effective_actions
 
+    @staticmethod
+    def _parallel_file_workers(
+        request: SCTVARequestContract,
+        file_count: int,
+    ) -> int:
+        if file_count <= 1:
+            return 1
+
+        configured = request.execution_options.max_parallel_files
+        if configured > 0:
+            return max(1, min(configured, file_count))
+
+        env_value = os.getenv("SCTVA_MAX_PARALLEL_FILES", "").strip()
+        if env_value.isdigit():
+            return max(1, min(int(env_value), file_count))
+
+        cpu_count = os.cpu_count() or 2
+        return max(1, min(4, cpu_count, file_count))
+
+    @classmethod
+    def _build_action_scope_index(
+        cls,
+        actions: List[RefactoringAction],
+    ) -> List[Dict[str, Any]]:
+        indexed: List[Dict[str, Any]] = []
+        for action in actions:
+            source_file = cls._action_source_file(action)
+            if not source_file:
+                continue
+            normalized = cls._normalize_path(source_file)
+            if not normalized:
+                continue
+            indexed.append(
+                {
+                    "action": action,
+                    "path": normalized,
+                    "base": normalized.rsplit("/", 1)[-1],
+                }
+            )
+        return indexed
+
+    @classmethod
+    def _actions_for_file_from_scope(
+        cls,
+        actions: List[RefactoringAction],
+        action_scope: List[Dict[str, Any]],
+        file_name: str,
+    ) -> List[RefactoringAction]:
+        if not action_scope:
+            return actions
+
+        file_path = cls._normalize_path(file_name)
+        if not file_path:
+            return []
+        file_base = file_path.rsplit("/", 1)[-1]
+
+        return [
+            entry["action"]
+            for entry in action_scope
+            if cls._file_matches_normalized(
+                action_path=entry["path"],
+                action_base=entry["base"],
+                file_path=file_path,
+                file_base=file_base,
+            )
+        ]
+
     @classmethod
     def _actions_for_file(
         cls,
@@ -406,6 +500,21 @@ class SafeCodeTransformationValidationAgent:
 
         action_base = action_path.rsplit("/", 1)[-1]
         file_base = file_path.rsplit("/", 1)[-1]
+        return cls._file_matches_normalized(
+            action_path=action_path,
+            action_base=action_base,
+            file_path=file_path,
+            file_base=file_base,
+        )
+
+    @staticmethod
+    def _file_matches_normalized(
+        *,
+        action_path: str,
+        action_base: str,
+        file_path: str,
+        file_base: str,
+    ) -> bool:
         return (
             action_path == file_path
             or file_path.endswith(f"/{action_path}")

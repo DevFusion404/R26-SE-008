@@ -59,7 +59,14 @@ export const DEFAULT_EXECUTION_OPTIONS = {
   // javac/gcc are not assumed to be on PATH; syntax validation still runs.
   require_compilation: false,
   rollback_on_behavior_failure: true,
-  enable_sctva_auto_refactoring: true,
+  // MUST stay false for the DIWO workflow. SCTVA defaults this to true, and
+  // whenever `source_files` is present its LocalRefactorDetector appends
+  // refactorings the plan never asked for (agent.py::_local_actions_for_file).
+  // In a reviewed workflow that is a correctness bug, not a bonus: a step the
+  // developer explicitly REJECTED comes back through the side door — a
+  // rejected "Introduce Constant" reappeared as `#define MAGIC_NUMBER_32 32`
+  // in testing. The approved plan is the contract; nothing else runs.
+  enable_sctva_auto_refactoring: false,
 };
 
 // ─── Errors ──────────────────────────────────────────────────────────────────

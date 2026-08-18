@@ -24,7 +24,6 @@ import json
 import io
 import os
 import subprocess
-import tempfile
 import shutil
 import zipfile
 from pathlib import Path
@@ -38,12 +37,16 @@ from db.database import (
 from diwo.orchestrator import (
     generate_refactoring_plan, simulate_transformation,
     compute_metrics_before, compute_metrics_after, next_stage,
-    generate_updated_plan_report,
-    normalize_cuqa_report, cuqa_report_to_smells,
+    generate_updated_plan_report, build_approved_plan,
+    normalize_cuqa_report, cuqa_report_to_smells, filter_cuqa_report,
     detect_primary_language, derive_target_name,
+    build_rdp_plan_input, normalize_rdp_plan,
 )
 from diwo.cuqa_client import (
     CUQAError, cuqa_base_url, fetch_quality_report, probe_cuqa,
+)
+from diwo.rdp_client import (
+    RDPError, generate_plan as rdp_generate_plan, probe_rdp, rdp_base_url,
 )
 
 diwo_bp = Blueprint("diwo", __name__)
@@ -64,11 +67,17 @@ def _parse_json_field(wf: dict, field: str):
     return json.loads(val) if isinstance(val, str) else val
 
 
-def _require_stage(wf: dict, expected: str):
-    """Return an error response if the workflow is not in the expected stage."""
-    if wf["status"] != expected:
+def _require_stage(wf: dict, *expected: str):
+    """Return an error response unless the workflow is in one of `expected`.
+
+    Several stages legitimately accept a request from more than one point in the
+    workflow — falling back from plan approval to smell review, for instance,
+    re-enters /select-smells while the stored stage is still 'plan_approval'.
+    """
+    if wf["status"] not in expected:
+        wanted = " or ".join(f"'{stage}'" for stage in expected)
         return _err(
-            f"Expected workflow stage '{expected}' but current stage is '{wf['status']}'."
+            f"Expected workflow stage {wanted} but current stage is '{wf['status']}'."
             " Reload the page to sync your session."
         )
     return None
@@ -273,7 +282,70 @@ def _store_refactored_archive(wf_id: str, files: list, meta: dict):
     }
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Planning hand-off to the RDP agent
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _plan_from_rdp(updated_report: dict, selected: list, target: str, wf_id: str = None):
+    """Generate the refactoring plan for the developer's smell selection.
+
+    The updated report — every analysed file, but only the smells the developer
+    kept — is forwarded to the RDP agent's POST /generate, which is the agent
+    that owns planning. The local generator in orchestrator.py stays only as
+    the offline fallback, and the response always says which one produced the
+    plan so a fallback is never mistaken for real RDP output.
+
+    Returns (plan, trace, source, warning).
+    """
+    rdp_input = build_rdp_plan_input(updated_report)
+
+    if not rdp_input["files"]:
+        warning = (
+            "The selection contains no code smells, so the RDP agent was not called."
+        )
+        return generate_refactoring_plan(selected, target), {}, "diwo_local_fallback", warning
+
+    try:
+        result = rdp_generate_plan(rdp_input)
+    except RDPError as exc:
+        if wf_id:
+            log_event(wf_id, "plan_approval", "rdp_plan_failed",
+                      {"rdp_url": rdp_base_url(), "status": exc.status, "reason": exc.message},
+                      actor="system")
+        return (
+            generate_refactoring_plan(selected, target),
+            {},
+            "diwo_local_fallback",
+            exc.message,
+        )
+
+    plan = normalize_rdp_plan(result["plan"], rdp_input)
+
+    if wf_id:
+        log_event(wf_id, "plan_approval", "rdp_plan_generated", {
+            "rdp_url":       rdp_base_url(),
+            "plan_id":       plan.get("plan_id"),
+            "target":        plan.get("target"),
+            "steps":         plan["summary"]["total_steps"],
+            "files_sent":    len(rdp_input["files"]),
+            "smells_sent":   rdp_input["summary"]["total_code_smells"],
+            "smells_skipped": len(result["trace"].get("plan_generation", {}).get("skipped_smells", [])),
+        }, actor="system")
+
+    return plan, result["trace"], "rdp_agent", None
+
+
 def _resolve_selected_ids(all_smells: list, selected_files: list, selected_smells: list):
+    """Turn a file-wise and/or smell-wise selection into workflow smell ids.
+
+    File-wise selection takes every smell in the listed files. Smell-wise
+    selection is per smell: an entry carrying the smell's own `id` resolves
+    directly (that is what the UI sends), and an entry without one is matched on
+    file + type + line, falling back to file + type + entity. A smell's `line`
+    and its `location.lines[0]` can differ — CUQA reports both `line` and
+    `start_line` — so both are indexed, otherwise a descriptor built from the
+    report's `line` would never match a smell keyed on `start_line`.
+    """
     ids = []
 
     if selected_files:
@@ -284,27 +356,60 @@ def _resolve_selected_ids(all_smells: list, selected_files: list, selected_smell
         ])
 
     if selected_smells:
-        key_map = {}
+        known_ids = {smell.get("id") for smell in all_smells if smell.get("id")}
+        line_map = {}     # (file, type, line)   -> [ids]
+        entity_map = {}   # (file, type, entity) -> [ids]
+
         for smell in all_smells:
             loc = smell.get("location", {}) or {}
-            key = (
-                loc.get("file"),
-                smell.get("type"),
-                (loc.get("lines") or [0, 0])[0],
-            )
-            key_map[key] = smell.get("id")
+            file_path = loc.get("file") or smell.get("relative_path")
+            smell_type = smell.get("type")
+            lines = loc.get("lines") or []
+            candidates = {smell.get("line") or 0, (lines[0] if lines else 0) or 0}
+            for line in candidates:
+                line_map.setdefault((file_path, smell_type, line), []).append(smell.get("id"))
+            if smell.get("entity"):
+                entity_map.setdefault(
+                    (file_path, smell_type, smell["entity"]), []
+                ).append(smell.get("id"))
 
         for s in selected_smells:
+            if not isinstance(s, dict):
+                continue
+
+            explicit = s.get("id") or s.get("smell_id")
+            if explicit in known_ids:
+                ids.append(explicit)
+                continue
+
             file_path = s.get("file") or s.get("relative_path") or s.get("path")
-            key = (
-                file_path,
-                s.get("type"),
-                s.get("line") or 0,
-            )
-            if key in key_map:
-                ids.append(key_map[key])
+            smell_type = s.get("type")
+            matched = line_map.get((file_path, smell_type, s.get("line") or 0))
+            if not matched and s.get("entity"):
+                matched = entity_map.get((file_path, smell_type, s["entity"]))
+            if matched:
+                ids.extend(matched)
 
     return list(dict.fromkeys(ids))
+
+
+def _resolve_selection(all_smells: list, selected_ids: list,
+                       selected_files: list, selected_smells: list):
+    """Resolve the developer's selection, preferring explicit smell ids.
+
+    Ids that are not part of this workflow are dropped and the selection is
+    re-derived from the files / smell descriptors instead, so a smell-wise
+    selection made against a re-filtered report — where a smell's index inside
+    its file, and therefore its id, has shifted — is still honoured rather than
+    silently resolving to nothing.
+    """
+    known_ids = {smell.get("id") for smell in all_smells if smell.get("id")}
+    resolved = [sid for sid in (selected_ids or []) if sid in known_ids]
+
+    if len(resolved) < len(selected_ids or []) or not resolved:
+        resolved.extend(_resolve_selected_ids(all_smells, selected_files, selected_smells))
+
+    return list(dict.fromkeys(resolved))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -362,13 +467,23 @@ def start_workflow():
     }), 201
 
 
-def _persist_new_workflow(target: str, language: str, smells: list, source: str = "client"):
-    """Create the workflow row, seed metrics_before, and log the start event."""
+def _persist_new_workflow(target: str, language: str, smells: list,
+                          source: str = "client", cuqa_report: dict = None):
+    """Create the workflow row, seed metrics_before, and log the start event.
+
+    `cuqa_report` is stored verbatim when the workflow was seeded from the CUQA
+    agent, so the updated report can later be produced by filtering it instead
+    of rebuilding one from the flattened smells.
+    """
     wf_id          = f"wf_{uuid.uuid4().hex[:10]}"
     metrics_before = compute_metrics_before(smells)
 
     create_workflow(wf_id, target, language, smells)
-    update_workflow(wf_id, metrics_before_json=json.dumps(metrics_before))
+    update_workflow(
+        wf_id,
+        metrics_before_json=json.dumps(metrics_before),
+        cuqa_report_json=json.dumps(cuqa_report) if cuqa_report else None,
+    )
     log_event(wf_id, "smell_review", "workflow_started",
               {"target": target, "language": language,
                "smell_count": len(smells), "source": source})
@@ -396,6 +511,12 @@ def _cuqa_error_response(exc: CUQAError):
 def cuqa_status():
     """Is the CUQA agent up, and does it have a repository loaded?"""
     return jsonify(probe_cuqa())
+
+
+@diwo_bp.route("/rdp/status", methods=["GET"])
+def rdp_status():
+    """Is the RDP agent up? Planning is forwarded to it at POST /generate."""
+    return jsonify(probe_rdp())
 
 
 @diwo_bp.route("/cuqa/quality-report", methods=["GET", "POST"])
@@ -470,7 +591,9 @@ def start_workflow_from_cuqa():
     target   = data.get("target") or derive_target_name(report)
     language = data.get("language") or detect_primary_language(report)
 
-    wf_id, metrics_before = _persist_new_workflow(target, language, smells, source="cuqa")
+    wf_id, metrics_before = _persist_new_workflow(
+        target, language, smells, source="cuqa", cuqa_report=report
+    )
     log_event(wf_id, "smell_review", "cuqa_report_ingested", {
         "cuqa_url":       cuqa_base_url(),
         "report_type":    report.get("report_type"),
@@ -539,7 +662,18 @@ def _build_smell_selection_payload(wf, selected_ids, selected_files=None):
             upd["selected_at"] = now_iso()
         updated_smells.append(upd)
 
-    updated_report = _build_report_from_smells(all_smells, wf.get("target"), selected_ids=selected_ids)
+    # Prefer filtering the stored CUQA report: it keeps the exact shape
+    # /api/cuqa/quality-report serves, so the report that reaches the RDP agent
+    # carries the same metrics, quality scores and per-smell fields CUQA
+    # produced. _build_report_from_smells is the fallback for workflows created
+    # from a client-supplied smell list, which never had a report to store.
+    stored_report = _parse_json_field(wf, "cuqa_report_json")
+    if stored_report:
+        updated_report = filter_cuqa_report(stored_report, selected_ids)
+    else:
+        updated_report = _build_report_from_smells(
+            all_smells, wf.get("target"), selected_ids=selected_ids
+        )
     updated_report["workflow_id"] = wf.get("id")
     updated_report["generated_at"] = now_iso()
 
@@ -564,7 +698,14 @@ def _build_smell_selection_payload(wf, selected_ids, selected_files=None):
 
 @diwo_bp.route("/workflows/<wf_id>/smell-selection-pass", methods=["POST"])
 def smell_selection_pass(wf_id):
-    """Return the updated code smell JSON without advancing the workflow."""
+    """Preview the updated code smell JSON without advancing the workflow.
+
+    Report only — no plan. The Code Smell Review stage calls this to show what
+    the selection looks like, then the same selection goes through
+    /select-smells, which is where the RDP agent is called exactly once. This
+    endpoint deliberately does not plan: doing so would put two POSTs to
+    /generate in every smell-selection flow.
+    """
     wf = get_workflow(wf_id)
     if not wf:
         return _err("Workflow not found.", 404)
@@ -574,6 +715,7 @@ def smell_selection_pass(wf_id):
     selected_ids = data.get("selected_ids") or []
     selected_files = data.get("selected_files") or data.get("selected_file_paths") or []
     selected_smells = data.get("selected_smells") or []
+    selection_mode = data.get("selection_mode") or ("smell" if selected_ids and not selected_files else "file")
 
     if selected_ids and not isinstance(selected_ids, list):
         return _err("'selected_ids' must be a list of smell ID strings.")
@@ -582,19 +724,24 @@ def smell_selection_pass(wf_id):
     if selected_smells and not isinstance(selected_smells, list):
         return _err("'selected_smells' must be a list if provided.")
 
-    if not selected_ids:
-        selected_ids = _resolve_selected_ids(
-            _parse_json_field(wf, "smells_json") or [],
-            selected_files,
-            selected_smells,
-        )
+    selected_ids = _resolve_selection(
+        _parse_json_field(wf, "smells_json") or [],
+        selected_ids,
+        selected_files,
+        selected_smells,
+    )
 
     if not selected_ids:
         return _err("No smell IDs could be resolved from the selection. Send 'selected_ids', 'selected_files', or 'selected_smells'.")
 
     payload = _build_smell_selection_payload(wf, selected_ids, selected_files)
-    payload["plan"] = generate_refactoring_plan(payload["selected"], wf["target"])
-    payload["status"] = "plan_approval"
+
+    # What /select-smells would forward to the RDP agent, so the developer can
+    # confirm the selection before committing to it. Built, not sent.
+    payload["rdp_plan_input"] = build_rdp_plan_input(payload["updated_report"])
+    payload["status"] = "smell_review"
+    payload["selection_mode"] = selection_mode
+    payload["selected_ids"] = selected_ids
     return jsonify(payload)
 
 
@@ -640,6 +787,46 @@ def save_updated_report(wf_id):
         return _err(f"Failed to save report: {str(e)}", 500)
 
 
+@diwo_bp.route("/workflows/<wf_id>/reset-to-smell-review", methods=["POST"])
+def reset_to_smell_review(wf_id):
+    """Send the workflow back to Stage 1 after a fallback from plan approval.
+
+    The plan review screen's "Fallback to Smell Review" only moved the frontend;
+    the workflow row stayed at 'plan_approval', so the next /select-smells was
+    refused by the stage guard. This clears the plan and the stored selection so
+    the developer starts the stage from the full CUQA report again.
+    """
+    wf = get_workflow(wf_id)
+    if not wf:
+        return _err("Workflow not found.", 404)
+
+    previous = wf["status"]
+    if previous == "smell_review":
+        return jsonify({"status": "smell_review", "changed": False,
+                        "message": "Workflow is already in smell review."})
+
+    data = request.get_json(force=True, silent=True) or {}
+    reason = (data.get("feedback") or {}).get("reason") or data.get("reason") or "Developer fell back to smell review"
+
+    update_workflow(
+        wf_id,
+        status="smell_review",
+        plan_json=None,
+        selected_smells_json=None,
+        updated_smells_json=None,
+        planning_input_json=None,
+    )
+    log_event(wf_id, "smell_review", "reset_to_smell_review",
+              {"from_stage": previous, "reason": reason})
+
+    return jsonify({
+        "status": "smell_review",
+        "changed": True,
+        "from_stage": previous,
+        "message": "Workflow reset to smell review. The full CUQA report is selectable again.",
+    })
+
+
 @diwo_bp.route("/workflows/<wf_id>/select-smells", methods=["POST"])
 def select_smells(wf_id):
     """
@@ -647,14 +834,21 @@ def select_smells(wf_id):
     Body: { selected_ids: [str], feedback?: { reason?: str } }
 
     FIX [13,14]: Stage guard + list validation before any DB write.
+
+    'plan_approval' is accepted as well as 'smell_review': the plan approval
+    screen can fall back to smell review, and re-submitting a selection from
+    there simply replaces the plan. Rejecting it would strand the developer with
+    a stage error on a screen that offers the fallback button in the first place.
     """
     wf = get_workflow(wf_id)
     if not wf:
         return _err("Workflow not found.", 404)
 
-    err = _require_stage(wf, "smell_review")
+    err = _require_stage(wf, "smell_review", "plan_approval")
     if err:
         return err
+
+    replanning = wf["status"] == "plan_approval"
 
     data = request.get_json(force=True, silent=True) or {}
 
@@ -662,6 +856,7 @@ def select_smells(wf_id):
     selected_ids = data.get("selected_ids")
     selected_files = data.get("selected_files") or data.get("selected_file_paths") or []
     selected_smells = data.get("selected_smells") or []
+    selection_mode = data.get("selection_mode") or ("file" if selected_files else "smell")
 
     if selected_ids is not None:
         if not isinstance(selected_ids, list):
@@ -677,13 +872,15 @@ def select_smells(wf_id):
     if selected_smells and not isinstance(selected_smells, list):
         return _err("'selected_smells' must be a list if provided.")
 
-    # If no smell IDs were sent, derive them from selected files or smell details.
-    if not selected_ids:
-        selected_ids = _resolve_selected_ids(
-            _parse_json_field(wf, "smells_json") or [],
-            selected_files,
-            selected_smells,
-        )
+    # Explicit ids win; anything unresolved falls back to the selected files or
+    # the per-smell descriptors (smell-wise selection sends no files, so the
+    # deselected smells of a partially selected file are not pulled back in).
+    selected_ids = _resolve_selection(
+        _parse_json_field(wf, "smells_json") or [],
+        selected_ids,
+        selected_files,
+        selected_smells,
+    )
 
     if not selected_ids:
         return _err("No smell IDs could be resolved from the selection. Send 'selected_ids', 'selected_files', or 'selected_smells'.")
@@ -703,7 +900,13 @@ def select_smells(wf_id):
     update_workflow(wf_id, status="smell_selection",
                     selected_smells_json=json.dumps(selected))
     log_event(wf_id, "smell_selection", "smells_selected",
-              {"selected": selected_ids, "excluded": [s["id"] for s in excluded]})
+              {"selected": selected_ids, "excluded": [s["id"] for s in excluded],
+               "selection_mode": selection_mode,
+               "replanned_after_fallback": replanning,
+               "selected_files": sorted({
+                   s.get("location", {}).get("file") for s in selected
+                   if s.get("location", {}).get("file")
+               })})
 
     for s in excluded:
         save_feedback(wf_id, "smell_selection", "smell_excluded",
@@ -711,11 +914,22 @@ def select_smells(wf_id):
                       reason=feedback.get("reason", "Developer choice"),
                       accepted=False)
 
-    # Generate the refactoring plan (still useful as a quick local plan preview)
-    plan = generate_refactoring_plan(selected, wf["target"])
-    update_workflow(wf_id, status="plan_approval", plan_json=json.dumps(plan))
+    # Forward the updated report — every file, but only the smells the
+    # developer kept — to the RDP agent, which owns plan generation.
+    plan, trace, plan_source, plan_warning = _plan_from_rdp(
+        payload["updated_report"], selected, wf["target"], wf_id=wf_id
+    )
+
+    # plan_full_json keeps the agent's plan before approval trims it down to the
+    # approved steps, so a rollback from transformation can offer every step for
+    # re-selection instead of only the ones approved last time.
+    plan_serialized = json.dumps(plan)
+    update_workflow(wf_id, status="plan_approval",
+                    plan_json=plan_serialized, plan_full_json=plan_serialized)
     log_event(wf_id, "plan_approval", "plan_generated",
-              {"plan_id": plan["plan_id"], "steps": plan["summary"]["total_steps"]},
+              {"plan_id": plan.get("plan_id"),
+               "steps": plan["summary"]["total_steps"],
+               "source": plan_source},
               actor="system")
 
     return jsonify({
@@ -723,11 +937,22 @@ def select_smells(wf_id):
         "selected_count":  len(selected),
         "excluded_count":  len(excluded),
         "plan":            plan,
+        # RDP's decision trace: impact / risk / MCDA scores live here, not on
+        # the steps, so the approval page needs it to explain each choice.
+        "trace":           trace,
+        "plan_source":     plan_source,
+        "plan_warning":    plan_warning,
+        "rdp_url":         rdp_base_url(),
         "selected_ids":    selected_ids,
         "selected_files":   selected_files,
+        "selection_mode":   selection_mode,
         "updated_report":   payload["updated_report"],
         "planning_input":   planning_input,
-        "message":         "Refactoring plan generated. Please review and approve.",
+        "message": (
+            "Refactoring plan generated by the RDP agent. Please review and approve."
+            if plan_source == "rdp_agent"
+            else f"RDP agent unavailable ({plan_warning}); showing a local fallback plan."
+        ),
     })
 
 
@@ -790,18 +1015,72 @@ def plan_preference_update(wf_id):
         "updated_planning_report": updated_plan,
     })
 
+@diwo_bp.route("/workflows/<wf_id>/reset-to-plan-approval", methods=["POST"])
+def reset_to_plan_approval(wf_id):
+    """Send the workflow back to Stage 2 after a rollback from transformation.
+
+    Approval reduces plan_json to the approved steps, so simply flipping the
+    stage back would re-open plan review with the rejected steps already gone
+    and no way to reinstate them. plan_full_json — the plan as the RDP agent
+    produced it — is restored instead, and the simulated transformation result
+    is dropped so nothing stale is carried into the next run.
+    """
+    wf = get_workflow(wf_id)
+    if not wf:
+        return _err("Workflow not found.", 404)
+
+    previous = wf["status"]
+    full_plan = _parse_json_field(wf, "plan_full_json")
+    plan = full_plan or _parse_json_field(wf, "plan_json")
+
+    if not plan:
+        return _err("This workflow has no plan to go back to.", 400)
+
+    if previous == "plan_approval":
+        return jsonify({"status": "plan_approval", "changed": False, "plan": plan,
+                        "message": "Workflow is already in plan approval."})
+
+    data = request.get_json(force=True, silent=True) or {}
+    reason = (data.get("feedback") or {}).get("reason") or data.get("reason") or "Developer rolled back to plan approval"
+
+    update_workflow(
+        wf_id,
+        status="plan_approval",
+        plan_json=json.dumps(plan),
+        transformation_result_json=None,
+        metrics_after_json=None,
+    )
+    log_event(wf_id, "plan_approval", "reset_to_plan_approval",
+              {"from_stage": previous, "reason": reason,
+               "restored_steps": len(plan.get("steps") or []),
+               "restored_full_plan": bool(full_plan)})
+
+    return jsonify({
+        "status": "plan_approval",
+        "changed": True,
+        "from_stage": previous,
+        "plan": plan,
+        "restored_full_plan": bool(full_plan),
+        "message": "Workflow reset to plan approval. Re-select the steps and forward them again.",
+    })
+
+
 @diwo_bp.route("/workflows/<wf_id>/plan-decision", methods=["POST"])
 def plan_decision(wf_id):
     """
     Body: { decision: 'approve'|'reject'|'modify', modified_steps?: [...], feedback?: {...} }
 
     FIX [13,15]: Stage guard + decision enum validation.
+
+    'transformation' is accepted as well as 'plan_approval': Stage 3 offers a
+    rollback to plan review, and re-approving from there must not be refused
+    just because the stage reset did not reach the backend.
     """
     wf = get_workflow(wf_id)
     if not wf:
         return _err("Workflow not found.", 404)
 
-    err = _require_stage(wf, "plan_approval")
+    err = _require_stage(wf, "plan_approval", "transformation")
     if err:
         return err
 
@@ -827,27 +1106,59 @@ def plan_decision(wf_id):
 
     # ── Modify ───────────────────────────────────────────────────────────────
     if decision == "modify":
+        decisions = data.get("decisions")
         modified_steps = data.get("modified_steps")
-        if modified_steps is not None:
+
+        if isinstance(decisions, dict) and decisions:
+            # Preferred: the backend derives the approved plan itself, so the
+            # report the Transformation Agent receives cannot disagree with the
+            # verdicts recorded in the audit trail.
+            plan = build_approved_plan(plan, decisions)
+        elif modified_steps is not None:
             if not isinstance(modified_steps, list):
                 return _err("'modified_steps' must be a list of step objects.")
-            plan["steps"] = modified_steps
-            plan["summary"]["total_steps"] = len(modified_steps)
+            kept = {s.get("step_id") for s in modified_steps if isinstance(s, dict)}
+            plan = build_approved_plan(
+                plan,
+                {s.get("step_id"): ("approve" if s.get("step_id") in kept else "reject")
+                 for s in plan.get("steps") or []},
+            )
+
         update_workflow(wf_id, plan_json=json.dumps(plan))
-        log_event(wf_id, "plan_approval", "plan_modified",
-                  {"steps_after": len(plan["steps"])})
+        log_event(wf_id, "plan_approval", "plan_modified", {
+            "steps_after":  len(plan.get("steps") or []),
+            "approved_ids": (plan.get("approval") or {}).get("approved_step_ids"),
+            "rejected_ids": (plan.get("approval") or {}).get("rejected_step_ids"),
+        })
         save_feedback(wf_id, "plan_approval", "plan_modified",
                       reason=feedback.get("reason"), rating=feedback.get("rating"),
                       accepted=True)
+
+        # One feedback row per rejected step — a step-level rejection is a
+        # stronger training signal than the session-level approval.
+        for step in (plan.get("approval") or {}).get("rejected_step_ids") or []:
+            save_feedback(wf_id, "plan_approval", "plan_step_rejected",
+                          reason=f"Developer rejected plan step {step}.",
+                          accepted=False)
+
         return jsonify({
             "status":  "plan_approval",
             "plan":    plan,
-            "message": "Plan updated. Please approve to proceed.",
+            "message": "Plan reduced to the approved steps. Please approve to proceed.",
         })
 
     # ── Approve → trigger transformation ─────────────────────────────────────
+    # An approve can carry the decisions directly, so a caller that never sent
+    # a separate 'modify' still gets an approved-only plan persisted.
+    approve_decisions = data.get("decisions")
+    if isinstance(approve_decisions, dict) and approve_decisions:
+        plan = build_approved_plan(plan, approve_decisions)
+        update_workflow(wf_id, plan_json=json.dumps(plan))
+
     log_event(wf_id, "plan_approval", "plan_approved",
-              {"plan_id": plan.get("plan_id")})
+              {"plan_id": plan.get("plan_id"),
+               "steps": len(plan.get("steps") or []),
+               "approved_ids": (plan.get("approval") or {}).get("approved_step_ids")})
     save_feedback(wf_id, "plan_approval", "plan_approved",
                   reason=feedback.get("reason"), rating=feedback.get("rating"),
                   accepted=True)
@@ -868,12 +1179,16 @@ def plan_decision(wf_id):
 
     return jsonify({
         "status":               "transformation",
+        # The approved-only plan report. This is what the Safe Transformation
+        # Agent must execute — Stage 3 posts it to /sctva/execute, so a
+        # rejected step never reaches the transformer.
+        "approved_plan":        plan,
         "transformation_result": tr,
         "refactored_code":      tr.get("refactored_code", ""),
         "diff_rows":            tr.get("diff_rows", []),
         "files":                tr.get("files", []),
         "metrics_after":        metrics_after,
-        "message":              "Transformation applied. Please review results.",
+        "message":              "Plan approved. Forward the approved plan to the Transformation Agent.",
     })
 
 
@@ -1117,170 +1432,319 @@ def audit_logs(wf_id):
 # Git Integration: Apply Files & Push to GitHub
 # ─────────────────────────────────────────────────────────────────────────────
 
+# ─────────────────────────────────────────────────────────────────────────────
+# GitHub integration — apply the refactored project to a branch
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Remote repositories are cloned here, not into a temp dir: GitHub Desktop has
+# to be able to open the same working copy afterwards, and a second run on the
+# same repository should reuse the clone instead of downloading it again.
+DIWO_CLONE_ROOT = Path.home() / "DIWO" / "repos"
+
+GIT_TIMEOUT = 300
+
+
+def _git(args, cwd=None, timeout=GIT_TIMEOUT):
+    """Run one git command. Returns (ok, stdout, stderr) and never raises."""
+    try:
+        proc = subprocess.run(
+            ["git", *args],
+            cwd=str(cwd) if cwd else None,
+            capture_output=True,
+            timeout=timeout,
+        )
+        return (
+            proc.returncode == 0,
+            proc.stdout.decode("utf-8", errors="replace").strip(),
+            proc.stderr.decode("utf-8", errors="replace").strip(),
+        )
+    except FileNotFoundError:
+        return False, "", "git is not installed or not on PATH."
+    except subprocess.TimeoutExpired:
+        return False, "", f"git {' '.join(args)} timed out after {timeout}s."
+
+
+def _is_remote_repo(value: str) -> bool:
+    """A clone URL rather than a filesystem path.
+
+    `file://` counts: git clones it happily, but Path() would treat the URL text
+    as a directory name and the repository would never be found.
+    """
+    lowered = value.lower()
+    return lowered.startswith(("http://", "https://", "git@", "ssh://", "file://"))
+
+
+def _repo_name_from_url(url: str) -> str:
+    """`https://github.com/user/my-repo.git` -> `my-repo`."""
+    cleaned = url.rstrip("/")
+    if cleaned.endswith(".git"):
+        cleaned = cleaned[:-4]
+    tail = cleaned.replace(":", "/").split("/")[-1]
+    return _safe_archive_path(tail, "repository").replace("/", "_") or "repository"
+
+
+def _web_url_for_remote(url: str) -> str:
+    """Browser URL for a clone URL, so the response can link to the branch."""
+    cleaned = url.strip()
+    if cleaned.startswith("git@"):                       # git@github.com:user/repo.git
+        host, _, path = cleaned[4:].partition(":")
+        cleaned = f"https://{host}/{path}"
+    if cleaned.startswith("ssh://git@"):
+        cleaned = "https://" + cleaned[len("ssh://git@"):]
+    if cleaned.endswith(".git"):
+        cleaned = cleaned[:-4]
+    return cleaned if cleaned.startswith("http") else ""
+
+
+def _default_remote_branch(repo_path: Path) -> str:
+    """The remote's own HEAD, so a work branch is cut from the right place."""
+    ok, out, _ = _git(["symbolic-ref", "--short", "refs/remotes/origin/HEAD"], cwd=repo_path)
+    if ok and out:
+        return out.split("/", 1)[-1]
+    for candidate in ("main", "master"):
+        ok, _, _ = _git(["rev-parse", "--verify", f"refs/remotes/origin/{candidate}"], cwd=repo_path)
+        if ok:
+            return candidate
+    return "main"
+
+
+def _open_github_desktop(repo_path: Path):
+    """Open GitHub Desktop on `repo_path`. Returns (opened, detail).
+
+    The old command was `start github -- -r "<path>"`, which cmd reads as
+    title="github", command="--" — the path never reached GitHub Desktop, so it
+    opened on whatever repository was last selected and the refactored changes
+    appeared to be missing. `start "" github "<path>"` passes the repository as
+    the argument it actually is, and the direct executable is the fallback for
+    when the `github` shim is not on PATH.
+    """
+    target = str(repo_path)
+
+    if os.name == "nt":
+        attempts = [
+            ["cmd", "/c", "start", "", "github", target],
+            [str(Path(os.environ.get("LOCALAPPDATA", "")) / "GitHubDesktop" / "GitHubDesktop.exe"), target],
+        ]
+    else:
+        attempts = [["github", target], ["open", "-a", "GitHub Desktop", target]]
+
+    errors = []
+    for cmd in attempts:
+        if not cmd[0]:
+            continue
+        try:
+            subprocess.Popen(cmd, cwd=target)
+            return True, f"Launched: {' '.join(cmd[:2])}"
+        except Exception as exc:                      # not installed / not on PATH
+            errors.append(f"{cmd[0]}: {exc}")
+
+    return False, "; ".join(errors) or "GitHub Desktop could not be launched."
+
+
+def _prepare_repository(repository: str):
+    """Resolve the request's repository to a local working copy.
+
+    A URL is cloned (once) into DIWO_CLONE_ROOT and re-fetched on later runs; a
+    filesystem path is used where it is. Returns (repo_path, info) or (None, error).
+    """
+    if _is_remote_repo(repository):
+        DIWO_CLONE_ROOT.mkdir(parents=True, exist_ok=True)
+        repo_path = DIWO_CLONE_ROOT / _repo_name_from_url(repository)
+
+        if (repo_path / ".git").exists():
+            ok, _, err = _git(["fetch", "origin", "--prune"], cwd=repo_path)
+            if not ok:
+                return None, f"Could not fetch the existing clone at {repo_path}: {err}"
+        else:
+            if repo_path.exists():
+                shutil.rmtree(repo_path, ignore_errors=True)
+            ok, _, err = _git(["clone", repository, str(repo_path)])
+            if not ok:
+                return None, (
+                    f"Could not clone {repository}: {err} — check the URL, and that you have "
+                    "access to the repository (a private repo needs credentials configured for git)."
+                )
+
+        return repo_path, {"remote": True, "clone_url": repository, "base_branch": _default_remote_branch(repo_path)}
+
+    repo_path = Path(repository).expanduser().resolve()
+    if not (repo_path / ".git").exists():
+        return None, f"Not a git repository: {repo_path}"
+
+    ok, out, _ = _git(["remote", "get-url", "origin"], cwd=repo_path)
+    return repo_path, {"remote": False, "clone_url": out if ok else "", "base_branch": None}
+
+
 @diwo_bp.route("/diwo/apply-and-push", methods=["POST"])
 def apply_and_push():
     """
-    Apply refactored files to local repository, create a branch, and open GitHub Desktop.
-    
-    Request body:
-    {
-      "files": [{ "path": "file/path.java", "after": "code content" }, ...],
-      "branch_name": "refactoring/my-changes",
-      "repository_path": "/path/to/repo"
-    }
+    Write the refactored project into a git repository, on its own branch.
+
+    Body:
+      {
+        "files":           [{ path, after|content }, ...],   # the WHOLE project
+        "branch_name":     "refactoring/diwo-changes",
+        "repository_path": "https://github.com/user/repo"  |  "C:/path/to/repo",
+        "commit_message":  "...",       optional
+        "commit":          true,        optional (default true)
+        "push":            true         optional (default true when a remote exists)
+      }
+
+    `files` is the same entry list the "Download Project (.zip)" action packs:
+    every project file, with the accepted refactorings replacing the originals
+    in place. Sending only the refactored files would leave a freshly cloned
+    repository holding nothing else.
     """
-    data = request.get_json() or {}
-    
-    # Validate inputs
-    files = data.get("files", [])
-    branch_name = data.get("branch_name", "").strip()
-    repo_path = data.get("repository_path", "").strip()
-    
-    if not files:
-        return _err("No files provided", 400)
+    data = request.get_json(force=True, silent=True) or {}
+
+    files = data.get("files") or []
+    branch_name = str(data.get("branch_name") or "").strip()
+    repository = str(data.get("repository_path") or "").strip()
+    commit_message = str(data.get("commit_message") or "").strip() or (
+        f"refactor: DIWO agent changes on {branch_name or 'diwo branch'}"
+    )
+    want_commit = data.get("commit", True) is not False
+    want_push = data.get("push", True) is not False
+
+    if not isinstance(files, list) or not files:
+        return _err("No files provided.", 400)
     if not branch_name:
-        return _err("Branch name required", 400)
-    if not repo_path:
-        return _err("Repository path required", 400)
-    if not isinstance(files, list):
-        return _err("Files must be a list", 400)
-    
-    try:
-        # If the user provided a remote URL (https://, http://, git@, or contains github.com),
-        # clone it into a temporary directory so we can apply changes locally.
-        repo_path_str = repo_path
-        is_remote = False
-        if isinstance(repo_path_str, str):
-            lp = repo_path_str.lower()
-            if lp.startswith("http://") or lp.startswith("https://") or lp.startswith("git@") or ("github.com" in lp and ":" in repo_path_str) or ("github.com" in lp and "/" in repo_path_str):
-                is_remote = True
+        return _err("Branch name required.", 400)
+    if not repository:
+        return _err("Repository path or GitHub URL required.", 400)
 
-        temp_clone_dir = None
-        if is_remote:
-            try:
-                temp_clone_dir = Path(tempfile.mkdtemp(prefix="diwo_repo_"))
-                subprocess.run(["git", "clone", repo_path_str, str(temp_clone_dir)], check=True, capture_output=True)
-                repo_path = temp_clone_dir
-            except subprocess.CalledProcessError as e:
-                # Cleanup on failure
-                try:
-                    if temp_clone_dir and temp_clone_dir.exists():
-                        shutil.rmtree(temp_clone_dir)
-                except Exception:
-                    pass
-                return _err(f"Failed to clone remote repository: {e.stderr.decode('utf-8', errors='ignore')}", 400)
+    repo_path, info = _prepare_repository(repository)
+    if repo_path is None:
+        return _err(info, 400)
+
+    # ── Branch ───────────────────────────────────────────────────────────────
+    if info["remote"]:
+        # Cut the work branch from the remote's current head, so a second run
+        # does not stack on top of the previous run's commit.
+        base = info["base_branch"]
+        ok, _, err = _git(["checkout", "-B", branch_name, f"origin/{base}"], cwd=repo_path)
+        if not ok:
+            ok, _, err = _git(["checkout", "-B", branch_name], cwd=repo_path)
+        if not ok:
+            return _err(f"Could not create branch '{branch_name}': {err}", 500)
+    else:
+        exists, _, _ = _git(["rev-parse", "--verify", branch_name], cwd=repo_path)
+        ok, _, err = _git(["checkout", branch_name] if exists else ["checkout", "-b", branch_name], cwd=repo_path)
+        if not ok:
+            return _err(
+                f"Could not check out branch '{branch_name}': {err} — commit or stash the "
+                "repository's current changes first.",
+                500,
+            )
+
+    # ── Write the project ────────────────────────────────────────────────────
+    written_files = []
+    for entry in files:
+        if not isinstance(entry, dict):
+            continue
+        rel = str(entry.get("path") or "").strip().replace("\\", "/").lstrip("/")
+        if not rel:
+            continue
+        content = entry.get("after")
+        if content is None:
+            content = entry.get("content") or ""
+
+        target = (repo_path / rel).resolve()
+        # Compare resolved parents so "src/../../etc/passwd" cannot escape, and
+        # a path that merely shares a prefix ("/repo-backup") is not accepted.
+        if repo_path != target and repo_path not in target.parents:
+            return _err(f"Path traversal detected: {rel}", 400)
+
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with open(target, "w", encoding="utf-8", newline="") as handle:
+            handle.write(content)
+        written_files.append(rel)
+
+    if not written_files:
+        return _err("None of the provided files had a usable path.", 400)
+
+    # ── Stage ────────────────────────────────────────────────────────────────
+    ok, _, err = _git(["add", "-A"], cwd=repo_path)
+    if not ok:
+        return _err(f"Failed to stage changes: {err}", 500)
+
+    ok, staged_out, _ = _git(["diff", "--cached", "--name-only"], cwd=repo_path)
+    staged_files = [line.strip() for line in staged_out.splitlines() if line.strip()] if ok else []
+
+    # ── Commit ───────────────────────────────────────────────────────────────
+    committed = False
+    commit_sha = ""
+    commit_error = ""
+    if want_commit and staged_files:
+        ok, _, err = _git(["commit", "-m", commit_message], cwd=repo_path)
+
+        # A machine with no git identity cannot commit at all. For a clone DIWO
+        # created it can set one itself — scoped to that clone, never --global,
+        # and never touching a repository the developer already had.
+        if not ok and info["remote"] and "user.email" in (err or "").lower():
+            _git(["config", "user.email", "diwo-agent@localhost"], cwd=repo_path)
+            _git(["config", "user.name", "DIWO Agent"], cwd=repo_path)
+            ok, _, err = _git(["commit", "-m", commit_message], cwd=repo_path)
+
+        if ok:
+            committed = True
+            _, commit_sha, _ = _git(["rev-parse", "--short", "HEAD"], cwd=repo_path)
         else:
-            repo_path = Path(repo_path).resolve()
+            commit_error = err or "git commit failed."
 
-        # Ensure git repo exists
-        if not (repo_path / ".git").exists():
-            # If we cloned a remote, inform the user; otherwise it's a bad path
-            if is_remote:
-                return _err(f"Cloned repository did not contain a .git folder: {repo_path}", 400)
-            return _err(f"Not a git repository: {repo_path}", 400)
-        
-        # Write files to repository and track what's written
-        written_files = []
-        for file_obj in files:
-            file_path = file_obj.get("path", "")
-            content = file_obj.get("after", "")
+    # ── Push ─────────────────────────────────────────────────────────────────
+    has_origin, _, _ = _git(["remote", "get-url", "origin"], cwd=repo_path)
+    pushed = False
+    push_error = ""
+    if want_push and committed and has_origin:
+        ok, _, err = _git(["push", "-u", "origin", branch_name], cwd=repo_path)
+        if ok:
+            pushed = True
+        else:
+            push_error = (
+                f"{err} — the branch is committed locally, so you can push it from GitHub Desktop "
+                "once credentials are available."
+            )
+    elif want_push and not has_origin:
+        push_error = "This repository has no 'origin' remote, so the branch stays local."
+    elif want_push and not committed:
+        push_error = commit_error or "Nothing was committed, so there was nothing to push."
 
-            if not file_path:
-                continue
+    opened, launch_detail = _open_github_desktop(repo_path)
 
-            # Normalize file path to avoid absolute paths interfering with join
-            file_path = str(file_path).lstrip("/\\")
+    web_url = _web_url_for_remote(info.get("clone_url") or "")
+    branch_url = f"{web_url}/tree/{branch_name}" if (web_url and pushed) else ""
 
-            # Prevent path traversal
-            target_file = (repo_path / file_path).resolve()
-            if not str(target_file).startswith(str(repo_path)):
-                return _err(f"Path traversal detected: {file_path}", 400)
+    if committed and pushed:
+        message = f"Branch '{branch_name}' committed and pushed to origin."
+    elif committed:
+        message = f"Branch '{branch_name}' committed locally."
+    elif staged_files:
+        message = f"Changes staged on '{branch_name}' — review and commit in GitHub Desktop."
+    else:
+        message = f"Branch '{branch_name}' is up to date; the project already matches these files."
 
-            # Create parent directories
-            target_file.parent.mkdir(parents=True, exist_ok=True)
-
-            # Write file
-            with open(target_file, "w", encoding="utf-8") as f:
-                f.write(content)
-
-            written_files.append(str(target_file.relative_to(repo_path)))
-        
-        # Create or checkout the branch
-        # If branch exists, checkout; otherwise create new branch
-        try:
-            # Check if branch exists
-            res = subprocess.run(["git", "rev-parse", "--verify", branch_name], cwd=str(repo_path), capture_output=True)
-            if res.returncode == 0:
-                subprocess.run(["git", "checkout", branch_name], cwd=str(repo_path), check=True, capture_output=True)
-            else:
-                subprocess.run(["git", "checkout", "-b", branch_name], cwd=str(repo_path), check=True, capture_output=True)
-        except subprocess.CalledProcessError as e:
-            return _err(f"Failed to create or checkout branch: {e.stderr.decode('utf-8', errors='ignore')}", 500)
-
-        # Stage all changes
-        try:
-            # Use git add -A to ensure all changes (including deletes) are staged
-            add_proc = subprocess.run(["git", "add", "-A"], cwd=str(repo_path), check=True, capture_output=True)
-            add_stdout = add_proc.stdout.decode('utf-8', errors='ignore')
-            add_stderr = add_proc.stderr.decode('utf-8', errors='ignore')
-        except subprocess.CalledProcessError as e:
-            return _err(f"Failed to stage changes: {e.stderr.decode('utf-8', errors='ignore')}", 500)
-
-        # Get staged files via git diff --cached --name-only
-        staged_files = []
-        try:
-            diff_proc = subprocess.run(["git", "diff", "--cached", "--name-only"], cwd=str(repo_path), check=True, capture_output=True)
-            diff_out = diff_proc.stdout.decode('utf-8', errors='ignore').strip()
-            if diff_out:
-                staged_files = [line.strip() for line in diff_out.splitlines() if line.strip()]
-        except subprocess.CalledProcessError:
-            staged_files = []
-        
-        # Open GitHub Desktop asynchronously (don't block on this)
-        github_desktop_opened = False
-        try:
-            if os.name == "nt":  # Windows
-                # Use start command to open GitHub Desktop with the repository
-                subprocess.Popen(
-                    f'start github -- -r "{repo_path}"',
-                    shell=True,
-                    creationflags=subprocess.CREATE_NEW_CONSOLE if os.name == "nt" else 0
-                )
-                github_desktop_opened = True
-            else:  # macOS / Linux
-                # Try github command directly
-                subprocess.Popen(["github", str(repo_path)])
-                github_desktop_opened = True
-        except Exception as launch_error:
-            # GitHub Desktop may not be installed or in PATH
-            print(f"Warning: Could not open GitHub Desktop: {launch_error}")
-        
-        resp = {
-            "status": "success",
-            "message": f"Files applied to branch '{branch_name}' and staged for commit",
-            "branch": branch_name,
-            "repository": str(repo_path),
-            "github_desktop_opened": github_desktop_opened,
-            "staged_files": staged_files,
-        }
-        # Include written files and git add output if available for diagnostics
-        try:
-            resp["written_files"] = written_files
-        except Exception:
-            resp["written_files"] = []
-        try:
-            resp["git_add_stdout"] = add_stdout
-            resp["git_add_stderr"] = add_stderr
-        except Exception:
-            resp["git_add_stdout"] = resp["git_add_stderr"] = ""
-
-        return jsonify(resp), 200
-    
-    except subprocess.CalledProcessError as e:
-        error_msg = e.stderr.decode("utf-8") if e.stderr else str(e)
-        return _err(f"Git operation failed: {error_msg}", 500)
-    except Exception as e:
-        return _err(f"Error: {str(e)}", 500)
+    return jsonify({
+        "status": "success",
+        "message": message,
+        "branch": branch_name,
+        "base_branch": info.get("base_branch"),
+        "repository": str(repo_path),
+        "cloned": bool(info["remote"]),
+        "clone_url": info.get("clone_url") or "",
+        "branch_url": branch_url,
+        "written_files": written_files,
+        "written_count": len(written_files),
+        "staged_files": staged_files,
+        "committed": committed,
+        "commit_sha": commit_sha,
+        "commit_message": commit_message if committed else "",
+        "commit_error": commit_error,
+        "pushed": pushed,
+        "push_error": push_error,
+        "github_desktop_opened": opened,
+        "github_desktop_detail": launch_detail,
+    }), 200
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -349,7 +349,7 @@ public class Demo {
 
 def test_c_static_behavioral_fingerprint_passes_without_behavior_tests():
     original = "#include <stdio.h>\ndouble ratio(void) { return 0.12; }\n"
-    transformed = "#include <stdio.h>\n#define MAGIC_NUMBER_0_12 0.12\ndouble ratio(void) { return MAGIC_NUMBER_0_12; }\n"
+    transformed = "#include <stdio.h>\n#define CONSTANT_NUMBER_0_12 0.12\ndouble ratio(void) { return CONSTANT_NUMBER_0_12; }\n"
     validator = BehavioralValidator()
     result = validator.validate(
         language="c",

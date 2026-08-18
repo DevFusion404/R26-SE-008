@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import ast
 import re
-from typing import Any, List, Tuple
+from typing import Any, Dict, List, Tuple
 
 from ..constants import (
     ACTION_EXTRACT_CONSTANT,
@@ -125,6 +125,7 @@ class TransformationEngine:
         current_code = source_code
         logs: List[TransformationLogEntry] = []
         global_warnings: List[str] = []
+        syntax_cache: Dict[Tuple[str, str], str] = {}
 
         for idx, action in enumerate(actions, start=1):
             warnings = list(action.warnings)
@@ -385,7 +386,11 @@ class TransformationEngine:
                     raise
 
             if replacements > 0 and action.action_type != ACTION_INJECT_SYNTAX_ERROR:
-                syntax_issue = self._candidate_syntax_issue(language, current_code)
+                syntax_key = (language, current_code)
+                syntax_issue = syntax_cache.get(syntax_key)
+                if syntax_issue is None:
+                    syntax_issue = self._candidate_syntax_issue(language, current_code)
+                    syntax_cache[syntax_key] = syntax_issue
                 if syntax_issue:
                     current_code = before_action_code
                     replacements = 0

@@ -945,6 +945,7 @@ class BehavioralValidator:
             for name in name_loads
             if (
                 name.startswith("MAGIC_")
+                or name.startswith("CONSTANT_")
                 or name == "EXTRACTED_CONSTANT"
             )
         }
@@ -961,7 +962,7 @@ class BehavioralValidator:
                 else "unresolved_magic_constant_names"
             ),
             "original": {
-                "rule": "Every used MAGIC_* or EXTRACTED_CONSTANT name must be declared as a module constant.",
+                "rule": "Every used MAGIC_*, CONSTANT_*, or EXTRACTED_CONSTANT name must be declared as a module constant.",
             },
             "transformed": {
                 "module_constants": sorted(module_constants),
@@ -976,7 +977,7 @@ class BehavioralValidator:
         text = re.sub(r"[^A-Za-z0-9_]", "_", text)
 
         if not text:
-            return "MAGIC_VALUE"
+            return "CONSTANT_VALUE"
 
         if text[0].isdigit():
             text = f"N_{text}"
@@ -985,25 +986,25 @@ class BehavioralValidator:
 
     def _constant_name_from_value(self, value: Any) -> str:
         if isinstance(value, bool):
-            return f"MAGIC_BOOL_{str(value).upper()}"
+            return f"CONSTANT_BOOL_{str(value).upper()}"
 
         if value is None:
-            return "MAGIC_NONE"
+            return "CONSTANT_NONE"
 
         if isinstance(value, int):
             if value < 0:
-                return f"MAGIC_NUMBER_NEG_{abs(value)}"
-            return f"MAGIC_NUMBER_{value}"
+                return f"CONSTANT_NUMBER_NEG_{abs(value)}"
+            return f"CONSTANT_NUMBER_{value}"
 
         if isinstance(value, float):
             text = str(value).replace("-", "NEG_").replace(".", "_")
-            return f"MAGIC_NUMBER_{self._sanitize_constant_name(text)}"
+            return f"CONSTANT_NUMBER_{self._sanitize_constant_name(text)}"
 
         if isinstance(value, str):
             short = value[:24]
-            return f"MAGIC_STRING_{self._sanitize_constant_name(short)}"
+            return f"CONSTANT_STRING_{self._sanitize_constant_name(short)}"
 
-        return "MAGIC_VALUE"
+        return "CONSTANT_VALUE"
 
     def _validate_java(
         self,
@@ -1236,6 +1237,30 @@ class BehavioralValidator:
                 warnings.append(
                     f"{name}: Java runtime probe could not execute because project or external dependencies were unavailable."
                 )
+                remaining_tests = runtime_tests[idx:]
+                if remaining_tests and not failures:
+                    warnings.append(
+                        f"Skipped {len(remaining_tests)} remaining Java runtime probe(s) "
+                        "after dependency-unavailable compilation was confirmed; "
+                        "static behavioral fallback still ran."
+                    )
+                    for remaining_index, remaining in enumerate(remaining_tests, start=idx + 1):
+                        remaining_name = str(
+                            remaining.get("name")
+                            or remaining.get("test_id")
+                            or f"java_probe_{remaining_index}"
+                        )
+                        java_results.append(
+                            {
+                                "name": remaining_name,
+                                "status": "skipped",
+                                "auto_generated": bool(remaining.get("auto_generated")),
+                                "reason": "dependency_unavailable_after_preflight",
+                                "dependency_unavailable": True,
+                            }
+                        )
+                        dependency_unavailable_count += 1
+                    break
             elif comparison.get("matched"):
                 component_scores.append(1.0)
             else:
@@ -1341,7 +1366,7 @@ class BehavioralValidator:
                 return False
 
             unresolved_magic = re.search(
-                r"symbol:\s+(?:variable|class|interface|method)\s+MAGIC_[A-Z0-9_]*",
+                r"symbol:\s+(?:variable|class|interface|method)\s+(?:MAGIC|CONSTANT)_[A-Z0-9_]*",
                 raw_message,
             )
             if unresolved_magic:

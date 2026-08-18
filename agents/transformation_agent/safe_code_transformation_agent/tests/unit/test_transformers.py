@@ -17,6 +17,14 @@ def test_python_extract_constant_falls_back_when_source_line_misses():
     assert "BASE" in transformed
 
 
+def test_python_extract_constant_normalizes_legacy_magic_name():
+    source = "def value():\n    return 10\n"
+    transformed, count = python_transformers.apply_extract_constant(source, 10, "MAGIC_NUMBER_10")
+    assert count >= 1
+    assert "CONSTANT_NUMBER_10" in transformed
+    assert "MAGIC_NUMBER_10" not in transformed
+
+
 def test_python_rename_symbol_changes_function_name():
     source = "def calc(x):\n    return x + 1\n"
     transformed, count = python_transformers.apply_rename_symbol(source, "calc", "calculate")
@@ -90,9 +98,9 @@ def test_java_extract_constant_converts_numeric_string_to_string_constant():
         source_line=3,
     )
     assert count == 1
-    assert 'private static final String MAGIC_STRING_N_1234 = "1234";' in transformed
-    assert "String pass = MAGIC_STRING_N_1234;" in transformed
-    assert 'String pass = "MAGIC_NUMBER_1234";' not in transformed
+    assert 'private static final String CONSTANT_STRING_N_1234 = "1234";' in transformed
+    assert "String pass = CONSTANT_STRING_N_1234;" in transformed
+    assert 'String pass = "CONSTANT_NUMBER_1234";' not in transformed
 
 
 def test_java_extract_constant_does_not_replace_number_inside_longer_string():
@@ -137,10 +145,10 @@ def test_java_extract_constant_handles_numeric_string_after_prior_constant_inser
 
     assert url_count == 1
     assert pass_count == 1
-    assert "String url = MAGIC_STRING_JDBC_MYSQL___LOCALHOST_3;" in transformed
-    assert "String pass = MAGIC_STRING_N_1234;" in transformed
-    assert 'private static final String MAGIC_STRING_N_1234 = "1234";' in transformed
-    assert 'String pass = "MAGIC_NUMBER_1234";' not in transformed
+    assert "String url = CONSTANT_STRING_JDBC_MYSQL___LOCALHOST_3;" in transformed
+    assert "String pass = CONSTANT_STRING_N_1234;" in transformed
+    assert 'private static final String CONSTANT_STRING_N_1234 = "1234";' in transformed
+    assert "MAGIC_NUMBER_1234" not in transformed
 
 
 def test_java_extract_constant_inserts_constant_into_extending_class():
@@ -161,10 +169,10 @@ def test_java_extract_constant_inserts_constant_into_extending_class():
 
     assert count == 1
     assert (
-        "private static final String MAGIC_STRING_JDBC_MYSQL___LOCALHOST_3 = "
+        "private static final String CONSTANT_STRING_JDBC_MYSQL___LOCALHOST_3 = "
         '"jdbc:mysql://localhost:3306/contact";'
     ) in transformed
-    assert "String url = MAGIC_STRING_JDBC_MYSQL___LOCALHOST_3;" in transformed
+    assert "String url = CONSTANT_STRING_JDBC_MYSQL___LOCALHOST_3;" in transformed
     assert "public class SignUpServlet extends HttpServlet {" in transformed
 
 
@@ -333,8 +341,16 @@ def test_c_introduce_constant_uses_define_for_magic_number():
     source = "double ratio(void) { return 0.12; }\n"
     transformed, count = c_transformers.apply_extract_constant(source, 0.12, "EXTRACTED_CONSTANT")
     assert count == 1
-    assert "#define MAGIC_NUMBER_0_12 0.12" in transformed
-    assert "MAGIC_NUMBER_0_12" in transformed
+    assert "#define CONSTANT_NUMBER_0_12 0.12" in transformed
+    assert "CONSTANT_NUMBER_0_12" in transformed
+
+
+def test_c_extract_constant_normalizes_legacy_magic_name():
+    source = "int size(void) { return 7; }\n"
+    transformed, count = c_transformers.apply_extract_constant(source, 7, "MAGIC_NUMBER_7")
+    assert count == 1
+    assert "#define CONSTANT_NUMBER_7 7" in transformed
+    assert "MAGIC_NUMBER_7" not in transformed
 
 
 def test_c_introduce_constant_replaces_escaped_newline_string():
@@ -346,8 +362,8 @@ def test_c_introduce_constant_replaces_escaped_newline_string():
         source_line=2,
     )
     assert count == 1
-    assert '#define MAGIC_STRING_HELLO "hello\\n"' in transformed
-    assert "printf(MAGIC_STRING_HELLO)" in transformed
+    assert '#define CONSTANT_STRING_HELLO "hello\\n"' in transformed
+    assert "printf(CONSTANT_STRING_HELLO)" in transformed
 
 
 def test_c_extract_constant_falls_back_when_source_line_misses():
