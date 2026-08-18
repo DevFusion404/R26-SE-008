@@ -243,6 +243,7 @@ async def upload_zip(file: UploadFile = File(...)):
     Accept a ZIP file (up to 500 MB), extract it to a temporary workspace, and
     scan for supported source files.
     """
+    assert file.filename is not None
     if not file.filename.endswith(".zip"):
         raise HTTPException(400, "Only .zip files are supported.")
 
@@ -455,7 +456,7 @@ def parse_ast(payload: dict):
 # ── 5. Quality Report ────────────────────────────────────────────────────────
 
 @app.post("/api/quality-report")
-def quality_report(payload: dict = None):
+def quality_report(payload: dict = None): # type: ignore
     """
     Generate a quality report for one or all files in the workspace.
 
