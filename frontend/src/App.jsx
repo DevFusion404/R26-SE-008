@@ -17,6 +17,9 @@ import Reports         from './pages/Reports.jsx';
 import Evaluation      from './pages/Evaluation.jsx';
 import Settings        from './pages/Settings.jsx';
 import Documentation   from './pages/Documentation.jsx';
+import UserService     from './services/userService.js';
+import AuthPage        from './pages/AuthPage.jsx';
+import ProfilePage     from './pages/ProfilePage.jsx';
 
 const API = 'http://localhost:8080';
 
@@ -35,8 +38,8 @@ const NAV_MAIN = [
 ];
 
 const NAV_BOTTOM = [
+  { id: 'profile', icon: '👤', label: 'Profile' },
   { id: 'docs',    icon: '📖', label: 'Documentation' },
-  { id: 'support', icon: '💬', label: 'Support' },
 ];
 
 // Agents that aren't built yet — show a "coming soon" state
@@ -76,6 +79,11 @@ function PlaceholderPage({ page }) {
 
 // ── Main App ───────────────────────────────────────────────────────────────
 export default function App() {
+  const [currentUser, setCurrentUser] = useState(() => UserService.getUser());
+  const [isGuest, setIsGuest] = useState(
+    () => !UserService.isAuthenticated() && localStorage.getItem('is_guest') === 'true'
+  );
+
   // Persist active page across refreshes
   const [page, setPage] = useState(
     () => localStorage.getItem('rfiq_active_page') || 'overview'
@@ -88,6 +96,19 @@ export default function App() {
   const [cuqaReport,    setCuqaReport]    = useState(null); // quality report from CUQA → RDP bridge
   // 'idle' | 'cuqa_done' | 'rdp_running' | 'rdp_done'
   const [pipelineState, setPipelineState] = useState('idle');
+
+  async function handleLogout() {
+    await UserService.logout();
+    setCurrentUser(null);
+    setIsGuest(false);
+    localStorage.removeItem('is_guest');
+    localStorage.setItem('rfiq_active_page', 'overview');
+    setPage('overview');
+  }
+
+  function handleProfileUpdate(updatedUser) {
+    setCurrentUser(updatedUser);
+  }
 
   // Check backend health on mount
   useEffect(() => {
@@ -160,9 +181,33 @@ export default function App() {
       case 'reports':     return <Reports />;
       case 'evaluation':  return <Evaluation />;
       case 'settings':    return <Settings />;
+      case 'profile':     return (
+        <ProfilePage
+          currentUser={currentUser}
+          isGuest={isGuest}
+          onLogout={handleLogout}
+          onProfileUpdate={handleProfileUpdate}
+        />
+      );
       case 'docs':        return <Documentation />;
       default:            return <PlaceholderPage page={page} />;
     }
+  }
+
+  if (!currentUser && !isGuest) {
+    return (
+      <AuthPage
+        onAuthSuccess={(user) => {
+          setCurrentUser(user);
+          setIsGuest(false);
+          localStorage.removeItem('is_guest');
+        }}
+        onGuestLogin={() => {
+          setIsGuest(true);
+          setCurrentUser(null);
+        }}
+      />
+    );
   }
 
   return (
@@ -201,7 +246,22 @@ export default function App() {
 
           <button className="topbar-icon-btn" title="Notifications">🔔</button>
           <button className="topbar-icon-btn" title="Help">❓</button>
-          <div className="topbar-avatar" title="Researcher">R</div>
+          <div
+            className="topbar-avatar"
+            title={isGuest ? 'Guest User' : currentUser?.full_name}
+            onClick={() => navigate('profile')}
+            style={{
+              background: isGuest ? 'var(--text-muted)' : 'var(--gradient-accent)',
+              color: isGuest ? 'var(--text-secondary)' : '#000',
+              fontWeight: 700,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              cursor: 'pointer'
+            }}
+          >
+            {isGuest ? 'G' : (currentUser?.full_name?.[0]?.toUpperCase() || 'U')}
+          </div>
         </div>
       </header>
 

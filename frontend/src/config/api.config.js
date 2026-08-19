@@ -46,6 +46,21 @@ const API_CONFIG = {
     timeout: 60000,
   },
 
+  // === User Management Service ===
+  USER_MANAGEMENT: {
+    baseURL: import.meta.env.VITE_USER_MANAGEMENT_API_URL || 'http://localhost:6000',
+    endpoints: {
+      health: '/api/auth/health',
+      register: '/api/auth/register',
+      login: '/api/auth/login',
+      logout: '/api/auth/logout',
+      profile: '/api/auth/profile',
+      account: '/api/auth/account',
+      users: '/api/auth/users',
+    },
+    timeout: 30000,
+  },
+
   // === Global Configuration ===
   GLOBAL: {
     defaultTimeout: 30000,
