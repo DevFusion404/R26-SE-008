@@ -20,6 +20,7 @@ import zipfile
 import tempfile
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlparse
 from pydantic import BaseModel, HttpUrl
 
 import requests
@@ -78,6 +79,51 @@ _workspace: dict = {
 }
 
 SUPPORTED_EXTENSIONS = {".py", ".java", ".c", ".h"}
+
+
+def _safe_extract_zip(zip_file: zipfile.ZipFile, extract_dir: str) -> None:
+    """Extract ZIP members after validating each member path.
+
+    Prevents Zip Slip / path traversal attacks by ensuring no member
+    extracts to a path outside *extract_dir*.
+
+    Raises:
+        HTTPException(400): if any member attempts to escape the directory.
+    """
+    extract_path = Path(extract_dir).resolve()
+    for member in zip_file.namelist():
+        member_path = (extract_path / member).resolve()
+        try:
+            member_path.relative_to(extract_path)
+        except ValueError:
+            raise HTTPException(
+                400,
+                f"ZIP entry '{member}' attempts to escape the extraction directory (Zip Slip).",
+            )
+    zip_file.extractall(extract_dir)
+
+
+def _safe_resolve_path(workspace_root: str, rel_path: str) -> str:
+    """Resolve *rel_path* relative to *workspace_root* and verify containment.
+
+    Prevents path traversal attacks (e.g. ../../etc/passwd).
+
+    Returns:
+        The resolved absolute path string.
+
+    Raises:
+        HTTPException(400): if the resolved path escapes the workspace.
+    """
+    root = Path(workspace_root).resolve()
+    candidate = (root / rel_path).resolve()
+    try:
+        candidate.relative_to(root)
+    except ValueError:
+        raise HTTPException(
+            400,
+            f"Path '{rel_path}' attempts to escape the workspace directory.",
+        )
+    return str(candidate)
 
 
 def _find_source_files(root: str) -> list[str]:
@@ -197,6 +243,7 @@ async def upload_zip(file: UploadFile = File(...)):
     Accept a ZIP file (up to 500 MB), extract it to a temporary workspace, and
     scan for supported source files.
     """
+    assert file.filename is not None
     if not file.filename.endswith(".zip"):
         raise HTTPException(400, "Only .zip files are supported.")
 
@@ -222,10 +269,13 @@ async def upload_zip(file: UploadFile = File(...)):
 
     try:
         with zipfile.ZipFile(zip_path, "r") as z:
-            z.extractall(extract_dir)
+            _safe_extract_zip(z, extract_dir)  # SEC-FIX: Zip Slip prevention
     except zipfile.BadZipFile:
         shutil.rmtree(tmp_dir, ignore_errors=True)
         raise HTTPException(400, "Invalid or corrupted ZIP file.")
+    except HTTPException:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        raise
 
     # If ZIP has a single top-level folder, go inside it
     entries = os.listdir(extract_dir)
@@ -260,13 +310,14 @@ async def upload_zip(file: UploadFile = File(...)):
 @app.post("/api/github-repo")
 def load_github_repo(request: GitHubRepoRequest):  # Use Pydantic model
     url = str(request.url).rstrip('/')  # Normalize trailing slash
-    
+
     # Remove .git suffix if present
     if url.endswith('.git'):
         url = url[:-4]
-    
-    # Validate GitHub domain
-    if "github.com" not in url:
+
+    # SEC-FIX: Exact hostname validation — prevents github.com.evil.com spoofing
+    parsed = urlparse(url)
+    if parsed.hostname != "github.com":
         raise HTTPException(400, "Only github.com URLs are supported.")
     
     repo_name = url.split("/")[-1]
@@ -311,10 +362,13 @@ def load_github_repo(request: GitHubRepoRequest):  # Use Pydantic model
 
     try:
         with zipfile.ZipFile(zip_path, "r") as z:
-            z.extractall(extract_dir)
+            _safe_extract_zip(z, extract_dir)  # SEC-FIX: Zip Slip prevention
     except zipfile.BadZipFile:
         shutil.rmtree(tmp_dir, ignore_errors=True)
         raise HTTPException(500, "Downloaded archive is not a valid ZIP.")
+    except HTTPException:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        raise
 
     entries = os.listdir(extract_dir)
     if len(entries) == 1 and os.path.isdir(os.path.join(extract_dir, entries[0])):
@@ -376,7 +430,8 @@ def parse_ast(payload: dict):
     if not rel_path:
         raise HTTPException(400, "file_path is required.")
 
-    full_path = os.path.join(_workspace["root"], rel_path)
+    # SEC-FIX: path traversal prevention
+    full_path = _safe_resolve_path(_workspace["root"], rel_path)
     if not os.path.isfile(full_path):
         raise HTTPException(404, f"File not found: {rel_path}")
 
@@ -401,7 +456,7 @@ def parse_ast(payload: dict):
 # ── 5. Quality Report ────────────────────────────────────────────────────────
 
 @app.post("/api/quality-report")
-def quality_report(payload: dict = None):
+def quality_report(payload: dict = None): # type: ignore
     """
     Generate a quality report for one or all files in the workspace.
 
@@ -414,7 +469,8 @@ def quality_report(payload: dict = None):
     file_path = (payload or {}).get("file_path")
 
     if file_path:
-        full_path = os.path.join(_workspace["root"], file_path)
+        # SEC-FIX: path traversal prevention
+        full_path = _safe_resolve_path(_workspace["root"], file_path)
         if not os.path.isfile(full_path):
             raise HTTPException(404, f"File not found: {file_path}")
         with open(full_path, "r", encoding="utf-8", errors="replace") as f:
