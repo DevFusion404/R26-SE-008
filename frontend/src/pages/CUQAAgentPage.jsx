@@ -12,8 +12,8 @@
 
 import { useState, useEffect, useRef } from 'react';
 import QualityReportView from '../components/QualityReportView';
+import CUQAAgentService from '../services/cuqaAgentService';
 
-const API = 'http://localhost:8080';
 
 // ── Node colours by type ───────────────────────────────────────────────────
 const NODE_COLOR = {
@@ -681,21 +681,15 @@ export default function CUQAAgentPage({ repoLoaded, repoMeta, onSendToRdp, analy
 
   async function fetchTree() {
     try {
-      const res = await fetch(`${API}/api/project-structure`);
-      const d   = await res.json();
-      if (res.ok) setTree(d.tree);
+      const d = await CUQAAgentService.getProjectStructure();
+      setTree(d.tree);
     } catch {}
   }
 
   async function parseAst(path) {
     setLoadingAst(true); setAstData(null); setErr(null);
     try {
-      const res = await fetch(`${API}/api/parse-ast`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ file_path: path }),
-      });
-      const d = await res.json();
-      if (!res.ok) throw new Error(d.detail);
+      const d = await CUQAAgentService.parseAst(path);
       setAstData(d);
     } catch (e) { setErr(e.message); }
     finally { setLoadingAst(false); }
@@ -704,12 +698,8 @@ export default function CUQAAgentPage({ repoLoaded, repoMeta, onSendToRdp, analy
   async function fetchReport() {
     setLoadingRep(true);
     try {
-      const res = await fetch(`${API}/api/quality-report`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({}),
-      });
-      const d = await res.json();
-      if (res.ok) setReport(d.report);
+      const d = await CUQAAgentService.getQualityReport();
+      setReport(d.report);
     } catch {}
     finally { setLoadingRep(false); }
   }

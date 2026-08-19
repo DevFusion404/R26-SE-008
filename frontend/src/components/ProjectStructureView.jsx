@@ -9,8 +9,7 @@
  */
 
 import { useState, useEffect } from 'react';
-
-const API = 'http://localhost:8080';
+import CUQAAgentService from '../services/cuqaAgentService';
 
 const LANG_ICON = { python: '🐍', java: '☕', c: '⚙️', directory: '📁', file: '📄' };
 
@@ -99,9 +98,7 @@ export default function ProjectStructureView({ repoLoaded, onFileSelect }) {
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch(`${API}/api/project-structure`);
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.detail || 'Failed to fetch structure.');
+      const data = await CUQAAgentService.getProjectStructure();
       setTree(data.tree);
       setMeta({ repo_name: data.repo_name, source: data.source, total: data.total_source_files });
     } catch (err) {

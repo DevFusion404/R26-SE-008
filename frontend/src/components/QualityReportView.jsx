@@ -12,8 +12,7 @@
  */
 
 import { useState, useEffect } from 'react';
-
-const API = 'http://localhost:8080';
+import CUQAAgentService from '../services/cuqaAgentService';
 
 // ── Category config (mirrors SMELL_CATEGORY_MAP priority) ──────────────────
 const CATEGORY_CONFIG = {
@@ -562,13 +561,7 @@ export default function QualityReportView({ repoLoaded, selectedFile }) {
     const body = type === 'file' && filePath ? { file_path: filePath } : {};
 
     try {
-      const res = await fetch(`${API}/api/quality-report`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.detail || 'Failed to fetch report.');
+      const data = await CUQAAgentService.getQualityReport(type === 'file' ? filePath : null);
       setReport(data);
     } catch (err) {
       setError(err.message);
