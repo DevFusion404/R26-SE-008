@@ -1,0 +1,109 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://r26-se-008/contracts/rdp-plan.schema.json",
+  "title": "RefactoringPlan",
+  "description": "The refactoring plan produced by the RDP agent (Agent 2) from a FilteredCUQAReport, normalized by the Orchestration Agent (backend/domain/plan_normalizer.py::normalize_rdp_plan) and returned as `plan` from POST /api/workflows/<id>/select-smells.\n\nTwo normalizations are applied to what RDP sends, and both matter:\n\n  1. RDP serializes `summary` as a human-readable STRING; every DIWO stage reads plan.summary.total_steps. The object form is built here and the original text is preserved as `summary_text`.\n  2. RDP flattens every path to its basename while translating the report, so a plan comes back naming 'Helper.java' where the report said 'src/util/Helper.java'. The repository-relative paths are restored, because the Transformation stage resolves them against the CUQA workspace. Names that appear on more than one path are left alone — guessing between two Helper.java would point a refactoring at the wrong file.\n\nThe decision data the approval screen renders (impact, risk, MCDA score) is NOT on the steps: it lives in RDP's separate `trace`, and the frontend folds it back on with utils/planTrace.js::enrichPlanWithTrace.",
+  "type": "object",
+  "required": ["plan_id", "steps", "summary"],
+  "properties": {
+    "plan_id": { "type": "string" },
+    "target": {
+      "type": "string",
+      "description": "What the plan is named after. RDP takes this from files[0] of the report it was given, which is why build_rdp_plan_input drops files with no selected smells."
+    },
+    "source": {
+      "type": "string",
+      "enum": ["rdp_agent", "diwo_local_fallback"],
+      "description": "Which planner produced this. 'diwo_local_fallback' is the offline generator in backend/domain/plan_normalizer.py, used only when the RDP agent is unreachable or refuses the report. The response also carries `plan_source` and `plan_warning` alongside the plan so a fallback is never mistaken for real RDP output."
+    },
+    "generated_at": { "type": "string", "format": "date-time" },
+    "steps": { "type": "array", "items": { "$ref": "#/$defs/planStep" } },
+    "summary": { "$ref": "#/$defs/planSummary" },
+    "summary_text": {
+      "type": "string",
+      "description": "RDP's own human-readable summary, preserved because normalization replaces `summary` with the object form."
+    }
+  },
+
+  "$defs": {
+    "rating": { "type": "string", "enum": ["low", "medium", "high"] },
+
+    "planSummary": {
+      "type": "object",
+      "required": ["total_steps"],
+      "properties": {
+        "total_steps": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Always recomputed from steps.length, never carried over."
+        },
+        "high_impact": { "type": "integer", "minimum": 0 },
+        "risks": {
+          "type": "object",
+          "properties": {
+            "low": { "type": "integer", "minimum": 0 },
+            "medium": { "type": "integer", "minimum": 0 },
+            "high": { "type": "integer", "minimum": 0 }
+          }
+        }
+      },
+      "additionalProperties": true
+    },
+
+    "planStep": {
+      "type": "object",
+      "required": ["step_id", "refactoring"],
+      "properties": {
+        "step_id": {
+          "type": "integer",
+          "description": "Stable within a plan. The approved plan keeps the original ids so every action SCTVA reports traces back to the step the developer reviewed."
+        },
+        "smell_id": {
+          "type": "string",
+          "description": "The smell this step addresses. RDP re-keys smells internally ('smell_003'), so this does NOT always match the CUQA-style <path>:<line>:<index> id — join through the trace's input_summary when the original smell is needed."
+        },
+        "smell_type": { "type": "string" },
+        "refactoring": {
+          "type": "string",
+          "description": "Human-readable refactoring name, e.g. 'Extract Method'. backend/domain/sctva_mapper.py maps it onto the SCTVA action vocabulary; an unmapped name becomes a noop rather than disappearing."
+        },
+        "risk": { "$ref": "#/$defs/rating" },
+        "expected_impact": { "$ref": "#/$defs/rating" },
+        "explanation": { "type": "string" },
+        "target": {
+          "type": "object",
+          "properties": {
+            "file": { "type": "string", "description": "Repository-relative path, restored after RDP's basename flattening." },
+            "class": { "type": "string" },
+            "method": { "type": ["string", "null"] },
+            "lines": { "type": "array", "items": { "type": "integer" } }
+          },
+          "additionalProperties": true
+        },
+        "parameters": {
+          "type": "object",
+          "description": "Refactoring-specific arguments. The key set depends on the refactoring — see map_step in backend/domain/sctva_mapper.py for which keys each SCTVA action requires.",
+          "properties": {
+            "source_file": { "type": "string" },
+            "source_line": { "type": "integer" },
+            "source_lines": { "type": "array", "items": { "type": "integer" } },
+            "start_line": { "type": "integer" },
+            "end_line": { "type": "integer" },
+            "new_method_name": { "type": "string" },
+            "constant_name": { "type": "string" },
+            "literal_value": {},
+            "unsafe_function": { "type": "string" },
+            "safe_alternative": { "type": "string" }
+          },
+          "additionalProperties": true
+        },
+        "location": {
+          "type": "object",
+          "properties": { "file": { "type": "string" } },
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": true
+    }
+  }
+}
