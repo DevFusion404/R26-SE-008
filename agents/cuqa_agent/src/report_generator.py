@@ -42,6 +42,93 @@ except ImportError:
 
 
 # ---------------------------------------------------------------------------
+# Code-smell category taxonomy
+# ---------------------------------------------------------------------------
+#
+# Each entry maps a smell type string → (category_name, category_priority).
+# Category priority is independent of per-smell severity and reflects the
+# architectural risk class of the group as a whole.
+#
+# Priority ladder:
+#   critical — structural/security problems that block safe refactoring
+#   medium   — design-quality issues that raise maintenance cost
+#   low      — minor cleanliness / redundancy issues
+# ---------------------------------------------------------------------------
+
+SMELL_CATEGORY_MAP: dict[str, tuple[str, str]] = {
+    # ── Bloaters ─────────────────────────────────────────────────────────────
+    # Code that has grown excessively large and is hard to work with.
+    "LongMethod":           ("Bloaters", "critical"),
+    "LongFunction":         ("Bloaters", "critical"),  # C alias
+    "LargeClass":           ("Bloaters", "critical"),
+    "TooManyParameters":    ("Bloaters", "critical"),
+    "PrimitiveObsession":   ("Bloaters", "critical"),
+    "DataClumps":           ("Bloaters", "critical"),
+
+    # ── Object-Orientation Abusers ───────────────────────────────────────────
+    # Incorrect or incomplete application of OO principles.
+    "SwitchStatements":     ("Object-Orientation Abusers", "medium"),
+    "RefusedBequest":       ("Object-Orientation Abusers", "medium"),
+    "TemporaryField":       ("Object-Orientation Abusers", "medium"),
+    "AlternativeClassesWithDifferentInterfaces":
+                            ("Object-Orientation Abusers", "medium"),
+
+    # ── Change Preventers ────────────────────────────────────────────────────
+    # Smells that make it hard to change one thing without changing others.
+    "DuplicateCode":                        ("Change Preventers", "critical"),
+    "DivergentChange":                      ("Change Preventers", "critical"),
+    "ShotgunSurgery":                       ("Change Preventers", "critical"),
+    "ParallelInheritanceHierarchies":       ("Change Preventers", "critical"),
+
+    # ── Dispensables ─────────────────────────────────────────────────────────
+    # Pointless things whose absence would make the code cleaner.
+    "DeadCode":             ("Dispensables", "low"),
+    "LazyClass":            ("Dispensables", "low"),
+    "Comments":             ("Dispensables", "low"),
+    "SpeculativeGenerality":("Dispensables", "low"),
+    "DataClass":            ("Dispensables", "low"),
+
+    # ── Couplers ─────────────────────────────────────────────────────────────
+    # Smells that cause excessive coupling between classes/modules.
+    "FeatureEnvy":          ("Couplers", "medium"),
+    "InappropriateIntimacy":("Couplers", "medium"),
+    "MessageChains":        ("Couplers", "medium"),
+    "MiddleMan":            ("Couplers", "medium"),
+
+    # ── Security / Language-Specific ─────────────────────────────────────────
+    # Language-level or security-sensitive smells.
+    "UnsafeFunctionUsage":  ("Security / Language-Specific", "critical"),
+    "DeepNesting":          ("Security / Language-Specific", "critical"),
+    "GlobalVariable":       ("Security / Language-Specific", "medium"),
+    "LargeHeaderFile":      ("Security / Language-Specific", "medium"),
+    "BareExcept":           ("Security / Language-Specific", "medium"),
+    "MagicNumber":          ("Security / Language-Specific", "low"),
+}
+
+# Ordered list of all canonical category names (for stable output ordering)
+_CATEGORY_ORDER: list[str] = [
+    "Bloaters",
+    "Object-Orientation Abusers",
+    "Change Preventers",
+    "Dispensables",
+    "Couplers",
+    "Security / Language-Specific",
+    "Uncategorized",
+]
+
+# Priority for categories not covered by any mapped smell
+_CATEGORY_PRIORITY_DEFAULTS: dict[str, str] = {
+    "Bloaters":                        "critical",
+    "Object-Orientation Abusers":      "medium",
+    "Change Preventers":               "critical",
+    "Dispensables":                    "low",
+    "Couplers":                        "medium",
+    "Security / Language-Specific":    "critical",
+    "Uncategorized":                   "low",
+}
+
+
+# ---------------------------------------------------------------------------
 # Python analysis helpers  (FIX-04, FIX-06, FIX-09, FIX-10)
 # ---------------------------------------------------------------------------
 
@@ -965,6 +1052,65 @@ def _analyze_c_smells(source: str, filename: str) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
+# Category enrichment helpers
+# ---------------------------------------------------------------------------
+
+def _enrich_smells_with_category(smells: list[dict]) -> None:
+    """Stamp each smell dict in-place with 'category' and 'category_priority'.
+
+    Smells whose type is not present in SMELL_CATEGORY_MAP receive the
+    fallback values 'Uncategorized' / 'low' so the schema remains stable.
+    The existing 'severity' field on each smell is never modified.
+    """
+    for smell in smells:
+        smell_type = smell.get("type", "")
+        category, priority = SMELL_CATEGORY_MAP.get(
+            smell_type, ("Uncategorized", "low")
+        )
+        smell["category"] = category
+        smell["category_priority"] = priority
+
+
+def _build_smell_overview(smells: list[dict]) -> dict:
+    """Build the 'code_smell_overview' block from an already-enriched smell list.
+
+    Returns a dict keyed by category name (in _CATEGORY_ORDER order) where
+    each value contains:
+        priority  — the category-level priority string
+        count     — number of smell instances detected in this category
+        smells    — deduplicated list of smell type strings found
+
+    Categories with zero occurrences are still included so the consumer
+    always sees a complete, stable schema.
+    """
+    # Initialise every known category with zero count
+    overview: dict[str, dict] = {
+        cat: {
+            "priority": _CATEGORY_PRIORITY_DEFAULTS[cat],
+            "count": 0,
+            "smells": [],
+        }
+        for cat in _CATEGORY_ORDER
+    }
+
+    for smell in smells:
+        cat = smell.get("category", "Uncategorized")
+        if cat not in overview:
+            # Dynamically created category (shouldn't happen, but be safe)
+            overview[cat] = {
+                "priority": smell.get("category_priority", "low"),
+                "count": 0,
+                "smells": [],
+            }
+        overview[cat]["count"] += 1
+        smell_type = smell.get("type", "")
+        if smell_type and smell_type not in overview[cat]["smells"]:
+            overview[cat]["smells"].append(smell_type)
+
+    return overview
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
@@ -1016,6 +1162,12 @@ def generate_file_report(source: str, filename: str) -> dict:
                 "entity": filename,
             })
 
+    # Enrich each smell with category + category_priority fields
+    _enrich_smells_with_category(smells)
+
+    # Build structured overview grouped by category
+    smell_overview = _build_smell_overview(smells)
+
     severity_counts = {"high": 0, "medium": 0, "low": 0}
     for smell in smells:
         s = smell.get("severity", "medium")
@@ -1026,6 +1178,7 @@ def generate_file_report(source: str, filename: str) -> dict:
         "language": language,
         "metrics": metrics,
         "code_smells": smells,
+        "code_smell_overview": smell_overview,
         "smell_summary": severity_counts,
         "quality_score": _compute_score(smells, metrics),
     }
@@ -1052,6 +1205,19 @@ def generate_repo_report(file_reports: list[dict]) -> dict:
         if files_analyzed else 100
     )
 
+    # ── Aggregate code_smell_overview across all file reports ────────────────
+    # Collect every individual smell from all files (already enriched with
+    # category / category_priority by generate_file_report) and rebuild a
+    # single repo-level overview so callers get one consolidated view.
+    all_smells: list[dict] = []
+    for r in file_reports:
+        all_smells.extend(r.get("code_smells", []))
+
+    # If for some reason smells haven't been enriched yet (e.g. error reports),
+    # run enrichment defensively before building the overview.
+    _enrich_smells_with_category(all_smells)
+    repo_smell_overview = _build_smell_overview(all_smells)
+
     return {
         "summary": {
             "files_analyzed": files_analyzed,
@@ -1063,6 +1229,7 @@ def generate_repo_report(file_reports: list[dict]) -> dict:
                 "low": low_smells,
             },
             "average_quality_score": round(avg_score, 1),
+            "code_smell_overview": repo_smell_overview,
         },
         "files": file_reports,
     }

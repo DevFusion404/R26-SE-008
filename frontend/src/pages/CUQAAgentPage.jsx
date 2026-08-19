@@ -11,6 +11,7 @@
  */
 
 import { useState, useEffect, useRef } from 'react';
+import QualityReportView from '../components/QualityReportView';
 
 const API = 'http://localhost:8080';
 
@@ -43,6 +44,154 @@ const NODE_COLOR = {
   pointer_declarator:'#a855f7',
 };
 const getColor = t => NODE_COLOR[t] || '#1e3a4f';
+
+// ── Category taxonomy (mirrors backend SMELL_CATEGORY_MAP) ─────────────────
+const CATEGORY_CONFIG = {
+  'Bloaters':                    { icon: '📈', priority: 'critical', description: 'Code grown too large to work with.', color: '#ef4444', glow: 'rgba(239,68,68,0.15)', border: 'rgba(239,68,68,0.28)' },
+  'Object-Orientation Abusers': { icon: '🔀', priority: 'medium',   description: 'Incorrect or incomplete OO usage.',  color: '#eab308', glow: 'rgba(234,179,8,0.15)',  border: 'rgba(234,179,8,0.28)'  },
+  'Change Preventers':           { icon: '🔒', priority: 'critical', description: 'Cascading changes across the codebase.', color: '#f97316', glow: 'rgba(249,115,22,0.15)', border: 'rgba(249,115,22,0.28)' },
+  'Dispensables':                { icon: '🗑', priority: 'low',      description: 'Unnecessary elements to remove.',    color: '#3b82f6', glow: 'rgba(59,130,246,0.15)', border: 'rgba(59,130,246,0.28)'  },
+  'Couplers':                    { icon: '🔗', priority: 'medium',   description: 'Excessive coupling between modules.', color: '#a855f7', glow: 'rgba(168,85,247,0.15)', border: 'rgba(168,85,247,0.28)'  },
+  'Security / Language-Specific':{ icon: '🛡', priority: 'critical', description: 'Security or language-level hazards.', color: '#ef4444', glow: 'rgba(239,68,68,0.15)', border: 'rgba(239,68,68,0.28)'  },
+  'Uncategorized':               { icon: '❓', priority: 'low',      description: 'Unclassified smell.',               color: '#6b7280', glow: 'rgba(107,114,128,0.1)', border: 'rgba(107,114,128,0.25)' },
+};
+const PRIORITY_CFG = {
+  critical: { label: 'CRITICAL', color: '#ef4444', bg: 'rgba(239,68,68,0.15)',  border: 'rgba(239,68,68,0.35)'  },
+  medium:   { label: 'MEDIUM',   color: '#eab308', bg: 'rgba(234,179,8,0.15)',  border: 'rgba(234,179,8,0.35)'  },
+  low:      { label: 'LOW',      color: '#3b82f6', bg: 'rgba(59,130,246,0.15)', border: 'rgba(59,130,246,0.35)' },
+};
+const CAT_ORDER = ['Bloaters','Object-Orientation Abusers','Change Preventers','Dispensables','Couplers','Security / Language-Specific','Uncategorized'];
+
+function PriorityBadge({ priority }) {
+  const cfg = PRIORITY_CFG[priority] || PRIORITY_CFG.low;
+  return (
+    <span style={{
+      display: 'inline-flex', alignItems: 'center', gap: 3,
+      padding: '2px 7px', borderRadius: 9999,
+      fontSize: 10, fontWeight: 700, letterSpacing: '0.4px',
+      background: cfg.bg, color: cfg.color, border: `1px solid ${cfg.border}`,
+      whiteSpace: 'nowrap',
+    }}>
+      {priority === 'critical' && <span style={{ fontSize: 8 }}>●</span>}
+      {cfg.label}
+    </span>
+  );
+}
+
+function CategoryBar({ count, maxCount, color }) {
+  const pct = maxCount > 0 ? (count / maxCount) * 100 : 0;
+  return (
+    <div style={{ height: 5, borderRadius: 3, background: 'var(--bg-hover)', overflow: 'hidden', flex: 1 }}>
+      <div style={{
+        height: '100%', borderRadius: 3, width: `${pct}%`, background: color,
+        transition: 'width 0.7s cubic-bezier(0.4,0,0.2,1)',
+        boxShadow: `0 0 5px ${color}80`,
+      }} />
+    </div>
+  );
+}
+
+function InlineCodeSmellOverview({ overview }) {
+  const [expanded, setExpanded] = useState(null);
+  if (!overview) return null;
+  const maxCount = Math.max(...CAT_ORDER.map(c => overview[c]?.count ?? 0), 1);
+  const totalSmells = CAT_ORDER.reduce((a, c) => a + (overview[c]?.count ?? 0), 0);
+
+  return (
+    <div style={{ background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 12, overflow: 'hidden' }}>
+      {/* Header */}
+      <div style={{
+        padding: '14px 20px', borderBottom: '1px solid var(--border)',
+        display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+        background: 'linear-gradient(135deg,#0f1e30 0%,#0a1520 100%)',
+      }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          <span style={{ fontSize: 15 }}>🗂</span>
+          <span style={{ fontSize: 13, fontWeight: 700, color: 'var(--text-primary)' }}>Code Smell Category Overview</span>
+          <span style={{
+            fontSize: 10, padding: '2px 8px', borderRadius: 9999,
+            background: 'var(--accent-muted)', color: 'var(--accent)',
+            border: '1px solid var(--border-accent)', fontWeight: 600,
+          }}>{totalSmells} total</span>
+        </div>
+        <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>Click a row to expand</span>
+      </div>
+
+      {/* Category rows — 2-column grid for wider layout */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(360px, 1fr))' }}>
+        {CAT_ORDER.map(cat => {
+          const data = overview[cat];
+          if (!data) return null;
+          const cfg = CATEGORY_CONFIG[cat] || CATEGORY_CONFIG['Uncategorized'];
+          const isOpen = expanded === cat;
+          const hasSmells = data.count > 0;
+          return (
+            <div key={cat} style={{
+              borderBottom: '1px solid var(--border)',
+              borderRight: '1px solid var(--border)',
+            }}>
+              <div
+                onClick={() => setExpanded(isOpen ? null : cat)}
+                style={{
+                  display: 'flex', alignItems: 'center', gap: 12,
+                  padding: '11px 18px', cursor: 'pointer',
+                  background: isOpen ? cfg.glow : 'transparent',
+                  transition: 'background 0.15s ease', userSelect: 'none',
+                }}
+              >
+                <span style={{ fontSize: 18, flexShrink: 0 }}>{cfg.icon}</span>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 7, marginBottom: 5 }}>
+                    <span style={{ fontSize: 11, fontWeight: 600, color: hasSmells ? 'var(--text-primary)' : 'var(--text-muted)' }}>
+                      {cat}
+                    </span>
+                    <PriorityBadge priority={cfg.priority} />
+                  </div>
+                  <CategoryBar count={data.count} maxCount={maxCount} color={hasSmells ? cfg.color : 'var(--border-light)'} />
+                </div>
+                <div style={{
+                  flexShrink: 0, minWidth: 32, textAlign: 'center',
+                  fontSize: 15, fontWeight: 700,
+                  color: hasSmells ? cfg.color : 'var(--text-muted)',
+                  textShadow: hasSmells ? `0 0 10px ${cfg.color}60` : 'none',
+                }}>{data.count}</div>
+                <span style={{
+                  flexShrink: 0, fontSize: 11, color: 'var(--text-muted)',
+                  transform: isOpen ? 'rotate(90deg)' : 'none',
+                  transition: 'transform 0.2s ease',
+                }}>▸</span>
+              </div>
+              {isOpen && (
+                <div style={{
+                  padding: '10px 18px 14px 50px',
+                  borderTop: `1px solid ${cfg.border}`,
+                  background: `linear-gradient(180deg,${cfg.glow} 0%,transparent 100%)`,
+                  animation: 'fadeIn 0.15s ease',
+                }}>
+                  <div style={{ fontSize: 10, color: 'var(--text-secondary)', marginBottom: 8, fontStyle: 'italic' }}>{cfg.description}</div>
+                  {data.smells?.length > 0 ? (
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5 }}>
+                      {data.smells.map(t => (
+                        <span key={t} style={{
+                          padding: '2px 9px', borderRadius: 5,
+                          fontSize: 10, fontWeight: 600, fontFamily: 'var(--font-mono)',
+                          background: `${cfg.color}18`, color: cfg.color,
+                          border: `1px solid ${cfg.border}`,
+                        }}>{t}</span>
+                      ))}
+                    </div>
+                  ) : (
+                    <span style={{ fontSize: 11, color: '#22c55e' }}>✓ No smells in this category</span>
+                  )}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
 
 // ── Simple tree layout (BFS levels) ───────────────────────────────────────
 function layoutTree(root, nodeW = 150, nodeH = 44, hGap = 20, vGap = 70) {
@@ -776,6 +925,23 @@ export default function CUQAAgentPage({ repoLoaded, repoMeta, onSendToRdp, analy
         )}
       </div>
 
+      {/* ── Code Smell Category Overview ────────────────────── */}
+      <div>
+        <h3 style={{ margin: '16px 0 12px 0', fontSize: 14, fontWeight: 600 }}>🗂 Code Smell Category Overview</h3>
+        {loadingRep ? (
+          <div className="loading-state"><div className="spinner" /></div>
+        ) : report?.summary?.code_smell_overview ? (
+          <InlineCodeSmellOverview overview={report.summary.code_smell_overview} />
+        ) : (
+          <div className="card">
+            <div className="empty-state" style={{ padding: 28 }}>
+              <span className="empty-icon">🗂</span>
+              <p>Run analysis to see category breakdown.</p>
+            </div>
+          </div>
+        )}
+      </div>
+
       {/* ── Files with Code Smells ──────────────────────────── */}
       <div>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
@@ -843,6 +1009,8 @@ export default function CUQAAgentPage({ repoLoaded, repoMeta, onSendToRdp, analy
                 <thead>
                   <tr>
                     <th>Type</th>
+                    <th>Category</th>
+                    <th>Priority</th>
                     <th>File</th>
                     <th>Line</th>
                     <th>Message</th>
@@ -851,38 +1019,44 @@ export default function CUQAAgentPage({ repoLoaded, repoMeta, onSendToRdp, analy
                   </tr>
                 </thead>
                 <tbody>
-                  {filteredSmells.slice(0, 30).map((s, i) => (
-                    <tr key={i}>
-                      <td>
-                        <span style={{ fontWeight: 600, fontSize: 12, color: 'var(--text-primary)' }}>
-                          {s.type}
-                        </span>
-                      </td>
-                      <td>
-                        <span style={{ fontSize: 11, color: 'var(--accent)' }}>{s.file}</span>
-                      </td>
-                      <td>
-                        <span style={{ fontSize: 11, color: 'var(--text-secondary)' }}>
-                          {s.line ? `L${s.line}` : '—'}
-                        </span>
-                      </td>
-                      <td>
-                        <span style={{ fontSize: 11, color: 'var(--text-secondary)', maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                          {s.message?.slice(0, 60)}
-                        </span>
-                      </td>
-                      <td>
-                        <span className={`badge badge-${s.severity === 'high' ? 'critical' : s.severity === 'medium' ? 'medium' : 'success'}`}>
-                          {(s.severity || '?').toUpperCase()}
-                        </span>
-                      </td>
-                      <td style={{ textAlign: 'center' }}>
-                        <button className="btn btn-ghost btn-sm" style={{ fontSize: 11 }}>
-                          View
-                        </button>
-                      </td>
-                    </tr>
-                  ))}
+                  {filteredSmells.slice(0, 30).map((s, i) => {
+                    const catCfg = CATEGORY_CONFIG[s.category] || CATEGORY_CONFIG['Uncategorized'];
+                    return (
+                      <tr key={i}>
+                        <td>
+                          <span style={{ fontWeight: 600, fontSize: 12, color: 'var(--text-primary)' }}>{s.type}</span>
+                        </td>
+                        <td>
+                          {s.category ? (
+                            <span style={{
+                              display: 'inline-flex', alignItems: 'center', gap: 4,
+                              padding: '2px 7px', borderRadius: 5, fontSize: 10, fontWeight: 600,
+                              background: `${catCfg.color}18`, color: catCfg.color,
+                              border: `1px solid ${catCfg.border}`,
+                            }}>
+                              {catCfg.icon} {s.category}
+                            </span>
+                          ) : <span style={{ color: 'var(--text-muted)', fontSize: 11 }}>—</span>}
+                        </td>
+                        <td>
+                          {s.category_priority
+                            ? <PriorityBadge priority={s.category_priority} />
+                            : <span style={{ color: 'var(--text-muted)', fontSize: 11 }}>—</span>}
+                        </td>
+                        <td><span style={{ fontSize: 11, color: 'var(--accent)' }}>{s.file}</span></td>
+                        <td><span style={{ fontSize: 11, color: 'var(--text-secondary)' }}>{s.line ? `L${s.line}` : '—'}</span></td>
+                        <td><span style={{ fontSize: 11, color: 'var(--text-secondary)', maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis' }}>{s.message?.slice(0, 60)}</span></td>
+                        <td>
+                          <span className={`badge badge-${s.severity === 'high' ? 'critical' : s.severity === 'medium' ? 'medium' : 'success'}`}>
+                            {(s.severity || '?').toUpperCase()}
+                          </span>
+                        </td>
+                        <td style={{ textAlign: 'center' }}>
+                          <button className="btn btn-ghost btn-sm" style={{ fontSize: 11 }}>View</button>
+                        </td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>

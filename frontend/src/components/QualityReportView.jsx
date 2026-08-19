@@ -6,15 +6,112 @@
  * This is the structured output the CUQA Agent passes to the RDP Agent.
  *
  * Supports Python (.py), Java (.java), and C (.c, .h) source files.
+ *
+ * v2: Adds Code Smell Overview panel with category taxonomy,
+ *     priority badges, animated bars, and enriched smell cards.
  */
 
 import { useState, useEffect } from 'react';
 
 const API = 'http://localhost:8080';
 
+// ── Category config (mirrors SMELL_CATEGORY_MAP priority) ──────────────────
+const CATEGORY_CONFIG = {
+  'Bloaters': {
+    icon: '📈',
+    priority: 'critical',
+    description: 'Code that has grown too large to work with comfortably.',
+    color: '#ef4444',
+    glow: 'rgba(239,68,68,0.18)',
+    border: 'rgba(239,68,68,0.30)',
+  },
+  'Object-Orientation Abusers': {
+    icon: '🔀',
+    priority: 'medium',
+    description: 'Incorrect or incomplete application of OO principles.',
+    color: '#eab308',
+    glow: 'rgba(234,179,8,0.18)',
+    border: 'rgba(234,179,8,0.30)',
+  },
+  'Change Preventers': {
+    icon: '🔒',
+    priority: 'critical',
+    description: 'Make it hard to change one part without cascading updates.',
+    color: '#f97316',
+    glow: 'rgba(249,115,22,0.18)',
+    border: 'rgba(249,115,22,0.30)',
+  },
+  'Dispensables': {
+    icon: '🗑',
+    priority: 'low',
+    description: 'Unnecessary elements whose removal would clean the code.',
+    color: '#3b82f6',
+    glow: 'rgba(59,130,246,0.18)',
+    border: 'rgba(59,130,246,0.30)',
+  },
+  'Couplers': {
+    icon: '🔗',
+    priority: 'medium',
+    description: 'Excessive coupling between classes or modules.',
+    color: '#a855f7',
+    glow: 'rgba(168,85,247,0.18)',
+    border: 'rgba(168,85,247,0.30)',
+  },
+  'Security / Language-Specific': {
+    icon: '🛡',
+    priority: 'critical',
+    description: 'Language-level or security-sensitive patterns.',
+    color: '#ef4444',
+    glow: 'rgba(239,68,68,0.18)',
+    border: 'rgba(239,68,68,0.30)',
+  },
+  'Uncategorized': {
+    icon: '❓',
+    priority: 'low',
+    description: 'Unclassified smell type.',
+    color: '#6b7280',
+    glow: 'rgba(107,114,128,0.18)',
+    border: 'rgba(107,114,128,0.30)',
+  },
+};
+
+const PRIORITY_CONFIG = {
+  critical: { label: 'CRITICAL', color: '#ef4444', bg: 'rgba(239,68,68,0.15)', border: 'rgba(239,68,68,0.35)' },
+  medium:   { label: 'MEDIUM',   color: '#eab308', bg: 'rgba(234,179,8,0.15)', border: 'rgba(234,179,8,0.35)' },
+  low:      { label: 'LOW',      color: '#3b82f6', bg: 'rgba(59,130,246,0.15)', border: 'rgba(59,130,246,0.35)' },
+};
+
+const CATEGORY_ORDER = [
+  'Bloaters',
+  'Object-Orientation Abusers',
+  'Change Preventers',
+  'Dispensables',
+  'Couplers',
+  'Security / Language-Specific',
+  'Uncategorized',
+];
+
 // ── Severity badge ──────────────────────────────────────────────────────────
 function SeverityBadge({ level }) {
   return <span className={`pill pill-${level}`}>{level.toUpperCase()}</span>;
+}
+
+// ── Priority badge ──────────────────────────────────────────────────────────
+function PriorityBadge({ priority }) {
+  const cfg = PRIORITY_CONFIG[priority] || PRIORITY_CONFIG.low;
+  return (
+    <span style={{
+      display: 'inline-flex', alignItems: 'center', gap: 3,
+      padding: '2px 8px', borderRadius: 9999,
+      fontSize: 10, fontWeight: 700, letterSpacing: '0.5px',
+      background: cfg.bg, color: cfg.color,
+      border: `1px solid ${cfg.border}`,
+      whiteSpace: 'nowrap',
+    }}>
+      {priority === 'critical' && <span>●</span>}
+      {cfg.label}
+    </span>
+  );
 }
 
 // ── Language icon helper ────────────────────────────────────────────────────
@@ -60,7 +157,194 @@ function ScoreRing({ score }) {
   );
 }
 
-// ── Smell list ──────────────────────────────────────────────────────────────
+// ── Category progress bar ───────────────────────────────────────────────────
+function CategoryBar({ count, maxCount, color }) {
+  const pct = maxCount > 0 ? (count / maxCount) * 100 : 0;
+  return (
+    <div style={{
+      height: 6, borderRadius: 3,
+      background: 'var(--bg-hover)', overflow: 'hidden', flex: 1,
+    }}>
+      <div style={{
+        height: '100%', borderRadius: 3,
+        width: `${pct}%`, background: color,
+        transition: 'width 0.6s cubic-bezier(0.4,0,0.2,1)',
+        boxShadow: `0 0 6px ${color}80`,
+      }} />
+    </div>
+  );
+}
+
+// ── Code Smell Overview panel ───────────────────────────────────────────────
+function CodeSmellOverview({ overview }) {
+  const [expanded, setExpanded] = useState(null);
+
+  if (!overview) return null;
+
+  const maxCount = Math.max(
+    ...CATEGORY_ORDER.map(cat => overview[cat]?.count ?? 0),
+    1,
+  );
+  const totalSmells = CATEGORY_ORDER.reduce(
+    (acc, cat) => acc + (overview[cat]?.count ?? 0), 0,
+  );
+
+  return (
+    <div style={{
+      background: 'var(--bg-card)',
+      border: '1px solid var(--border)',
+      borderRadius: 12,
+      overflow: 'hidden',
+    }}>
+      {/* Header */}
+      <div style={{
+        padding: '16px 20px',
+        borderBottom: '1px solid var(--border)',
+        display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+        background: 'linear-gradient(135deg, #0f1e30 0%, #0a1520 100%)',
+      }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          <span style={{ fontSize: 16 }}>🗂</span>
+          <span style={{ fontSize: 13, fontWeight: 700, color: 'var(--text-primary)' }}>
+            Code Smell Overview
+          </span>
+          <span style={{
+            fontSize: 10, padding: '2px 8px', borderRadius: 9999,
+            background: 'var(--accent-muted)', color: 'var(--accent)',
+            border: '1px solid var(--border-accent)', fontWeight: 600,
+          }}>
+            {totalSmells} total
+          </span>
+        </div>
+        <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+          Click a category to expand
+        </span>
+      </div>
+
+      {/* Category rows */}
+      <div style={{ padding: '8px 0' }}>
+        {CATEGORY_ORDER.map(cat => {
+          const data = overview[cat];
+          if (!data) return null;
+          const cfg = CATEGORY_CONFIG[cat] || CATEGORY_CONFIG['Uncategorized'];
+          const isOpen = expanded === cat;
+          const hasSmells = data.count > 0;
+
+          return (
+            <div key={cat} style={{
+              borderBottom: '1px solid var(--border)',
+              transition: 'background 0.15s ease',
+            }}>
+              {/* Row */}
+              <div
+                onClick={() => setExpanded(isOpen ? null : cat)}
+                style={{
+                  display: 'flex', alignItems: 'center', gap: 12,
+                  padding: '12px 20px', cursor: 'pointer',
+                  background: isOpen ? cfg.glow : 'transparent',
+                  transition: 'background 0.15s ease',
+                  userSelect: 'none',
+                }}
+                onMouseEnter={e => {
+                  if (!isOpen) e.currentTarget.style.background = `${cfg.glow}`;
+                }}
+                onMouseLeave={e => {
+                  if (!isOpen) e.currentTarget.style.background = 'transparent';
+                }}
+              >
+                {/* Icon */}
+                <span style={{ fontSize: 18, flexShrink: 0 }}>{cfg.icon}</span>
+
+                {/* Category name + description */}
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{
+                    display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4,
+                  }}>
+                    <span style={{
+                      fontSize: 12, fontWeight: 600,
+                      color: hasSmells ? 'var(--text-primary)' : 'var(--text-muted)',
+                    }}>
+                      {cat}
+                    </span>
+                    <PriorityBadge priority={cfg.priority} />
+                  </div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                    <CategoryBar
+                      count={data.count}
+                      maxCount={maxCount}
+                      color={hasSmells ? cfg.color : 'var(--border-light)'}
+                    />
+                  </div>
+                </div>
+
+                {/* Count badge */}
+                <div style={{
+                  flexShrink: 0, minWidth: 36, textAlign: 'center',
+                  fontSize: 16, fontWeight: 700,
+                  color: hasSmells ? cfg.color : 'var(--text-muted)',
+                  textShadow: hasSmells ? `0 0 12px ${cfg.color}60` : 'none',
+                }}>
+                  {data.count}
+                </div>
+
+                {/* Expand chevron */}
+                <span style={{
+                  flexShrink: 0, fontSize: 12,
+                  color: 'var(--text-muted)',
+                  transform: isOpen ? 'rotate(90deg)' : 'rotate(0deg)',
+                  transition: 'transform 0.2s ease',
+                }}>
+                  ▸
+                </span>
+              </div>
+
+              {/* Expanded detail */}
+              {isOpen && (
+                <div style={{
+                  padding: '12px 20px 16px 52px',
+                  borderTop: `1px solid ${cfg.border}`,
+                  background: `linear-gradient(180deg, ${cfg.glow} 0%, transparent 100%)`,
+                  animation: 'fadeIn 0.15s ease',
+                }}>
+                  <div style={{
+                    fontSize: 11, color: 'var(--text-secondary)',
+                    marginBottom: 10, fontStyle: 'italic',
+                  }}>
+                    {cfg.description}
+                  </div>
+                  {data.smells?.length > 0 ? (
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                      {data.smells.map(smellType => (
+                        <span key={smellType} style={{
+                          padding: '3px 10px', borderRadius: 6,
+                          fontSize: 11, fontWeight: 600, fontFamily: 'var(--font-mono)',
+                          background: `${cfg.color}18`,
+                          color: cfg.color,
+                          border: `1px solid ${cfg.border}`,
+                        }}>
+                          {smellType}
+                        </span>
+                      ))}
+                    </div>
+                  ) : (
+                    <span style={{
+                      fontSize: 11, color: '#22c55e',
+                      display: 'flex', alignItems: 'center', gap: 5,
+                    }}>
+                      ✓ No smells detected in this category
+                    </span>
+                  )}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// ── Enriched smell card ─────────────────────────────────────────────────────
 function SmellList({ smells }) {
   if (!smells?.length) {
     return (
@@ -72,26 +356,52 @@ function SmellList({ smells }) {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: 8 }}>
-      {smells.map((s, i) => (
-        <div key={i} style={{
-          display: 'flex', alignItems: 'flex-start', gap: 10,
-          background: 'var(--bg-elevated)', border: '1px solid var(--border)',
-          borderRadius: 6, padding: '10px 14px',
-        }}>
-          <SeverityBadge level={s.severity || 'medium'} />
-          <div style={{ flex: 1 }}>
-            <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-primary)', marginBottom: 2 }}>
-              {s.type}
+      {smells.map((s, i) => {
+        const catCfg = CATEGORY_CONFIG[s.category] || CATEGORY_CONFIG['Uncategorized'];
+        return (
+          <div key={i} style={{
+            display: 'flex', alignItems: 'flex-start', gap: 10,
+            background: 'var(--bg-elevated)', border: '1px solid var(--border)',
+            borderLeft: `3px solid ${catCfg.color}`,
+            borderRadius: 6, padding: '10px 14px',
+            transition: 'border-color 0.15s ease',
+          }}>
+            <SeverityBadge level={s.severity || 'medium'} />
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{
+                display: 'flex', alignItems: 'center', gap: 6,
+                flexWrap: 'wrap', marginBottom: 3,
+              }}>
+                <span style={{ fontSize: 12, fontWeight: 700, color: 'var(--text-primary)' }}>
+                  {s.type}
+                </span>
+                {s.category && (
+                  <span style={{
+                    fontSize: 10, padding: '1px 6px', borderRadius: 4,
+                    background: `${catCfg.color}18`, color: catCfg.color,
+                    border: `1px solid ${catCfg.border}`,
+                    fontWeight: 600,
+                  }}>
+                    {catCfg.icon} {s.category}
+                  </span>
+                )}
+                {s.category_priority && (
+                  <PriorityBadge priority={s.category_priority} />
+                )}
+              </div>
+              <div style={{ fontSize: 12, color: 'var(--text-secondary)' }}>{s.message}</div>
             </div>
-            <div style={{ fontSize: 12, color: 'var(--text-secondary)' }}>{s.message}</div>
+            {s.line && (
+              <span style={{
+                fontFamily: 'var(--font-mono)', fontSize: 11,
+                color: 'var(--text-muted)', flexShrink: 0,
+              }}>
+                L{s.line}
+              </span>
+            )}
           </div>
-          {s.line && (
-            <span style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-muted)', flexShrink: 0 }}>
-              L{s.line}
-            </span>
-          )}
-        </div>
-      ))}
+        );
+      })}
     </div>
   );
 }
@@ -99,9 +409,11 @@ function SmellList({ smells }) {
 // ── File report card ─────────────────────────────────────────────────────────
 function FileReportCard({ report }) {
   const [open, setOpen] = useState(false);
+  const [tab, setTab] = useState('smells'); // 'smells' | 'overview'
   const m = report.metrics || {};
   const score = report.quality_score ?? '—';
   const smellCount = report.code_smells?.length ?? 0;
+  const hasOverview = !!report.code_smell_overview;
 
   return (
     <div className="card" style={{ marginBottom: 8 }}>
@@ -159,7 +471,7 @@ function FileReportCard({ report }) {
             ))}
           </div>
 
-          {/* C-specific metrics — only shown for C files */}
+          {/* C-specific metrics */}
           {report.language === 'c' && (
             <div>
               <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '0.5px' }}>
@@ -180,13 +492,44 @@ function FileReportCard({ report }) {
             </div>
           )}
 
-          {/* Smells */}
-          <div>
-            <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 4 }}>
-              Code Smells
+          {/* Tab switcher */}
+          {hasOverview && (
+            <div style={{ display: 'flex', gap: 4, borderBottom: '1px solid var(--border)', paddingBottom: 0 }}>
+              {[
+                { key: 'smells', label: '🔍 Smell List' },
+                { key: 'overview', label: '🗂 Category Overview' },
+              ].map(t => (
+                <button
+                  key={t.key}
+                  onClick={() => setTab(t.key)}
+                  style={{
+                    padding: '5px 12px', border: 'none', cursor: 'pointer',
+                    background: 'transparent', fontSize: 11, fontWeight: 600,
+                    color: tab === t.key ? 'var(--accent)' : 'var(--text-muted)',
+                    borderBottom: tab === t.key ? '2px solid var(--accent)' : '2px solid transparent',
+                    transition: 'all 0.15s ease',
+                  }}
+                >
+                  {t.label}
+                </button>
+              ))}
             </div>
-            <SmellList smells={report.code_smells} />
-          </div>
+          )}
+
+          {/* Smells */}
+          {tab === 'smells' && (
+            <div>
+              <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 4 }}>
+                Code Smells
+              </div>
+              <SmellList smells={report.code_smells} />
+            </div>
+          )}
+
+          {/* Per-file overview */}
+          {tab === 'overview' && hasOverview && (
+            <CodeSmellOverview overview={report.code_smell_overview} />
+          )}
         </div>
       )}
     </div>
@@ -318,7 +661,7 @@ export default function QualityReportView({ repoLoaded, selectedFile }) {
                 <div className="card-header">
                   <span className="card-title">📊 Repository Summary — {report.report.repo_name}</span>
                 </div>
-                <div className="card-body">
+                <div className="card-body" style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 32, flexWrap: 'wrap' }}>
                     <ScoreRing score={report.report.summary.average_quality_score} />
                     <div className="metrics-grid" style={{ flex: 1 }}>
@@ -337,18 +680,45 @@ export default function QualityReportView({ repoLoaded, selectedFile }) {
                       ))}
                     </div>
                   </div>
+
+                  {/* Repo-level category overview */}
+                  {report.report.summary.code_smell_overview && (
+                    <div>
+                      <div style={{
+                        fontSize: 11, fontWeight: 600, textTransform: 'uppercase',
+                        letterSpacing: '0.5px', color: 'var(--text-muted)', marginBottom: 10,
+                      }}>
+                        Category Breakdown
+                      </div>
+                      <CodeSmellOverview overview={report.report.summary.code_smell_overview} />
+                    </div>
+                  )}
                 </div>
               </div>
             )}
 
             {/* File-level summary */}
             {report.type === 'file' && report.report && (
-              <div style={{ display: 'flex', alignItems: 'flex-start', gap: 20 }}>
-                <ScoreRing score={report.report.quality_score ?? 0} />
-                <div style={{ flex: 1 }}>
-                  <FileReportCard report={report.report} />
+              <>
+                <div style={{ display: 'flex', alignItems: 'flex-start', gap: 20 }}>
+                  <ScoreRing score={report.report.quality_score ?? 0} />
+                  <div style={{ flex: 1 }}>
+                    <FileReportCard report={report.report} />
+                  </div>
                 </div>
-              </div>
+
+                {/* Standalone overview card for single-file view */}
+                {report.report.code_smell_overview && (
+                  <div className="card">
+                    <div className="card-header">
+                      <span className="card-title">🗂 Code Smell Categories</span>
+                    </div>
+                    <div className="card-body">
+                      <CodeSmellOverview overview={report.report.code_smell_overview} />
+                    </div>
+                  </div>
+                )}
+              </>
             )}
 
             {/* File list for repo report */}
