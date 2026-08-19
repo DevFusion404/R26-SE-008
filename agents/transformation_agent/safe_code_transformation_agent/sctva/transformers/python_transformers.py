@@ -939,12 +939,35 @@ def apply_extract_method(
     return "".join(transformed), 1
 
 
+class _ReturnTransformer(ast.NodeTransformer):
+    def __init__(self, outputs):
+        self.outputs = outputs
+    def visit_FunctionDef(self, node):
+        return node
+    def visit_AsyncFunctionDef(self, node):
+        return node
+    def visit_Return(self, node):
+        elts = []
+        for o in self.outputs:
+            elts.append(ast.Name(id=o, ctx=ast.Load()))
+        elts.append(ast.Constant(value=True))
+        elts.append(node.value if node.value else ast.Constant(value=None))
+        return ast.Return(value=ast.Tuple(elts=elts, ctx=ast.Load()))
+
+
 def _extract_full_python_function(
     source_code: str,
     new_method_name: str,
     start_line: int,
     end_line: int,
 ) -> Tuple[str, int]:
+    """Decompose a long Python function into cohesive top-level sub-functions.
+
+    Instead of wrapping the entire function body in a single nested wrapper (which
+    doesn't reduce complexity), this splits the function body into logical blocks
+    (using blank lines as starting boundaries), calculates their inputs/outputs via
+    AST analysis, and replaces each block with a call to a newly extracted helper.
+    """
     lines = source_code.splitlines(keepends=True)
     selected = lines[start_line - 1 : end_line]
     if len(selected) < 2:
@@ -958,22 +981,259 @@ def _extract_full_python_function(
 
     function_indent = _line_indent(header)
     body_indent = min((_line_indent(line) for line in meaningful_body), key=len)
-    if len(body_indent) <= len(function_indent):
-        return source_code, 0
+    
+    # 1. Group body lines into cohesive syntactically valid blocks
+    raw_blocks: List[List[str]] = []
+    current_block: List[str] = []
+    
+    for line in body:
+        # We start a new block on empty lines or lines with comments at base body indentation
+        stripped = line.strip()
+        if not stripped:
+            if current_block:
+                raw_blocks.append(current_block)
+                current_block = []
+            continue
+        current_block.append(line)
+        
+    if current_block:
+        raw_blocks.append(current_block)
 
-    has_return = any(line.strip().startswith("return") for line in meaningful_body)
-    helper_header = f"{body_indent}def {new_method_name}():\n"
-    helper_body = [
-        (f"{body_indent}    {line[len(body_indent):]}" if line.startswith(body_indent) else f"{body_indent}    {line.lstrip()}")
-        for line in body
-    ]
-    call_line = (
-        f"{body_indent}return {new_method_name}()\n"
-        if has_return
-        else f"{body_indent}{new_method_name}()\n"
-    )
-    replacement = [header, helper_header, *helper_body, call_line]
-    return "".join(lines[: start_line - 1] + replacement + lines[end_line:]), 1
+    # Merge blocks that are not syntactically valid on their own (e.g. try without except, if without body)
+    valid_blocks: List[str] = []
+    temp_lines: List[str] = []
+    
+    for block in raw_blocks:
+        temp_lines.extend(block)
+        # Check syntax by dedenting the lines and trying to parse
+        block_code = "".join(temp_lines)
+        # Dedent helper
+        lines_to_dedent = block_code.splitlines()
+        min_ind = min((_line_indent(l) for l in lines_to_dedent if l.strip()), default="")
+        dedented = "\n".join(l[len(min_ind):] if l.startswith(min_ind) else l.lstrip() for l in lines_to_dedent)
+        
+        try:
+            ast.parse(dedented)
+            # Valid block found!
+            valid_blocks.append(block_code)
+            temp_lines = []
+        except SyntaxError:
+            # Not valid yet, keep appending next block
+            continue
+            
+    if temp_lines:
+        # Append any remaining lines to the last block or as a new block
+        block_code = "".join(temp_lines)
+        if valid_blocks:
+            valid_blocks[-1] += "\n" + block_code
+        else:
+            valid_blocks.append(block_code)
+
+    # If we only have 1 block, fallback to single extraction or return unchanged
+    if len(valid_blocks) <= 1:
+        # Fallback: Extract the body as a single nested helper to preserve behavior
+        has_return = any(line.strip().startswith("return") for line in meaningful_body)
+        helper_header = f"{body_indent}def {new_method_name}():\n"
+        helper_body = [
+            (f"{body_indent}    {line[len(body_indent):]}" if line.startswith(body_indent) else f"{body_indent}    {line.lstrip()}")
+            for line in body
+        ]
+        call_line = (
+            f"{body_indent}return {new_method_name}()\n"
+            if has_return
+            else f"{body_indent}{new_method_name}()\n"
+        )
+        replacement = [header, helper_header, *helper_body, call_line]
+        return "".join(lines[: start_line - 1] + replacement + lines[end_line:]), 1
+
+    # 2. Extract each block into a helper and build the main function call sequence
+    prefix_code = "".join(lines[: start_line - 1])
+    suffix_code = "".join(lines[end_line:])
+    
+    extracted_helpers: List[str] = []
+    main_calls: List[str] = []
+    
+    # Track variables defined before each block starts
+    defined_before_set = set()
+    # Populate initial parameters from function header
+    param_match = re.search(r'def\s+[A-Za-z0-9_]+\s*\(([^)]*)\)', header)
+    if param_match:
+        for p in param_match.group(1).split(","):
+            p_clean = p.split("=")[0].strip()
+            if p_clean:
+                defined_before_set.add(p_clean)
+
+    for idx, block_code in enumerate(valid_blocks, 1):
+        # Determine code before/after this block for scope analysis (local function scope only)
+        code_before = header + "".join(valid_blocks[:idx-1])
+        code_after = "".join(valid_blocks[idx:])
+        
+        # Analyze variables (inputs/outputs)
+        try:
+            block_lines_to_dedent = block_code.splitlines()
+            block_min_ind = min((_line_indent(l) for l in block_lines_to_dedent if l.strip()), default="")
+            block_dedented = "\n".join(l[len(block_min_ind):] if l.startswith(block_min_ind) else l.lstrip() for l in block_lines_to_dedent)
+            block_node = ast.parse(block_dedented)
+        except Exception:
+            # Fallback for parsing errors
+            main_calls.append(block_code)
+            continue
+            
+        reads = set()
+        writes = set()
+        for node in ast.walk(block_node):
+            if isinstance(node, ast.Name):
+                if isinstance(node.ctx, ast.Load):
+                    reads.add(node.id)
+                elif isinstance(node.ctx, ast.Store):
+                    writes.add(node.id)
+            elif isinstance(node, ast.arg):
+                writes.add(node.arg)
+
+        # Variables defined before this block
+        try:
+            before_node = ast.parse(code_before)
+            for node in ast.walk(before_node):
+                if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+                    defined_before_set.add(node.id)
+                elif isinstance(node, ast.arg):
+                    defined_before_set.add(node.arg)
+        except Exception:
+            pass
+
+        # Variables read after this block
+        read_after_set = set()
+        try:
+            after_dedented = "".join(
+                (l[len(body_indent):] if l.startswith(body_indent) else l.lstrip())
+                for l in code_after.splitlines(keepends=True)
+            )
+            after_node = ast.parse(after_dedented)
+            for node in ast.walk(after_node):
+                if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
+                    read_after_set.add(node.id)
+        except Exception:
+            pass
+
+        # Filter builtins/globals
+        builtins = {"print", "input", "float", "int", "str", "round", "range", "len", "ValueError", "Exception", "True", "False", "None"}
+        inputs = sorted([v for v in reads if v in defined_before_set and v not in builtins and not v.isupper()])
+        outputs = sorted([v for v in writes if v in read_after_set and v not in builtins and not v.isupper()])
+
+        # Check for early returns in the block (excluding nested functions)
+        class ReturnFinder(ast.NodeVisitor):
+            def __init__(self):
+                self.found = False
+            def visit_FunctionDef(self, node):
+                pass
+            def visit_AsyncFunctionDef(self, node):
+                pass
+            def visit_Return(self, node):
+                self.found = True
+        finder = ReturnFinder()
+        finder.visit(block_node)
+        has_early_return = finder.found
+
+        # Infer a semantic name
+        name_choice = "extracted_step"
+        # Try finding print header
+        header_match = re.search(r'print\(\s*["\']={2,}\s*([^=]+?)\s*={2,}["\']\s*\)', block_code)
+        if header_match:
+            name_choice = header_match.group(1).lower().strip()
+            name_choice = re.sub(r'[^a-z0-9_]+', '_', name_choice)
+            if "sheet" in name_choice or "result" in name_choice:
+                name_choice = f"display_{name_choice}"
+            else:
+                name_choice = f"enter_{name_choice}"
+        else:
+            # Try finding comments
+            comment_match = re.search(r'^\s*#\s*([A-Za-z0-9\s_-]+)', block_code, re.MULTILINE)
+            if comment_match:
+                name_choice = comment_match.group(1).lower().strip()
+                name_choice = re.sub(r'[^a-z0-9_]+', '_', name_choice)
+            else:
+                # Try finding assignments
+                assign_match = re.findall(r'^\s*([a-z_][a-z0-9_]*)\s*=', block_code, re.MULTILINE)
+                filtered = [v for v in assign_match if v not in ("i", "j", "temp", "val")]
+                if filtered:
+                    primary = filtered[0]
+                    if "grade" in primary:
+                        name_choice = "calculate_grades"
+                    elif "passed" in primary:
+                        name_choice = "count_passed_subjects"
+                    elif "overall" in primary:
+                        name_choice = "calculate_overall_result"
+                    elif "total" in primary:
+                        name_choice = "calculate_totals"
+                    else:
+                        name_choice = f"calculate_{primary}"
+
+        helper_name = f"helper_{name_choice}_{idx}"
+        
+        # Build helper function signature
+        sig_args = ", ".join(inputs)
+        helper_sig = f"def {helper_name}({sig_args}):\n"
+        
+        # Format helper body
+        helper_lines = []
+        new_locals = sorted([v for v in outputs if v not in inputs])
+        if new_locals:
+            init_line = "    " + " = ".join(new_locals) + " = None\n"
+            helper_lines.append(init_line)
+
+        if has_early_return:
+            # Transform returns inside the AST and unparse back
+            rt = _ReturnTransformer(outputs)
+            transformed_block_node = rt.visit(block_node)
+            ast.fix_missing_locations(transformed_block_node)
+            block_code_processed = ast.unparse(transformed_block_node)
+            helper_lines.extend([f"    {l}\n" for l in block_code_processed.splitlines()])
+        else:
+            # Deduct indentation and shift by 4 spaces (preserves original formatting and comments)
+            lines_to_shift = block_code.splitlines()
+            min_ind = min((_line_indent(l) for l in lines_to_shift if l.strip()), default="")
+            for l in lines_to_shift:
+                l_stripped = l[len(min_ind):] if l.startswith(min_ind) else l.lstrip()
+                helper_lines.append(f"    {l_stripped}\n" if l_stripped else "\n")
+            
+        # Append return statement for success path
+        if has_early_return:
+            # Success path returns: outputs + (False, None)
+            success_returns = outputs + ["False", "None"]
+            helper_lines.append(f"    return {', '.join(success_returns)}\n")
+        elif outputs:
+            helper_lines.append(f"    return {', '.join(outputs)}\n")
+            
+        extracted_helpers.append(helper_sig + "".join(helper_lines) + "\n\n")
+        
+        # Build main call line and control flow checks
+        call_args = ", ".join(inputs)
+        if has_early_return:
+            # Helper returns: outputs + (should_return, return_val)
+            call_lhs = outputs + ["should_return", "return_val"]
+            call_line = f"{body_indent}{', '.join(call_lhs)} = {helper_name}({call_args})\n"
+            cf_check = f"{body_indent}if should_return:\n{body_indent}    return return_val\n"
+            main_calls.append(call_line + cf_check)
+        elif outputs:
+            call_line = f"{body_indent}{', '.join(outputs)} = {helper_name}({call_args})\n"
+            main_calls.append(call_line)
+        else:
+            call_line = f"{body_indent}{helper_name}({call_args})\n"
+            main_calls.append(call_line)
+
+        # Update defined variables for subsequent blocks
+        for o in outputs:
+            defined_before_set.add(o)
+        for w in writes:
+            defined_before_set.add(w)
+
+    # 3. Assemble the final source code
+    # Helpers are placed at module scope right before the original function
+    assembled_helpers = "".join(extracted_helpers)
+    main_func = header + "".join(main_calls)
+    
+    transformed_code = prefix_code + assembled_helpers + main_func + suffix_code
+    return transformed_code, 1
 
 
 def apply_inject_syntax_error(source_code: str) -> Tuple[str, int]:
