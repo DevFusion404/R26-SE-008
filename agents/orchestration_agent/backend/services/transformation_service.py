@@ -3,36 +3,168 @@ Transformation stage
 ====================
 R26-SE-008 | Bandara S M Y M | IT22277886
 
-Stands in for Agent 3 while the browser owns the live SCTVA call.
+Owns the Stage 3 hand-off to the Safe Code Transformation & Validation agent:
 
-Where the transformation actually happens today
------------------------------------------------
-The approved plan is posted to the SCTVA agent from the frontend
-(frontend/src/pages/diwo/services/sctvaApi.js -> POST /sctva/execute), and the
-code it returns is what the Transformation and Results stages render. That
-integration is untouched.
+    approved plan  ->  SCTVA actions  ->  SCTVA  ->  normalized result
 
-What this module produces is the *validation summary* the workflow persists
-when a plan is approved: per-step pass/fail, a snapshot id for rollback, and
-the mock before/after used when no live SCTVA output is available. It is
-simulated, and clearly labelled as such, exactly as it was in
-diwo/orchestrator.py.
+run_transformation() is the live path. The browser used to assemble and post
+this request itself; it now calls POST /api/workflows/<id>/transform and the
+orchestrator does the work, so the architecture is uniformly
 
-clients/sctva_client.py is the seam for moving the execute call behind the
-orchestrator later, so the frontend would not need a second integration path.
+    DIWO frontend -> Orchestration Agent -> CUQA / RDP / SCTVA
+
+simulate_transformation() is the older, simulated validation summary the
+workflow still persists when a plan is approved (per-step pass/fail plus a
+snapshot id for rollback). It is clearly labelled as simulated and is
+unchanged from diwo/orchestrator.py.
 """
 
 import uuid
 import random
 from datetime import datetime, timezone
+from typing import Optional
 
-from db.workflow_repository import parse_json_field
+from clients.sctva_client import (
+    SCTVAError, execute_transformation as sctva_execute,
+    fetch_workspace_sources, sctva_base_url,
+)
+from db.workflow_repository import log_event, parse_json_field
 from domain.metrics import compute_metrics_after
+from domain.sctva_mapper import (
+    DEFAULT_EXECUTION_OPTIONS, collect_plan_source_paths, normalize_execute_result,
+    normalize_language, normalize_plan_for_sctva,
+)
 
 __all__ = [
+    "run_transformation", "TransformationError",
     "simulate_transformation", "compute_metrics_after",
     "record_file_decisions", "metrics_after_for",
 ]
+
+
+class TransformationError(RuntimeError):
+    """The transformation could not be attempted, or SCTVA refused it.
+
+    `status` is the HTTP status the route answers with, so the stage can tell
+    "SCTVA is not running" (503) from "the plan is not executable" (422).
+    """
+
+    def __init__(self, message: str, status: int = 422, detail=None):
+        super().__init__(message)
+        self.message = message
+        self.status = status
+        self.detail = detail
+
+
+def run_transformation(plan: dict, language: Optional[str] = None,
+                       request_id: Optional[str] = None,
+                       execution_options: Optional[dict] = None,
+                       wf_id: Optional[str] = None) -> dict:
+    """Run the approved plan through SCTVA and return the normalized result.
+
+    Only the approved plan is ever passed in - the rejected steps were dropped
+    at plan approval - so nothing the developer refused can be executed here.
+
+    Two things have to be assembled before /sctva/execute can run, and neither
+    is carried by the plan on its own:
+
+      1. SOURCE TEXT. The CUQA report describes files but never ships their
+         contents. /sctva/cuqa-sources reads them back out of the CUQA temp
+         workspace, already shaped for the `source_files` field.
+      2. ACTIONS. domain/sctva_mapper.py translates each approved step into
+         the action vocabulary SCTVA executes.
+
+    Returns { result, request, sources, mapping, sctva_url, executed_at }.
+    `request` is the exact payload that was posted, kept so the stage can show
+    what the agent was asked to do next to what it reported back.
+    """
+    try:
+        mapping = normalize_plan_for_sctva(plan, correlation_id=(plan or {}).get("plan_id"))
+    except ValueError as exc:
+        raise TransformationError(str(exc), status=422) from exc
+
+    paths = collect_plan_source_paths(plan)
+    if not paths:
+        raise TransformationError(
+            "The approved plan does not name any source file, so SCTVA has nothing to "
+            "transform. Re-run the plan stage against a CUQA report that carries file paths.",
+            status=422,
+        )
+
+    try:
+        sources = fetch_workspace_sources(paths)
+    except SCTVAError as exc:
+        if wf_id:
+            log_event(wf_id, "transformation", "sctva_sources_failed",
+                      {"sctva_url": sctva_base_url(), "status": exc.status,
+                       "reason": exc.message}, actor="system")
+        raise TransformationError(exc.message, status=exc.status,
+                                  detail={"sctva_url": sctva_base_url()}) from exc
+
+    if not sources["files"]:
+        raise TransformationError(
+            f"SCTVA could not read the source of any planned file "
+            f"({len(sources['missing'])} missing). The CUQA temp workspace is where it "
+            "looks, so re-run the analysis in the Code Smell Review stage to recreate it, "
+            "then transform again.",
+            status=422,
+            detail={"missing": sources["missing"]},
+        )
+
+    resolved_language = (
+        normalize_language(language)
+        or normalize_language((sources["files"][0] or {}).get("language"))
+        or ""
+    )
+    if not resolved_language:
+        raise TransformationError(
+            f"SCTVA does not support language '{language or 'unknown'}'. "
+            "Supported: c, java, python.",
+            status=422,
+        )
+
+    request = {
+        "request_id": request_id or f"sctva_diwo_{uuid.uuid4().hex[:12]}",
+        "language": resolved_language,
+        "source_files": sources["files"],
+        "refactoring_plan": mapping["plan"],
+        "execution_options": {**DEFAULT_EXECUTION_OPTIONS, **(execution_options or {})},
+    }
+
+    try:
+        raw = sctva_execute(request)
+    except SCTVAError as exc:
+        if wf_id:
+            log_event(wf_id, "transformation", "sctva_execute_failed",
+                      {"sctva_url": sctva_base_url(), "status": exc.status,
+                       "reason": exc.message}, actor="system")
+        raise TransformationError(exc.message, status=exc.status,
+                                  detail={"sctva_url": sctva_base_url()}) from exc
+
+    result = normalize_execute_result(raw, sources["files"])
+
+    if wf_id:
+        log_event(wf_id, "transformation", "sctva_transformation_executed", {
+            "sctva_url":     sctva_base_url(),
+            "request_id":    result["requestId"],
+            "language":      resolved_language,
+            "actions":       len(mapping["plan"]["actions"]),
+            "executable":    mapping["executableCount"],
+            "noops":         mapping["noopCount"],
+            "files_sent":    len(sources["files"]),
+            "files_missing": len(sources["missing"]),
+            "success":       result["success"],
+            "rollback":      result["rollbackOccurred"],
+        }, actor="system")
+
+    return {
+        "result":      result,
+        "request":     request,
+        "sources":     sources,
+        "mapping":     mapping,
+        "sctva_url":   sctva_base_url(),
+        "executed_at": datetime.now(timezone.utc).isoformat(),
+    }
 
 
 def simulate_transformation(plan: dict, language: str, before_code: str = "") -> dict:

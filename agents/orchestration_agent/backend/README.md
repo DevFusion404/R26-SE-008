@@ -47,6 +47,7 @@ backend/
 │   ├── workflow_states.py
 │   ├── cuqa_normalizer.py
 │   ├── plan_normalizer.py
+│   ├── sctva_mapper.py        approved plan <-> SCTVA action vocabulary
 │   └── metrics.py
 │
 ├── db/
@@ -60,7 +61,12 @@ backend/
 │
 └── tests/
     ├── test_workflow_end_to_end.py
-    └── fixtures/cquaAgent.json
+    ├── test_transform_endpoint.py
+    ├── test_sctva_mapper.py
+    └── fixtures/
+        ├── cquaAgent.json
+        ├── sctva_plan_cases.json
+        └── sctva_mapper_golden.json
 ```
 
 Dependencies flow one way: `api → services → clients / domain / db`. The
@@ -85,12 +91,16 @@ run configuration.
 ```bash
 python -m compileall -q .
 python -m tests.test_workflow_end_to_end
+python -m tests.test_transform_endpoint
+python -m tests.test_sctva_mapper
 ```
 
-The end-to-end check drives the whole workflow through the Flask test client
-against a throwaway database, with the other agents deliberately not running,
-so it also exercises the fallback paths. It asserts the two hand-offs that
-matter most:
+All three redirect `DIWO_RUNTIME_DIR` to a temporary folder, so a test run
+never touches `runtime/`.
+
+**`test_workflow_end_to_end`** drives the whole workflow through the Flask test
+client. It passes whether or not the specialized agents happen to be running,
+and prints which path it took. It asserts the two hand-offs that matter most:
 
 * **step 4 → 7** — the report forwarded to RDP contains only the smells the
   developer kept.
@@ -99,6 +109,17 @@ matter most:
 
 and the rollback behaviour: a rejected file is archived as its original
 source, not as the refactored one.
+
+**`test_transform_endpoint`** stubs SCTVA at the client boundary and checks
+that only the approved plan reaches it, that its failure statuses pass through
+(503 stays 503, not 500), and that the reply is normalized into the shape the
+Transformation stage renders.
+
+**`test_sctva_mapper`** is a golden test. The plan → SCTVA action mapping was
+ported from JavaScript when the call moved server-side, so
+`fixtures/sctva_mapper_golden.json` holds the output of the ORIGINAL browser
+mapper and the test asserts an exact match — the request SCTVA receives is
+byte-identical to what it received before.
 
 ## API
 
@@ -122,21 +143,27 @@ Every endpoint is mounted at `/api`. The Vite dev server proxies `/api` to
 | POST       | `/api/workflows/<id>/complete`                | finish the workflow                       |
 | GET        | `/api/workflows/<id>/audit-logs`              | the audit trail                           |
 | GET        | `/api/feedback/export`                        | feedback training data                    |
-| GET        | `/api/cuqa/status`, `/api/rdp/status`, `/api/sctva/status` | agent reachability          |
+| POST       | `/api/workflows/<id>/transform`               | run the approved plan through SCTVA       |
+| GET        | `/api/cuqa/status`, `/api/rdp/status`, `/api/sctva/status` | agent reachability           |
 | GET, POST  | `/api/cuqa/quality-report`                    | proxy Agent 1's quality report            |
+| GET        | `/api/cuqa/project-structure`                 | proxy Agent 1's repository file tree      |
+| POST       | `/api/workspace/sources`                      | read source text out of the workspace     |
 | POST       | `/api/diwo/apply-and-push`                    | write the project to a git branch         |
 | GET        | `/api/health`, `/`                            | backend health                            |
 
-`/api/sctva/status` is the only endpoint added in the 2026-08 restructure;
-every other URL, method, request body and response body is unchanged.
+Four endpoints were ADDED in the 2026-08 restructure — `/api/sctva/status`,
+`/api/workflows/<id>/transform`, `/api/cuqa/project-structure` and
+`/api/workspace/sources`. Every pre-existing URL, method, request body and
+response body is unchanged.
+
+The last three exist because the DIWO browser used to call CUQA :8080 and
+SCTVA :8002 itself. It no longer does: every agent hand-off is server-side, so
+the frontend needs one base URL and one CORS origin, and there is exactly one
+place where an agent contract can drift.
 
 ## Notes
 
-* `runtime/database/diwo_audit.db` and `runtime/reports/*.json` are still
-  tracked in git from before `runtime/` existed. Untrack them with
-  `git rm --cached <path>` if the workflow history should stop being
-  versioned; the files themselves stay on disk.
-* The approved plan is still posted to SCTVA from the browser
-  (`frontend/src/pages/diwo/services/sctvaApi.js`). `clients/sctva_client.py`
-  is the seam for moving that behind the orchestrator without inventing a
-  second integration path.
+* `runtime/` is git-ignored and untracked. The existing database and reports
+  stayed on disk when they were untracked, so no workflow history was lost.
+* The JSON shapes exchanged with the three agents are documented in
+  `shared/contracts/`, built from payloads captured from a live session.

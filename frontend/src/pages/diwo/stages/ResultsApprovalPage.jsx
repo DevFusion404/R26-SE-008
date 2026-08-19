@@ -26,7 +26,7 @@
 import { useMemo, useState } from "react";
 import { Badge, C, Card, Pill } from "../diwoTheme.jsx";
 import { CodeBlock, CodeSurface, DiffBlock, DiffLegend } from "../components/DiffView.jsx";
-import { buildDiffRows } from "../services/sctvaApi";
+import { buildDiffRows } from "../utils/diffMapper";
 import { buildProjectArchive } from "../utils/projectArchive";
 import { createZip, downloadBlob } from "../utils/zipWriter";
 import { applyAndPush } from "../services/diwoApi";

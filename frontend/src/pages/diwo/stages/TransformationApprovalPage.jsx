@@ -4,10 +4,19 @@
  * R26-SE-008 | Bandara S M Y M | IT22277886
  *
  * Stage 3 of the DIWO workflow. The approved refactoring plan is executed by
- * the Safe Code Transformation & Validation Agent
- * (POST http://localhost:8002/sctva/execute) and the code it returns is what
- * this page renders — the refactored source, the diff against the original,
- * the confidence score and the four validation stages behind it.
+ * the Safe Code Transformation & Validation Agent, and the code it returns is
+ * what this page renders — the refactored source, the diff against the
+ * original, the confidence score and the four validation stages behind it.
+ *
+ * The page does NOT talk to SCTVA. It posts to the orchestration backend
+ *
+ *     POST /api/workflows/<id>/transform
+ *
+ * which maps the approved steps onto SCTVA actions, reads the source text out
+ * of the CUQA workspace, calls the agent and normalizes the reply. Keeping the
+ * hand-off server-side is what makes the architecture uniform:
+ *
+ *     DIWO stage -> diwoApi -> Orchestration -> CUQA / RDP / SCTVA
  *
  * The DIWO backend also returns a transformation result when the plan is
  * approved, but that one is a simulation. It is kept only as the fallback the
@@ -18,22 +27,23 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Badge, C, Card, Pill } from "../diwoTheme.jsx";
 import { CodeBlock, CodeSurface, DiffBlock, DiffLegend } from "../components/DiffView.jsx";
-import { SCTVA_BASE, buildDiffRows, executeTransformation } from "../services/sctvaApi";
+import { runTransformation } from "../services/diwoApi";
+import { buildDiffRows } from "../utils/diffMapper";
+import { hydrateTransformationResult } from "../utils/transformationMapper";
 
+// Two client-observable phases now, not four: mapping the plan and importing
+// the sources both happen inside the single POST to the orchestrator, so the
+// browser can honestly report "sent" and "waiting" and nothing finer.
 const STAGE_LABELS = {
   mapping: {
     label: "Preparing Transformation Request",
-    detail: "Mapping approved plan steps onto SCTVA actions...",
+    detail: "Sending the approved plan to the orchestration agent...",
     progress: 12,
-  },
-  sources: {
-    label: "Importing Source Files",
-    detail: "Reading original file contents from the CUQA workspace...",
-    progress: 32,
   },
   executing: {
     label: "Applying & Validating Transformation",
-    detail: "AST transformation, syntax, structural, behavioral and invariant checks...",
+    detail: "Mapping actions, importing sources, then AST transformation with "
+      + "syntax, structural, behavioral and invariant checks...",
     progress: 70,
   },
   complete: {
@@ -211,6 +221,7 @@ export default function TransformationApprovalPage({
   onBackToPlan,
   transformationData,
   plan,
+  workflowId,
   language = "java",
 }) {
   // One object so a new run replaces the previous one atomically, from inside
@@ -235,27 +246,50 @@ export default function TransformationApprovalPage({
     let alive = true;
 
     (async () => {
+      // Opening a run clears the previous one's result, error and verdicts.
+      setRunState({ ...BLANK_RUN, stage: "mapping" });
+      setSelectedIndex(0);
+      setUsingFallback(false);
+      setDecisions({});
+
+      if (!workflowId) {
+        setRunState((prev) => ({
+          ...prev,
+          error: new Error(
+            "This session has no backend workflow, so the transformation cannot be "
+            + "run. Reload the page to start one."
+          ),
+        }));
+        return;
+      }
+
       try {
-        const outcome = await executeTransformation({
-          plan,
-          language,
-          onStage: (next) => {
-            if (!alive) return;
-            // "mapping" opens every run, so it doubles as the point where the
-            // previous run's result and error are cleared.
-            if (next === "mapping") {
-              setRunState({ ...BLANK_RUN, stage: next });
-              setSelectedIndex(0);
-              setUsingFallback(false);
-              setDecisions({});
-            } else {
-              setRunState((prev) => ({ ...prev, stage: next }));
-            }
-          },
-          signal: controller.signal,
-        });
+        setRunState((prev) => ({ ...prev, stage: "executing" }));
+
+        // The backend defaults to the workflow's stored plan, which is already
+        // the approved-only one; `plan` is sent so a re-run after a rollback
+        // uses exactly what this stage was handed.
+        const outcome = await runTransformation(
+          workflowId,
+          { plan, language },
+          { signal: controller.signal }
+        );
         if (!alive) return;
-        setRunState((prev) => ({ ...prev, run: outcome, progress: 100 }));
+
+        setRunState((prev) => ({
+          ...prev,
+          stage: "complete",
+          progress: 100,
+          run: {
+            // Field names the rest of this page already reads.
+            result: hydrateTransformationResult(outcome.result),
+            request: outcome.request,
+            mapping: outcome.mapping,
+            sources: outcome.sources,
+            sctvaUrl: outcome.sctva_url,
+            executedAt: outcome.executed_at,
+          },
+        }));
       } catch (e) {
         if (!alive || e.name === "AbortError") return;
         setRunState((prev) => ({ ...prev, error: e }));
@@ -266,7 +300,7 @@ export default function TransformationApprovalPage({
       alive = false;
       controller.abort();
     };
-  }, [plan, language, attempt]);
+  }, [plan, language, workflowId, attempt]);
 
   // Creep the ring towards the current stage's ceiling so a slow execute still
   // looks alive; the real stage transitions set the ceiling.
@@ -283,6 +317,12 @@ export default function TransformationApprovalPage({
 
   const done = Boolean(run);
   const result = run?.result || null;
+
+  // Reported by the orchestrator with the result; before the first reply there
+  // is nothing to claim, so the UI names the hop it actually made.
+  const agentEndpoint = run?.sctvaUrl
+    ? `${run.sctvaUrl}/sctva/execute`
+    : "orchestration agent → SCTVA";
 
   const files = useMemo(() => {
     if (result) return result.files || [];
@@ -406,7 +446,7 @@ export default function TransformationApprovalPage({
           plan_mapping: run?.mapping || null,
           missing_sources: run?.sources?.missing || [],
           executed_at: run?.executedAt || null,
-          agent_url: run?.sctvaUrl || SCTVA_BASE,
+          agent_url: run?.sctvaUrl || null,
         },
       });
       return;
@@ -455,7 +495,7 @@ export default function TransformationApprovalPage({
           )}
 
           <div style={{ marginTop: 16, fontSize: 11, color: C.textMuted }}>
-            Agent endpoint: <span style={{ fontFamily: "monospace" }}>{SCTVA_BASE}/sctva/execute</span>
+            Agent endpoint: <span style={{ fontFamily: "monospace" }}>{agentEndpoint}</span>
           </div>
 
           <div style={{ display: "flex", gap: 12, marginTop: 20, flexWrap: "wrap" }}>
@@ -530,7 +570,7 @@ export default function TransformationApprovalPage({
         </div>
 
         <div style={{ marginTop: 24, fontSize: 11, color: C.textMuted, textAlign: "center" }}>
-          Safe Code Transformation & Validation Agent · {SCTVA_BASE}/sctva/execute
+          Safe Code Transformation & Validation Agent · {agentEndpoint}
         </div>
 
         {onBackToPlan && (
@@ -848,7 +888,7 @@ export default function TransformationApprovalPage({
           )}
           <div style={{ fontSize: 11, color: C.textMuted }}>
             {result
-              ? `Request ${result.requestId} · executed by SCTVA at ${run?.sctvaUrl || SCTVA_BASE}`
+              ? `Request ${result.requestId} · executed by SCTVA at ${run?.sctvaUrl || "the orchestration agent"}`
               : "Simulated by the DIWO backend"}
           </div>
         </div>

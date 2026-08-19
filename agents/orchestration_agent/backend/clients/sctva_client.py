@@ -8,16 +8,16 @@ Flask service (default http://localhost:8002, SCTVA_PORT). It exposes:
 
     GET  /health              ->  service liveness
     POST /sctva/execute       ->  { actions[], source_files[] } -> transformation result
-    POST /sctva/cuqa-sources  ->  { paths[] } -> the source text of those paths
+    POST /sctva/cuqa-sources  ->  { file_paths[] } -> the source text of those paths
 
 Written to match cuqa_client and rdp_client: stdlib urllib only, one error
 type carrying the status the frontend needs, no DIWO workflow rules inside.
 
-Scope note — the browser currently posts the approved plan to SCTVA itself
-(frontend services/sctvaApi.js), which is the existing, working integration
-and is left exactly as it is. This client gives the orchestrator the same
-reach for its own integration checks, and is the place a future server-side
-hand-off belongs so that no new direct DIWO -> SCTVA path has to be invented.
+The DIWO browser no longer talks to SCTVA at all: the approved plan is posted
+here by services/transformation_service.py, behind
+POST /api/workflows/<id>/transform, so every agent hand-off goes
+
+    DIWO frontend -> Orchestration Agent -> specialized agent
 """
 
 import json
@@ -111,9 +111,42 @@ def execute_transformation(payload: dict, timeout: int = 120) -> dict:
     return _request("POST", EXECUTE_PATH, body=payload, timeout=timeout)
 
 
-def fetch_workspace_sources(paths: list, timeout: int = 60) -> dict:
-    """POST /sctva/cuqa-sources — read repo-relative paths out of the workspace."""
-    return _request("POST", SOURCES_PATH, body={"paths": list(paths or [])}, timeout=timeout)
+#: /sctva/cuqa-sources truncates the path list at 1000 entries, so send it in
+#: batches. 400 keeps each request comfortably inside that cap.
+SOURCE_BATCH_SIZE = 400
+
+
+def fetch_workspace_sources(file_paths: list, timeout: int = 60) -> dict:
+    """POST /sctva/cuqa-sources — read repo-relative paths out of the workspace.
+
+    The CUQA report describes files but never ships their contents; SCTVA reads
+    them back out of the CUQA temp workspace (%TEMP%/cuqa_*) and returns
+    entries already shaped for the `source_files` field of an execute request.
+
+    Batched across SOURCE_BATCH_SIZE, so a whole-project archive of several
+    thousand files is one call from the caller's point of view. Files SCTVA
+    could not locate come back in `missing`; the caller decides whether that
+    is fatal, because a plan spanning ten files should not be blocked by one
+    stale path.
+
+    The request field is `file_paths` — that is what the agent reads
+    (sctva/integration/api.py::sctva_cuqa_sources).
+    """
+    requested = [str(p) for p in (file_paths or [])]
+
+    files, missing = [], []
+    for start in range(0, len(requested), SOURCE_BATCH_SIZE):
+        batch = requested[start:start + SOURCE_BATCH_SIZE]
+        payload = _request("POST", SOURCES_PATH, body={"file_paths": batch}, timeout=timeout)
+        files.extend(payload.get("files") or [])
+        missing.extend(payload.get("missing") or [])
+
+    return {
+        "files": files,
+        "missing": missing,
+        "imported": len(files),
+        "total": len(requested),
+    }
 
 
 def probe_sctva(timeout: int = 5) -> dict:

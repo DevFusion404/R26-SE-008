@@ -109,7 +109,7 @@ def build_rdp_plan_input(updated_report: dict) -> dict:
     return payload
 
 
-def _relative_path_index(plan_input: dict) -> dict:
+def _relative_path_index(plan_input: Optional[dict]) -> dict:
     """Map basename -> repo-relative path, for names that are unambiguous.
 
     RDP reduces every path to its basename while translating the report
@@ -161,7 +161,7 @@ def _restore_relative_paths(plan: dict, index: dict) -> dict:
     return plan
 
 
-def normalize_rdp_plan(plan: dict, plan_input: dict = None) -> dict:
+def normalize_rdp_plan(plan: dict, plan_input: Optional[dict] = None) -> dict:
     """Reshape an RDP plan into the structure the DIWO workflow expects.
 
     RDP serializes ``summary`` as a human-readable string; every other stage
@@ -249,7 +249,8 @@ def build_approved_plan(plan: dict, decisions: dict) -> dict:
     # Reducing an already-reduced plan must not erase what was rejected the
     # first time: the second pass only sees the survivors, so its own rejected
     # list would come back empty and the audit would lose the verdict.
-    prior = plan.get("approval") if isinstance(plan.get("approval"), dict) else {}
+    raw_prior = plan.get("approval")
+    prior: dict = raw_prior if isinstance(raw_prior, dict) else {}
     prior_rejected = [i for i in (prior.get("rejected_step_ids") or [])]
     rejected_ids = prior_rejected + [
         s.get("step_id") for s in rejected if s.get("step_id") not in prior_rejected

@@ -17,6 +17,7 @@ Moved out of diwo/routes.py; behaviour is unchanged.
 
 import json
 import uuid
+from typing import Optional
 
 from config import reports_dir
 from db.workflow_repository import (
@@ -151,7 +152,7 @@ def resolve_selection(all_smells: list, selected_ids: list,
 # ─────────────────────────────────────────────────────────────────────────────
 
 def persist_new_workflow(target: str, language: str, smells: list,
-                          source: str = "client", cuqa_report: dict = None):
+                          source: str = "client", cuqa_report: Optional[dict] = None):
     """Create the workflow row, seed metrics_before, and log the start event.
 
     `cuqa_report` is stored verbatim when the workflow was seeded from the CUQA

@@ -3,19 +3,24 @@
  * =================================
  * R26-SE-008 | Bandara S M Y M | IT22277886
  *
- * The single place the DIWO frontend talks to the Orchestration Agent
- * (Flask, default http://localhost:5001, blueprints mounted under /api).
+ * The ONLY place the DIWO frontend makes a network call. Every agent hand-off
+ * goes through the Orchestration Agent (Flask, default http://localhost:5001,
+ * blueprints mounted under /api):
  *
  *     DIWO stage  ->  diwoApi.js  ->  Orchestration  ->  CUQA / RDP / SCTVA
  *
- * Consolidated from three places that each held their own copy of the base URL
- * and their own fetch wrapper: the inline `api` object in DIWOAgentPage.jsx,
- * the raw fetch in CodeSmellApprovalPage.jsx, and the HTTP half of the former
- * diwo/cuqaApi.js. The pure report-shape helpers that used to live alongside
- * those calls are now in utils/cuqaReport.js.
+ * There is no DIWO -> agent shortcut left. The browser used to post the
+ * approved plan straight to SCTVA :8002 and read the project tree straight
+ * from CUQA :8080; both now run server-side, which means one base URL, one
+ * CORS origin, and one place where an agent contract can drift.
  *
- * Endpoint paths, request bodies and response shapes are unchanged — this
- * module is transport only, so the backend contract is exactly what it was.
+ * Consolidated from: the inline `api` object in DIWOAgentPage.jsx, the raw
+ * fetch in CodeSmellApprovalPage.jsx, the HTTP half of the former
+ * diwo/cuqaApi.js, and the whole network half of diwo/sctvaApi.js. The pure
+ * shaping helpers live in utils/ (cuqaReport, planTrace, diffMapper,
+ * transformationMapper).
+ *
+ * This module is transport only — no workflow rules, no shaping.
  */
 
 import { normalizeCuqaReport, detectPrimaryLanguage } from "../utils/cuqaReport";
@@ -27,9 +32,9 @@ export const DIWO_BASE =
   import.meta?.env?.VITE_API_URL || "http://localhost:5001/api";
 
 /**
- * CUQA agent, used only for the read-only fallback below. The DIWO workflow
- * itself never plans or transforms against this URL — it goes through the
- * orchestration backend.
+ * CUQA agent. Used ONLY by the read-only fallback below, for when the DIWO
+ * backend itself is unreachable and the Code Smell Review stage would
+ * otherwise show nothing at all. No workflow action ever runs against it.
  */
 export const CUQA_BASE = (
   import.meta?.env?.VITE_CUQA_API_URL || "http://localhost:8080"
@@ -298,19 +303,138 @@ export const resetToPlanApproval = (workflowId, body = {}) =>
 export const submitTransformationDecision = (workflowId, body) =>
   api.post(`/workflows/${workflowId}/transformation-decision`, body);
 
+// ─── Stage 3 — transformation via SCTVA (through the orchestrator) ──────────
+
+/**
+ * POST /workflows/<id>/transform — run the approved plan through SCTVA.
+ *
+ * The backend maps the approved steps to SCTVA actions, reads the source text
+ * out of the CUQA workspace, posts /sctva/execute and normalizes the reply.
+ * Because it defaults to the workflow's stored plan — which plan-decision
+ * already reduced to the approved steps — a rejected step cannot be executed
+ * even if the caller passes nothing.
+ *
+ * Resolves to { result, request, mapping, sources, sctva_url, executed_at }.
+ * `result.files[]` carry `before`/`after`; add the rendered diff with
+ * utils/transformationMapper.hydrateTransformationResult.
+ */
+export async function runTransformation(workflowId, body = {}, { signal } = {}) {
+  const response = await fetch(`${DIWO_BASE}/workflows/${workflowId}/transform`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+    signal,
+  });
+
+  const json = await readJson(response);
+  if (!response.ok) {
+    // The backend passes SCTVA's own status through: 503 = agent not running,
+    // 422 = the plan is not executable against the current workspace.
+    const error = new Error(json.error || `HTTP ${response.status}: ${response.statusText}`);
+    error.status = response.status;
+    error.sctvaUrl = json.sctva_url || null;
+    error.missing = json.missing || null;
+    error.reachable = response.status !== 503;
+    throw error;
+  }
+  return json;
+}
+
+/** GET /sctva/status — is the Safe Transformation agent up? Never rejects. */
+export async function checkSctvaHealth({ signal } = {}) {
+  try {
+    const res = await fetch(`${DIWO_BASE}/sctva/status`, { signal });
+    if (!res.ok) return { reachable: false, sctvaUrl: null, status: res.status };
+    const json = await readJson(res);
+    return {
+      ...json,
+      reachable: Boolean(json.reachable),
+      sctvaUrl: json.sctva_url || null,
+      status: res.status,
+    };
+  } catch (e) {
+    if (e.name === "AbortError") throw e;
+    return { reachable: false, sctvaUrl: null, status: 0 };
+  }
+}
+
+// ─── Workspace access for the whole-project archive ─────────────────────────
+
+/**
+ * GET /cuqa/project-structure — the loaded repository's file tree.
+ *
+ * Proxied from the CUQA agent by the orchestrator. Needed so the final
+ * download is the WHOLE project rather than only the files the agents touched.
+ */
+export async function fetchProjectStructure({ signal } = {}) {
+  const res = await fetch(`${DIWO_BASE}/cuqa/project-structure`, { signal });
+  const json = await readJson(res);
+
+  if (!res.ok) {
+    const error = new Error(
+      json.error || `The project structure could not be read (HTTP ${res.status}).`
+    );
+    error.status = res.status;
+    error.cuqaUrl = json.cuqa_url || CUQA_BASE;
+    error.reachable = json.reachable ?? res.status !== 503;
+    throw error;
+  }
+
+  return {
+    repoName: json.repo_name || null,
+    source: json.source || null,
+    totalSourceFiles: json.total_source_files ?? null,
+    tree: json.tree || null,
+  };
+}
+
+/**
+ * POST /workspace/sources — the raw text of CUQA-analysed files.
+ *
+ * The orchestrator batches this against SCTVA's workspace reader, so any
+ * number of paths can be sent in one call. Files that could not be located
+ * come back in `missing` rather than failing the request.
+ */
+export async function fetchWorkspaceSources(filePaths, { signal } = {}) {
+  const res = await fetch(`${DIWO_BASE}/workspace/sources`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ file_paths: filePaths }),
+    signal,
+  });
+
+  const json = await readJson(res);
+  if (!res.ok) {
+    const error = new Error(
+      json.error || `The workspace sources could not be read (HTTP ${res.status}).`
+    );
+    error.status = res.status;
+    error.sctvaUrl = json.sctva_url || null;
+    error.reachable = json.reachable ?? res.status !== 503;
+    throw error;
+  }
+
+  return {
+    files: json.files || [],
+    missing: json.missing || [],
+    imported: json.imported ?? (json.files || []).length,
+    total: json.total ?? (filePaths || []).length,
+  };
+}
+
 // ─── Git integration ─────────────────────────────────────────────────────────
 
 /**
- * POST /api/diwo/apply-and-push — write the whole project onto a branch,
- * commit and (optionally) push it.
+ * POST /diwo/apply-and-push — write the whole project onto a branch, commit
+ * and (optionally) push it.
  *
- * Deliberately a root-relative path rather than `${DIWO_BASE}/...`: it is
- * served through the Vite dev proxy (vite.config.js maps /api ->
- * http://localhost:5001), which is how this call has always reached the
- * backend. Both resolve to the same URL under the default configuration.
+ * Addressed through DIWO_BASE like every other call. It used to be the
+ * root-relative "/api/diwo/apply-and-push", which resolved to the same URL
+ * only because the Vite dev proxy maps /api to http://localhost:5001 — so it
+ * was the one call that silently depended on the dev server being in front.
  */
 export async function applyAndPush(body) {
-  const response = await fetch("/api/diwo/apply-and-push", {
+  const response = await fetch(`${DIWO_BASE}/diwo/apply-and-push`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),

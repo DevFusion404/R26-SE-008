@@ -17,6 +17,8 @@ RDP cannot be reached or refuses the report, and the response always says
 which one produced the plan so a fallback is never mistaken for RDP output.
 """
 
+from typing import Optional
+
 from clients.rdp_client import (
     RDPError, generate_plan as rdp_generate_plan, rdp_base_url,
 )
@@ -32,7 +34,8 @@ __all__ = [
 ]
 
 
-def plan_from_rdp(updated_report: dict, selected: list, target: str, wf_id: str = None):
+def plan_from_rdp(updated_report: dict, selected: list, target: str,
+                  wf_id: Optional[str] = None):
     """Generate the refactoring plan for the developer's smell selection.
 
     The updated report — every analysed file, but only the smells the developer

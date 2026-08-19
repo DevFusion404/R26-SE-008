@@ -30,7 +30,9 @@ from pathlib import Path
 BACKEND_DIR = Path(__file__).resolve().parent
 
 #: Generated data lives under runtime/ so it is never mixed with source.
-RUNTIME_DIR = BACKEND_DIR / "runtime"
+#: DIWO_RUNTIME_DIR redirects the whole tree, which is how the tests keep their
+#: databases, reports and archives out of the real one.
+RUNTIME_DIR = Path(os.environ.get("DIWO_RUNTIME_DIR") or (BACKEND_DIR / "runtime"))
 DATABASE_DIR = RUNTIME_DIR / "database"
 REPORTS_DIR = RUNTIME_DIR / "reports"
 ARCHIVES_DIR = RUNTIME_DIR / "archives"

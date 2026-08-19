@@ -12,9 +12,6 @@ __pycache__/
 !.env.example
 
 # Generated at runtime: the audit database, saved smell reports, project ZIPs.
-# runtime/database/diwo_audit.db and runtime/reports/*.json are still tracked
-# from before this layout existed; untrack them with
-#     git rm --cached <path>
-# if the workflow history should stop being versioned.
-runtime/archives/
-runtime/**/*.zip
+# All untracked (git rm --cached) - the local files stay on disk, they are just
+# no longer versioned, so a workflow run never shows up as a repository change.
+runtime/

@@ -51,6 +51,7 @@ def register_blueprints(app, url_prefix: str = "/api"):
     (and therefore the database) as a side effect.
     """
     from services.git_service import GitOperationError
+    from services.transformation_service import TransformationError
     from services.workflow_service import StageError
 
     from api.feedback_routes import feedback_bp
@@ -70,5 +71,14 @@ def register_blueprints(app, url_prefix: str = "/api"):
     @app.errorhandler(GitOperationError)
     def _git_error(exc):
         return err(exc.message, exc.status)
+
+    # SCTVA failures carry the agent URL and the missing paths, so the
+    # Transformation stage can say exactly what to start or re-run.
+    @app.errorhandler(TransformationError)
+    def _transformation_error(exc):
+        payload = {"error": exc.message}
+        if isinstance(exc.detail, dict):
+            payload.update(exc.detail)
+        return jsonify(payload), exc.status
 
     return app

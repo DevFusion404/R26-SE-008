@@ -795,6 +795,7 @@ export default function DIWOAgentPage() {
           {phase === 2 && (
             <TransformationApprovalPage
               plan={approvedPlan || planData}
+              workflowId={workflowId}
               language={workflowLanguage}
               transformationData={transformationData}
               onComplete={handleTransformComplete}

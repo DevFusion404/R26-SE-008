@@ -21,6 +21,19 @@ from config import CLONE_ROOT, GIT_TIMEOUT
 from services.archive_service import safe_archive_path
 
 
+class GitOperationError(RuntimeError):
+    """A git step failed in a way the caller should report verbatim.
+
+    Carries the HTTP status the route used to return directly, so splitting
+    the handler into a service did not change a single response code.
+    """
+
+    def __init__(self, message: str, status: int = 400):
+        super().__init__(message)
+        self.message = message
+        self.status = status
+
+
 def run_git(args, cwd=None, timeout=GIT_TIMEOUT):
     """Run one git command. Returns (ok, stdout, stderr) and never raises."""
     try:
@@ -122,7 +135,12 @@ def prepare_repository(repository: str):
     """Resolve the request's repository to a local working copy.
 
     A URL is cloned (once) into CLONE_ROOT and re-fetched on later runs; a
-    filesystem path is used where it is. Returns (repo_path, info) or (None, error).
+    filesystem path is used where it is.
+
+    Returns (repo_path, info). Every failure raises GitOperationError with the
+    message the route reports — it used to return (None, error_message)
+    instead, which made the result a union the caller had to unpack by hand
+    and left `info` typed as "dict or the error string".
     """
     if is_remote_repo(repository):
         CLONE_ROOT.mkdir(parents=True, exist_ok=True)
@@ -131,38 +149,26 @@ def prepare_repository(repository: str):
         if (repo_path / ".git").exists():
             ok, _, err = run_git(["fetch", "origin", "--prune"], cwd=repo_path)
             if not ok:
-                return None, f"Could not fetch the existing clone at {repo_path}: {err}"
+                raise GitOperationError(
+                    f"Could not fetch the existing clone at {repo_path}: {err}", 400)
         else:
             if repo_path.exists():
                 shutil.rmtree(repo_path, ignore_errors=True)
             ok, _, err = run_git(["clone", repository, str(repo_path)])
             if not ok:
-                return None, (
+                raise GitOperationError(
                     f"Could not clone {repository}: {err} — check the URL, and that you have "
-                    "access to the repository (a private repo needs credentials configured for git)."
-                )
+                    "access to the repository (a private repo needs credentials configured for git).",
+                    400)
 
         return repo_path, {"remote": True, "clone_url": repository, "base_branch": default_remote_branch(repo_path)}
 
     repo_path = Path(repository).expanduser().resolve()
     if not (repo_path / ".git").exists():
-        return None, f"Not a git repository: {repo_path}"
+        raise GitOperationError(f"Not a git repository: {repo_path}", 400)
 
     ok, out, _ = run_git(["remote", "get-url", "origin"], cwd=repo_path)
     return repo_path, {"remote": False, "clone_url": out if ok else "", "base_branch": None}
-
-
-class GitOperationError(RuntimeError):
-    """A git step failed in a way the caller should report verbatim.
-
-    Carries the HTTP status the route used to return directly, so splitting
-    the handler into a service did not change a single response code.
-    """
-
-    def __init__(self, message: str, status: int = 400):
-        super().__init__(message)
-        self.message = message
-        self.status = status
 
 
 def apply_and_push(data: dict) -> dict:
@@ -204,8 +210,6 @@ def apply_and_push(data: dict) -> dict:
         raise GitOperationError("Repository path or GitHub URL required.", 400)
 
     repo_path, info = prepare_repository(repository)
-    if repo_path is None:
-        raise GitOperationError(info, 400)
 
     # ── Branch ───────────────────────────────────────────────────────────────
     if info["remote"]:

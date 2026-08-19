@@ -21,15 +21,17 @@ requirements.txt and needs no extra install to talk to CUQA.
 import json
 import urllib.error
 import urllib.request
+from typing import Optional
 
 from config import cuqa_base_url
 
 QUALITY_REPORT_PATH = "/api/quality-report"
 FILES_PATH = "/api/files"
+PROJECT_STRUCTURE_PATH = "/api/project-structure"
 
 __all__ = [
     "CUQAError", "cuqa_base_url", "fetch_quality_report",
-    "fetch_workspace_files", "probe_cuqa",
+    "fetch_workspace_files", "fetch_project_structure", "probe_cuqa",
 ]
 
 
@@ -97,7 +99,7 @@ def _request(method: str, path: str, body=None, timeout: int = 120) -> dict:
         ) from exc
 
 
-def fetch_quality_report(file_path: str = None, timeout: int = 120) -> dict:
+def fetch_quality_report(file_path: Optional[str] = None, timeout: int = 120) -> dict:
     """Call POST /api/quality-report and return the raw CUQA payload."""
     body = {"file_path": file_path} if file_path else {}
     return _request("POST", QUALITY_REPORT_PATH, body=body, timeout=timeout)
@@ -106,6 +108,16 @@ def fetch_quality_report(file_path: str = None, timeout: int = 120) -> dict:
 def fetch_workspace_files(timeout: int = 15) -> dict:
     """Call GET /api/files — {repo_name, files[], total}."""
     return _request("GET", FILES_PATH, timeout=timeout)
+
+
+def fetch_project_structure(timeout: int = 30) -> dict:
+    """Call GET /api/project-structure — the loaded repository's file tree.
+
+    Names and paths only; the file contents are read separately, out of the
+    CUQA temp workspace. Used to assemble the whole-project archive so it
+    contains every file, not only the ones the agents touched.
+    """
+    return _request("GET", PROJECT_STRUCTURE_PATH, timeout=timeout)
 
 
 def probe_cuqa(timeout: int = 5) -> dict:

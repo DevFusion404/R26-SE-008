@@ -74,10 +74,13 @@ def normalize_cuqa_report(payload: dict) -> dict:
     if not isinstance(payload, dict):
         raise ValueError("CUQA payload must be a JSON object.")
 
-    report = payload.get("report") if isinstance(payload.get("report"), dict) else payload
+    # Bind once: calling payload.get("report") twice means the isinstance
+    # narrows a different object than the one that gets used.
+    nested = payload.get("report")
+    report: dict = nested if isinstance(nested, dict) else payload
 
-    if isinstance(report.get("files"), list):
-        raw_files = report["files"]
+    raw_files = report.get("files")
+    if isinstance(raw_files, list):
         repo_name = report.get("repo_name") or payload.get("repo_name")
     else:
         # Single-file report — wrap it so callers only handle one shape.

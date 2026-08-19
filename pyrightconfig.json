@@ -4,6 +4,29 @@
     "agents/cuqa_agent",
     "agents/rdp_agent",
     "agents/orchestration_agent",
+    "agents/orchestration_agent/backend",
     "agents/transformation_agent"
+  ],
+
+  "executionEnvironments": [
+    {
+      "root": "agents/orchestration_agent/backend",
+      "extraPaths": ["agents/orchestration_agent/backend"]
+    },
+    {
+      "root": "agents/cuqa_agent",
+      "extraPaths": ["agents/cuqa_agent/src", "agents/cuqa_agent"]
+    },
+    {
+      "root": "agents/rdp_agent",
+      "extraPaths": ["agents/rdp_agent"]
+    },
+    {
+      "root": "agents/transformation_agent",
+      "extraPaths": [
+        "agents/transformation_agent/safe_code_transformation_agent",
+        "agents/transformation_agent"
+      ]
+    }
   ]
 }

@@ -28,6 +28,7 @@ from domain.cuqa_normalizer import (
 from domain.plan_normalizer import build_rdp_plan_input
 from services.archive_service import archive_path
 from services.planning_service import generate_updated_plan_report
+from services.transformation_service import run_transformation
 from services.workflow_service import (
     apply_plan_decision, apply_transformation_decision,
     build_smell_selection_payload, commit_smell_selection, get_workflow,
@@ -472,6 +473,67 @@ def plan_decision(wf_id):
 
     return jsonify(apply_plan_decision(wf, decision, data))
 
+@workflow_bp.route("/workflows/<wf_id>/transform", methods=["POST"])
+def transform(wf_id):
+    """
+    Run the APPROVED plan through the SCTVA agent.
+
+    Body (all optional):
+      {
+        "plan":              {...},   defaults to the workflow's stored plan
+        "language":          "java",  defaults to the workflow's language
+        "request_id":        "...",
+        "execution_options": {...}
+      }
+
+    The stored plan_json is the approved-only plan - plan-decision reduced it
+    to the steps the developer accepted - so a rejected step cannot reach
+    SCTVA even when the caller omits `plan`.
+
+    This replaced the browser's direct POST to
+    http://localhost:8002/sctva/execute. The response carries the same
+    normalized shape the Transformation stage already rendered, so the stage
+    reads the fields it always did.
+    """
+    wf = get_workflow(wf_id)
+    if not wf:
+        return err("Workflow not found.", 404)
+
+    require_stage(wf, "plan_approval", "transformation")
+
+    data = request.get_json(force=True, silent=True) or {}
+
+    plan = data.get("plan") or parse_json_field(wf, "plan_json")
+    if not plan:
+        return err("This workflow has no approved plan to transform.", 400)
+
+    execution_options = data.get("execution_options")
+    if execution_options is not None and not isinstance(execution_options, dict):
+        return err("'execution_options' must be an object if provided.")
+
+    outcome = run_transformation(
+        plan,
+        language=data.get("language") or wf["language"],
+        request_id=data.get("request_id"),
+        execution_options=execution_options,
+        wf_id=wf_id,
+    )
+
+    return jsonify({
+        "status":      "transformation",
+        "result":      outcome["result"],
+        "request":     outcome["request"],
+        "mapping":     outcome["mapping"],
+        "sources": {
+            "imported": outcome["sources"]["imported"],
+            "missing":  outcome["sources"]["missing"],
+            "total":    outcome["sources"]["total"],
+        },
+        "sctva_url":   outcome["sctva_url"],
+        "executed_at": outcome["executed_at"],
+    })
+
+
 @workflow_bp.route("/workflows/<wf_id>/transformation-decision", methods=["POST"])
 def transformation_decision(wf_id):
     """
@@ -521,11 +583,13 @@ def transformation_decision(wf_id):
                 "Send the final source of each file in 'files' to download an archive.",
                 400,
             )
+        archive = payload.get("archive")
+        filename = archive.get("filename") if isinstance(archive, dict) else None
         return send_file(
             io.BytesIO(archive_bytes),
             mimetype="application/zip",
             as_attachment=True,
-            download_name=payload["archive"]["filename"],
+            download_name=filename or f"diwo_refactored_{wf_id}.zip",
         )
 
     return jsonify(payload)

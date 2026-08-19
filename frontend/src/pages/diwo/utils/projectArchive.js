@@ -10,30 +10,23 @@
  *   refactored files → the code the developer accepted
  *   rejected files   → the original they were reverted to
  *
- * Two services supply the pieces, because neither has both halves:
+ * Two pieces are needed, because neither service has both halves:
  *
- *   GET  http://localhost:8080/api/project-structure   (CUQA)
- *        the file tree of the loaded repository — names and paths only.
+ *   the file tree of the loaded repository — names and paths only  (CUQA)
+ *   the source text behind those paths, read out of the CUQA
+ *   temp workspace                                                 (SCTVA)
  *
- *   POST http://localhost:8002/sctva/cuqa-sources      (SCTVA)
- *        reads those paths back out of the CUQA temp workspace as text.
- *        Capped at 1000 paths per call, so requests are batched.
+ * Both are fetched through the orchestration backend
+ * (GET /api/cuqa/project-structure and POST /api/workspace/sources) rather
+ * than from the agents directly, so this module keeps no agent URLs and no
+ * batching rules of its own — it only assembles the archive.
  *
  * The DIWO workflow's own files are overlaid last, so a refactored file always
  * wins over the original copy read from the workspace.
  */
 
-import { fetchWorkspaceSources } from "../services/sctvaApi";
+import { fetchProjectStructure, fetchWorkspaceSources } from "../services/diwoApi";
 import { normalizeZipPath } from "./zipWriter";
-
-export const CUQA_BASE = (
-  import.meta?.env?.VITE_CUQA_API_URL || "http://localhost:8080"
-).replace(/\/+$/, "");
-
-export const PROJECT_STRUCTURE_URL = `${CUQA_BASE}/api/project-structure`;
-
-/** SCTVA truncates the path list at 1000 entries, so send it in batches. */
-const SOURCE_BATCH_SIZE = 400;
 
 /** Hard ceiling so a huge repository cannot lock up the tab. */
 const MAX_PROJECT_FILES = 3000;
@@ -116,44 +109,7 @@ function uniqueBaseNames(paths) {
   return new Set([...counts.entries()].filter(([, n]) => n === 1).map(([base]) => base));
 }
 
-// ─── CUQA project structure ──────────────────────────────────────────────────
-
-/** Fetch the loaded repository's file tree from the CUQA agent. */
-export async function fetchProjectStructure({ signal } = {}) {
-  let res;
-  try {
-    res = await fetch(PROJECT_STRUCTURE_URL, { signal });
-  } catch (e) {
-    if (e.name === "AbortError") throw e;
-    throw projectError(
-      `The Code Understanding agent (${CUQA_BASE}) could not be reached, so the full project ` +
-        "structure is unavailable. Start it with: uvicorn main:app --port 8080 " +
-        "(from agents/cuqa_agent/src).",
-      { status: 503 }
-    );
-  }
-
-  let json = {};
-  try {
-    json = await res.json();
-  } catch {
-    json = {};
-  }
-
-  if (!res.ok) {
-    throw projectError(
-      json.detail || json.error || `CUQA returned HTTP ${res.status} for the project structure.`,
-      { status: res.status, reachable: true }
-    );
-  }
-
-  return {
-    repoName: json.repo_name || null,
-    source: json.source || null,
-    totalSourceFiles: json.total_source_files ?? null,
-    tree: json.tree || null,
-  };
-}
+// ─── Project structure ───────────────────────────────────────────────────────
 
 /** Depth-first list of every file node in a CUQA tree. */
 export function flattenProjectTree(node, out = []) {
@@ -172,32 +128,30 @@ export function flattenProjectTree(node, out = []) {
 // ─── Archive assembly ────────────────────────────────────────────────────────
 
 /**
- * Read the original text of many workspace files, batching around the
- * 1000-path cap on /sctva/cuqa-sources.
+ * Read the original text of many workspace files.
+ *
+ * One call: the orchestration backend batches against the 1000-path cap on
+ * SCTVA's workspace reader, so the browser no longer has to know that limit.
  */
 async function readWorkspaceFiles(paths, { signal, onProgress } = {}) {
   const found = new Map();
   const missing = [];
 
-  for (let i = 0; i < paths.length; i += SOURCE_BATCH_SIZE) {
-    const batch = paths.slice(i, i + SOURCE_BATCH_SIZE);
-    const result = await fetchWorkspaceSources(batch, { signal });
+  onProgress?.({ phase: "sources", done: 0, total: paths.length });
 
-    (result.files || []).forEach((f) => {
-      const path = normalizeZipPath(f.file_name, "");
-      if (path) found.set(path, f.source_code ?? "");
-    });
-    (result.missing || []).forEach((p) => missing.push(p));
+  const result = await fetchWorkspaceSources(paths, { signal });
 
-    onProgress?.({
-      phase: "sources",
-      done: Math.min(i + batch.length, paths.length),
-      total: paths.length,
-    });
-  }
+  (result.files || []).forEach((f) => {
+    const path = normalizeZipPath(f.file_name, "");
+    if (path) found.set(path, f.source_code ?? "");
+  });
+  (result.missing || []).forEach((p) => missing.push(p));
+
+  onProgress?.({ phase: "sources", done: paths.length, total: paths.length });
 
   return { found, missing };
 }
+
 
 /**
  * Build the entry list for a whole-project archive.

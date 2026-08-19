@@ -9,12 +9,12 @@
  * The diff is hunk-grouped: each change region prints every removed line as
  * one red block, then every line that replaced them as one blue block, with
  * unchanged lines left in place as context between regions. Grouping is what
- * buildDiffSegments() in sctvaApi.js produces; this file only paints it.
+ * buildDiffSegments() in utils/diffMapper.js produces; this file only paints it.
  */
 
 import { useMemo } from "react";
 import { C } from "../diwoTheme.jsx";
-import { buildDiffSegments } from "../services/sctvaApi";
+import { buildDiffSegments } from "../utils/diffMapper";
 
 /** Scrollable dark panel every code and diff view sits in. */
 export function CodeSurface({ children, maxHeight = 460, style = {} }) {
