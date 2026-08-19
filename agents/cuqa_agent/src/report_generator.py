@@ -33,10 +33,12 @@ try:
         _NUMERIC_LIT_RE,
         _max_nesting_depth,
         _estimate_cyclomatic,
+        analyze_c_magic_numbers,
     )
     _C_HELPERS_AVAILABLE = True
 except ImportError:
     _C_HELPERS_AVAILABLE = False
+
 
 
 # ---------------------------------------------------------------------------
@@ -88,7 +90,7 @@ def _chain_depth(node: pyast.expr) -> int:  # type: ignore[type-arg]
     return depth
 
 
-def _normalize_function_body(func_node: pyast.FunctionDef) -> str:
+def _normalize_function_body(func_node: pyast.FunctionDef | pyast.AsyncFunctionDef) -> str:
     """Return a normalised structural fingerprint of a function body.
 
     FIX-09: used for duplicate-body detection (ignores names/values).
@@ -239,6 +241,7 @@ class _PythonSmellVisitor(pyast.NodeVisitor):
         self.generic_visit(node)
         self._func_stack.pop()
 
+    # pyrefly: ignore [bad-override]
     visit_AsyncFunctionDef = visit_FunctionDef
 
     # ── Large class / Lazy class / Phase 4 class-level detectors ─────────────
@@ -333,13 +336,61 @@ class _PythonSmellVisitor(pyast.NodeVisitor):
         self._class_stack.pop()
 
     # ── Magic numbers (entity resolved via stack) ─────────────────────────────
+    def _extract_py_variable(self, node: pyast.AST) -> str | None:
+        """Extract variable name from an expression node in Python AST."""
+        if isinstance(node, pyast.Name):
+            return node.id
+        elif isinstance(node, pyast.Attribute):
+            if isinstance(node.value, pyast.Name) and node.value.id == "self":
+                return node.attr
+            val_id = self._extract_py_variable(node.value)
+            return f"{val_id}.{node.attr}" if val_id else node.attr
+        elif isinstance(node, pyast.Call):
+            for arg in node.args:
+                v = self._extract_py_variable(arg)
+                if v:
+                    return v
+            if isinstance(node.func, pyast.Name):
+                return node.func.id
+        elif isinstance(node, pyast.UnaryOp):
+            return self._extract_py_variable(node.operand)
+        elif isinstance(node, pyast.BinOp):
+            return self._extract_py_variable(node.left) or self._extract_py_variable(node.right)
+        return None
+
     def visit_Constant(self, node: pyast.Constant):
         if isinstance(node.value, (int, float)) and node.value not in (0, 1, -1, 2, True, False):
-            self._add(
-                "MagicNumber",
-                f"Magic number {node.value}",
-                getattr(node, "lineno", None), "low",
-            )
+            parent = getattr(node, "parent", None)
+            while parent and isinstance(parent, (pyast.UnaryOp, pyast.BinOp)):
+                parent = getattr(parent, "parent", None)
+
+            var_context = None
+            if isinstance(parent, pyast.Compare):
+                comp_nodes = [parent.left] + list(parent.comparators)
+                for comp_node in comp_nodes:
+                    if comp_node is not node and not (isinstance(comp_node, pyast.Constant) and comp_node.value == node.value):
+                        v = self._extract_py_variable(comp_node)
+                        if v:
+                            var_context = v
+                            break
+
+            if var_context:
+                msg = f"Magic number {node.value} compared to variable '{var_context}'"
+                self._add(
+                    "MagicNumber",
+                    msg,
+                    getattr(node, "lineno", None), "low",
+                    details=msg,
+                    variable_context=var_context,
+                )
+            else:
+                msg = f"Magic number {node.value}"
+                self._add(
+                    "MagicNumber",
+                    msg,
+                    getattr(node, "lineno", None), "low",
+                    details=msg,
+                )
 
     # ── Bare except (entity resolved via stack) ───────────────────────────────
     def visit_ExceptHandler(self, node: pyast.ExceptHandler):
@@ -355,8 +406,15 @@ class _PythonSmellVisitor(pyast.NodeVisitor):
 def _analyze_python_smells(source: str) -> list[dict]:
     try:
         tree = pyast.parse(source)
+        for parent in pyast.walk(tree):
+            for child in pyast.iter_child_nodes(parent):
+                try:
+                    setattr(child, "parent", parent)
+                except (AttributeError, TypeError):
+                    pass
     except SyntaxError:
         return []
+
 
     visitor = _PythonSmellVisitor()
     visitor.visit(tree)
@@ -561,6 +619,7 @@ def _analyze_java_smells(source: str) -> list[dict]:
     for _, node in tree:
         # ── FIX-12 + FIX-14: LongMethod for Java ─────────────────────────────
         if isinstance(node, javalang.tree.MethodDeclaration):
+            method_name = getattr(node, "name", "") or ""
             params = getattr(node, "parameters", []) or []
             start_line = (
                 getattr(node.position, "line", None) if node.position else None
@@ -576,11 +635,11 @@ def _analyze_java_smells(source: str) -> list[dict]:
                     smells.append({
                         "type": "LongMethod",
                         "message": (
-                            f"Method '{node.name}' has {method_loc} lines (>30)"
+                            f"Method '{method_name}' has {method_loc} lines (>30)"
                         ),
                         "line": start_line,
                         "severity": "high",
-                        "entity": node.name,
+                        "entity": method_name,
                         "start_line": start_line,       # FIX-12
                         "end_line": end_line,            # FIX-12
                         "parameter_count": len(params), # FIX-12
@@ -595,17 +654,18 @@ def _analyze_java_smells(source: str) -> list[dict]:
                 smells.append({
                     "type": "TooManyParameters",
                     "message": (
-                        f"Method '{node.name}' has {len(params)} parameters (>5)"
+                        f"Method '{method_name}' has {len(params)} parameters (>5)"
                     ),
                     "line": line,
                     "severity": "medium",
-                    "entity": node.name,
+                    "entity": method_name,
                     "parameter_count": len(params),
                 })
 
         # Existing: LargeClass for Java — now with FIX-03 method_count
         if isinstance(node, (javalang.tree.ClassDeclaration,
                               javalang.tree.InterfaceDeclaration)):
+            class_name = getattr(node, "name", "") or ""
             methods = getattr(node, "methods", []) or []
             if len(methods) > 15:
                 line = (
@@ -614,28 +674,118 @@ def _analyze_java_smells(source: str) -> list[dict]:
                 smells.append({
                     "type": "LargeClass",
                     "message": (
-                        f"Class '{node.name}' has {len(methods)} methods (>15)"
+                        f"Class '{class_name}' has {len(methods)} methods (>15)"
                     ),
                     "line": line,
                     "severity": "high",
-                    "entity": node.name,        # ← class name
+                    "entity": class_name,        # ← class name
                     "method_count": len(methods),  # FIX-03 (Java parity)
                 })
 
     # ── FIX-13: MagicNumber for Java ─────────────────────────────────────────
+    COMP_LEFT_RE = re.compile(r'\b([A-Za-z_]\w*)\s*(?:==|!=|<=|>=|<|>)\s*(-?\d+\.?\d*[fFdDlL]?)\b')
+    COMP_RIGHT_RE = re.compile(r'\b(-?\d+\.?\d*[fFdDlL]?)\s*(?:==|!=|<=|>=|<|>)\s*([A-Za-z_]\w*)\b')
+
+    java_magic_found = set()
+    if JAVALANG_AVAILABLE and tree:
+        for path, node in tree:
+            if isinstance(node, javalang.tree.Literal):
+                val = getattr(node, "value", None)
+                if val is None:
+                    continue
+                raw_val = str(val).strip()
+                clean_val = raw_val.rstrip("fFlLdD")
+                if clean_val not in _JAVA_SAFE_NUMS and raw_val not in _JAVA_SAFE_NUMS:
+                    try:
+                        float(clean_val)
+                    except ValueError:
+                        continue
+
+                    pos = getattr(node, "position", None)
+                    line_no = getattr(pos, "line", None) if pos else None
+                    parent = path[-1] if path else None
+                    var_context = None
+                    if isinstance(parent, javalang.tree.BinaryOperation):
+                        relational_ops = {"==", "!=", "<", ">", "<=", ">="}
+                        op = getattr(parent, "operator", getattr(parent, "op", None))
+                        if op in relational_ops:
+                            operandl = getattr(parent, "operandl", None)
+                            operandr = getattr(parent, "operandr", None)
+                            sibling = operandr if operandl is node else operandl
+                            if sibling is not None:
+                                if isinstance(sibling, javalang.tree.MemberReference):
+                                    var_context = getattr(sibling, "member", None)
+                                elif isinstance(sibling, javalang.tree.VariableDeclarator):
+                                    var_context = getattr(sibling, "name", None)
+                                elif hasattr(sibling, "member") and getattr(sibling, "member"):
+                                    var_context = getattr(sibling, "member")
+                                elif hasattr(sibling, "name") and getattr(sibling, "name"):
+                                    var_context = getattr(sibling, "name")
+
+                    java_magic_found.add((raw_val, line_no))
+                    if var_context:
+                        msg = f"Magic number {raw_val} compared to variable '{var_context}'"
+                        smells.append({
+                            "type": "MagicNumber",
+                            "message": msg,
+                            "details": msg,
+                            "variable_context": var_context,
+                            "line": line_no,
+                            "severity": "low",
+                            "entity": None,
+                        })
+                    else:
+                        msg = f"Magic number {raw_val} detected"
+                        smells.append({
+                            "type": "MagicNumber",
+                            "message": msg,
+                            "details": msg,
+                            "line": line_no,
+                            "severity": "low",
+                            "entity": None,
+                        })
+
     for m in _JAVA_MAGIC_NUM_RE.finditer(clean_java):
         val = m.group(0).strip()
         if val not in _JAVA_SAFE_NUMS:
             line_no = clean_java[: m.start()].count("\n") + 1
-            smells.append({
-                "type": "MagicNumber",
-                "message": f"Magic number {val} detected",
-                "line": line_no,
-                "severity": "low",
-                "entity": None,
-            })
+            if (val, line_no) in java_magic_found:
+                continue
+
+            split_lines = clean_java.splitlines()
+            line_str = split_lines[line_no - 1] if line_no <= len(split_lines) else ""
+            var_context = None
+            m_left = COMP_LEFT_RE.search(line_str)
+            m_right = COMP_RIGHT_RE.search(line_str)
+            if m_left and m_left.group(2).strip() == val:
+                var_context = m_left.group(1)
+            elif m_right and m_right.group(1).strip() == val:
+                var_context = m_right.group(2)
+
+            if var_context:
+                msg = f"Magic number {val} compared to variable '{var_context}'"
+                smells.append({
+                    "type": "MagicNumber",
+                    "message": msg,
+                    "details": msg,
+                    "variable_context": var_context,
+                    "line": line_no,
+                    "severity": "low",
+                    "entity": None,
+                })
+            else:
+                msg = f"Magic number {val} detected"
+                smells.append({
+                    "type": "MagicNumber",
+                    "message": msg,
+                    "details": msg,
+                    "line": line_no,
+                    "severity": "low",
+                    "entity": None,
+                })
 
     return smells
+
 
 
 def _java_metrics(source: str, filename: str) -> dict:
@@ -772,19 +922,10 @@ def _analyze_c_smells(source: str, filename: str) -> list[dict]:
         })
 
     # ── 4: MagicNumber ────────────────────────────────────────────────────────
-    SAFE_NUMBERS = {"0", "1", "-1", "2", "0.0", "1.0"}
+    c_magic_smells = analyze_c_magic_numbers(source, filename)
+    smells.extend(c_magic_smells)
     clean = _strip_string_literals(_strip_comments(source))
-    for m in _NUMERIC_LIT_RE.finditer(clean):
-        val = m.group(0).strip()
-        if val not in SAFE_NUMBERS:
-            line_no = clean[: m.start()].count("\n") + 1
-            smells.append({
-                "type": "MagicNumber",
-                "message": f"Magic number {val} detected",
-                "line": line_no,
-                "severity": "low",
-                "entity": filename,
-            })
+
 
     # ── 5: UnsafeFunctionUsage ────────────────────────────────────────────────
     for m in _UNSAFE_CALL_RE.finditer(clean):
