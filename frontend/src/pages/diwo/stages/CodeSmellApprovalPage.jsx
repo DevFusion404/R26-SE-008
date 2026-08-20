@@ -15,11 +15,16 @@
  *      If the DIWO backend is down, diwoApi calls the CUQA agent directly.
  *   3. Bundled sample report (diwoData.CUQA_DATA) — only if the developer opts
  *      in after a failure, and it is labelled as sample data in the UI.
+ *
+ * Either mode can open the ORIGINAL source behind a finding: the eye button on
+ * a smell opens its file scrolled to that smell, the one on a file header opens
+ * the file with every smell in it marked. See components/SourceViewer.jsx.
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { CUQA_DATA } from "../data/diwoData";
 import { C, Card, Badge, severityColor } from "../diwoTheme.jsx";
+import SourceViewer from "../components/SourceViewer.jsx";
 import { fetchQualityReport, previewSmellSelection } from "../services/diwoApi";
 
 
@@ -40,14 +45,12 @@ const round = (value, dp = 0) => {
 const smellId = (relativePath, smell, index) =>
   `${relativePath}:${smell?.line || 0}:${index}`;
 
-/** A stable colour per file, so each file's header is identifiable at a glance
- *  — the same palette the Refactoring Plan page uses for its file headers. */
-const FILE_COLORS = ["#00d4aa", "#3b82f6", "#f59e0b", "#a855f7", "#ec4899", "#22c55e", "#06b6d4", "#f97316"];
-const fileColor = (path = "") => {
-  let hash = 0;
-  for (let i = 0; i < path.length; i += 1) hash = (hash * 31 + path.charCodeAt(i)) >>> 0;
-  return FILE_COLORS[hash % FILE_COLORS.length];
-};
+/** Every file path bar is drawn in one colour — the theme's blue. Files used to
+ *  get a hashed colour each, which made the list read as eight competing
+ *  categories when the only thing being said was "this is a file path". The
+ *  severity colours are the ones that carry meaning on this screen, so nothing
+ *  else should compete with them. */
+const FILE_BAR_COLOR = C.info;
 
 export default function CodeSmellApprovalPage({
   onProceed,
@@ -64,6 +67,10 @@ export default function CodeSmellApprovalPage({
   const [filter, setFilter] = useState("all");
   const [search, setSearch] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
+
+  // Which file's original source is open, and which smell inside it is focused.
+  // { file, focusId } — focusId is null when the whole file was opened.
+  const [viewing, setViewing] = useState(null);
 
   // ── CUQA report loading ────────────────────────────────────────────────────
   const [fetched, setFetched] = useState(null);   // { report, via, cuqaUrl, ... }
@@ -84,6 +91,7 @@ export default function CodeSmellApprovalPage({
     setSelectedIds(new Set());
     setLoadError(null);
     setLoading(false);
+    setViewing(null);
     onReportLoadedRef.current?.(result);
   }, []);
 
@@ -115,6 +123,7 @@ export default function CodeSmellApprovalPage({
       setSelected(new Set());
       setSelectedIds(new Set());
       setLoading(false);
+      setViewing(null);
     }
   }
 
@@ -237,6 +246,19 @@ export default function CodeSmellApprovalPage({
 
   const highCount = selectedSmells.filter((s) => s.severity === "high").length;
   const selectionCount = isSmellMode ? selectedIds.size : selected.size;
+
+  // Every smell of the file being viewed — NOT just the ones passing the
+  // current filter. The point of opening the source is to see the file as CUQA
+  // reported it; hiding findings because a severity chip is active would show
+  // clean code that is not actually clean.
+  const viewerFile = viewing?.file || null;
+  const viewerSmells = viewerFile
+    ? smellRows
+        .filter((r) => r.file === viewerFile)
+        .map(({ id, smell }) => ({ id, ...smell }))
+    : [];
+  const viewerLanguage =
+    viewerFile ? smellRows.find((r) => r.file === viewerFile)?.language : "";
 
   // File mode sends the file paths and lets the backend expand them to every
   // smell inside. Smell mode must NOT send them: the backend ORs files with
@@ -377,6 +399,8 @@ export default function CodeSmellApprovalPage({
             selectedIds={selectedIds}
             onToggleSmell={toggleSmell}
             onToggleGroup={toggleGroup}
+            onViewFile={(file) => setViewing({ file, focusId: null })}
+            onViewSmell={(file, id) => setViewing({ file, focusId: id })}
           />
         ))}
 
@@ -394,7 +418,6 @@ export default function CodeSmellApprovalPage({
             }}>
               <FilePathBar
                 file={f.relative_path}
-                color={fileColor(f.relative_path)}
                 leading={<Checkbox on={isSelected} size={20} />}
               >
                 <Badge label={f.language || "unknown"} color={C.info} />
@@ -402,6 +425,10 @@ export default function CodeSmellApprovalPage({
                 <span style={{ marginLeft: "auto", fontSize: 11, color: C.warn, flexShrink: 0 }}>
                   {smells.length} smell{smells.length > 1 ? "s" : ""}
                 </span>
+                <ViewButton
+                  label="View source"
+                  onClick={() => setViewing({ file: f.relative_path, focusId: null })}
+                />
               </FilePathBar>
 
               <div style={{ padding: "12px 18px" }}>
@@ -414,7 +441,18 @@ export default function CodeSmellApprovalPage({
                   <div style={{ marginTop: 12, paddingTop: 12, borderTop: `1px solid ${C.borderAcc}` }}>
                     <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
                       {smells.map((smell, idx) => (
-                        <div key={`${smell.type}-${smell.line ?? "x"}-${idx}`} title={smell.message || smell.type} style={{ background: `${severityColor(smell.severity)}10`, border: `1px solid ${severityColor(smell.severity)}30`, borderRadius: 6, padding: "4px 10px", display: "flex", alignItems: "center", gap: 6 }}>
+                        <div
+                          key={`${smell.type}-${smell.line ?? "x"}-${idx}`}
+                          title={`${smell.message || smell.type}\n\nClick to open this smell in the original file`}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setViewing({
+                              file: f.relative_path,
+                              focusId: smellId(f.relative_path, smell, idx),
+                            });
+                          }}
+                          style={{ background: `${severityColor(smell.severity)}10`, border: `1px solid ${severityColor(smell.severity)}30`, borderRadius: 6, padding: "4px 10px", display: "flex", alignItems: "center", gap: 6, cursor: "pointer" }}
+                        >
                           <div style={{ width: 6, height: 6, borderRadius: "50%", background: severityColor(smell.severity) }} />
                           <span style={{ fontSize: 11, color: C.textSub }}>{smell.type}</span>
                           {smell.entity && <span style={{ fontSize: 10, color: C.textMuted, fontFamily: "monospace" }}>{smell.entity}</span>}
@@ -476,7 +514,49 @@ export default function CodeSmellApprovalPage({
           {isSubmitting ? "Generating report..." : "Approve Selected Smells →"}
         </button>
       </div>
+
+      {viewerFile && (
+        <SourceViewer
+          // Keyed by file: opening a different file mounts a fresh viewer, so
+          // its loading state resets without an effect writing state.
+          key={viewerFile}
+          file={viewerFile}
+          language={viewerLanguage}
+          smells={viewerSmells}
+          focusId={viewing?.focusId || null}
+          // Smell mode selects individual smells, so the viewer can tick them
+          // too. File mode selects whole files — offering a per-smell tick
+          // there would suggest a partial selection the mode cannot express.
+          selectedIds={isSmellMode ? selectedIds : null}
+          onToggleSmell={isSmellMode ? toggleSmell : undefined}
+          onClose={() => setViewing(null)}
+        />
+      )}
     </div>
+  );
+}
+
+/** The eye affordance. Stops propagation so opening a file never also toggles
+ *  its selection — the row and its header are both click targets already. */
+function ViewButton({ label = "View", onClick, compact = false }) {
+  return (
+    <button
+      title="Open the original file with the code smells marked"
+      onClick={(e) => {
+        e.stopPropagation();
+        onClick();
+      }}
+      style={{
+        display: "flex", alignItems: "center", gap: 5, flexShrink: 0,
+        padding: compact ? "2px 8px" : "5px 12px",
+        borderRadius: 7, cursor: "pointer",
+        fontSize: compact ? 10 : 11, fontWeight: 700,
+        background: C.panel, color: C.textSub, border: `1px solid ${C.border}`,
+      }}
+    >
+      <span aria-hidden="true">👁</span>
+      {label}
+    </button>
   );
 }
 
@@ -500,14 +580,14 @@ function Checkbox({ on, half = false, size = 18 }) {
 }
 
 /** The file path header both modes share: the path called out by name, over a
- *  border in the file's own colour so one file's block is told from the next. */
-function FilePathBar({ file, color, leading, sticky = false, onClick, children }) {
+ *  blue border that separates one file's block from the next. */
+function FilePathBar({ file, leading, sticky = false, onClick, children }) {
   return (
     <div onClick={onClick} style={{
       display: "flex", alignItems: "center", gap: 10, padding: "10px 16px",
-      background: `${color}12`,
-      borderBottom: `2px solid ${color}`,
-      borderLeft: `4px solid ${color}`,
+      background: `${FILE_BAR_COLOR}12`,
+      borderBottom: `2px solid ${FILE_BAR_COLOR}`,
+      borderLeft: `4px solid ${FILE_BAR_COLOR}`,
       ...(onClick ? { cursor: "pointer" } : {}),
       // Sticky must sit directly on the scrolling list's descendant chain — a
       // wrapper sized to the bar itself would leave it nothing to travel in.
@@ -515,7 +595,7 @@ function FilePathBar({ file, color, leading, sticky = false, onClick, children }
     }}>
       {leading}
       <span style={{
-        fontSize: 18, fontWeight: 700, color, letterSpacing: 1,
+        fontSize: 18, fontWeight: 700, color: FILE_BAR_COLOR, letterSpacing: 1,
         textTransform: "uppercase", flexShrink: 0,
       }}>
         File Path
@@ -596,7 +676,7 @@ function ModeSwitch({ mode, onChange, fileCount, smellCount }) {
  *  The card is never height-capped — it grows with the number of smells, so all
  *  10 rows of a 10-smell file are laid out one under the other. flexShrink: 0
  *  keeps the parent's fixed-height column from squeezing (and clipping) it. */
-function SmellGroup({ group, selectedIds, onToggleSmell, onToggleGroup }) {
+function SmellGroup({ group, selectedIds, onToggleSmell, onToggleGroup, onViewFile, onViewSmell }) {
   const selectedInGroup = group.rows.filter((r) => selectedIds.has(r.id)).length;
   const total = group.rows.length;
   const allOn = selectedInGroup === total;
@@ -614,7 +694,6 @@ function SmellGroup({ group, selectedIds, onToggleSmell, onToggleGroup }) {
           through a long smell list. */}
       <FilePathBar
         file={group.file}
-        color={fileColor(group.file)}
         leading={<Checkbox on={allOn} half={someOn} />}
         onClick={() => onToggleGroup(group)}
         sticky
@@ -624,6 +703,7 @@ function SmellGroup({ group, selectedIds, onToggleSmell, onToggleGroup }) {
         <span style={{ marginLeft: "auto", fontSize: 11, color: selectedInGroup > 0 ? C.accent : C.textMuted, flexShrink: 0 }}>
           {selectedInGroup}/{total} selected
         </span>
+        <ViewButton label="View source" onClick={() => onViewFile?.(group.file)} />
       </FilePathBar>
 
       <div style={{ display: "flex", flexDirection: "column" }}>
@@ -672,6 +752,8 @@ function SmellGroup({ group, selectedIds, onToggleSmell, onToggleGroup }) {
                   <div style={{ fontSize: 11, color: C.textMuted, marginTop: 4, lineHeight: 1.5 }}>{smell.message}</div>
                 )}
               </div>
+
+              <ViewButton compact onClick={() => onViewSmell?.(group.file, id)} />
             </div>
           );
         })}

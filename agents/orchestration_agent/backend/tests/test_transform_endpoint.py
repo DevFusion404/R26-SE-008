@@ -175,15 +175,24 @@ def main():
     check("agent down -> 503, not 500", res.status_code == 503, str(res.status_code))
     check("error names the agent url", "sctva_url" in res.get_json(), str(res.get_json()))
 
+    requested = []
+
     def no_sources(file_paths, timeout=60):
+        requested[:] = list(file_paths)
         return {"files": [], "missing": list(file_paths), "imported": 0, "total": len(file_paths)}
 
     transformation_service.sctva_execute = stub_execute
     transformation_service.fetch_workspace_sources = no_sources
     res = client.post(f"/api/workflows/{wf_id}/transform", json={})
     check("no readable source -> 422", res.status_code == 422, str(res.status_code))
-    check("422 lists the missing paths", res.get_json().get("missing") == ["src/Order.java"],
-          str(res.get_json()))
+    # Compared against what the mapper actually asked for, not a hard-coded
+    # path: which paths a plan names depends on whether the RDP agent produced
+    # it or the offline fallback did, and this check is about the 422 carrying
+    # the missing list through - not about which planner ran.
+    check("422 lists exactly the paths that could not be read",
+          res.get_json().get("missing") == requested,
+          f"missing={res.get_json().get('missing')} requested={requested}")
+    check("and it named at least one path", len(requested) >= 1, str(requested))
 
     print("\n5. stage guard")
     transformation_service.fetch_workspace_sources = stub_sources
