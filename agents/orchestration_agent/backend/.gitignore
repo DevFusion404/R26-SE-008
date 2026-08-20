@@ -1,0 +1,17 @@
+# Orchestration Agent backend
+# ===========================
+# Root .gitignore already covers most of this; these rules keep the backend
+# self-contained so it stays clean when moved or vendored.
+
+__pycache__/
+*.py[cod]
+
+# Never commit a real environment file. .env.example is the template.
+.env
+.env.*
+!.env.example
+
+# Generated at runtime: the audit database, saved smell reports, project ZIPs.
+# All untracked (git rm --cached) - the local files stay on disk, they are just
+# no longer versioned, so a workflow run never shows up as a repository change.
+runtime/

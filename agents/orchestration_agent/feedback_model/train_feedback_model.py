@@ -44,6 +44,7 @@ import pickle
 import warnings
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Optional
 
 import numpy as np
 import pandas as pd
@@ -170,7 +171,7 @@ def generate_synthetic_data(n: int = 800) -> pd.DataFrame:
 
 CATEGORICAL_COLS = ["stage", "action", "smell_type", "refactoring_type", "severity"]
 
-def encode_features(df: pd.DataFrame, encoders: dict = None, fit: bool = True):
+def encode_features(df: pd.DataFrame, encoders: Optional[dict] = None, fit: bool = True):
     """
     Encode categorical columns and build feature matrix.
     Returns: (X, encoders_dict)

@@ -1,16 +1,27 @@
 """
-Database layer – SQLite for prototype.
-Replace ENGINE_URL with PostgreSQL DSN for production.
+Database connection and schema
+==============================
+R26-SE-008 | Bandara S M Y M | IT22277886
+
+SQLite for the prototype; replace the connection with a PostgreSQL DSN for
+production. This module owns the connection, the schema and its migrations —
+persistence of workflows, audit events and feedback lives next door in
+workflow_repository.py.
+
+The database file now sits under runtime/database/, resolved by config so
+generated data is never mixed with source. An older backend/diwo_audit.db is
+moved into place on first use, so no existing workflow history is lost.
 """
 
 import sqlite3
-import json
 from datetime import datetime, timezone
-from pathlib import Path
 from flask import g
 
+from config import database_path
 
-DB_PATH = Path(__file__).parent.parent / "diwo_audit.db"
+#: Resolved once at import so every helper agrees on the file, and the
+#: legacy-path migration runs exactly once per process.
+DB_PATH = database_path()
 
 
 def get_db():
@@ -100,81 +111,3 @@ def init_db(app):
 
 def now_iso():
     return datetime.now(timezone.utc).isoformat()
-
-
-# ---------- Workflow CRUD ----------
-
-def create_workflow(wf_id, target, language, smells):
-    db = get_db()
-    db.execute(
-        """INSERT INTO workflows
-           (id, target, language, status, created_at, updated_at, smells_json)
-           VALUES (?,?,?,?,?,?,?)""",
-        (wf_id, target, language, "smell_review", now_iso(), now_iso(), json.dumps(smells))
-    )
-    db.commit()
-
-
-def get_workflow(wf_id):
-    db = get_db()
-    row = db.execute("SELECT * FROM workflows WHERE id=?", (wf_id,)).fetchone()
-    if row is None:
-        return None
-    return dict(row)
-
-
-def update_workflow(wf_id, **kwargs):
-    db = get_db()
-    kwargs["updated_at"] = now_iso()
-    set_clause = ", ".join(f"{k}=?" for k in kwargs)
-    values = list(kwargs.values()) + [wf_id]
-    db.execute(f"UPDATE workflows SET {set_clause} WHERE id=?", values)
-    db.commit()
-
-
-def list_workflows():
-    db = get_db()
-    rows = db.execute("SELECT * FROM workflows ORDER BY created_at DESC").fetchall()
-    return [dict(r) for r in rows]
-
-
-# ---------- Audit Log ----------
-
-def log_event(workflow_id, stage, action, details=None, actor="developer"):
-    db = get_db()
-    db.execute(
-        """INSERT INTO audit_logs (workflow_id, stage, action, actor, details_json, timestamp)
-           VALUES (?,?,?,?,?,?)""",
-        (workflow_id, stage, action, actor, json.dumps(details or {}), now_iso())
-    )
-    db.commit()
-
-
-def get_audit_logs(workflow_id):
-    db = get_db()
-    rows = db.execute(
-        "SELECT * FROM audit_logs WHERE workflow_id=? ORDER BY timestamp ASC",
-        (workflow_id,)
-    ).fetchall()
-    return [dict(r) for r in rows]
-
-
-# ---------- Feedback ----------
-
-def save_feedback(workflow_id, stage, action, smell_type=None, refactoring_type=None,
-                  severity=None, reason=None, rating=None, accepted=False):
-    db = get_db()
-    db.execute(
-        """INSERT INTO feedback_entries
-           (workflow_id, stage, action, smell_type, refactoring_type, severity, reason, rating, accepted, timestamp)
-           VALUES (?,?,?,?,?,?,?,?,?,?)""",
-        (workflow_id, stage, action, smell_type, refactoring_type, severity,
-         reason, rating, 1 if accepted else 0, now_iso())
-    )
-    db.commit()
-
-
-def export_feedback_dataset():
-    db = get_db()
-    rows = db.execute("SELECT * FROM feedback_entries ORDER BY timestamp ASC").fetchall()
-    return [dict(r) for r in rows]

@@ -1,0 +1,121 @@
+[
+  {
+    "name": "extract method with range",
+    "plan_id": "plan_A",
+    "target": "src/Order.java",
+    "steps": [
+      {
+        "step_id": 1,
+        "refactoring": "Extract Method",
+        "target": {"class": "Order", "method": "calculateTotal"},
+        "parameters": {"source_lines": [10, 130], "new_method_name": "calcCore"},
+        "location": {"file": "src/Order.java"}
+      }
+    ]
+  },
+  {
+    "name": "extract method missing range -> noop",
+    "plan_id": "plan_B",
+    "target": "src/Order.java",
+    "steps": [
+      {
+        "step_id": 1,
+        "refactoring": "Extract Method",
+        "target": {"class": "Order", "method": "calculateTotal"},
+        "parameters": {}
+      }
+    ]
+  },
+  {
+    "name": "unsupported refactoring -> noop",
+    "plan_id": "plan_C",
+    "target": "src/Order.java",
+    "steps": [
+      {"step_id": 1, "refactoring": "Extract Class", "target": {"class": "Order"}, "parameters": {"new_class_name": "OrderHelper"}},
+      {"step_id": 2, "refactoring": "Move Method", "target": {"class": "Order", "method": "x"}, "parameters": {}}
+    ]
+  },
+  {
+    "name": "rename + safe identifier",
+    "plan_id": "plan_D",
+    "target": "src/Util.py",
+    "steps": [
+      {"step_id": 1, "refactoring": "Rename Method", "target": {"class": "Util", "method": "do_it"}, "parameters": {"new_name": "9bad name!"}}
+    ]
+  },
+  {
+    "name": "remove dead code by line only",
+    "plan_id": "plan_E",
+    "target": "src/util/Helper.java",
+    "steps": [
+      {"step_id": 1, "refactoring": "Remove Dead Code", "target": {"class": "Helper"}, "parameters": {"source_lines": [5, 9]}, "location": {"file": "src/util/Helper.java"}}
+    ]
+  },
+  {
+    "name": "introduce constant with hint only",
+    "plan_id": "plan_F",
+    "target": "src/main.c",
+    "steps": [
+      {"step_id": 1, "refactoring": "Introduce Constant", "target": {"class": "main"}, "parameters": {"hint": "magic 32"}}
+    ]
+  },
+  {
+    "name": "extract constant with explicit null literal",
+    "plan_id": "plan_G",
+    "target": "src/main.c",
+    "steps": [
+      {"step_id": 1, "refactoring": "Replace Magic Number with Symbolic Constant", "parameters": {"literal_value": 32, "source_lines": [12, 12]}, "target": {"class": "main"}}
+    ]
+  },
+  {
+    "name": "replace unsafe function",
+    "plan_id": "plan_H",
+    "target": "src/main.c",
+    "steps": [
+      {"step_id": 1, "refactoring": "Replace Unsafe Function", "target": {"method": "strcpy"}, "parameters": {"safe_alternative": "strncpy"}}
+    ]
+  },
+  {
+    "name": "encapsulate variable defaults",
+    "plan_id": "plan_I",
+    "target": "src/Config.py",
+    "steps": [
+      {"step_id": 1, "refactoring": "Encapsulate Variable", "target": {"variable": "cache"}, "parameters": {}}
+    ]
+  },
+  {
+    "name": "fault injection",
+    "plan_id": "plan_J",
+    "target": "src/Order.java",
+    "steps": [
+      {"step_id": 1, "refactoring": "Fault Injection - boundary", "target": {"class": "Order", "method": "total"}, "parameters": {"original_logic": "a < b", "faulty_logic": "a <= b", "purpose": "mutation"}}
+    ]
+  },
+  {
+    "name": "malformed and empty",
+    "plan_id": "plan_K",
+    "target": "src/Order.java",
+    "steps": ["not-an-object", {"step_id": 2}]
+  },
+  {
+    "name": "empty plan",
+    "plan_id": "plan_L",
+    "target": "src/Order.java",
+    "steps": []
+  },
+  {
+    "name": "replace literal",
+    "plan_id": "plan_M",
+    "target": "src/Order.java",
+    "steps": [
+      {"step_id": 1, "refactoring": "Replace Literal", "parameters": {"old_literal": "\"x\"", "new_literal": "\"y\"", "source_file": "src/Deep/Nested.java"}}
+    ]
+  },
+  {
+    "name": "no plan target, step file only",
+    "plan_id": "plan_N",
+    "steps": [
+      {"step_id": 1, "refactoring": "Rename Class", "target": {"class": "Old"}, "parameters": {"new_name": "New", "relative_path": "src/pkg/Old.java"}}
+    ]
+  }
+]

@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://r26-se-008/contracts/approved-plan.schema.json",
+  "title": "ApprovedPlan",
+  "description": "The refactoring plan after the developer's accept/reject pass in the DIWO Plan Approval stage. This is the second critical human-feedback hand-off, and the mirror of FilteredCUQAReport: a step the developer rejected must NEVER reach the SCTVA agent, because a rejected step left in the JSON would be mapped to an SCTVA action and executed.\n\nProduced by backend/domain/plan_normalizer.py::build_approved_plan and returned as `approved_plan` from POST /api/workflows/<id>/plan-decision. It is stored as the workflow's plan_json, which is what POST /api/workflows/<id>/transform defaults to — so the approved-only plan is used even when the caller sends nothing.\n\nIt is a RefactoringPlan reduced to the approved steps, plus an `approval` block recording what was rejected. The rejected steps are recorded rather than silently dropped, and the full pre-approval plan is kept separately (plan_full_json) so a rollback from the Transformation stage can offer every step for re-selection.",
+  "allOf": [{ "$ref": "https://r26-se-008/contracts/rdp-plan.schema.json" }],
+  "type": "object",
+  "required": ["plan_id", "steps", "summary", "approval"],
+  "properties": {
+    "steps": {
+      "type": "array",
+      "description": "ONLY the steps the developer approved. Steps keep their ORIGINAL step_id — they are not renumbered — so every action SCTVA reports still traces back to the plan that was reviewed.",
+      "items": { "type": "object" }
+    },
+    "summary": {
+      "type": "object",
+      "description": "Recomputed against the approved steps only. Leaving the original total_steps on a reduced step list produces a report that contradicts itself, which is exactly the kind of stale figure that hides a filtering bug.",
+      "required": ["total_steps"],
+      "properties": {
+        "total_steps": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Equals steps.length and equals approval.approved_count."
+        }
+      }
+    },
+    "approval": {
+      "type": "object",
+      "description": "The audit record of the decision. This is what lets the audit trail and the feedback dataset agree with the plan that was actually executed.",
+      "required": ["approved_step_ids", "rejected_step_ids", "approved_count", "rejected_count", "decided_at"],
+      "properties": {
+        "source_plan_id": {
+          "type": ["string", "null"],
+          "description": "The plan_id this was reduced from. Preserved across a second reduction pass."
+        },
+        "approved_step_ids": {
+          "type": "array",
+          "items": { "type": "integer" },
+          "description": "Exactly the step_ids present in `steps`."
+        },
+        "rejected_step_ids": {
+          "type": "array",
+          "items": { "type": "integer" },
+          "description": "Accumulated across reduction passes. Reducing an already-reduced plan must not erase what was rejected the first time: the second pass only sees the survivors, so its own rejected list would come back empty and the audit would lose the verdict."
+        },
+        "pending_step_ids": {
+          "type": "array",
+          "items": { "type": "integer" },
+          "description": "Steps the developer neither approved nor rejected. These are NOT executed — only approved steps are."
+        },
+        "approved_count": { "type": "integer", "minimum": 0 },
+        "rejected_count": { "type": "integer", "minimum": 0 },
+        "original_total_steps": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "How many steps the RDP agent produced before approval, so the reduction is visible in the record."
+        },
+        "decided_at": { "type": "string", "format": "date-time" }
+      },
+      "additionalProperties": false
+    }
+  }
+}

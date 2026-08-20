@@ -1,0 +1,66 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://r26-se-008/contracts/filtered-cuqa-report.schema.json",
+  "title": "FilteredCUQAReport",
+  "description": "The CUQA report after the developer's accept/reject pass in the DIWO Code Smell Review stage. This is the payload the Orchestration Agent forwards to the RDP agent, and it is the single most important contract in the system: the RDP agent must NEVER receive the original report after a selection has been made, or it will plan refactorings for smells the developer explicitly rejected.\n\nProduced by backend/domain/cuqa_normalizer.py::filter_cuqa_report and returned as `updated_report` from POST /api/workflows/<id>/select-smells.\n\nIt is deliberately a FILTERED COPY of CUQAReport, not a new shape: every file keeps its language, full metrics block and quality_score, and every surviving smell keeps all of its own fields. Only the code_smells lists shrink. Rebuilding the report from DIWO's flattened smell list instead would drop per-smell `entity` and per-file metrics, and RDP would plan against weaker input than CUQA actually produced.",
+  "allOf": [{ "$ref": "https://r26-se-008/contracts/cuqa-report.schema.json" }],
+  "type": "object",
+  "required": ["summary", "files", "filtered"],
+  "properties": {
+    "filtered": {
+      "type": "boolean",
+      "const": true,
+      "description": "Marks this as a post-selection report. Its presence is how a reader tells a filtered report from the original one."
+    },
+    "workflow_id": {
+      "type": "string",
+      "pattern": "^wf_[0-9a-f]{10}$",
+      "description": "The workflow whose selection produced this report."
+    },
+    "generated_at": { "type": "string", "format": "date-time" },
+    "files": {
+      "type": "array",
+      "description": "EVERY analysed file is still present, including files whose smells were all rejected — the developer must be able to see what was excluded. Files with an empty code_smells list are dropped later, when the RDP request itself is built (backend/domain/plan_normalizer.py::build_rdp_plan_input), because RDP names the plan after files[0].",
+      "items": {
+        "type": "object",
+        "properties": {
+          "code_smells": {
+            "type": "array",
+            "description": "ONLY the smells the developer kept. A rejected smell is absent, not flagged."
+          }
+        }
+      }
+    },
+    "summary": {
+      "type": "object",
+      "description": "Recomputed from the surviving smells, never carried over from the original report — a summary describing smells that are no longer in the payload is exactly the stale figure that hides a filtering bug.",
+      "required": ["selected_smell_ids", "selected_count", "excluded_count"],
+      "properties": {
+        "selected_smell_ids": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^.+:[0-9]+:[0-9]+$",
+            "description": "Smell id, formatted <relative_path>:<line>:<index_within_file>. The same key cuqa_report_to_smells() assigns, so a selection made against the flattened smell list resolves here without a lookup table."
+          }
+        },
+        "selected_count": { "type": "integer", "minimum": 0 },
+        "excluded_count": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "How many smells the developer rejected. selected_count + excluded_count equals the original report's total_code_smells."
+        },
+        "selected_file_count": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Files that still carry at least one selected smell — the number RDP will actually plan against."
+        },
+        "total_code_smells": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Equals selected_count. If this ever exceeds it, the filter leaked."
+        }
+      }
+    }
+  }
+}
