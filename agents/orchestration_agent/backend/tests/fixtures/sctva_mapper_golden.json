@@ -1,0 +1,603 @@
+[
+  {
+    "name": "extract method with range",
+    "mapping": {
+      "plan": {
+        "plan_id": "plan_A",
+        "actions": [
+          {
+            "action_type": "extract_method",
+            "parameters": {
+              "method": "calculateTotal",
+              "new_method_name": "calcCore",
+              "start_line": 10,
+              "end_line": 130,
+              "target_class": "Order",
+              "source_file": "src/Order.java",
+              "source_line": 10
+            },
+            "source_step_id": 1,
+            "source_refactoring": "Extract Method",
+            "warnings": []
+          }
+        ],
+        "behavior_tests": [],
+        "metadata": {
+          "source_agent": "rdp_agent",
+          "source_plan_id": "plan_A",
+          "correlation_id": "plan_A",
+          "adapter_warnings": [],
+          "malformed_steps": [],
+          "planner_metadata": {},
+          "mapped_by": "<mapper>"
+        }
+      },
+      "warnings": [],
+      "executableCount": 1,
+      "noopCount": 0
+    },
+    "paths": [
+      "src/Order.java"
+    ]
+  },
+  {
+    "name": "extract method missing range -> noop",
+    "mapping": {
+      "plan": {
+        "plan_id": "plan_B",
+        "actions": [
+          {
+            "action_type": "noop",
+            "parameters": {
+              "reason": "unmappable_step",
+              "refactoring": "Extract Method",
+              "step_id": 1,
+              "source_file": "src/Order.java"
+            },
+            "source_step_id": 1,
+            "source_refactoring": "Extract Method",
+            "warnings": [
+              "Step 1 (Extract Method): extract method mapping requires an executable source range (start_line/end_line or source_lines/lines)"
+            ]
+          }
+        ],
+        "behavior_tests": [],
+        "metadata": {
+          "source_agent": "rdp_agent",
+          "source_plan_id": "plan_B",
+          "correlation_id": "plan_B",
+          "adapter_warnings": [
+            "Step 1 (Extract Method): extract method mapping requires an executable source range (start_line/end_line or source_lines/lines)"
+          ],
+          "malformed_steps": [
+            1
+          ],
+          "planner_metadata": {},
+          "mapped_by": "<mapper>"
+        }
+      },
+      "warnings": [
+        "Step 1 (Extract Method): extract method mapping requires an executable source range (start_line/end_line or source_lines/lines)"
+      ],
+      "executableCount": 0,
+      "noopCount": 1
+    },
+    "paths": [
+      "src/Order.java"
+    ]
+  },
+  {
+    "name": "unsupported refactoring -> noop",
+    "mapping": {
+      "plan": {
+        "plan_id": "plan_C",
+        "actions": [
+          {
+            "action_type": "noop",
+            "parameters": {
+              "reason": "unmappable_step",
+              "refactoring": "Extract Class",
+              "step_id": 1,
+              "source_file": "src/Order.java"
+            },
+            "source_step_id": 1,
+            "source_refactoring": "Extract Class",
+            "warnings": [
+              "Step 1 (Extract Class): Extract Class requires coordinated multi-file class creation; SCTVA will not simulate it with a rename"
+            ]
+          },
+          {
+            "action_type": "noop",
+            "parameters": {
+              "reason": "unmappable_step",
+              "refactoring": "Move Method",
+              "step_id": 2,
+              "source_file": "src/Order.java"
+            },
+            "source_step_id": 2,
+            "source_refactoring": "Move Method",
+            "warnings": [
+              "Step 2 (Move Method): Move Method requires coordinated edits to source and destination classes; SCTVA will not simulate it with a rename"
+            ]
+          }
+        ],
+        "behavior_tests": [],
+        "metadata": {
+          "source_agent": "rdp_agent",
+          "source_plan_id": "plan_C",
+          "correlation_id": "plan_C",
+          "adapter_warnings": [
+            "Step 1 (Extract Class): Extract Class requires coordinated multi-file class creation; SCTVA will not simulate it with a rename",
+            "Step 2 (Move Method): Move Method requires coordinated edits to source and destination classes; SCTVA will not simulate it with a rename"
+          ],
+          "malformed_steps": [
+            1,
+            2
+          ],
+          "planner_metadata": {},
+          "mapped_by": "<mapper>"
+        }
+      },
+      "warnings": [
+        "Step 1 (Extract Class): Extract Class requires coordinated multi-file class creation; SCTVA will not simulate it with a rename",
+        "Step 2 (Move Method): Move Method requires coordinated edits to source and destination classes; SCTVA will not simulate it with a rename"
+      ],
+      "executableCount": 0,
+      "noopCount": 2
+    },
+    "paths": [
+      "src/Order.java"
+    ]
+  },
+  {
+    "name": "rename + safe identifier",
+    "mapping": {
+      "plan": {
+        "plan_id": "plan_D",
+        "actions": [
+          {
+            "action_type": "rename_symbol",
+            "parameters": {
+              "old_name": "do_it",
+              "new_name": "R_9bad_name_",
+              "source_file": "src/Util.py"
+            },
+            "source_step_id": 1,
+            "source_refactoring": "Rename Method",
+            "warnings": []
+          }
+        ],
+        "behavior_tests": [],
+        "metadata": {
+          "source_agent": "rdp_agent",
+          "source_plan_id": "plan_D",
+          "correlation_id": "plan_D",
+          "adapter_warnings": [],
+          "malformed_steps": [],
+          "planner_metadata": {},
+          "mapped_by": "<mapper>"
+        }
+      },
+      "warnings": [],
+      "executableCount": 1,
+      "noopCount": 0
+    },
+    "paths": [
+      "src/Util.py"
+    ]
+  },
+  {
+    "name": "remove dead code by line only",
+    "mapping": {
+      "plan": {
+        "plan_id": "plan_E",
+        "actions": [
+          {
+            "action_type": "remove_dead_code",
+            "parameters": {
+              "method": "",
+              "class_name": "Helper",
+              "source_line": 5,
+              "source_file": "src/util/Helper.java"
+            },
+            "source_step_id": 1,
+            "source_refactoring": "Remove Dead Code",
+            "warnings": []
+          }
+        ],
+        "behavior_tests": [],
+        "metadata": {
+          "source_agent": "rdp_agent",
+          "source_plan_id": "plan_E",
+          "correlation_id": "plan_E",
+          "adapter_warnings": [],
+          "malformed_steps": [],
+          "planner_metadata": {},
+          "mapped_by": "<mapper>"
+        }
+      },
+      "warnings": [],
+      "executableCount": 1,
+      "noopCount": 0
+    },
+    "paths": [
+      "src/util/Helper.java"
+    ]
+  },
+  {
+    "name": "introduce constant with hint only",
+    "mapping": {
+      "plan": {
+        "plan_id": "plan_F",
+        "actions": [
+          {
+            "action_type": "introduce_constant",
+            "parameters": {
+              "literal_value": null,
+              "literal_values": null,
+              "constant_name": "EXTRACTED_CONSTANT",
+              "hint": "magic 32",
+              "source_file": "src/main.c",
+              "target_class": "main"
+            },
+            "source_step_id": 1,
+            "source_refactoring": "Introduce Constant",
+            "warnings": []
+          }
+        ],
+        "behavior_tests": [],
+        "metadata": {
+          "source_agent": "rdp_agent",
+          "source_plan_id": "plan_F",
+          "correlation_id": "plan_F",
+          "adapter_warnings": [],
+          "malformed_steps": [],
+          "planner_metadata": {},
+          "mapped_by": "<mapper>"
+        }
+      },
+      "warnings": [],
+      "executableCount": 1,
+      "noopCount": 0
+    },
+    "paths": [
+      "src/main.c"
+    ]
+  },
+  {
+    "name": "extract constant with explicit null literal",
+    "mapping": {
+      "plan": {
+        "plan_id": "plan_G",
+        "actions": [
+          {
+            "action_type": "extract_constant",
+            "parameters": {
+              "literal_value": 32,
+              "constant_name": "EXTRACTED_CONSTANT",
+              "source_line": 12,
+              "source_file": "src/main.c"
+            },
+            "source_step_id": 1,
+            "source_refactoring": "Replace Magic Number with Symbolic Constant",
+            "warnings": []
+          }
+        ],
+        "behavior_tests": [],
+        "metadata": {
+          "source_agent": "rdp_agent",
+          "source_plan_id": "plan_G",
+          "correlation_id": "plan_G",
+          "adapter_warnings": [],
+          "malformed_steps": [],
+          "planner_metadata": {},
+          "mapped_by": "<mapper>"
+        }
+      },
+      "warnings": [],
+      "executableCount": 1,
+      "noopCount": 0
+    },
+    "paths": [
+      "src/main.c"
+    ]
+  },
+  {
+    "name": "replace unsafe function",
+    "mapping": {
+      "plan": {
+        "plan_id": "plan_H",
+        "actions": [
+          {
+            "action_type": "replace_unsafe_function",
+            "parameters": {
+              "unsafe_function": "strcpy",
+              "safe_alternative": "strncpy",
+              "source_line": null,
+              "source_file": "src/main.c"
+            },
+            "source_step_id": 1,
+            "source_refactoring": "Replace Unsafe Function",
+            "warnings": []
+          }
+        ],
+        "behavior_tests": [],
+        "metadata": {
+          "source_agent": "rdp_agent",
+          "source_plan_id": "plan_H",
+          "correlation_id": "plan_H",
+          "adapter_warnings": [],
+          "malformed_steps": [],
+          "planner_metadata": {},
+          "mapped_by": "<mapper>"
+        }
+      },
+      "warnings": [],
+      "executableCount": 1,
+      "noopCount": 0
+    },
+    "paths": [
+      "src/main.c"
+    ]
+  },
+  {
+    "name": "encapsulate variable defaults",
+    "mapping": {
+      "plan": {
+        "plan_id": "plan_I",
+        "actions": [
+          {
+            "action_type": "encapsulate_variable",
+            "parameters": {
+              "variable_name": "cache",
+              "getter_name": "get_cache",
+              "setter_name": "set_cache",
+              "source_file": "src/Config.py"
+            },
+            "source_step_id": 1,
+            "source_refactoring": "Encapsulate Variable",
+            "warnings": []
+          }
+        ],
+        "behavior_tests": [],
+        "metadata": {
+          "source_agent": "rdp_agent",
+          "source_plan_id": "plan_I",
+          "correlation_id": "plan_I",
+          "adapter_warnings": [],
+          "malformed_steps": [],
+          "planner_metadata": {},
+          "mapped_by": "<mapper>"
+        }
+      },
+      "warnings": [],
+      "executableCount": 1,
+      "noopCount": 0
+    },
+    "paths": [
+      "src/Config.py"
+    ]
+  },
+  {
+    "name": "fault injection",
+    "mapping": {
+      "plan": {
+        "plan_id": "plan_J",
+        "actions": [
+          {
+            "action_type": "fault_injection",
+            "parameters": {
+              "original_logic": "a < b",
+              "faulty_logic": "a <= b",
+              "purpose": "mutation",
+              "target_class": "Order",
+              "target_method": "total",
+              "source_file": "src/Order.java"
+            },
+            "source_step_id": 1,
+            "source_refactoring": "Fault Injection - boundary",
+            "warnings": []
+          }
+        ],
+        "behavior_tests": [],
+        "metadata": {
+          "source_agent": "rdp_agent",
+          "source_plan_id": "plan_J",
+          "correlation_id": "plan_J",
+          "adapter_warnings": [],
+          "malformed_steps": [],
+          "planner_metadata": {},
+          "mapped_by": "<mapper>"
+        }
+      },
+      "warnings": [],
+      "executableCount": 1,
+      "noopCount": 0
+    },
+    "paths": [
+      "src/Order.java"
+    ]
+  },
+  {
+    "name": "malformed and empty",
+    "mapping": {
+      "plan": {
+        "plan_id": "plan_K",
+        "actions": [
+          {
+            "action_type": "noop",
+            "parameters": {
+              "reason": "malformed_step",
+              "refactoring": null,
+              "step_id": null,
+              "source_file": "src/Order.java"
+            },
+            "source_step_id": null,
+            "source_refactoring": null,
+            "warnings": [
+              "Step 1 is malformed and was mapped to noop."
+            ]
+          },
+          {
+            "action_type": "noop",
+            "parameters": {
+              "reason": "unmappable_step",
+              "refactoring": null,
+              "step_id": 2,
+              "source_file": "src/Order.java"
+            },
+            "source_step_id": 2,
+            "source_refactoring": null,
+            "warnings": [
+              "Step 2 (unknown): missing 'refactoring' in step"
+            ]
+          }
+        ],
+        "behavior_tests": [],
+        "metadata": {
+          "source_agent": "rdp_agent",
+          "source_plan_id": "plan_K",
+          "correlation_id": "plan_K",
+          "adapter_warnings": [
+            "Step 1 is malformed and was mapped to noop.",
+            "Step 2 (unknown): missing 'refactoring' in step"
+          ],
+          "malformed_steps": [
+            1,
+            2
+          ],
+          "planner_metadata": {},
+          "mapped_by": "<mapper>"
+        }
+      },
+      "warnings": [
+        "Step 1 is malformed and was mapped to noop.",
+        "Step 2 (unknown): missing 'refactoring' in step"
+      ],
+      "executableCount": 0,
+      "noopCount": 2
+    },
+    "paths": [
+      "src/Order.java"
+    ]
+  },
+  {
+    "name": "empty plan",
+    "mapping": {
+      "plan": {
+        "plan_id": "plan_L",
+        "actions": [
+          {
+            "action_type": "noop",
+            "parameters": {
+              "reason": "empty_or_non_actionable_plan",
+              "refactoring": null,
+              "step_id": null,
+              "source_file": "src/Order.java"
+            },
+            "source_step_id": null,
+            "source_refactoring": null,
+            "warnings": [
+              "The approved plan produced zero executable actions; using a noop action."
+            ]
+          }
+        ],
+        "behavior_tests": [],
+        "metadata": {
+          "source_agent": "rdp_agent",
+          "source_plan_id": "plan_L",
+          "correlation_id": "plan_L",
+          "adapter_warnings": [
+            "The approved plan produced zero executable actions; using a noop action."
+          ],
+          "malformed_steps": [],
+          "planner_metadata": {},
+          "mapped_by": "<mapper>"
+        }
+      },
+      "warnings": [
+        "The approved plan produced zero executable actions; using a noop action."
+      ],
+      "executableCount": 0,
+      "noopCount": 1
+    },
+    "paths": [
+      "src/Order.java"
+    ]
+  },
+  {
+    "name": "replace literal",
+    "mapping": {
+      "plan": {
+        "plan_id": "plan_M",
+        "actions": [
+          {
+            "action_type": "replace_literal",
+            "parameters": {
+              "old_literal": "\"x\"",
+              "new_literal": "\"y\"",
+              "source_file": "src/Deep/Nested.java"
+            },
+            "source_step_id": 1,
+            "source_refactoring": "Replace Literal",
+            "warnings": []
+          }
+        ],
+        "behavior_tests": [],
+        "metadata": {
+          "source_agent": "rdp_agent",
+          "source_plan_id": "plan_M",
+          "correlation_id": "plan_M",
+          "adapter_warnings": [],
+          "malformed_steps": [],
+          "planner_metadata": {},
+          "mapped_by": "<mapper>"
+        }
+      },
+      "warnings": [],
+      "executableCount": 1,
+      "noopCount": 0
+    },
+    "paths": [
+      "src/Deep/Nested.java",
+      "src/Order.java"
+    ]
+  },
+  {
+    "name": "no plan target, step file only",
+    "mapping": {
+      "plan": {
+        "plan_id": "plan_N",
+        "actions": [
+          {
+            "action_type": "rename_symbol",
+            "parameters": {
+              "old_name": "Old",
+              "new_name": "New",
+              "source_file": "src/pkg/Old.java"
+            },
+            "source_step_id": 1,
+            "source_refactoring": "Rename Class",
+            "warnings": []
+          }
+        ],
+        "behavior_tests": [],
+        "metadata": {
+          "source_agent": "rdp_agent",
+          "source_plan_id": "plan_N",
+          "correlation_id": "plan_N",
+          "adapter_warnings": [],
+          "malformed_steps": [],
+          "planner_metadata": {},
+          "mapped_by": "<mapper>"
+        }
+      },
+      "warnings": [],
+      "executableCount": 1,
+      "noopCount": 0
+    },
+    "paths": [
+      "src/pkg/Old.java"
+    ]
+  }
+]

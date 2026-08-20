@@ -1,0 +1,129 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://r26-se-008/contracts/cuqa-report.schema.json",
+  "title": "CUQAReport",
+  "description": "The code quality report produced by the CUQA agent (Agent 1) and normalized by the Orchestration Agent (backend/domain/cuqa_normalizer.py::normalize_cuqa_report). This is the FIRST contract in the chain: CUQA -> Orchestration -> DIWO Code Smell Review. It is served by GET/POST /api/cuqa/quality-report and embedded in the POST /api/workflows/from-cuqa response. Derived from a live report of the C_Backend_CodeSmells_Project workspace, so every field below is one the system actually emits.",
+  "type": "object",
+  "required": ["summary", "files"],
+  "properties": {
+    "summary": { "$ref": "#/$defs/summary" },
+    "files": {
+      "type": "array",
+      "description": "Every analysed file, including files with no code smells. Files are never dropped here — the developer has to be able to see what was clean.",
+      "items": { "$ref": "#/$defs/fileReport" }
+    },
+    "repo_name": {
+      "type": ["string", "null"],
+      "description": "Repository name for a repository report; the relative path for a single-file report."
+    },
+    "source": {
+      "type": "string",
+      "const": "cuqa",
+      "description": "Stamped by the normalizer so a report's origin is never ambiguous downstream."
+    },
+    "report_type": {
+      "type": "string",
+      "enum": ["repository", "file"],
+      "description": "Whether CUQA analysed the whole workspace or one file. A file report is wrapped into the same repository shape so callers handle one structure."
+    },
+    "generated_at": { "type": "string", "format": "date-time" }
+  },
+
+  "$defs": {
+    "severity": {
+      "type": "string",
+      "enum": ["high", "medium", "low"],
+      "description": "Normalized severity. Anything CUQA emits outside this set is coerced to 'low' rather than dropped."
+    },
+
+    "severityCounts": {
+      "type": "object",
+      "required": ["high", "medium", "low"],
+      "properties": {
+        "high": { "type": "integer", "minimum": 0 },
+        "medium": { "type": "integer", "minimum": 0 },
+        "low": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": false
+    },
+
+    "summary": {
+      "type": "object",
+      "required": ["files_analyzed", "total_code_smells"],
+      "properties": {
+        "files_analyzed": { "type": "integer", "minimum": 0 },
+        "total_lines_of_code": { "type": "integer", "minimum": 0 },
+        "total_code_smells": { "type": "integer", "minimum": 0 },
+        "smell_severity": { "$ref": "#/$defs/severityCounts" },
+        "average_quality_score": { "type": "number" }
+      }
+    },
+
+    "codeSmell": {
+      "type": "object",
+      "description": "One detected smell. CUQA reports `line` for every smell and adds start_line/end_line plus per-smell metrics for the types that have them, so this object is intentionally open.",
+      "required": ["type", "severity"],
+      "properties": {
+        "type": {
+          "type": "string",
+          "description": "PascalCase smell type, e.g. LongMethod, MagicNumber, UnsafeFunctionUsage. Never empty — an unnamed smell is normalized to 'Unknown'."
+        },
+        "severity": { "$ref": "#/$defs/severity" },
+        "message": { "type": "string" },
+        "line": {
+          "type": ["integer", "null"],
+          "description": "1-based line. Null for a smell CUQA attributes to the file rather than a line; the smell id then uses 0 in that position."
+        },
+        "entity": {
+          "type": ["string", "null"],
+          "description": "The class, function or file the smell is attached to. Which one it means depends on the smell type — see CLASS_LEVEL_SMELLS / METHOD_LEVEL_SMELLS in backend/domain/cuqa_normalizer.py."
+        },
+        "start_line": { "type": "integer", "minimum": 0 },
+        "end_line": { "type": "integer", "minimum": 0 },
+        "cyclomatic_complexity": { "type": "integer" },
+        "parameter_count": { "type": "integer" },
+        "method_count": { "type": "integer" },
+        "primitive_field_count": { "type": "integer" },
+        "chain_length": { "type": "integer" },
+        "nesting_depth": { "type": "integer" },
+        "external_field_accesses": { "type": "integer" },
+        "self_field_accesses": { "type": "integer" }
+      },
+      "additionalProperties": true
+    },
+
+    "fileReport": {
+      "type": "object",
+      "required": ["relative_path", "language", "metrics", "code_smells", "smell_summary", "quality_score"],
+      "properties": {
+        "file": { "type": "string", "description": "Base name." },
+        "relative_path": {
+          "type": "string",
+          "description": "Repository-relative path with forward slashes. This is the key everything downstream joins on — smell ids, plan targets and archive entries are all built from it."
+        },
+        "language": { "type": "string", "description": "Lower-cased, e.g. 'c', 'java', 'python', or 'unknown'." },
+        "metrics": {
+          "type": "object",
+          "description": "Whatever CUQA measured for this file. The set varies by language — a C file carries include_count and global_variables, a Java file carries classes — so extra keys are expected.",
+          "properties": {
+            "filename": { "type": "string" },
+            "lines_of_code": { "type": "integer", "minimum": 0 },
+            "blank_lines": { "type": "integer", "minimum": 0 },
+            "comment_lines": { "type": "integer", "minimum": 0 },
+            "functions": { "type": "integer", "minimum": 0 },
+            "classes": { "type": "integer", "minimum": 0 },
+            "estimated_cyclomatic_complexity": { "type": "integer" },
+            "global_variables": { "type": "integer" },
+            "include_count": { "type": "integer" }
+          },
+          "additionalProperties": true
+        },
+        "code_smells": { "type": "array", "items": { "$ref": "#/$defs/codeSmell" } },
+        "smell_summary": { "$ref": "#/$defs/severityCounts" },
+        "quality_score": { "type": "number", "description": "0-100. Defaults to 100 when CUQA reports none." },
+        "error": { "type": "string", "description": "Present only when this file could not be parsed." }
+      },
+      "additionalProperties": true
+    }
+  }
+}

@@ -1,0 +1,162 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://r26-se-008/contracts/workflow.schema.json",
+  "title": "Workflow",
+  "description": "One developer-in-the-loop refactoring session, as served by GET /api/workflows/<id>. This is the record that ties the other six contracts together: it holds the CUQA report it started from, the selection the developer made, the plan that was approved, and the transformation result that was accepted or rolled back.\n\nPersisted by the Orchestration Agent in SQLite (backend/db/). The stored columns are JSON TEXT (smells_json, plan_json, ...); this schema describes the DECODED shape the API serves.",
+  "type": "object",
+  "required": ["id", "target", "language", "status", "created_at", "updated_at"],
+  "properties": {
+    "id": { "type": "string", "pattern": "^wf_[0-9a-f]{10}$" },
+    "target": {
+      "type": "string",
+      "description": "What is being refactored: the repository name, or the single file when only one was analysed."
+    },
+    "language": { "type": "string" },
+    "status": { "$ref": "#/$defs/stage" },
+    "created_at": { "type": "string", "format": "date-time" },
+    "updated_at": { "type": "string", "format": "date-time" },
+
+    "smells": {
+      "type": ["array", "null"],
+      "description": "Every detected smell, flattened from the CUQA report. Ids are <relative_path>:<line>:<index_within_file>.",
+      "items": { "$ref": "#/$defs/smell" }
+    },
+    "selected_smells": {
+      "type": ["array", "null"],
+      "description": "The subset the developer chose to address. This is what the plan was generated for.",
+      "items": { "$ref": "#/$defs/smell" }
+    },
+    "updated_smells": {
+      "type": ["array", "null"],
+      "description": "Every smell with a `selected` flag and a `selected_at` timestamp, so the audit trail shows what was considered as well as what was chosen."
+    },
+    "planning_input": {
+      "type": ["object", "null"],
+      "description": "The snapshot handed to the planning stage: target, language, and the selected/updated smell lists."
+    },
+    "plan": {
+      "description": "The current plan. Before approval this is the RDP plan; after approval it is the ApprovedPlan, reduced to the approved steps. The pre-approval plan is kept separately (plan_full_json) so a rollback from the Transformation stage can re-offer every step.",
+      "oneOf": [{ "type": "null" }, { "$ref": "https://r26-se-008/contracts/approved-plan.schema.json" }]
+    },
+    "transformation_result": {
+      "type": ["object", "null"],
+      "description": "The transformation outcome plus the developer's per-file verdict.",
+      "properties": {
+        "snapshot_id": { "type": "string", "description": "Rollback anchor." },
+        "file_decisions": { "$ref": "#/$defs/fileDecisions" },
+        "archive": { "$ref": "#/$defs/archiveInfo" }
+      },
+      "additionalProperties": true
+    },
+    "metrics_before": { "$ref": "#/$defs/metrics" },
+    "metrics_after": { "$ref": "#/$defs/metrics" }
+  },
+
+  "$defs": {
+    "stage": {
+      "type": "string",
+      "enum": ["smell_review", "smell_selection", "plan_approval", "transformation", "comparison", "completed", "rolled_back"],
+      "description": "The workflow state machine (backend/domain/workflow_states.py). Transitions are gated: each stage requires an explicit developer action, and endpoints refuse a request made from the wrong stage. Two stages accept a request from more than one point, because the UI offers a fallback: /select-smells accepts 'plan_approval', and /plan-decision accepts 'transformation'."
+    },
+
+    "smell": {
+      "type": "object",
+      "required": ["id", "type", "severity"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^.+:[0-9]+:[0-9]+$" },
+        "type": { "type": "string" },
+        "severity": { "type": "string", "enum": ["high", "medium", "low"] },
+        "message": { "type": "string" },
+        "line": { "type": "integer" },
+        "entity": { "type": ["string", "null"] },
+        "language": { "type": "string" },
+        "relative_path": { "type": "string" },
+        "quality_score": { "type": "number" },
+        "location": {
+          "type": "object",
+          "properties": {
+            "file": { "type": "string" },
+            "class": { "type": ["string", "null"] },
+            "method": { "type": ["string", "null"] },
+            "lines": { "type": "array", "items": { "type": "integer" }, "minItems": 2, "maxItems": 2 }
+          }
+        },
+        "metrics": { "type": "object" },
+        "source": { "type": "string", "const": "cuqa" },
+        "selected": { "type": "boolean" },
+        "selected_at": { "type": "string", "format": "date-time" }
+      },
+      "additionalProperties": true
+    },
+
+    "fileDecisions": {
+      "type": "object",
+      "description": "The developer's per-file verdict in the Results stage. This is what preserves the rollback guarantee end to end — the archive, the audit trail and the git branch all describe the code the developer settled on.",
+      "properties": {
+        "accepted": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Kept as REFACTORED."
+        },
+        "rejected_reverted": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Reverted to their ORIGINAL source. A rejected file is still written out — it is written out unchanged."
+        },
+        "written": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+
+    "archiveInfo": {
+      "type": "object",
+      "description": "The whole-project ZIP built when the transformation was accepted. It contains the COMPLETE project, not only the refactored files: accepted transformations use the refactored version, rejected ones the original, and untouched files their original.",
+      "properties": {
+        "filename": { "type": "string" },
+        "file_count": { "type": "integer", "minimum": 0 },
+        "bytes": { "type": "integer", "minimum": 0 },
+        "generated_at": { "type": "string", "format": "date-time" },
+        "url": { "type": "string", "description": "GET /api/workflows/<id>/refactored-archive" },
+        "files": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "path": { "type": "string" },
+              "state": { "type": "string", "enum": ["refactored", "reverted_to_original"] }
+            }
+          }
+        }
+      }
+    },
+
+    "metrics": {
+      "type": ["object", "null"],
+      "description": "Heuristic quality figures for the Comparison stage. Prototype-grade by design: derived from the smell mix and how much of it was resolved, not measured from the code.",
+      "properties": {
+        "cyclomatic_complexity": { "type": "integer" },
+        "code_duplication_pct": { "type": "integer" },
+        "maintainability_index": { "type": "integer" },
+        "total_smells": { "type": "integer", "minimum": 0 },
+        "smell_breakdown": {
+          "type": "object",
+          "properties": {
+            "critical": { "type": "integer" },
+            "high": { "type": "integer" },
+            "medium": { "type": "integer" },
+            "low": { "type": "integer" }
+          }
+        },
+        "improvements": {
+          "type": "object",
+          "description": "Present on metrics_after only.",
+          "properties": {
+            "complexity_reduced_by": { "type": "integer" },
+            "duplication_reduced_by": { "type": "integer" },
+            "maintainability_gained": { "type": "integer" }
+          }
+        }
+      },
+      "additionalProperties": true
+    }
+  }
+}

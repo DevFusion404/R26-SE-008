@@ -136,6 +136,9 @@ celerybeat.pid
 
 # Environments
 .env
+.env.*
+!.env.example
+!.env.*.example
 .envrc
 .venv
 env/
@@ -216,9 +219,11 @@ frontend/.vite/
 dist/
 .vite/
 
-# npm / yarn / pnpm lock files (not needed for a research project)
-frontend/package-lock.json
-package-lock.json
+# Lock files.
+# package-lock.json is deliberately NOT ignored: it is what makes
+# `npm install` reproduce the same dependency tree for every group member and
+# on a clean checkout. Only the lock files of package managers this project
+# does not use are ignored.
 yarn.lock
 pnpm-lock.yaml
 
@@ -234,11 +239,19 @@ temp/
 cuqa_tmp/
 
 # ── DIWO orchestration backend runtime artefacts ─────────────
-# Written per workflow while the agent runs: saved smell reports
-# (POST /workflows/<id>/save-updated-report) and the downloadable
-# ZIP archives (POST /workflows/<id>/transformation-decision).
-# Both folders are recreated on demand, so nothing needs committing.
+# Written per workflow while the agent runs: the SQLite audit database,
+# saved smell reports (POST /workflows/<id>/save-updated-report) and the
+# downloadable ZIP archives (POST /workflows/<id>/transformation-decision).
+# All are recreated on demand, so nothing here needs committing.
+agents/orchestration_agent/backend/runtime/
+
+# Pre-restructure location, kept so an older working copy stays clean.
 agents/orchestration_agent/backend/reports/
+
+# SQLite databases anywhere in the tree.
+*.db
+*.sqlite
+*.sqlite3
 
 # ── OS artefacts ──────────────────────────────────────────────
 .DS_Store
@@ -246,7 +259,7 @@ Thumbs.db
 desktop.ini
 
 # ── Editor artefacts ─────────────────────────────────────────
-.vscode/settings.json
+.vscode/
 .idea/
 *.swp
 *.swo

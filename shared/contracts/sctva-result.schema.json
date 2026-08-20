@@ -1,0 +1,108 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://r26-se-008/contracts/sctva-result.schema.json",
+  "title": "TransformationResult",
+  "description": "The SCTVA agent's transformation and validation result, normalized by the Orchestration Agent (backend/domain/sctva_mapper.py::normalize_execute_result) and returned as `result` from POST /api/workflows/<id>/transform.\n\nSCTVA answers a one-file request with the result fields at the TOP LEVEL and a many-file request with a `file_results` array. Normalization flattens both into `files[]`, so the Transformation and Results stages render one structure either way.\n\nThe camelCase summary fields are deliberate: they are the names the DIWO stages already read, kept unchanged when this normalization moved from the browser to the backend.\n\nNOT included: `diff_rows`. Rendering a diff is presentation work, it would roughly double the response size, and the line alignment already runs in the browser. The frontend adds it from before/after with utils/transformationMapper.js::hydrateTransformationResult.",
+  "type": "object",
+  "required": ["files", "success", "requestId"],
+  "properties": {
+    "requestId": { "type": "string", "description": "Echoes SCTVARequest.request_id." },
+    "language": { "type": "string" },
+    "success": {
+      "type": "boolean",
+      "description": "SCTVA's aggregate verdict. It is false when ANY file was not applied, even if others succeeded — read fileSummary for the breakdown rather than treating false as total failure."
+    },
+    "transformationApplied": { "type": "boolean" },
+    "rollbackOccurred": {
+      "type": "boolean",
+      "description": "SCTVA rolled the change back itself because a safety check failed. Distinct from the DEVELOPER's rollback in the Results stage, which is recorded in the workflow, not here."
+    },
+    "confidenceScore": { "type": ["number", "null"], "description": "0-1." },
+    "confidenceApplicable": {
+      "type": "boolean",
+      "description": "False when no confidence could be computed; the UI hides the score rather than showing a misleading zero."
+    },
+    "validationScore": { "type": ["number", "null"] },
+    "totalReplacements": { "type": "integer", "minimum": 0 },
+    "fileSummary": {
+      "type": "object",
+      "properties": {
+        "total": { "type": "integer", "minimum": 0 },
+        "succeeded": { "type": "integer", "minimum": 0 },
+        "applied": { "type": "integer", "minimum": 0 },
+        "rolled_back": { "type": "integer", "minimum": 0 },
+        "not_applied": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": true
+    },
+    "validation": { "$ref": "#/$defs/validation" },
+    "confidenceComponents": { "type": ["object", "null"] },
+    "safetyReport": { "$ref": "#/$defs/safetyReport" },
+    "files": { "type": "array", "items": { "$ref": "#/$defs/fileResult" } },
+    "refactored_code": {
+      "type": "string",
+      "description": "The `after` text of the first CHANGED file, kept flat because that is the contract the DIWO workflow state expects."
+    },
+    "raw": {
+      "type": "object",
+      "description": "SCTVA's untouched response, kept so the stage can show what the agent actually reported next to the normalized view."
+    }
+  },
+
+  "$defs": {
+    "fileResult": {
+      "type": "object",
+      "required": ["path", "before", "after", "changed"],
+      "properties": {
+        "path": { "type": "string", "description": "Repository-relative path." },
+        "file": { "type": "string", "description": "Same value as `path`; both names are read by different stages." },
+        "before": {
+          "type": "string",
+          "description": "The ORIGINAL source, taken from the source_files that were sent — not from SCTVA's reply. This is what makes the developer's reject meaningful: rejecting a file writes this text back."
+        },
+        "after": { "type": "string", "description": "The refactored source. Empty when nothing was applied." },
+        "refactored_code": { "type": "string", "description": "Alias of `after`." },
+        "changed": {
+          "type": "boolean",
+          "description": "after is non-empty AND differs from before. The stage selects the first changed file to show, because that is what the developer came to see."
+        },
+        "language": { "type": "string" },
+        "success": { "type": "boolean" },
+        "rollback_occurred": { "type": "boolean" },
+        "transformation_applied": { "type": "boolean" },
+        "total_replacements": { "type": "integer", "minimum": 0 },
+        "confidence_score": { "type": ["number", "null"] },
+        "confidence_components": { "type": ["object", "null"] },
+        "validation": { "$ref": "#/$defs/validation" },
+        "safety_report": { "$ref": "#/$defs/safetyReport" },
+        "source_mode": { "type": "string" }
+      },
+      "additionalProperties": true
+    },
+
+    "validation": {
+      "type": ["object", "null"],
+      "description": "The four validation stages SCTVA runs. Present per file for a multi-file request and at the top level for a single-file one.",
+      "properties": {
+        "syntax": { "type": "object" },
+        "structural": { "type": "object" },
+        "behavioral": { "type": "object" },
+        "invariant": { "type": "object" }
+      },
+      "additionalProperties": true
+    },
+
+    "safetyReport": {
+      "type": ["object", "null"],
+      "properties": {
+        "summary": { "type": "string" },
+        "human_messages": { "type": "array", "items": { "type": "string" } },
+        "risk_flags": { "type": "array", "items": { "type": "string" } },
+        "rollback_reason": { "type": "string" },
+        "transformation_log": { "type": "array" },
+        "validation_timestamps": { "type": "object" }
+      },
+      "additionalProperties": true
+    }
+  }
+}
