@@ -8,14 +8,14 @@ Also provides utilities for counting nodes, measuring depth, etc.
 from typing import Any
 
 
-def count_nodes(ast_node: dict, depth: int = 0) -> dict:
+def count_nodes(ast_node: dict | None, depth: int = 0) -> dict:
     """Return statistics about the AST tree."""
     stats = {"total": 0, "max_depth": 0, "by_type": {}}
     _count_recursive(ast_node, 0, stats)
     return stats
 
 
-def _count_recursive(node: dict, depth: int, stats: dict):
+def _count_recursive(node: dict | None, depth: int, stats: dict):
     if not isinstance(node, dict):
         return
     stats["total"] += 1
@@ -52,7 +52,7 @@ def _flatten_recursive(node: dict, path: str, result: list):
         _flatten_recursive(child, current_path, result)
 
 
-def enrich_ast(ast_node: dict, parent_id: str = "root", counter: list = None) -> dict:
+def enrich_ast(ast_node: dict, parent_id: str = "root", counter: list | None = None) -> dict:
     """
     Add unique `id` fields to every node so the frontend React tree can use them
     as stable keys. Mutates in-place and returns the node.
