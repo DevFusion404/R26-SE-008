@@ -3,6 +3,66 @@ from sctva.validators.behavior_fingerprint import compare_fingerprints
 from sctva.validators.behavioral_validator import BehavioralValidator
 
 
+def test_java_nested_class_uses_binary_runtime_name():
+    source = """class Outer {
+    static class LibraryManager {
+        int count() { return 1; }
+    }
+}
+"""
+
+    assert BehavioralValidator._java_binary_class_name(
+        source, "LibraryManager"
+    ) == "Outer$LibraryManager"
+
+
+def test_java_extract_class_probes_target_nested_source_class():
+    source = """class Outer {
+    static class LibraryManager {
+        int count() { return 1; }
+    }
+    public static void main(String[] args) { }
+}
+"""
+    validator = BehavioralValidator()
+    probes = validator._infer_java_runtime_tests_from_source(
+        original_code=source,
+        actions=[RefactoringAction(
+            action_type="extract_java_class",
+            parameters={"source_class": "LibraryManager"},
+        )],
+    )
+
+    assert probes
+    assert probes[0]["original_target_class"] == "LibraryManager"
+    assert probes[0]["original_target_method"] == "count"
+
+
+def test_java_source_probe_fallback_uses_direct_nested_method_owner():
+    source = """class Outer {
+    static class LibraryManager {
+        int count() { return 1; }
+        boolean available() { return true; }
+    }
+    public static void main(String[] args) { }
+}
+"""
+    validator = BehavioralValidator()
+    probes = validator._infer_java_runtime_tests_from_source(
+        original_code=source,
+        actions=[RefactoringAction(
+            action_type="introduce_constant",
+            parameters={"literal_value": 1, "constant_name": "CONSTANT_1"},
+        )],
+    )
+
+    assert probes
+    assert {probe["original_target_class"] for probe in probes} == {"LibraryManager"}
+    assert {probe["original_target_method"] for probe in probes} == {
+        "count", "available",
+    }
+
+
 def test_behavior_match_success():
     original = """
 def add(a, b):
@@ -214,6 +274,20 @@ def test_compare_fingerprints_rejects_matching_infrastructure_failures():
     }
 
     comparison = compare_fingerprints(original_fp, transformed_fp)
+
+    assert comparison["matched"] is False
+    assert comparison["reason"] == "fingerprint_execution_failed"
+
+
+def test_compare_fingerprints_rejects_matching_missing_java_method():
+    fingerprint = {
+        "success": False,
+        "timeout": False,
+        "exception_type": "NoSuchMethodException",
+        "exception_message_category": "missing target method or parameter count mismatch",
+    }
+
+    comparison = compare_fingerprints(fingerprint, fingerprint)
 
     assert comparison["matched"] is False
     assert comparison["reason"] == "fingerprint_execution_failed"
