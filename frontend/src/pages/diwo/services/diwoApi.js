@@ -68,8 +68,8 @@ export const api = {
     if (!res.ok) throw new Error(json.error || `HTTP ${res.status}`);
     return json;
   },
-  async get(path) {
-    const res = await fetch(`${DIWO_BASE}${path}`);
+  async get(path, { signal } = {}) {
+    const res = await fetch(`${DIWO_BASE}${path}`, { signal });
     const json = await res.json();
     if (!res.ok) throw new Error(json.error || `HTTP ${res.status}`);
     return json;
@@ -271,6 +271,42 @@ export const selectSmells = (workflowId, body) =>
 /** POST /workflows/<id>/reset-to-smell-review */
 export const resetToSmellReview = (workflowId, body = {}) =>
   api.post(`/workflows/${workflowId}/reset-to-smell-review`, body);
+
+// ─── Stage 1 — selection impact ─────────────────────────────────────────────
+
+/**
+ * GET /workflows/<id>/smell-impacts — the per-smell Selection Impact Records.
+ *
+ * Selection-independent and cached server-side, so this is fetched once when
+ * Stage 1 mounts. The page then aggregates locally on every checkbox click,
+ * which is what keeps the panel instant.
+ *
+ * Resolves to { records[], count, executable, advisory, model_version }.
+ */
+export const fetchSmellImpacts = (workflowId, { signal } = {}) =>
+  api.get(`/workflows/${workflowId}/smell-impacts`, { signal });
+
+/**
+ * POST /workflows/<id>/selection-impact — the authoritative projection for a
+ * candidate selection.
+ *
+ * Read-only: it never advances the workflow and never calls RDP. The page
+ * computes the same aggregate locally for responsiveness; this is what it
+ * reconciles against before committing.
+ */
+export const analyseSelectionImpact = (workflowId, body) =>
+  api.post(`/workflows/${workflowId}/selection-impact`, body);
+
+/**
+ * POST /workflows/<id>/optimise-selection — propose a selection under a
+ * review-time budget.
+ *
+ * Body: { preset: "best_value" | "safe_wins" | "stop_bleeding", budget_minutes }
+ * Returns ids only; applying them is the developer's choice, and nothing is
+ * persisted server-side.
+ */
+export const optimiseSelection = (workflowId, body) =>
+  api.post(`/workflows/${workflowId}/optimise-selection`, body);
 
 // ─── Stage 2 → 3 — plan approval ─────────────────────────────────────────────
 

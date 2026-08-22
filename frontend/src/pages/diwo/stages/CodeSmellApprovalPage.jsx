@@ -19,13 +19,38 @@
  * Either mode can open the ORIGINAL source behind a finding: the eye button on
  * a smell opens its file scrolled to that smell, the one on a file header opens
  * the file with every smell in it marked. See components/SourceViewer.jsx.
+ *
+ * Selection impact
+ * ----------------
+ * Every row also carries what picking it buys and what skipping it costs, from
+ * GET /workflows/<id>/smell-impacts. The records are selection-independent, so
+ * they are fetched once and aggregated locally on each click — the footer has
+ * to react on the same frame as the checkbox. The backend is still the
+ * authority: POST /selection-impact is called when the developer proceeds, and
+ * that projection is what reaches the audit trail.
+ *
+ * The single most important thing on screen is the capability chip. Ten of the
+ * highest-severity smell types CUQA reports map to refactorings SCTVA cannot
+ * perform, so severity alone was actively misleading about what a selection
+ * would achieve.
+ *
+ * All of it degrades: no records means no chips, no panel, and Stage 1 behaves
+ * exactly as it did before.
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { CUQA_DATA } from "../data/diwoData";
 import { C, Card, Badge, severityColor } from "../diwoTheme.jsx";
 import SourceViewer from "../components/SourceViewer.jsx";
-import { fetchQualityReport, previewSmellSelection } from "../services/diwoApi";
+import ImpactChip from "../components/ImpactChip.jsx";
+import ImpactDrawer from "../components/ImpactDrawer.jsx";
+import TradeOffPanel from "../components/TradeOffPanel.jsx";
+import { DEFAULT_BUDGET_MINUTES } from "../utils/impactPresets";
+import { qualityBaseline, summariseSelection } from "../utils/impactSummary";
+import {
+  analyseSelectionImpact, fetchQualityReport, fetchSmellImpacts,
+  optimiseSelection, previewSmellSelection,
+} from "../services/diwoApi";
 
 
 const num = (value, fallback = 0) => (typeof value === "number" ? value : fallback);
@@ -72,6 +97,15 @@ export default function CodeSmellApprovalPage({
   // { file, focusId } — focusId is null when the whole file was opened.
   const [viewing, setViewing] = useState(null);
 
+  // ── Selection impact ───────────────────────────────────────────────────────
+  // Map<smell_id, record>. Null until loaded, and stays null if the endpoint
+  // is unavailable — every consumer below treats that as "render nothing".
+  const [impacts, setImpacts] = useState(null);
+  const [explaining, setExplaining] = useState(null);   // smell id in the drawer
+  const [optimising, setOptimising] = useState(false);
+  const [budgetMinutes, setBudgetMinutes] = useState(DEFAULT_BUDGET_MINUTES);
+  const [interactionNotes, setInteractionNotes] = useState([]);
+
   // ── CUQA report loading ────────────────────────────────────────────────────
   const [fetched, setFetched] = useState(null);   // { report, via, cuqaUrl, ... }
   const [loading, setLoading] = useState(!reportData);
@@ -92,6 +126,8 @@ export default function CodeSmellApprovalPage({
     setLoadError(null);
     setLoading(false);
     setViewing(null);
+    setExplaining(null);
+    setInteractionNotes([]);
     onReportLoadedRef.current?.(result);
   }, []);
 
@@ -124,6 +160,9 @@ export default function CodeSmellApprovalPage({
       setSelectedIds(new Set());
       setLoading(false);
       setViewing(null);
+      setImpacts(null);
+      setExplaining(null);
+      setInteractionNotes([]);
     }
   }
 
@@ -135,6 +174,22 @@ export default function CodeSmellApprovalPage({
     fetchQualityReport({ signal: controller.signal }).then(applyReport).catch(applyLoadError);
     return () => controller.abort();
   }, [reportData, applyReport, applyLoadError]);
+
+  // Impact records depend only on the workflow's smells, so this runs once per
+  // workflow. A failure is swallowed on purpose: the chips and the panel
+  // disappear, the smell list keeps working.
+  useEffect(() => {
+    if (!workflowId) return undefined;
+    const controller = new AbortController();
+
+    fetchSmellImpacts(workflowId, { signal: controller.signal })
+      .then((payload) => {
+        setImpacts(new Map((payload.records || []).map((r) => [r.smell_id, r])));
+      })
+      .catch(() => setImpacts(null));
+
+    return () => controller.abort();
+  }, [workflowId]);
 
   // ── Resolve the report actually being rendered ─────────────────────────────
   // `fetched` only outranks `reportData` after an explicit re-analyze, because
@@ -260,6 +315,42 @@ export default function CodeSmellApprovalPage({
   const viewerLanguage =
     viewerFile ? smellRows.find((r) => r.file === viewerFile)?.language : "";
 
+  // Aggregated on every render rather than fetched: the panel has to move with
+  // the checkbox, and this is a sum over records already in memory.
+  const impactRecords = impacts ? Array.from(impacts.values()) : null;
+  const selectedImpactIds = new Set(selectedRows.map((r) => r.id));
+  const impactSummary = impactRecords
+    ? summariseSelection(impactRecords, selectedImpactIds, qualityBaseline(sourceReport))
+    : null;
+
+  const explainedRecord = explaining ? impacts?.get(explaining) : null;
+  const explainedSmell = explaining
+    ? smellRows.find((r) => r.id === explaining)?.smell
+    : null;
+
+  /** Ask the backend for a budgeted selection, then apply it. */
+  const handleOptimise = async (preset) => {
+    if (!workflowId || optimising) return;
+    setOptimising(true);
+    try {
+      const result = await optimiseSelection(workflowId, {
+        preset,
+        budget_minutes: budgetMinutes,
+      });
+      const ids = new Set(result.selected_ids || []);
+      setSelectedIds(ids);
+      // The optimiser only ever proposes individual smells, so switching to
+      // smell mode is what makes its answer visible and editable.
+      setMode("smell");
+      setSelected(new Set());
+    } catch (error) {
+      console.error("Optimise failed:", error);
+      alert(error.message);
+    } finally {
+      setOptimising(false);
+    }
+  };
+
   // File mode sends the file paths and lets the backend expand them to every
   // smell inside. Smell mode must NOT send them: the backend ORs files with
   // smells, so a file path would pull back the smells just deselected. It sends
@@ -286,6 +377,14 @@ export default function CodeSmellApprovalPage({
 
     setIsSubmitting(true);
     try {
+      // The authoritative projection, recorded alongside the selection. Local
+      // aggregation drives the live panel; this is what the audit trail gets.
+      if (impacts) {
+        analyseSelectionImpact(workflowId, selectionPayload)
+          .then((result) => setInteractionNotes(result.interaction_notes || []))
+          .catch(() => {});
+      }
+
       const report = await previewSmellSelection(workflowId, {
         ...selectionPayload,
         feedback: {
@@ -401,6 +500,8 @@ export default function CodeSmellApprovalPage({
             onToggleGroup={toggleGroup}
             onViewFile={(file) => setViewing({ file, focusId: null })}
             onViewSmell={(file, id) => setViewing({ file, focusId: id })}
+            impacts={impacts}
+            onExplain={setExplaining}
           />
         ))}
 
@@ -514,6 +615,27 @@ export default function CodeSmellApprovalPage({
           {isSubmitting ? "Generating report..." : "Approve Selected Smells →"}
         </button>
       </div>
+
+      {impactSummary && (
+        <TradeOffPanel
+          summary={impactSummary}
+          interactionNotes={interactionNotes}
+          optimising={optimising}
+          onOptimise={workflowId ? handleOptimise : undefined}
+          budgetMinutes={budgetMinutes}
+          onBudgetChange={setBudgetMinutes}
+        />
+      )}
+
+      {explainedRecord && (
+        <ImpactDrawer
+          record={explainedRecord}
+          smell={explainedSmell}
+          isSelected={selectedIds.has(explaining)}
+          onToggleSmell={isSmellMode ? toggleSmell : undefined}
+          onClose={() => setExplaining(null)}
+        />
+      )}
 
       {viewerFile && (
         <SourceViewer
@@ -676,7 +798,8 @@ function ModeSwitch({ mode, onChange, fileCount, smellCount }) {
  *  The card is never height-capped — it grows with the number of smells, so all
  *  10 rows of a 10-smell file are laid out one under the other. flexShrink: 0
  *  keeps the parent's fixed-height column from squeezing (and clipping) it. */
-function SmellGroup({ group, selectedIds, onToggleSmell, onToggleGroup, onViewFile, onViewSmell }) {
+function SmellGroup({ group, selectedIds, onToggleSmell, onToggleGroup, onViewFile,
+                     onViewSmell, impacts, onExplain }) {
   const selectedInGroup = group.rows.filter((r) => selectedIds.has(r.id)).length;
   const total = group.rows.length;
   const allOn = selectedInGroup === total;
@@ -750,6 +873,15 @@ function SmellGroup({ group, selectedIds, onToggleSmell, onToggleGroup, onViewFi
                 </div>
                 {smell.message && (
                   <div style={{ fontSize: 11, color: C.textMuted, marginTop: 4, lineHeight: 1.5 }}>{smell.message}</div>
+                )}
+                {impacts?.get(id) && (
+                  <div style={{ marginTop: 6 }}>
+                    <ImpactChip
+                      record={impacts.get(id)}
+                      compact
+                      onExplain={() => onExplain?.(id)}
+                    />
+                  </div>
                 )}
               </div>
 

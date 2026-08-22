@@ -7,6 +7,7 @@ The Safe Code Transformation & Validation (SCTVA) agent runs as a separate
 Flask service (default http://localhost:8002, SCTVA_PORT). It exposes:
 
     GET  /health              ->  service liveness
+    GET  /sctva/health        ->  { supported_actions[], supported_capabilities[] }
     POST /sctva/execute       ->  { actions[], source_files[] } -> transformation result
     POST /sctva/cuqa-sources  ->  { file_paths[] } -> the source text of those paths
 
@@ -27,12 +28,13 @@ import urllib.request
 from config import sctva_base_url
 
 HEALTH_PATH = "/health"
+AGENT_HEALTH_PATH = "/sctva/health"
 EXECUTE_PATH = "/sctva/execute"
 SOURCES_PATH = "/sctva/cuqa-sources"
 
 __all__ = [
     "SCTVAError", "sctva_base_url", "execute_transformation",
-    "fetch_workspace_sources", "probe_sctva",
+    "fetch_workspace_sources", "fetch_supported_actions", "probe_sctva",
 ]
 
 
@@ -147,6 +149,27 @@ def fetch_workspace_sources(file_paths: list, timeout: int = 60) -> dict:
         "imported": len(files),
         "total": len(requested),
     }
+
+
+def fetch_supported_actions(timeout: int = 5):
+    """The action types this SCTVA build can execute, from GET /sctva/health.
+
+    This is the live half of the Stage 1 feasibility gate: domain/capability_map
+    derives which refactorings CAN be mapped to an action, and this says which
+    of those the running agent actually exposes. A build compiled without, say,
+    the C transformers would otherwise be advertised as able to fix C smells.
+
+    Returns a set, or None when the agent could not be reached — the caller
+    falls back to the static tables rather than reporting everything as
+    unfixable.
+    """
+    try:
+        payload = _request("GET", AGENT_HEALTH_PATH, timeout=timeout)
+    except SCTVAError:
+        return None
+
+    actions = payload.get("supported_actions") if isinstance(payload, dict) else None
+    return set(actions) if isinstance(actions, list) else None
 
 
 def probe_sctva(timeout: int = 5) -> dict:

@@ -11,6 +11,10 @@ The DIWO workflow lifecycle and its human-decision stages:
 Split out of the single diwo/routes.py. Every URL, method, request body and
 response body is exactly what it was; the handlers now validate the request
 and delegate, and the workflow rules live in services/workflow_service.py.
+
+Stage 1 also carries the selection-impact endpoints, which answer "what does
+picking this smell buy me, and what does skipping it cost?" before the
+developer commits. They are read-only and never advance the workflow.
 """
 
 import io
@@ -25,9 +29,14 @@ from domain.cuqa_normalizer import (
     cuqa_report_to_smells, derive_target_name, detect_primary_language,
     normalize_cuqa_report,
 )
+from domain.impact_model import MODEL_VERSION as IMPACT_MODEL_VERSION
 from domain.plan_normalizer import build_rdp_plan_input
+from domain.selection_optimizer import DEFAULT_BUDGET_MINUTES, PRESETS
 from services.archive_service import archive_path
 from services.planning_service import generate_updated_plan_report
+from services.impact_service import (
+    analyse_selection, compute_workflow_impacts, optimise_selection,
+)
 from services.transformation_service import run_transformation
 from services.workflow_service import (
     apply_plan_decision, apply_transformation_decision,
@@ -281,6 +290,99 @@ def reset_to_smell_review(wf_id):
         "from_stage": previous,
         "message": "Workflow reset to smell review. The full CUQA report is selectable again.",
     })
+
+@workflow_bp.route("/workflows/<wf_id>/smell-impacts", methods=["GET"])
+def smell_impacts(wf_id):
+    """Per-smell Selection Impact Records.
+
+    Independent of the current selection, so this is computed once per workflow
+    and cached in `smell_impacts`. Stage 1 fetches it when it mounts and then
+    aggregates locally on every checkbox click, which is what keeps the panel
+    instant.
+
+    Each record answers both branches of the decision — what fixing the smell
+    is projected to recover, and what deferring it carries forward — and says
+    whether the pipeline can fix it at all.
+    """
+    wf = get_workflow(wf_id)
+    if not wf:
+        return err("Workflow not found.", 404)
+
+    records = compute_workflow_impacts(wf, refresh=_wants_refresh())
+
+    executable = sum(1 for r in records if r["capability"]["status"] == "executable")
+    return jsonify({
+        "workflow_id":   wf_id,
+        "model_version": IMPACT_MODEL_VERSION,
+        "tier":          "static",
+        "count":         len(records),
+        "executable":    executable,
+        "advisory":      len(records) - executable,
+        "records":       records,
+    })
+
+
+@workflow_bp.route("/workflows/<wf_id>/selection-impact", methods=["POST"])
+def selection_impact(wf_id):
+    """Project the consequences of a candidate selection. Read-only.
+
+    Body: { selected_ids?, selected_files?, selected_smells? }
+
+    Deliberately does NOT advance the workflow or call RDP — it is the what-if
+    sibling of /smell-selection-pass, which is itself read-only but returns the
+    filtered report rather than its consequences.
+    """
+    wf = get_workflow(wf_id)
+    if not wf:
+        return err("Workflow not found.", 404)
+
+    data = request.get_json(force=True, silent=True) or {}
+    for field in ("selected_ids", "selected_files", "selected_smells"):
+        if data.get(field) is not None and not isinstance(data[field], list):
+            return err(f"'{field}' must be a list if provided.")
+
+    selected_ids = resolve_selection(
+        parse_json_field(wf, "smells_json") or [],
+        data.get("selected_ids") or [],
+        data.get("selected_files") or [],
+        data.get("selected_smells") or [],
+    )
+    return jsonify(analyse_selection(wf, selected_ids))
+
+
+@workflow_bp.route("/workflows/<wf_id>/optimise-selection", methods=["POST"])
+def optimise_selection_route(wf_id):
+    """Propose a selection under a review-time budget.
+
+    Body: { preset?: "best_value"|"safe_wins"|"stop_bleeding", budget_minutes?: int }
+
+    Exact 0/1 knapsack over the executable smells only — value is projected
+    quality points, weight is review minutes. Advisory findings are never
+    proposed, because spending budget on a no-op is the defect this feature
+    exists to remove. The result is a SUGGESTION: it is returned for the
+    developer to apply or ignore, and nothing is persisted.
+    """
+    wf = get_workflow(wf_id)
+    if not wf:
+        return err("Workflow not found.", 404)
+
+    data = request.get_json(force=True, silent=True) or {}
+
+    preset = data.get("preset") or "best_value"
+    if preset not in PRESETS:
+        return err(f"'preset' must be one of: {', '.join(sorted(PRESETS))}.")
+
+    budget = data.get("budget_minutes", DEFAULT_BUDGET_MINUTES)
+    if not isinstance(budget, int) or isinstance(budget, bool) or budget <= 0:
+        return err("'budget_minutes' must be a positive integer.")
+
+    return jsonify(optimise_selection(wf, preset=preset, budget_minutes=budget))
+
+
+def _wants_refresh() -> bool:
+    """?refresh=1 recomputes instead of serving the cached records."""
+    return str(request.args.get("refresh") or "").lower() in ("1", "true", "yes")
+
 
 @workflow_bp.route("/workflows/<wf_id>/select-smells", methods=["POST"])
 def select_smells(wf_id):

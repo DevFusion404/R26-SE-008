@@ -17,6 +17,7 @@ from db.database import get_db, now_iso
 __all__ = [
     "create_workflow", "get_workflow", "update_workflow", "list_workflows",
     "log_event", "get_audit_logs", "save_feedback", "export_feedback_dataset",
+    "get_impact_records", "save_impact_records", "delete_impact_records",
     "parse_json_field", "now_iso",
 ]
 
@@ -108,3 +109,55 @@ def export_feedback_dataset():
     db = get_db()
     rows = db.execute("SELECT * FROM feedback_entries ORDER BY timestamp ASC").fetchall()
     return [dict(r) for r in rows]
+
+
+# ---------- Selection Impact Records ----------
+
+def get_impact_records(workflow_id, model_version=None):
+    """Cached per-smell impact records for a workflow, newest model first.
+
+    Filtering by model_version is what keeps a stale record from a previous
+    model revision being served as if it were current.
+    """
+    db = get_db()
+    if model_version:
+        rows = db.execute(
+            """SELECT record_json FROM smell_impacts
+               WHERE workflow_id=? AND model_version=? ORDER BY id ASC""",
+            (workflow_id, model_version),
+        ).fetchall()
+    else:
+        rows = db.execute(
+            "SELECT record_json FROM smell_impacts WHERE workflow_id=? ORDER BY id ASC",
+            (workflow_id,),
+        ).fetchall()
+
+    return [json.loads(r["record_json"]) for r in rows]
+
+
+def save_impact_records(workflow_id, records):
+    """Persist a workflow's impact records. Idempotent per (workflow, smell, model)."""
+    if not records:
+        return 0
+
+    db = get_db()
+    stamp = now_iso()
+    db.executemany(
+        """INSERT OR REPLACE INTO smell_impacts
+           (workflow_id, smell_id, model_version, record_json, computed_at)
+           VALUES (?,?,?,?,?)""",
+        [
+            (workflow_id, r.get("smell_id"), r.get("model_version"),
+             json.dumps(r), stamp)
+            for r in records
+        ],
+    )
+    db.commit()
+    return len(records)
+
+
+def delete_impact_records(workflow_id):
+    """Drop a workflow's cached records — used when its smell list changes."""
+    db = get_db()
+    db.execute("DELETE FROM smell_impacts WHERE workflow_id=?", (workflow_id,))
+    db.commit()
