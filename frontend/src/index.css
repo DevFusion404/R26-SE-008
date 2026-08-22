@@ -834,3 +834,16 @@ code {
   padding: 4px 8px;
   background: var(--code-bg);
 }
+
+/* ── Code smell category overview animations ─────────────────── */
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(-4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+/* Priority pills (used in CodeSmellOverview & SmellList) */
+.pill-critical {
+  background: rgba(239,68,68,0.15);
+  color: #f87171;
+  border-color: rgba(239,68,68,0.35);
+}

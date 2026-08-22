@@ -93,3 +93,19 @@ void fn(char *b, char *s) {
         r301 = generate_file_report(lines_301, "test.h")
         s301 = [s for s in r301["code_smells"] if s["type"] == "LargeHeaderFile"]
         assert len(s301) == 1
+
+    def test_c_magic_number_comparison_variable_context(self):
+        src = '''\
+void check(int student_marks) {
+    if (student_marks > 50) {
+        // pass
+    }
+}
+'''
+        r = generate_file_report(src, "test.c")
+        smells = [s for s in r["code_smells"] if s["type"] == "MagicNumber"]
+        assert len(smells) == 1
+        smell = smells[0]
+        assert smell.get("variable_context") == "student_marks"
+        assert "Magic number 50 compared to variable 'student_marks'" in smell["details"]
+
