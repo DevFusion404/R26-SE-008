@@ -818,6 +818,8 @@ def compare_fingerprints(orig: Dict[str, Any], trans: Dict[str, Any]) -> Dict[st
         "RuntimeUnavailable",
         "HarnessError",
         "RuntimeError",
+        "ClassNotFoundException",
+        "NoSuchMethodException",
     }
 
     if orig.get("timeout") or trans.get("timeout"):

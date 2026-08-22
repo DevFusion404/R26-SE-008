@@ -21,7 +21,7 @@ from .behavior_fingerprint import (
 )
 from .c_support import validate_c_behavior
 
-from ..constants import KNOWN_UNSAFE_JAVA_ACTIONS
+from ..constants import KNOWN_UNSAFE_JAVA_ACTIONS, PARAMETER_OBJECT_ACTIONS
 from ..contracts import RefactoringAction
 from ..models import ValidationStepResult
 from ..utils.io_helpers import utc_now_iso
@@ -161,6 +161,8 @@ class BehavioralValidator:
                     transformed_code=transformed_code,
                     actions=actions,
                 )
+
+        runtime_tests = self._adapt_python_parameter_object_tests(runtime_tests, actions)
 
         runner = BehaviorFingerprintRunner(
             default_timeout_seconds=self.DEFAULT_PYTHON_TIMEOUT_SECONDS
@@ -418,19 +420,30 @@ class BehavioralValidator:
             return []
 
         rename_map: Dict[str, str] = {}
+        removed_functions: set[str] = set()
         for action in actions:
-            if getattr(action, "action_type", "") != "rename_symbol":
-                continue
-            old_name = str(action.parameters.get("old_name") or "").strip()
-            new_name = str(action.parameters.get("new_name") or "").strip()
-            if old_name and new_name:
-                rename_map[old_name] = new_name
+            action_type = getattr(action, "action_type", "")
+            if action_type == "rename_symbol":
+                old_name = str(action.parameters.get("old_name") or "").strip()
+                new_name = str(action.parameters.get("new_name") or "").strip()
+                if old_name and new_name:
+                    rename_map[old_name] = new_name
+            elif action_type == "remove_dead_code":
+                method = str(
+                    action.parameters.get("method")
+                    or action.parameters.get("method_name")
+                    or ""
+                ).strip()
+                if method:
+                    removed_functions.add(method)
 
         inferred: List[Dict[str, Any]] = []
         for node in tree.body:
             if not isinstance(node, ast.FunctionDef):
                 continue
             if node.name.startswith("_"):
+                continue
+            if node.name in removed_functions:
                 continue
 
             args = self._python_args_for_auto_probe(node)
@@ -452,6 +465,113 @@ class BehavioralValidator:
                 break
 
         return inferred
+
+    @staticmethod
+    def _adapt_python_parameter_object_tests(
+        tests: Sequence[Dict[str, Any]],
+        actions: Sequence[RefactoringAction],
+    ) -> List[Dict[str, Any]]:
+        parameter_actions = {
+            str(action.parameters.get("method") or action.parameters.get("method_name") or "").strip(): str(
+                action.parameters.get("parameter_object_name")
+                or action.parameters.get("new_class_name")
+                or ""
+            ).strip()
+            for action in actions
+            if action.action_type in {
+                "introduce_parameter_object",
+                "introduce_python_parameter_object",
+            }
+        }
+        adapted: List[Dict[str, Any]] = []
+        for test in tests:
+            copied = dict(test)
+            if any(key in copied for key in ("expression", "original_expression", "transformed_expression")):
+                if copied.get("transformed_expression"):
+                    adapted.append(copied)
+                    continue
+                original_expression = str(
+                    copied.get("original_expression")
+                    or copied.get("expression")
+                    or ""
+                )
+                transformed_expression = original_expression
+                for method, object_name in parameter_actions.items():
+                    transformed_expression = BehavioralValidator._rewrite_python_parameter_object_expression(
+                        transformed_expression,
+                        method=method,
+                        object_name=object_name,
+                    )
+                copied["original_expression"] = original_expression
+                copied["transformed_expression"] = transformed_expression
+                adapted.append(copied)
+                continue
+            call = str(
+                copied.get("original_call")
+                or copied.get("call")
+                or copied.get("target_method")
+                or copied.get("method")
+                or ""
+            ).strip()
+            object_name = parameter_actions.get(call)
+            if not object_name:
+                adapted.append(copied)
+                continue
+            args = list(copied.get("args") or [])
+            kwargs = dict(copied.get("kwargs") or {})
+            rendered = [repr(value) for value in args]
+            rendered.extend(f"{key}={value!r}" for key, value in kwargs.items())
+            joined = ", ".join(rendered)
+            copied["original_expression"] = f"{call}({joined})"
+            copied["transformed_expression"] = f"{call}({object_name}({joined}))"
+            adapted.append(copied)
+        return adapted
+
+    @staticmethod
+    def _rewrite_python_parameter_object_expression(
+        expression: str,
+        *,
+        method: str,
+        object_name: str,
+    ) -> str:
+        if not expression or not method or not object_name:
+            return expression
+        try:
+            tree = ast.parse(expression, mode="eval")
+        except SyntaxError:
+            return expression
+
+        class CallRewriter(ast.NodeTransformer):
+            def visit_Call(self, node: ast.Call) -> ast.AST:
+                updated = self.generic_visit(node)
+                if not isinstance(updated, ast.Call):
+                    return updated
+                matches = (
+                    isinstance(updated.func, ast.Name) and updated.func.id == method
+                ) or (
+                    isinstance(updated.func, ast.Attribute) and updated.func.attr == method
+                )
+                already_wrapped = bool(
+                    len(updated.args) == 1
+                    and isinstance(updated.args[0], ast.Call)
+                    and isinstance(updated.args[0].func, ast.Name)
+                    and updated.args[0].func.id == object_name
+                )
+                if not matches or already_wrapped:
+                    return updated
+                parameter_call = ast.Call(
+                    func=ast.Name(id=object_name, ctx=ast.Load()),
+                    args=updated.args,
+                    keywords=updated.keywords,
+                )
+                return ast.copy_location(
+                    ast.Call(func=updated.func, args=[parameter_call], keywords=[]),
+                    updated,
+                )
+
+        rewritten = CallRewriter().visit(tree)
+        ast.fix_missing_locations(rewritten)
+        return ast.unparse(rewritten.body)
 
     @staticmethod
     def _python_source_safe_for_auto_runtime(source_code: str) -> bool:
@@ -561,6 +681,8 @@ class BehavioralValidator:
             original_summary,
             transformed_summary,
             actions,
+            original_code=original_code,
+            transformed_code=transformed_code,
         )
 
         constant_check = self._check_python_introduced_constants(
@@ -754,6 +876,9 @@ class BehavioralValidator:
         original_summary: Dict[str, Any],
         transformed_summary: Dict[str, Any],
         actions: Sequence[RefactoringAction],
+        *,
+        original_code: str,
+        transformed_code: str,
     ) -> Dict[str, Any]:
         if not original_summary.get("parse_success") or not transformed_summary.get("parse_success"):
             return {
@@ -764,27 +889,72 @@ class BehavioralValidator:
             }
 
         expected_renames: Dict[str, str] = {}
+        expected_removed: set[str] = set()
+        try:
+            original_tree = ast.parse(original_code)
+        except SyntaxError:
+            original_tree = None
 
         for action in actions:
-            if getattr(action, "action_type", "") != "rename_symbol":
-                continue
+            action_type = getattr(action, "action_type", "")
+            if action_type == "rename_symbol":
+                old_name = str(action.parameters.get("old_name") or "").strip()
+                new_name = str(action.parameters.get("new_name") or "").strip()
+                if old_name and new_name:
+                    expected_renames[old_name] = new_name
+            elif action_type == "remove_dead_code":
+                method = str(
+                    action.parameters.get("method")
+                    or action.parameters.get("method_name")
+                    or ""
+                ).strip()
+                if method:
+                    expected_removed.add(method)
+                    continue
 
-            old_name = str(action.parameters.get("old_name") or "").strip()
-            new_name = str(action.parameters.get("new_name") or "").strip()
-
-            if old_name and new_name:
-                expected_renames[old_name] = new_name
+                # RDP often supplies only a line number. Resolve a callable
+                # removal from the original AST before comparing signatures;
+                # do not treat statement-level dead-code actions as function
+                # removals merely because they appear inside a function.
+                raw_line = action.parameters.get("source_line")
+                source_line = int(raw_line) if isinstance(raw_line, (int, float)) else None
+                if source_line is None or original_tree is None:
+                    continue
+                candidates = [
+                    node
+                    for node in ast.walk(original_tree)
+                    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                    and int(getattr(node, "lineno", 0) or 0) == source_line
+                ]
+                if len(candidates) == 1:
+                    expected_removed.add(candidates[0].name)
 
         original_functions = dict(original_summary.get("functions", {}))
         transformed_functions = dict(transformed_summary.get("functions", {}))
 
+        expected_parameter_object_migrations = (
+            self._validated_python_parameter_object_migrations(
+                original_code=original_code,
+                transformed_code=transformed_code,
+                actions=actions,
+            )
+        )
+        allowed_signature_changes = {
+            item["function"]: item for item in expected_parameter_object_migrations
+        }
+
         missing_functions = []
         changed_signatures = []
+        accepted_signature_changes = []
+        removed_functions = []
 
         for old_name, old_signature in original_functions.items():
             expected_name = expected_renames.get(old_name, old_name)
 
             if expected_name not in transformed_functions:
+                if old_name in expected_removed:
+                    removed_functions.append(old_name)
+                    continue
                 missing_functions.append(
                     {
                         "original_function": old_name,
@@ -796,36 +966,192 @@ class BehavioralValidator:
             new_signature = transformed_functions[expected_name]
 
             if old_signature != new_signature:
-                changed_signatures.append(
-                    {
-                        "function": old_name,
-                        "expected_name": expected_name,
-                        "original_signature": old_signature,
-                        "transformed_signature": new_signature,
-                    }
-                )
+                change = {
+                    "function": old_name,
+                    "expected_name": expected_name,
+                    "original_signature": old_signature,
+                    "transformed_signature": new_signature,
+                }
+                migration = allowed_signature_changes.get(old_name)
+                if migration and expected_name == old_name:
+                    accepted_signature_changes.append({**change, **migration})
+                else:
+                    changed_signatures.append(change)
 
         matched = not missing_functions and not changed_signatures
+        reason = "function_signatures_preserved"
+        if matched and accepted_signature_changes:
+            reason = "parameter_object_signature_migration_preserved"
+        elif not matched:
+            reason = "function_signature_mismatch"
 
         return {
             "matched": matched,
-            "reason": (
-                "function_signatures_preserved"
-                if matched
-                else "function_signature_mismatch"
-            ),
+            "reason": reason,
             "original": {
                 "function_count": len(original_functions),
                 "functions": original_functions,
                 "expected_renames": expected_renames,
+                "expected_removed": sorted(expected_removed),
             },
             "transformed": {
                 "function_count": len(transformed_functions),
                 "functions": transformed_functions,
                 "missing_functions": missing_functions,
+                "removed_functions": removed_functions,
                 "changed_signatures": changed_signatures,
+                "accepted_parameter_object_migrations": accepted_signature_changes,
             },
         }
+
+    @staticmethod
+    def _validated_python_parameter_object_migrations(
+        *,
+        original_code: str,
+        transformed_code: str,
+        actions: Sequence[RefactoringAction],
+    ) -> List[Dict[str, Any]]:
+        """Prove an intentional Python parameter-object signature migration.
+
+        Introduce Parameter Object deliberately changes a callable's signature.  A
+        raw signature equality check must therefore not report a behavior change
+        when the new object faithfully represents the old arguments.  This check
+        is intentionally independent from structural validation so a malformed
+        migration cannot bypass behavioral rollback merely by naming an action.
+        """
+
+        try:
+            original_tree = ast.parse(original_code)
+            transformed_tree = ast.parse(transformed_code)
+        except SyntaxError:
+            return []
+
+        def find_target(
+            tree: ast.Module,
+            method: str,
+            source_class: str,
+        ) -> ast.FunctionDef | ast.AsyncFunctionDef | None:
+            candidates: List[ast.FunctionDef | ast.AsyncFunctionDef] = []
+            for node in tree.body:
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    if not source_class and node.name == method:
+                        candidates.append(node)
+                elif isinstance(node, ast.ClassDef):
+                    if source_class and node.name != source_class:
+                        continue
+                    for child in node.body:
+                        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)) and child.name == method:
+                            candidates.append(child)
+            return candidates[0] if len(candidates) == 1 else None
+
+        def non_receiver_parameters(
+            node: ast.FunctionDef | ast.AsyncFunctionDef,
+        ) -> List[ast.arg]:
+            return [
+                item
+                for item in [*node.args.posonlyargs, *node.args.args]
+                if item.arg not in {"self", "cls"}
+            ]
+
+        validated: List[Dict[str, Any]] = []
+        for action in actions:
+            if action.action_type not in PARAMETER_OBJECT_ACTIONS:
+                continue
+            if action.action_type == "introduce_java_parameter_object":
+                continue
+
+            params = action.parameters or {}
+            method = str(params.get("method") or params.get("method_name") or "").strip()
+            source_class = str(params.get("source_class") or "").strip()
+            object_name = str(
+                params.get("parameter_object_name") or params.get("new_class_name") or ""
+            ).strip()
+            parameter_name = str(params.get("parameter_name") or "params").strip()
+            if not method or not object_name or not parameter_name:
+                continue
+
+            before = find_target(original_tree, method, source_class)
+            after = find_target(transformed_tree, method, source_class)
+            object_node = next(
+                (
+                    node for node in transformed_tree.body
+                    if isinstance(node, ast.ClassDef) and node.name == object_name
+                ),
+                None,
+            )
+            if before is None or after is None or object_node is None:
+                continue
+
+            before_parameters = non_receiver_parameters(before)
+            after_parameters = non_receiver_parameters(after)
+            if len(before_parameters) < 2 or [item.arg for item in after_parameters] != [parameter_name]:
+                continue
+            if before.args.vararg or before.args.kwarg or before.args.kwonlyargs:
+                continue
+            if after.args.vararg or after.args.kwarg or after.args.kwonlyargs:
+                continue
+
+            annotation = after_parameters[0].annotation
+            if not isinstance(annotation, ast.Name) or annotation.id != object_name:
+                continue
+            before_return = (
+                ast.dump(before.returns, include_attributes=False)
+                if before.returns is not None
+                else None
+            )
+            after_return = (
+                ast.dump(after.returns, include_attributes=False)
+                if after.returns is not None
+                else None
+            )
+            if before_return != after_return:
+                continue
+
+            before_defaults: Dict[str, str | None] = {}
+            defaults = [None] * (len(before_parameters) - len(before.args.defaults)) + list(before.args.defaults)
+            for item, default in zip(before_parameters, defaults):
+                before_defaults[item.arg] = (
+                    ast.dump(default, include_attributes=False) if default is not None else None
+                )
+            object_fields = {
+                node.target.id: (
+                    ast.dump(node.value, include_attributes=False) if node.value is not None else None
+                )
+                for node in object_node.body
+                if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name)
+            }
+            if any(object_fields.get(name, object()) != default for name, default in before_defaults.items()):
+                continue
+
+            used_before = {
+                node.id
+                for node in ast.walk(before)
+                if isinstance(node, ast.Name)
+                and isinstance(node.ctx, ast.Load)
+                and node.id in before_defaults
+            }
+            accessed_after = {
+                node.attr
+                for node in ast.walk(after)
+                if isinstance(node, ast.Attribute)
+                and isinstance(node.value, ast.Name)
+                and node.value.id == parameter_name
+            }
+            if not used_before <= accessed_after:
+                continue
+
+            validated.append(
+                {
+                    "function": method,
+                    "parameter_object": object_name,
+                    "parameter_name": parameter_name,
+                    "preserved_fields": sorted(before_defaults),
+                    "body_accesses": sorted(accessed_after),
+                    "proof": "parameter_object_fields_defaults_return_annotation_and_body_access_preserved",
+                }
+            )
+
+        return validated
 
     def _check_python_introduced_constants(
         self,
@@ -1119,6 +1445,8 @@ class BehavioralValidator:
                         },
                     )
 
+        runtime_tests = self._adapt_java_parameter_object_tests(runtime_tests, actions)
+
         for idx, test in enumerate(runtime_tests, start=1):
             name = str(test.get("name") or test.get("test_id") or f"java_probe_{idx}")
 
@@ -1191,6 +1519,7 @@ class BehavioralValidator:
                 timeout_seconds=timeout_seconds,
                 project_source_files=project_sources,
                 current_file_name=current_file_name,
+                parameter_object=bool(test.get("transformed_parameter_object")),
             )
 
             comparison = compare_fingerprints(original_fp, transformed_fp)
@@ -1719,6 +2048,59 @@ class BehavioralValidator:
         seen: set[tuple[str, str, str, str]] = set()
 
         for action in actions:
+            if action.action_type in {
+                "introduce_parameter_object",
+                "introduce_java_parameter_object",
+            }:
+                target_class = str(action.parameters.get("source_class") or "").strip()
+                target_method = str(
+                    action.parameters.get("method")
+                    or action.parameters.get("method_name")
+                    or ""
+                ).strip()
+                object_name = str(
+                    action.parameters.get("parameter_object_name")
+                    or action.parameters.get("new_class_name")
+                    or ""
+                ).strip()
+                if not target_class:
+                    target_class = self._find_java_method_owner(original_code, target_method) or ""
+                candidate = next(
+                    (
+                        item for item in self._extract_java_method_candidates(
+                            original_code=original_code,
+                            class_name=target_class,
+                        )
+                        if item["name"] == target_method
+                    ),
+                    None,
+                )
+                if not target_class or not target_method or not object_name or candidate is None:
+                    continue
+                key = (target_class, target_method, target_class, target_method)
+                if key in seen:
+                    continue
+                seen.add(key)
+                inferred.append({
+                    "name": f"auto_{target_class}_{target_method}_parameter_object",
+                    "original_target_class": target_class,
+                    "original_target_method": target_method,
+                    "transformed_target_class": target_class,
+                    "transformed_target_method": target_method,
+                    "args": [
+                        self._java_raw_arg_for_type(type_name)
+                        for type_name in candidate.get("param_types", [])
+                    ],
+                    "transformed_parameter_object": object_name,
+                    "timeout_seconds": self.DEFAULT_JAVA_TIMEOUT_SECONDS,
+                    "auto_generated": True,
+                    "source_step_id": action.source_step_id,
+                    "source_refactoring": action.source_refactoring,
+                })
+                if len(inferred) >= self.AUTO_PROBE_LIMIT:
+                    break
+                continue
+
             if action.action_type == "fault_injection":
                 target_class = str(action.parameters.get("target_class") or "").strip()
                 target_method = str(action.parameters.get("target_method") or "").strip()
@@ -1751,6 +2133,51 @@ class BehavioralValidator:
                 if len(inferred) >= self.AUTO_PROBE_LIMIT:
                     break
 
+                continue
+
+            if action.action_type in {"extract_class", "extract_java_class"}:
+                target_class = str(
+                    action.parameters.get("source_class")
+                    or action.parameters.get("class_name")
+                    or ""
+                ).strip()
+                method_names = action.parameters.get("methods_to_extract") or []
+                if not target_class or not isinstance(method_names, list):
+                    continue
+                candidates = {
+                    candidate["name"]: candidate
+                    for candidate in self._extract_java_method_candidates(
+                        original_code=original_code,
+                        class_name=target_class,
+                    )
+                }
+                for method_name in (str(item).strip() for item in method_names):
+                    candidate = candidates.get(method_name)
+                    if not candidate:
+                        continue
+                    key = (target_class, method_name, target_class, method_name)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    inferred.append({
+                        "name": f"auto_{target_class}_{method_name}_extract_class",
+                        "original_target_class": target_class,
+                        "original_target_method": method_name,
+                        "transformed_target_class": target_class,
+                        "transformed_target_method": method_name,
+                        "args": [
+                            self._java_raw_arg_for_type(type_name)
+                            for type_name in candidate.get("param_types", [])
+                        ],
+                        "timeout_seconds": self.DEFAULT_JAVA_TIMEOUT_SECONDS,
+                        "auto_generated": True,
+                        "source_step_id": action.source_step_id,
+                        "source_refactoring": action.source_refactoring,
+                    })
+                    if len(inferred) >= self.AUTO_PROBE_LIMIT:
+                        break
+                if len(inferred) >= self.AUTO_PROBE_LIMIT:
+                    break
                 continue
 
             if action.action_type != "rename_symbol":
@@ -1807,6 +2234,37 @@ class BehavioralValidator:
 
         return inferred
 
+    @staticmethod
+    def _adapt_java_parameter_object_tests(
+        tests: Sequence[Dict[str, Any]],
+        actions: Sequence[RefactoringAction],
+    ) -> List[Dict[str, Any]]:
+        parameter_actions = {
+            str(action.parameters.get("method") or action.parameters.get("method_name") or "").strip(): str(
+                action.parameters.get("parameter_object_name")
+                or action.parameters.get("new_class_name")
+                or ""
+            ).strip()
+            for action in actions
+            if action.action_type in {
+                "introduce_parameter_object",
+                "introduce_java_parameter_object",
+            }
+        }
+        adapted: List[Dict[str, Any]] = []
+        for test in tests:
+            copied = dict(test)
+            method = str(
+                copied.get("original_target_method")
+                or copied.get("target_method")
+                or copied.get("method")
+                or ""
+            ).strip()
+            if method in parameter_actions:
+                copied["transformed_parameter_object"] = parameter_actions[method]
+            adapted.append(copied)
+        return adapted
+
     def _infer_java_runtime_tests_from_source(
         self,
         *,
@@ -1821,6 +2279,54 @@ class BehavioralValidator:
             class_name = self._extract_java_class_name(original_code)
         except ValueError:
             return []
+
+        for action in actions:
+            if action.action_type not in {
+                "extract_class",
+                "extract_python_class",
+                "extract_java_class",
+            }:
+                continue
+            requested_class = str(
+                action.parameters.get("source_class")
+                or action.parameters.get("class_name")
+                or ""
+            ).strip()
+            if requested_class and self._extract_java_method_candidates(
+                original_code=original_code,
+                class_name=requested_class,
+            ):
+                class_name = requested_class
+                break
+
+        # With no effective Extract Class action (for example, when another
+        # action changed the file first), choose the class that directly owns
+        # the useful methods. An enclosing class must not inherit methods from
+        # its nested classes merely because their text lies inside its braces.
+        if not any(
+            action.action_type in {
+                "extract_class",
+                "extract_python_class",
+                "extract_java_class",
+            }
+            for action in actions
+        ):
+            ranked_classes = []
+            for declared_class in self._extract_java_class_names(original_code):
+                owned_methods = self._extract_java_method_candidates(
+                    original_code=original_code,
+                    class_name=declared_class,
+                )
+                useful_methods = [
+                    candidate
+                    for candidate in owned_methods
+                    if candidate["name"] not in {declared_class, "main"}
+                ]
+                ranked_classes.append((len(useful_methods), len(owned_methods), declared_class))
+            if ranked_classes:
+                best_useful_count, _, best_class = max(ranked_classes)
+                if best_useful_count > 0:
+                    class_name = best_class
 
         if not class_renames:
             class_names = set(self._extract_java_class_names(original_code))
@@ -1906,6 +2412,8 @@ class BehavioralValidator:
         seen: set[tuple[str, int]] = set()
 
         for match in method_pattern.finditer(class_body):
+            if self._java_brace_depth_at(class_body, match.start()) != 0:
+                continue
             method_name = match.group("name")
             params_raw = match.group("params") or ""
 
@@ -1926,6 +2434,47 @@ class BehavioralValidator:
             )
 
         return candidates
+
+    @staticmethod
+    def _java_brace_depth_at(source_code: str, end_index: int) -> int:
+        """Return Java brace depth while ignoring comments and literals."""
+
+        depth = 0
+        index = 0
+        state = "code"
+        while index < min(end_index, len(source_code)):
+            char = source_code[index]
+            nxt = source_code[index + 1] if index + 1 < end_index else ""
+            if state == "line_comment":
+                if char == "\n":
+                    state = "code"
+            elif state == "block_comment":
+                if char == "*" and nxt == "/":
+                    state = "code"
+                    index += 1
+            elif state in {"string", "char"}:
+                if char == "\\":
+                    index += 1
+                elif (state == "string" and char == '"') or (
+                    state == "char" and char == "'"
+                ):
+                    state = "code"
+            elif char == "/" and nxt == "/":
+                state = "line_comment"
+                index += 1
+            elif char == "/" and nxt == "*":
+                state = "block_comment"
+                index += 1
+            elif char == '"':
+                state = "string"
+            elif char == "'":
+                state = "char"
+            elif char == "{":
+                depth += 1
+            elif char == "}":
+                depth = max(depth - 1, 0)
+            index += 1
+        return depth
 
     @staticmethod
     def _split_java_params(params_raw: str) -> List[str]:
@@ -2093,6 +2642,7 @@ class BehavioralValidator:
         timeout_seconds: int,
         project_source_files: Sequence[Dict[str, str]] | None = None,
         current_file_name: str | None = None,
+        parameter_object: bool = False,
     ) -> Dict[str, Any]:
         java_exe = shutil.which("java")
         javac_exe = shutil.which("javac")
@@ -2117,7 +2667,7 @@ class BehavioralValidator:
         source_code = source_code.lstrip("\ufeff")
         class_name = self._extract_java_class_name(source_code)
         package_name = self._extract_java_package(source_code)
-        target_class_name = target_class
+        target_class_name = self._java_binary_class_name(source_code, target_class)
         if package_name and "." not in target_class_name:
             target_class_name = f"{package_name}.{target_class_name}"
         args = args or []
@@ -2141,6 +2691,7 @@ class BehavioralValidator:
                     target_class=target_class_name,
                     target_method=target_method,
                     args=args,
+                    parameter_object=parameter_object,
                 ),
                 encoding="utf-8",
             )
@@ -2382,6 +2933,40 @@ class BehavioralValidator:
         finally:
             shutil.rmtree(temp_path, ignore_errors=True)
 
+    @classmethod
+    def _java_binary_class_name(cls, source_code: str, target_class: str) -> str:
+        """Resolve a Java member class to the JVM name used by reflection."""
+
+        requested = str(target_class or "").strip()
+        if not requested or "$" in requested:
+            return requested
+        simple_name = requested.rsplit(".", 1)[-1]
+        class_pattern = re.compile(r"\bclass\s+([A-Za-z_][A-Za-z0-9_]*)\b[^\{;]*\{")
+        spans: list[tuple[str, int, int]] = []
+        target_span: tuple[str, int, int] | None = None
+        for match in class_pattern.finditer(source_code):
+            open_brace = source_code.find("{", match.start(), match.end())
+            close_brace = cls._find_matching_brace(source_code, open_brace)
+            if close_brace == -1:
+                continue
+            span = (match.group(1), match.start(), close_brace)
+            spans.append(span)
+            if match.group(1) == simple_name and target_span is None:
+                target_span = span
+        if target_span is None:
+            return requested
+
+        enclosing = sorted(
+            (
+                span for span in spans
+                if span[1] < target_span[1] and target_span[2] < span[2]
+            ),
+            key=lambda span: span[1],
+        )
+        if not enclosing:
+            return requested
+        return "$".join([*(span[0] for span in enclosing), simple_name])
+
     def _write_java_project_sources(
         self,
         *,
@@ -2449,8 +3034,15 @@ class BehavioralValidator:
         target_class: str,
         target_method: str,
         args: List[Any] | None = None,
+        parameter_object: bool = False,
     ) -> str:
         raw_args = BehavioralValidator._java_string_array(args or [])
+        expected_arity = "1" if parameter_object else "rawArgs.length"
+        build_values = (
+            "buildParameterObjectArgs(targetMethod.getParameterTypes()[0], rawArgs)"
+            if parameter_object
+            else "buildArgs(targetMethod.getParameterTypes(), rawArgs)"
+        )
 
         return f"""
 import java.lang.reflect.*;
@@ -2469,7 +3061,7 @@ public class JavaRuntimeProbeHarness {{
             for (Method method : targetClass.getDeclaredMethods()) {{
                 if (
                     method.getName().equals("{target_method}")
-                    && method.getParameterTypes().length == rawArgs.length
+                    && method.getParameterTypes().length == {expected_arity}
                 ) {{
                     targetMethod = method;
                     break;
@@ -2485,7 +3077,7 @@ public class JavaRuntimeProbeHarness {{
 
             targetMethod.setAccessible(true);
 
-            Object[] values = buildArgs(targetMethod.getParameterTypes(), rawArgs);
+            Object[] values = {build_values};
             Object result = targetMethod.invoke(instance, values);
 
             String resultType = result == null
@@ -2516,6 +3108,25 @@ public class JavaRuntimeProbeHarness {{
                 + String.valueOf(ex.getMessage())
             );
         }}
+    }}
+
+    private static Object[] buildParameterObjectArgs(
+        Class<?> parameterObjectType,
+        String[] rawArgs
+    ) throws Exception {{
+        Constructor<?> selected = null;
+        for (Constructor<?> constructor : parameterObjectType.getDeclaredConstructors()) {{
+            if (constructor.getParameterTypes().length == rawArgs.length) {{
+                selected = constructor;
+                break;
+            }}
+        }}
+        if (selected == null) {{
+            throw new NoSuchMethodException("parameter object constructor mismatch");
+        }}
+        selected.setAccessible(true);
+        Object value = selected.newInstance(buildArgs(selected.getParameterTypes(), rawArgs));
+        return new Object[] {{value}};
     }}
 
     private static Object[] buildArgs(Class<?>[] parameterTypes, String[] rawArgs) {{
