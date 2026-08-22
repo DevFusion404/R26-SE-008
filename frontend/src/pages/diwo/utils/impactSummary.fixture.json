@@ -1,0 +1,365 @@
+{
+  "quality_before": 73.25,
+  "records": [
+    {
+      "smell_id": "a",
+      "smell_type": "LongMethod",
+      "severity": "high",
+      "file": "src/Order.java",
+      "line": 10,
+      "model_version": "impact-1.0.0",
+      "tier": "static",
+      "error_band": 0.35,
+      "capability": {
+        "smell_type": "LongMethod",
+        "refactoring": "Extract Method",
+        "risk": "low",
+        "impact": "high",
+        "status": "executable",
+        "action_type": "extract_method",
+        "required_parameters": [
+          "a source line range",
+          "the method name"
+        ],
+        "reason": "SCTVA applies 'extract_method' to this location."
+      },
+      "if_selected": {
+        "quality_gain": {
+          "automated_points": 6.38,
+          "potential_points": 6.38,
+          "automated_low": 4.14,
+          "automated_high": 8.61,
+          "factors": {
+            "severity": 0.85,
+            "magnitude": 1.0,
+            "reach": 0.5,
+            "refactoring_impact": 1.0
+          },
+          "explanation": "LongMethod at src/Order.java:10 sits 100% past its detection threshold and spans 50% of the file; Extract Method has high impact on that class of problem."
+        },
+        "risk": {
+          "score": 0.27,
+          "band": "low",
+          "drivers": [
+            "no test file covers this source file"
+          ]
+        },
+        "effort_minutes": 12,
+        "blast_radius_files": 1,
+        "validation": [
+          "syntax",
+          "structural"
+        ]
+      },
+      "if_deferred": {
+        "carried_points": 6.38,
+        "interest_per_quarter": 9.18,
+        "change_pressure": "low",
+        "churn_commits": 1,
+        "churn_window_days": 90,
+        "explanation": "Skipping this leaves 6.38 quality points on the table. The file was edited 1 time in 90 days \u2014 deferring is cheap.",
+        "churn_known": true
+      },
+      "headline": "Fixing this recovers ~6.38 quality points at low risk (~12 min review). Skipping it carries 6.38 points forward at low change pressure."
+    },
+    {
+      "smell_id": "b",
+      "smell_type": "LargeClass",
+      "severity": "high",
+      "file": "src/Order.java",
+      "line": 1,
+      "model_version": "impact-1.0.0",
+      "tier": "static",
+      "error_band": 0.35,
+      "capability": {
+        "smell_type": "LargeClass",
+        "refactoring": "Extract Class",
+        "risk": "medium",
+        "impact": "high",
+        "status": "advisory",
+        "action_type": null,
+        "reason": "needs a new class file and every call site updated \u2014 no safe automatic form yet"
+      },
+      "if_selected": {
+        "quality_gain": {
+          "automated_points": 0.0,
+          "potential_points": 7.29,
+          "automated_low": 0.0,
+          "automated_high": 0.0,
+          "factors": {
+            "severity": 0.85,
+            "magnitude": 0.77,
+            "reach": 1.0,
+            "refactoring_impact": 1.0
+          },
+          "explanation": "LargeClass at src/Order.java:1 sits 76% past its detection threshold and spans 99% of the file; Extract Class has high impact on that class of problem."
+        },
+        "risk": {
+          "score": 0.68,
+          "band": "high",
+          "drivers": [
+            "Extract Class is inherently medium-risk",
+            "no test file covers this source file"
+          ]
+        },
+        "effort_minutes": 25,
+        "blast_radius_files": 1,
+        "validation": [
+          "syntax",
+          "structural"
+        ]
+      },
+      "if_deferred": {
+        "carried_points": 7.29,
+        "interest_per_quarter": 10.49,
+        "change_pressure": "low",
+        "churn_commits": 1,
+        "churn_window_days": 90,
+        "explanation": "Skipping this leaves 7.29 quality points on the table. The file was edited 1 time in 90 days \u2014 deferring is cheap.",
+        "churn_known": true
+      },
+      "headline": "Real finding, but no automatic fix: needs a new class file and every call site updated \u2014 no safe automatic form yet. Worth ~7.29 points if done by hand. Selecting it will not change any code in this run."
+    },
+    {
+      "smell_id": "c",
+      "smell_type": "DeadCode",
+      "severity": "low",
+      "file": "src/util/Helper.java",
+      "line": 5,
+      "model_version": "impact-1.0.0",
+      "tier": "static",
+      "error_band": 0.35,
+      "capability": {
+        "smell_type": "DeadCode",
+        "refactoring": "Remove Dead Code",
+        "risk": "low",
+        "impact": "medium",
+        "status": "executable",
+        "action_type": "remove_dead_code",
+        "required_parameters": [
+          "the method name or a source line"
+        ],
+        "reason": "SCTVA applies 'remove_dead_code' to this location."
+      },
+      "if_selected": {
+        "quality_gain": {
+          "automated_points": 0.58,
+          "potential_points": 0.58,
+          "automated_low": 0.38,
+          "automated_high": 0.78,
+          "factors": {
+            "severity": 0.25,
+            "magnitude": 0.5,
+            "reach": 0.1,
+            "refactoring_impact": 0.6
+          },
+          "explanation": "DeadCode at src/util/Helper.java:5 sits 50% past its detection threshold and spans 10% of the file; Remove Dead Code has medium impact on that class of problem."
+        },
+        "risk": {
+          "score": 0.27,
+          "band": "low",
+          "drivers": [
+            "no test file covers this source file"
+          ]
+        },
+        "effort_minutes": 4,
+        "blast_radius_files": 1,
+        "validation": [
+          "syntax",
+          "structural"
+        ]
+      },
+      "if_deferred": {
+        "carried_points": 0.58,
+        "interest_per_quarter": 0.52,
+        "change_pressure": "high",
+        "churn_commits": 12,
+        "churn_window_days": 90,
+        "explanation": "Skipping this leaves 0.58 quality points on the table. The file was edited 12 times in 90 days \u2014 this debt is charged on every change.",
+        "churn_known": true
+      },
+      "headline": "Fixing this recovers ~0.58 quality points at low risk (~4 min review). Skipping it carries 0.58 points forward at high change pressure."
+    },
+    {
+      "smell_id": "d",
+      "smell_type": "MagicNumber",
+      "severity": "medium",
+      "file": "src/main.c",
+      "line": 22,
+      "model_version": "impact-1.0.0",
+      "tier": "static",
+      "error_band": 0.35,
+      "capability": {
+        "smell_type": "MagicNumber",
+        "refactoring": "Replace Magic Number with Symbolic Constant",
+        "risk": "low",
+        "impact": "medium",
+        "status": "executable",
+        "action_type": "extract_constant",
+        "required_parameters": [
+          "the literal value"
+        ],
+        "reason": "SCTVA applies 'extract_constant' to this location."
+      },
+      "if_selected": {
+        "quality_gain": {
+          "automated_points": 1.15,
+          "potential_points": 1.15,
+          "automated_low": 0.75,
+          "automated_high": 1.56,
+          "factors": {
+            "severity": 0.55,
+            "magnitude": 0.5,
+            "reach": 0.0,
+            "refactoring_impact": 0.6
+          },
+          "explanation": "MagicNumber at src/main.c:22 sits 50% past its detection threshold and spans 0% of the file; Replace Magic Number with Symbolic Constant has medium impact on that class of problem."
+        },
+        "risk": {
+          "score": 0.27,
+          "band": "low",
+          "drivers": [
+            "no test file covers this source file"
+          ]
+        },
+        "effort_minutes": 5,
+        "blast_radius_files": 1,
+        "validation": [
+          "syntax",
+          "structural"
+        ]
+      },
+      "if_deferred": {
+        "carried_points": 1.15,
+        "interest_per_quarter": 1.07,
+        "change_pressure": "low",
+        "churn_commits": 1,
+        "churn_window_days": 90,
+        "explanation": "Skipping this leaves 1.15 quality points on the table. The file was edited 1 time in 90 days \u2014 deferring is cheap.",
+        "churn_known": true
+      },
+      "headline": "Fixing this recovers ~1.15 quality points at low risk (~5 min review). Skipping it carries 1.15 points forward at low change pressure."
+    }
+  ],
+  "expected": {
+    "": {
+      "selected_count": 0,
+      "executable_count": 0,
+      "advisory_count": 0,
+      "skipped_count": 4,
+      "quality_before": 73.2,
+      "quality_projected": 73.2,
+      "quality_ceiling": 81.4,
+      "captured_points": 0,
+      "ceiling_points": 8.11,
+      "capture_rate": 0.0,
+      "forgone_points": 15.4,
+      "quarterly_interest": 21.26,
+      "effort_minutes": 0,
+      "max_risk": 0.0,
+      "mean_risk": 0.0,
+      "error_band": 0.35,
+      "warnings": [
+        {
+          "level": "info",
+          "message": "1 skipped smell(s) sit in files the team edits frequently \u2014 the most expensive kind to defer."
+        }
+      ]
+    },
+    "a": {
+      "selected_count": 1,
+      "executable_count": 1,
+      "advisory_count": 0,
+      "skipped_count": 3,
+      "quality_before": 73.2,
+      "quality_projected": 79.6,
+      "quality_ceiling": 81.4,
+      "captured_points": 6.38,
+      "ceiling_points": 8.11,
+      "capture_rate": 0.787,
+      "forgone_points": 9.02,
+      "quarterly_interest": 12.08,
+      "effort_minutes": 12,
+      "max_risk": 0.27,
+      "mean_risk": 0.27,
+      "error_band": 0.35,
+      "warnings": [
+        {
+          "level": "info",
+          "message": "1 skipped smell(s) sit in files the team edits frequently \u2014 the most expensive kind to defer."
+        }
+      ]
+    },
+    "b": {
+      "selected_count": 1,
+      "executable_count": 0,
+      "advisory_count": 1,
+      "skipped_count": 3,
+      "quality_before": 73.2,
+      "quality_projected": 73.2,
+      "quality_ceiling": 81.4,
+      "captured_points": 0.0,
+      "ceiling_points": 8.11,
+      "capture_rate": 0.0,
+      "forgone_points": 8.11,
+      "quarterly_interest": 10.77,
+      "effort_minutes": 25,
+      "max_risk": 0.0,
+      "mean_risk": 0.0,
+      "error_band": 0.35,
+      "warnings": [
+        {
+          "level": "error",
+          "message": "All 1 selected smells are advisory-only. This run will produce no code changes."
+        },
+        {
+          "level": "info",
+          "message": "1 skipped smell(s) sit in files the team edits frequently \u2014 the most expensive kind to defer."
+        }
+      ]
+    },
+    "a,c": {
+      "selected_count": 2,
+      "executable_count": 2,
+      "advisory_count": 0,
+      "skipped_count": 2,
+      "quality_before": 73.2,
+      "quality_projected": 80.2,
+      "quality_ceiling": 81.4,
+      "captured_points": 6.96,
+      "ceiling_points": 8.11,
+      "capture_rate": 0.858,
+      "forgone_points": 8.44,
+      "quarterly_interest": 11.56,
+      "effort_minutes": 16,
+      "max_risk": 0.27,
+      "mean_risk": 0.27,
+      "error_band": 0.35,
+      "warnings": []
+    },
+    "a,b,c,d": {
+      "selected_count": 4,
+      "executable_count": 3,
+      "advisory_count": 1,
+      "skipped_count": 0,
+      "quality_before": 73.2,
+      "quality_projected": 81.4,
+      "quality_ceiling": 81.4,
+      "captured_points": 8.11,
+      "ceiling_points": 8.11,
+      "capture_rate": 1.0,
+      "forgone_points": 0,
+      "quarterly_interest": 0,
+      "effort_minutes": 46,
+      "max_risk": 0.27,
+      "mean_risk": 0.27,
+      "error_band": 0.35,
+      "warnings": [
+        {
+          "level": "warning",
+          "message": "1 of your selections have no automatic fix and will come back as no-ops. They stay in the report as findings."
+        }
+      ]
+    }
+  }
+}

@@ -8,6 +8,7 @@
     "build": "vite build",
     "lint": "eslint .",
     "test:diwo": "node src/pages/diwo/utils/smellLines.test.mjs",
+    "test:impact": "node src/pages/diwo/utils/impactSummary.test.mjs",
     "preview": "vite preview"
   },
   "dependencies": {

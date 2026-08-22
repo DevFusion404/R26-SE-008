@@ -66,6 +66,20 @@ def init_db(app):
             timestamp   TEXT NOT NULL
         );
 
+        -- Per-smell Selection Impact Records (domain/impact_model.py).
+        -- Keyed by model_version so records from different model revisions stay
+        -- distinguishable rather than overwriting each other - that is what
+        -- makes a later before/after comparison of model accuracy possible.
+        CREATE TABLE IF NOT EXISTS smell_impacts (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            workflow_id   TEXT NOT NULL,
+            smell_id      TEXT NOT NULL,
+            model_version TEXT NOT NULL,
+            record_json   TEXT NOT NULL,
+            computed_at   TEXT NOT NULL,
+            UNIQUE(workflow_id, smell_id, model_version)
+        );
+
         CREATE TABLE IF NOT EXISTS feedback_entries (
             id                  INTEGER PRIMARY KEY AUTOINCREMENT,
             workflow_id         TEXT NOT NULL,
