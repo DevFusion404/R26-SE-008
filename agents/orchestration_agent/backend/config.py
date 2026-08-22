@@ -14,10 +14,10 @@ own entry point rather than assumed:
     SCTVA  http://localhost:8002   agents/transformation_agent/.../app.py (SCTVA_PORT, default 8002)
     DIWO   http://localhost:5001   this backend
 
-Values are read from the process environment only — the same source the
-clients used before this module existed. A .env file is *not* auto-loaded
-(python-dotenv is not a dependency), so exporting the variables, or setting
-them in the run configuration, is what takes effect. See .env.example.
+Values are read from the process environment only. A .env file is *not*
+auto-loaded, even though python-dotenv is now in requirements.txt — nothing
+calls load_dotenv(). Exporting the variables, or setting them in the run
+configuration, is what takes effect. See .env.example.
 """
 
 import os
@@ -77,6 +77,45 @@ def archives_dir() -> Path:
     """Where per-workflow refactored-source ZIPs are kept."""
     ARCHIVES_DIR.mkdir(parents=True, exist_ok=True)
     return ARCHIVES_DIR
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Database
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# NOT YET CONSUMED. db/database.py still opens SQLite directly, so setting
+# DATABASE_PROVIDER=supabase changes nothing today — the values are declared
+# here so there is one place to read them from when the persistence layer is
+# ported, and so nobody has to guess the variable names in the meantime.
+#
+# Porting needs, at minimum:
+#   * db/database.py        sqlite3.connect -> a SQLAlchemy engine / psycopg pool
+#   * the schema DDL        INTEGER PRIMARY KEY AUTOINCREMENT -> GENERATED AS IDENTITY
+#   * the migrations        PRAGMA table_info -> information_schema
+#   * workflow_repository   "?" placeholders -> "%s", and
+#                           INSERT OR REPLACE -> INSERT ... ON CONFLICT DO UPDATE
+
+#: "sqlite" (the default, what actually runs) or "supabase" / "postgres".
+DATABASE_PROVIDER = os.environ.get("DATABASE_PROVIDER", "sqlite").strip().lower()
+
+#: Full Postgres DSN. Supabase gives you this under Project Settings ->
+#: Database -> Connection string. It contains the password, so it belongs in
+#: .env and never in .env.example.
+DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
+
+#: "session" (port 5432, supports prepared statements) or "transaction"
+#: (port 6543, does not). psycopg prepares statements by default, so a
+#: transaction-mode pooler needs prepare_threshold=None on the connection.
+DB_POOL_MODE = os.environ.get("DB_POOL_MODE", "session").strip().lower()
+
+
+def uses_postgres() -> bool:
+    """True when the backend has been pointed at a Postgres/Supabase database.
+
+    Nothing branches on this yet; it exists so the port has an obvious switch
+    and so a misconfigured .env can be reported instead of silently ignored.
+    """
+    return DATABASE_PROVIDER in ("supabase", "postgres", "postgresql") and bool(DATABASE_URL)
 
 
 #: Remote repositories are cloned here, not into a temp dir: GitHub Desktop has

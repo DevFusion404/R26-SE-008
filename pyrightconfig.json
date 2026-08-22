@@ -14,6 +14,13 @@
       "extraPaths": ["agents/orchestration_agent/backend"]
     },
     {
+      "root": "agents/orchestration_agent",
+      "extraPaths": [
+        "agents/orchestration_agent/backend",
+        "agents/orchestration_agent"
+      ]
+    },
+    {
       "root": "agents/cuqa_agent",
       "extraPaths": ["agents/cuqa_agent/src", "agents/cuqa_agent"]
     },

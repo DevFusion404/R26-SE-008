@@ -1,0 +1,16 @@
+# ============================================================
+# R26-SE-008 — Test / Development Requirements
+# DIWO Orchestration Agent Test Suite
+# ============================================================
+
+# Core test framework
+pytest>=7.4.0
+pytest-cov>=4.1.0
+
+# All production dependencies are inherited from backend/requirements.txt
+# Install both with:
+#   pip install -r backend/requirements.txt -r requirements-test.txt
+#
+# The suite needs no HTTP client library: Flask ships its own test client,
+# and every call to CUQA / RDP / SCTVA is stubbed at the clients/ boundary
+# so the tests run with no agent processes and no network.
