@@ -43,6 +43,8 @@ carries that caveat forward so the UI can be honest about it, and it is the
 main reason the static tier is banded at ±35% rather than presented as exact.
 """
 
+from typing import Optional
+
 from domain.plan_normalizer import REFACTORING_MAP
 from domain.sctva_mapper import StepMappingError, UNSUPPORTED_REFACTORINGS, map_step
 
@@ -108,7 +110,7 @@ ADVISORY_REASON = {
 _action_cache = {}
 
 
-def refactoring_action(refactoring: str):
+def refactoring_action(refactoring: Optional[str]):
     """The SCTVA action map_step() would emit for this refactoring, or None.
 
     Derived by running the real mapper, then cached — the answer depends only

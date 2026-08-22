@@ -27,8 +27,17 @@ from db.workflow_repository import now_iso
 
 
 def archive_path(wf_id: str) -> Path:
-    """One archive per workflow; a new accept overwrites the previous one."""
-    return archives_dir() / f"{wf_id}.zip"
+    """One archive per workflow; a new accept overwrites the previous one.
+
+    The id is sanitised even though every caller passes a server-generated
+    `wf_<uuid>`: this function turns a caller-supplied string into a
+    filesystem path, and a helper that is safe only because of where it
+    happens to be called from is one refactor away from not being. Traversal
+    segments are stripped and the result is flattened to a single name, so the
+    archive can only ever land inside archives_dir().
+    """
+    safe = safe_archive_path(wf_id, "workflow").replace("/", "_")
+    return archives_dir() / f"{safe}.zip"
 
 
 def safe_archive_path(value, fallback: str = "file") -> str:

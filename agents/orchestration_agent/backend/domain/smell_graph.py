@@ -26,6 +26,8 @@ Pure: takes the flattened smell list from cuqa_report_to_smells(), returns
 edges. No I/O, no Flask, no database.
 """
 
+from typing import Optional
+
 CONTAINS = "contains"
 OVERLAPS = "overlaps"
 CLONE_OF = "clone_of"
@@ -58,7 +60,7 @@ def _span(smell):
     return lines[0] or 0, lines[1] or 0
 
 
-def build_edges(smells: list) -> list:
+def build_edges(smells: Optional[list]) -> list:
     """All pairwise relationships worth telling the developer about."""
     edges = []
 
@@ -133,6 +135,12 @@ def selection_notes(edges: list, selected_ids) -> list:
             seen.add(key)
             notes.append({"level": level, "smell_ids": list(ids), "message": message})
 
+    # Containment notes are collapsed per container. Selecting three methods
+    # inside one unselected class is ONE fact about that class, not three
+    # identical sentences — repeating it adds no information and buries the
+    # notes that differ.
+    unselected_containers = {}
+
     for edge in edges or []:
         a_in = edge["from"] in selected
         b_in = edge["to"] in selected
@@ -141,13 +149,18 @@ def selection_notes(edges: list, selected_ids) -> list:
             add("warning", [edge["from"], edge["to"]], f"Ordering conflict. {edge['note']}")
 
         elif edge["type"] == CONTAINS and b_in and not a_in:
-            add("info", [edge["from"], edge["to"]],
-                "The enclosing class-level smell is not selected — the container "
-                "stays flagged after this run.")
+            unselected_containers.setdefault(edge["from"], []).append(edge["to"])
 
         elif edge["type"] == CLONE_OF and (a_in != b_in):
             add("warning", [edge["from"], edge["to"]],
                 "Only one clone of this block is selected. Duplication will not "
                 "drop until all clones are fixed.")
+
+    for container, members in unselected_containers.items():
+        count = len(members)
+        add("info", [container, *members],
+            f"{count} selected smell{'s' if count > 1 else ''} "
+            f"{'sit' if count > 1 else 'sits'} inside a class-level smell that is "
+            "not selected — the container stays flagged after this run.")
 
     return notes
