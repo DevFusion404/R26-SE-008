@@ -17,6 +17,7 @@ from ..constants import (
     ACTION_EXTRACT_METHOD,
     ACTION_INTRODUCE_CONSTANT,
     ACTION_NORMALIZE_MULTILINE_STATEMENT,
+    ACTION_NARROW_EXCEPTION_HANDLER,
     ACTION_REMOVE_DEAD_CODE,
     ACTION_REPLACE_UNSAFE_FUNCTION,
 )
@@ -58,12 +59,25 @@ class LocalRefactorDetector:
 
         actions: list[RefactoringAction] = []
         seen = self._existing_action_keys(existing_actions)
+        unscoped_plan_lines = {
+            (action.action_type, action.parameters.get("source_line"))
+            for action in existing_actions
+            if action.parameters.get("source_line")
+            and not str(
+                action.parameters.get("source_file")
+                or action.parameters.get("file")
+                or ""
+            ).strip()
+        }
 
         def add(action: RefactoringAction) -> None:
             if len(actions) >= self.MAX_ACTIONS_PER_FILE:
                 return
             key = self._action_key(action)
-            if key in seen:
+            if key in seen or (
+                action.action_type,
+                action.parameters.get("source_line"),
+            ) in unscoped_plan_lines:
                 return
             seen.add(key)
             actions.append(action)
@@ -82,6 +96,14 @@ class LocalRefactorDetector:
             for action in self._detect_c_unsafe_function_calls(file_name, source_code):
                 add(action)
 
+        # Broad exception handlers are an exception-handling smell, not dead
+        # code.  Only emit an action when SCTVA can select a concrete narrow
+        # type from an explicit throw/raise in the guarded block.  A bare
+        # Python ``except:`` is the one safe, well-defined special case: it is
+        # narrowed to ``Exception`` so control-flow exceptions are not hidden.
+        for action in self._detect_exception_handler_smells(language, file_name, source_code):
+            add(action)
+
         for action in self._detect_dead_code(language, file_name, source_code):
             add(action)
 
@@ -95,6 +117,164 @@ class LocalRefactorDetector:
             add(action)
 
         return actions
+
+    def _detect_exception_handler_smells(
+        self,
+        language: str,
+        file_name: str,
+        source_code: str,
+    ) -> Iterable[RefactoringAction]:
+        if language == "python":
+            yield from self._detect_python_broad_exception_handlers(file_name, source_code)
+        elif language == "java":
+            yield from self._detect_java_broad_exception_handlers(file_name, source_code)
+
+    def _detect_python_broad_exception_handlers(
+        self,
+        file_name: str,
+        source_code: str,
+    ) -> Iterable[RefactoringAction]:
+        try:
+            tree = ast.parse(source_code)
+        except SyntaxError:
+            return
+
+        for try_node in (node for node in ast.walk(tree) if isinstance(node, ast.Try)):
+            raised_types = self._explicit_python_raised_types(try_node)
+            for handler in try_node.handlers:
+                original_type = self._python_exception_name(handler.type)
+                if handler.type is None:
+                    yield self._internal_action(
+                        ACTION_NARROW_EXCEPTION_HANDLER,
+                        file_name=file_name,
+                        reason="bare Python except handler",
+                        parameters={
+                            "source_line": int(getattr(handler, "lineno", 0) or 0),
+                            "original_exception_type": "",
+                            "target_exception_type": "Exception",
+                            "handler_name": str(handler.name or ""),
+                            "exception_smell": "bare_except",
+                        },
+                    )
+                    continue
+
+                # ``BaseException`` deliberately remains review-only: changing
+                # it may alter KeyboardInterrupt/SystemExit handling.  A plain
+                # Exception handler is narrowed only when the guarded body has
+                # one explicit exception type, which makes the edit auditable.
+                if original_type != "Exception" or len(raised_types) != 1:
+                    continue
+                target_type = next(iter(raised_types))
+                if target_type == "Exception":
+                    continue
+                yield self._internal_action(
+                    ACTION_NARROW_EXCEPTION_HANDLER,
+                    file_name=file_name,
+                    reason="overly broad Python Exception handler with explicit raised type",
+                    parameters={
+                        "source_line": int(getattr(handler, "lineno", 0) or 0),
+                        "original_exception_type": original_type,
+                        "target_exception_type": target_type,
+                        "handler_name": str(handler.name or ""),
+                        "exception_smell": "exception_overreach",
+                    },
+                )
+
+    @staticmethod
+    def _python_exception_name(expression: ast.AST | None) -> str:
+        if isinstance(expression, ast.Name):
+            return expression.id
+        if isinstance(expression, ast.Attribute):
+            return expression.attr
+        return ""
+
+    @classmethod
+    def _explicit_python_raised_types(cls, try_node: ast.Try) -> set[str]:
+        raised_types: set[str] = set()
+
+        def visit(node: ast.AST) -> None:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
+                # A nested definition is not executed by entering the outer
+                # try block, so its raises must not influence this handler.
+                return
+            if isinstance(node, ast.Raise) and node.exc is not None:
+                expression = node.exc.func if isinstance(node.exc, ast.Call) else node.exc
+                name = cls._python_exception_name(expression)
+                if name and name not in {"Exception", "BaseException"}:
+                    raised_types.add(name)
+            for child in ast.iter_child_nodes(node):
+                visit(child)
+
+        for statement in try_node.body:
+            visit(statement)
+        return raised_types
+
+    def _detect_java_broad_exception_handlers(
+        self,
+        file_name: str,
+        source_code: str,
+    ) -> Iterable[RefactoringAction]:
+        masked = self._mask_c_family_comments_and_strings(source_code)
+        catch_re = re.compile(
+            r"\bcatch\s*\(\s*(?:final\s+)?(?P<type>Exception|Throwable)\s+"
+            r"(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*\)"
+        )
+        for match in catch_re.finditer(masked):
+            raised_types = self._explicit_java_raised_types(masked, match.start())
+            if len(raised_types) != 1:
+                continue
+            target_type = next(iter(raised_types))
+            if target_type in {"Exception", "Throwable"}:
+                continue
+            yield self._internal_action(
+                ACTION_NARROW_EXCEPTION_HANDLER,
+                file_name=file_name,
+                reason="overly broad Java catch handler with explicit thrown type",
+                parameters={
+                    "source_line": self._line_of(masked, match.start()),
+                    "original_exception_type": match.group("type"),
+                    "target_exception_type": target_type,
+                    "handler_name": match.group("name"),
+                    "exception_smell": "exception_overreach",
+                },
+            )
+
+    @staticmethod
+    def _explicit_java_raised_types(masked_source: str, catch_index: int) -> set[str]:
+        """Return direct ``throw new X`` types from the matching try body.
+
+        This intentionally avoids guessing exceptions from arbitrary method
+        calls, which would make a behavior-preserving transformation unsafe.
+        """
+
+        candidate_bodies: list[str] = []
+        for match in re.finditer(r"\btry\s*(?:\([^{}]*\)\s*)?\{", masked_source[:catch_index]):
+            body_start = match.end() - 1
+            body_end = LocalRefactorDetector._find_matching_brace(masked_source, body_start)
+            if body_end is not None and body_end < catch_index:
+                candidate_bodies.append(masked_source[body_start + 1:body_end])
+        if not candidate_bodies:
+            return set()
+        body = candidate_bodies[-1]
+        return {
+            thrown.group(1)
+            for thrown in re.finditer(
+                r"\bthrow\s+new\s+([A-Za-z_][A-Za-z0-9_.]*)\s*\(", body
+            )
+        }
+
+    @staticmethod
+    def _find_matching_brace(source_code: str, opening_index: int) -> int | None:
+        depth = 0
+        for index in range(opening_index, len(source_code)):
+            character = source_code[index]
+            if character == "{":
+                depth += 1
+            elif character == "}":
+                depth -= 1
+                if depth == 0:
+                    return index
+        return None
 
     @classmethod
     def _existing_action_keys(
@@ -259,17 +439,65 @@ class LocalRefactorDetector:
         except SyntaxError:
             return
 
+        emitted_spans: set[tuple[int, int]] = set()
+        parents = {
+            child: parent
+            for parent in ast.walk(tree)
+            for child in ast.iter_child_nodes(parent)
+        }
+        false_branch_nodes: set[ast.AST] = set()
+
+        # Constant-false branches are safe only when the condition is made
+        # entirely from literals.  This deliberately does not evaluate names,
+        # calls, attributes, or arbitrary Python expressions.
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.If) or node.orelse:
+                continue
+            if not self._python_constant_false(node.test):
+                continue
+            span = self._python_statement_span(node)
+            emitted_spans.add(span)
+            false_branch_nodes.add(node)
+            yield self._internal_action(
+                ACTION_REMOVE_DEAD_CODE,
+                file_name=file_name,
+                reason="statically unreachable Python if False branch",
+                parameters={
+                    "source_line": getattr(node, "lineno", None),
+                    "dead_code_kind": "constant_false_branch",
+                    "target_statement_fingerprint": ast.dump(
+                        node,
+                        include_attributes=False,
+                    ),
+                },
+            )
+
         for suite in self._python_statement_suites(tree):
             terminated = False
             for statement in suite:
+                if self._has_false_branch_ancestor(statement, parents, false_branch_nodes):
+                    continue
                 if terminated:
+                    span = self._python_statement_span(statement)
+                    if span in emitted_spans:
+                        continue
+                    emitted_spans.add(span)
                     yield self._internal_action(
                         ACTION_REMOVE_DEAD_CODE,
                         file_name=file_name,
                         reason="unreachable Python statement after a terminator",
-                        parameters={"source_line": getattr(statement, "lineno", None)},
+                        parameters={
+                            "source_line": getattr(statement, "lineno", None),
+                            # Earlier plan actions can insert lines before this
+                            # local action runs. Preserve an AST anchor so SCTVA
+                            # can relocate this exact proven-dead statement.
+                            "dead_code_kind": "unreachable_after_terminator",
+                            "target_statement_fingerprint": ast.dump(
+                                statement,
+                                include_attributes=False,
+                            ),
+                        },
                     )
-                    break
                 if isinstance(statement, (ast.Return, ast.Raise, ast.Break, ast.Continue)):
                     terminated = True
 
@@ -280,14 +508,90 @@ class LocalRefactorDetector:
                 if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)
             }
             for statement in ast.walk(function):
+                if self._has_false_branch_ancestor(statement, parents, false_branch_nodes):
+                    continue
                 names = self._python_literal_assignment_names(statement)
                 if names and not any(name in loaded for name in names):
                     yield self._internal_action(
                         ACTION_REMOVE_DEAD_CODE,
                         file_name=file_name,
                         reason="unused side-effect-free Python local assignment",
-                        parameters={"source_line": getattr(statement, "lineno", None)},
+                        parameters={
+                            "source_line": getattr(statement, "lineno", None),
+                            "dead_code_kind": "unused_literal_assignment",
+                            "target_statement_fingerprint": ast.dump(
+                                statement,
+                                include_attributes=False,
+                            ),
+                        },
                     )
+
+    @staticmethod
+    def _python_statement_span(node: ast.stmt) -> tuple[int, int]:
+        start = int(getattr(node, "lineno", 0) or 0)
+        return start, int(getattr(node, "end_lineno", start) or start)
+
+    @staticmethod
+    def _has_false_branch_ancestor(
+        node: ast.AST,
+        parents: dict[ast.AST, ast.AST],
+        false_branch_nodes: set[ast.AST],
+    ) -> bool:
+        current = parents.get(node)
+        while current is not None:
+            if current in false_branch_nodes:
+                return True
+            current = parents.get(current)
+        return False
+
+    @classmethod
+    def _python_constant_false(cls, expression: ast.AST) -> bool:
+        """Evaluate only literal-only conditions without executing code."""
+
+        if isinstance(expression, ast.Constant):
+            return not bool(expression.value)
+        if isinstance(expression, ast.UnaryOp) and isinstance(expression.op, ast.Not):
+            value = cls._python_static_boolean(expression.operand)
+            return value is False
+        if isinstance(expression, ast.BoolOp):
+            values = [cls._python_static_boolean(value) for value in expression.values]
+            if any(value is None for value in values):
+                return False
+            return (all(values) if isinstance(expression.op, ast.And) else any(values)) is False
+        if isinstance(expression, ast.Compare) and len(expression.ops) == 1 and len(expression.comparators) == 1:
+            try:
+                left = ast.literal_eval(expression.left)
+                right = ast.literal_eval(expression.comparators[0])
+                operator = expression.ops[0]
+                if isinstance(operator, ast.Eq):
+                    return (left == right) is False
+                if isinstance(operator, ast.NotEq):
+                    return (left != right) is False
+                if isinstance(operator, ast.Lt):
+                    return (left < right) is False
+                if isinstance(operator, ast.LtE):
+                    return (left <= right) is False
+                if isinstance(operator, ast.Gt):
+                    return (left > right) is False
+                if isinstance(operator, ast.GtE):
+                    return (left >= right) is False
+            except (TypeError, ValueError, SyntaxError, MemoryError, RecursionError):
+                return False
+        return False
+
+    @classmethod
+    def _python_static_boolean(cls, expression: ast.AST) -> bool | None:
+        if isinstance(expression, ast.Constant):
+            return bool(expression.value)
+        if isinstance(expression, ast.UnaryOp) and isinstance(expression.op, ast.Not):
+            value = cls._python_static_boolean(expression.operand)
+            return None if value is None else not value
+        if isinstance(expression, ast.BoolOp):
+            values = [cls._python_static_boolean(value) for value in expression.values]
+            if any(value is None for value in values):
+                return None
+            return all(values) if isinstance(expression.op, ast.And) else any(values)
+        return None
 
     @staticmethod
     def _python_statement_suites(tree: ast.AST) -> Iterable[list[ast.stmt]]:
@@ -385,19 +689,20 @@ class LocalRefactorDetector:
             start_line = getattr(node, "lineno", None)
             if not start_line or not end_line or end_line - start_line + 1 < self.LONG_METHOD_MIN_LINES:
                 continue
-            returns = [item for item in ast.walk(node) if isinstance(item, ast.Return)]
-            if not returns:
+            body = list(node.body)
+            if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant) and isinstance(body[0].value.value, str):
+                body = body[1:]
+            if len(body) < 3:
                 continue
-            return_line = max(getattr(item, "lineno", 0) for item in returns)
             yield self._internal_action(
                 ACTION_EXTRACT_METHOD,
                 file_name=file_name,
                 reason=f"long Python function '{node.name}'",
                 parameters={
                     "method": node.name,
-                    "new_method_name": f"extracted_{node.name}_return",
-                    "start_line": return_line,
-                    "end_line": return_line,
+                    "new_method_name": f"extracted_{node.name}_responsibility",
+                    "start_line": start_line,
+                    "end_line": end_line,
                 },
             )
 
@@ -420,25 +725,16 @@ class LocalRefactorDetector:
             end_line = self._line_of(source_code, end_idx)
             if end_line - start_line + 1 < self.LONG_METHOD_MIN_LINES:
                 continue
-            method_source = source_code[match.start():end_idx]
-            return_lines = [
-                start_line + offset
-                for offset, line in enumerate(method_source.splitlines())
-                if line.strip().startswith("return ")
-            ]
-            if not return_lines:
-                continue
             method_name = match.group("name")
-            return_line = max(return_lines)
             yield self._internal_action(
                 ACTION_EXTRACT_METHOD,
                 file_name=file_name,
                 reason=f"long Java method '{method_name}'",
                 parameters={
                     "method": method_name,
-                    "new_method_name": f"extracted_{method_name}_return",
-                    "start_line": return_line,
-                    "end_line": return_line,
+                    "new_method_name": f"extracted_{method_name}_responsibility",
+                    "start_line": start_line,
+                    "end_line": end_line,
                 },
             )
 
@@ -460,25 +756,16 @@ class LocalRefactorDetector:
             end_line = self._line_of(source_code, end_idx)
             if end_line - start_line + 1 < self.LONG_METHOD_MIN_LINES:
                 continue
-            function_source = source_code[match.start():end_idx]
-            return_lines = [
-                start_line + offset
-                for offset, line in enumerate(function_source.splitlines())
-                if line.strip().startswith("return ")
-            ]
-            if not return_lines:
-                continue
             function_name = match.group("name")
-            return_line = max(return_lines)
             yield self._internal_action(
                 ACTION_EXTRACT_METHOD,
                 file_name=file_name,
                 reason=f"long C function '{function_name}'",
                 parameters={
                     "method": function_name,
-                    "new_method_name": f"extracted_{function_name}_return",
-                    "start_line": return_line,
-                    "end_line": return_line,
+                    "new_method_name": f"extracted_{function_name}_responsibility",
+                    "start_line": start_line,
+                    "end_line": end_line,
                 },
             )
 
