@@ -275,6 +275,17 @@ def index():
     return render_template("index.html")
 
 
+@app.route("/health", methods=["GET"])
+@app.route("/api/health", methods=["GET"])
+def health():
+    """Simple readiness/liveness endpoint for Azure Container Apps and monitoring."""
+    return jsonify({
+        "status": "ok",
+        "service": "rdp-agent",
+        "message": "RDP agent is healthy"
+    }), 200
+
+
 @app.route("/generate", methods=["POST"])
 def generate():
     """Accept a JSON quality report and return the refactoring plan + trace."""
