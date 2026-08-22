@@ -401,3 +401,146 @@ def parse_c_source(source: str, filename: str = "untitled.c") -> dict:
         "ast": ast_node,
         "parser": "regex-fallback",
     }
+
+
+def _extract_c_identifier(node) -> Optional[str]:
+    """Extract variable identifier from a tree-sitter node."""
+    if node.type == "identifier":
+        return node.text.decode("utf-8", errors="replace")
+    elif node.type == "field_expression":
+        text = node.text.decode("utf-8", errors="replace")
+        parts = re.split(r"\.|->", text)
+        return parts[-1].strip() if parts else text
+    elif node.type == "subscript_expression":
+        for child in node.children:
+            id_name = _extract_c_identifier(child)
+            if id_name:
+                return id_name
+    for child in node.children:
+        if child.is_named:
+            id_name = _extract_c_identifier(child)
+            if id_name:
+                return id_name
+    return None
+
+
+def analyze_c_magic_numbers(source: str, filename: str = "untitled.c") -> list[dict]:
+    """Detect magic numbers in C code using tree-sitter AST or regex fallback,
+    extracting variable context if compared in a relational expression.
+    """
+    SAFE_NUMBERS = {"0", "1", "-1", "2", "0.0", "1.0", "0f", "1f", "0L", "1L"}
+    smells: list[dict] = []
+
+    clean_no_comments = _strip_comments(source)
+    clean = _strip_string_literals(clean_no_comments)
+
+    if _TREE_SITTER_AVAILABLE:
+        try:
+            source_bytes = source.encode("utf-8", errors="replace")
+            tree = _TS_PARSER.parse(source_bytes)
+            root = tree.root_node
+
+            def _find_literals(n):
+                literals = []
+                if n.type in ("number_literal", "numeric_literal"):
+                    literals.append(n)
+                for child in n.children:
+                    literals.extend(_find_literals(child))
+                return literals
+
+            num_nodes = _find_literals(root)
+            relational_ops = {"==", "!=", "<", ">", "<=", ">="}
+
+            for node in num_nodes:
+                val = node.text.decode("utf-8", errors="replace").strip()
+                if val in SAFE_NUMBERS:
+                    continue
+
+                line_no = node.start_point[0] + 1
+
+                parent = node.parent
+                while parent and parent.type in ("parenthesized_expression", "cast_expression", "argument_list"):
+                    parent = parent.parent
+
+                var_context = None
+                if parent and parent.type == "binary_expression":
+                    op_node = None
+                    for child in parent.children:
+                        ch_text = child.text.decode("utf-8", errors="replace")
+                        if ch_text in relational_ops:
+                            op_node = child
+                            break
+
+                    if op_node:
+                        for child in parent.children:
+                            if child != op_node and not (child.start_byte <= node.start_byte and node.end_byte <= child.end_byte):
+                                var_context = _extract_c_identifier(child)
+                                if var_context:
+                                    break
+
+                if var_context:
+                    msg = f"Magic number {val} compared to variable '{var_context}'"
+                    smells.append({
+                        "type": "MagicNumber",
+                        "message": msg,
+                        "details": msg,
+                        "variable_context": var_context,
+                        "line": line_no,
+                        "severity": "low",
+                        "entity": filename,
+                    })
+                else:
+                    msg = f"Magic number {val} detected"
+                    smells.append({
+                        "type": "MagicNumber",
+                        "message": msg,
+                        "details": msg,
+                        "line": line_no,
+                        "severity": "low",
+                        "entity": filename,
+                    })
+            return smells
+        except Exception:
+            pass
+
+    COMP_LEFT_RE = re.compile(r'\b([A-Za-z_]\w*)\s*(?:==|!=|<=|>=|<|>)\s*(-?\d+\.?\d*[fFdDlL]?)\b')
+    COMP_RIGHT_RE = re.compile(r'\b(-?\d+\.?\d*[fFdDlL]?)\s*(?:==|!=|<=|>=|<|>)\s*([A-Za-z_]\w*)\b')
+
+    for m in _NUMERIC_LIT_RE.finditer(clean):
+        val = m.group(0).strip()
+        if val not in SAFE_NUMBERS:
+            line_no = clean[: m.start()].count("\n") + 1
+            split_lines = clean.splitlines()
+            line_str = split_lines[line_no - 1] if line_no <= len(split_lines) else ""
+
+            var_context = None
+            m_left = COMP_LEFT_RE.search(line_str)
+            m_right = COMP_RIGHT_RE.search(line_str)
+            if m_left and m_left.group(2).strip() == val:
+                var_context = m_left.group(1)
+            elif m_right and m_right.group(1).strip() == val:
+                var_context = m_right.group(2)
+
+            if var_context:
+                msg = f"Magic number {val} compared to variable '{var_context}'"
+                smells.append({
+                    "type": "MagicNumber",
+                    "message": msg,
+                    "details": msg,
+                    "variable_context": var_context,
+                    "line": line_no,
+                    "severity": "low",
+                    "entity": filename,
+                })
+            else:
+                msg = f"Magic number {val} detected"
+                smells.append({
+                    "type": "MagicNumber",
+                    "message": msg,
+                    "details": msg,
+                    "line": line_no,
+                    "severity": "low",
+                    "entity": filename,
+                })
+    return smells
+

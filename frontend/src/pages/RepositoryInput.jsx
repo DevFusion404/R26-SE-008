@@ -10,8 +10,8 @@
  */
 
 import { useState, useRef, useEffect } from 'react';
+import CUQAAgentService from '../services/cuqaAgentService';
 
-const API = 'http://localhost:8080';
 const HISTORY_KEY = 'cuqa_analysis_history';
 const MAX_HISTORY  = 20;
 
@@ -168,14 +168,8 @@ export default function RepositoryInput({ onLoaded }) {
     if (file.size > 500 * 1024 * 1024) { setError('ZIP file size exceeds the 500MB limit.'); return; }
     setError(null); setSuccess(null); setDetectedLangs(null); setLoading(true);
 
-    const form = new FormData();
-    form.append('file', file);
-    form.append('config', JSON.stringify(buildConfig()));
-
     try {
-      const res  = await fetch(`${API}/api/upload-zip`, { method: 'POST', body: form });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.detail || 'Upload failed.');
+      const data = await CUQAAgentService.uploadZip(file);
 
       // Store detected language info in state so we can display it
       const langInfo = {
@@ -199,16 +193,7 @@ export default function RepositoryInput({ onLoaded }) {
     setError(null); setSuccess(null); setDetectedLangs(null); setLoading(true);
 
     try {
-      const res  = await fetch(`${API}/api/github-repo`, {
-        method:  'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body:    JSON.stringify({
-          url: githubUrl.trim(),
-          config: buildConfig(),
-        }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.detail || 'Failed to load repo.');
+      const data = await CUQAAgentService.loadGithubRepo(githubUrl);
 
       // Store detected language info in state so we can display it
       const langInfo = {

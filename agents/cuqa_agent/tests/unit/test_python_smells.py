@@ -153,7 +153,17 @@ class TestPythonSmells:
         assert len(s_magic) == 1
         assert s_magic[0]["severity"] == "low"
 
+    def test_magic_number_comparison_variable_context(self):
+        src_comp = "if student_marks > 50:\n    pass\n"
+        r_comp = generate_file_report(src_comp, "test.py")
+        s_comp = [s for s in r_comp["code_smells"] if s["type"] == "MagicNumber"]
+        assert len(s_comp) == 1
+        smell = s_comp[0]
+        assert smell.get("variable_context") == "student_marks"
+        assert "Magic number 50 compared to variable 'student_marks'" in smell["details"]
+
     # ── 11. BareExcept ────────────────────────────────────────────────────────
+
     def test_bare_except(self):
         src = "try:\n    x = 1\nexcept:\n    pass\n"
         r = generate_file_report(src, "test.py")

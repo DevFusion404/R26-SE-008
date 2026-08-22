@@ -8,8 +8,7 @@
  */
 
 import { useState, useEffect } from 'react';
-
-const API = 'http://localhost:8080';
+import CUQAAgentService from '../services/cuqaAgentService';
 
 // ── Colour mapping per node type ────────────────────────────────────────────
 
@@ -200,13 +199,7 @@ export default function ASTVisualization({ selectedFile, repoLoaded }) {
     setParsedData(null);
 
     try {
-      const res = await fetch(`${API}/api/parse-ast`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ file_path: filePath }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.detail || 'Failed to parse file.');
+      const data = await CUQAAgentService.parseAst(filePath);
       setParsedData(data);
     } catch (err) {
       setError(err.message);

@@ -25,6 +25,21 @@ const API_CONFIG = {
     timeout: 120000, // 2 minutes for analysis
   },
 
+  // === CUQA Agent (Code Understanding & Quality Assessment) ===
+  CUQA_AGENT: {
+    baseURL: import.meta.env.VITE_CUQA_API_URL || 'http://localhost:8080',
+    endpoints: {
+      health: '/api/health',
+      uploadZip: '/api/upload-zip',
+      githubRepo: '/api/github-repo',
+      projectStructure: '/api/project-structure',
+      parseAst: '/api/parse-ast',
+      qualityReport: '/api/quality-report',
+      files: '/api/files',
+    },
+    timeout: 120000, // 2 minutes for analysis
+  },
+
   // === Safe Transformation Agent ===
   TRANSFORMATION_AGENT: {
     baseURL: import.meta.env.VITE_TRANSFORMATION_AGENT_API_URL || 'http://localhost:8002',

@@ -9,8 +9,7 @@
  */
 
 import { useState, useRef } from 'react';
-
-const API = 'http://localhost:8080';
+import CUQAAgentService from '../services/cuqaAgentService';
 
 export default function UploadPanel({ onLoaded }) {
   const [mode, setMode] = useState('zip');   // 'zip' | 'github'
@@ -36,13 +35,8 @@ export default function UploadPanel({ onLoaded }) {
     setSuccess(null);
     setLoading(true);
 
-    const form = new FormData();
-    form.append('file', file);
-
     try {
-      const res = await fetch(`${API}/api/upload-zip`, { method: 'POST', body: form });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.detail || 'Upload failed.');
+      const data = await CUQAAgentService.uploadZip(file);
       setSuccess(`✔ Loaded "${data.repo_name}" — ${data.files_found} source files found.`);
       onLoaded?.(data);
     } catch (err) {
@@ -63,13 +57,7 @@ export default function UploadPanel({ onLoaded }) {
     setLoading(true);
 
     try {
-      const res = await fetch(`${API}/api/github-repo`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url: githubUrl.trim() }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.detail || 'Failed to load repository.');
+      const data = await CUQAAgentService.loadGithubRepo(githubUrl);
       setSuccess(`✔ Loaded "${data.repo_name}" from GitHub — ${data.files_found} source files found.`);
       onLoaded?.(data);
     } catch (err) {
