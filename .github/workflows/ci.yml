@@ -49,11 +49,15 @@ jobs:
   deploy-to-azure:
     name: Deploy RDP agent to Azure Web App
     needs: build-and-push
-    if: ${{ secrets.AZURE_WEBAPP_NAME != '' && secrets.AZURE_WEBAPP_PUBLISH_PROFILE != '' }}
     runs-on: ubuntu-latest
 
     steps:
+      - name: Check Azure deployment secrets
+        if: ${{ secrets.AZURE_WEBAPP_NAME != '' && secrets.AZURE_WEBAPP_PUBLISH_PROFILE != '' }}
+        run: echo "Azure deployment credentials detected. Proceeding with deployment."
+
       - name: Deploy image to Azure Web App
+        if: ${{ secrets.AZURE_WEBAPP_NAME != '' && secrets.AZURE_WEBAPP_PUBLISH_PROFILE != '' }}
         uses: azure/webapps-deploy@v3
         with:
           app-name: ${{ secrets.AZURE_WEBAPP_NAME }}
