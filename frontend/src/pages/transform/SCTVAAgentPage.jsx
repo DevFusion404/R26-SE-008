@@ -339,7 +339,16 @@ async function buildBackendCompatiblePayload(payload) {
   const backendSupport = await readBackendSupport();
   const supportedActions = backendSupport?.actions || null;
   const supportedCapabilities = backendSupport?.capabilities || [];
-  const newActionTypes = ['extract_method', 'replace_unsafe_function', 'encapsulate_variable', 'normalize_multiline_statement'];
+  const newActionTypes = [
+    'extract_method',
+    'extract_class',
+    'extract_python_class',
+    'extract_java_class',
+    'extract_c_component',
+    'replace_unsafe_function',
+    'encapsulate_variable',
+    'normalize_multiline_statement',
+  ];
   const unsupportedActions = supportedActions
     ? newActionTypes.filter(actionType => payloadHasActionType(payload, actionType) && !supportedActions.includes(actionType))
     : [];
@@ -365,6 +374,10 @@ function unsupportedActionTypeFromError(error) {
   if (message.includes("remove_dead_code requires 'method'")) return 'line_based_remove_dead_code';
   if (!message.includes('unsupported action_type')) return '';
   if (message.includes('extract_method')) return 'extract_method';
+  if (message.includes('extract_python_class')) return 'extract_python_class';
+  if (message.includes('extract_java_class')) return 'extract_java_class';
+  if (message.includes('extract_c_component')) return 'extract_c_component';
+  if (message.includes('extract_class')) return 'extract_class';
   if (message.includes('replace_unsafe_function')) return 'replace_unsafe_function';
   if (message.includes('encapsulate_variable')) return 'encapsulate_variable';
   if (message.includes('normalize_multiline_statement')) return 'normalize_multiline_statement';
@@ -441,12 +454,38 @@ function attachSourceFileToAction(action, sourceItem) {
   const sourceFile = extractSourceFileFromPlanItem(sourceItem);
   if (!sourceFile) return action;
 
+  let actionType = action.action_type;
+  const normalizedSource = normalizePathForMatch(sourceFile);
+  if (actionType === 'extract_class') {
+    if (normalizedSource.endsWith('.java')) actionType = 'extract_java_class';
+    else if (normalizedSource.endsWith('.py')) actionType = 'extract_python_class';
+    else if (normalizedSource.endsWith('.c') || normalizedSource.endsWith('.h')) {
+      actionType = 'extract_c_component';
+    }
+  }
+  if (actionType === 'introduce_parameter_object') {
+    if (normalizedSource.endsWith('.java')) actionType = 'introduce_java_parameter_object';
+    else if (normalizedSource.endsWith('.py')) actionType = 'introduce_python_parameter_object';
+  }
+
+  const parameters = {
+    ...(action.parameters || {}),
+    source_file: action.parameters?.source_file || sourceFile,
+  };
+  if (
+    ['extract_class', 'extract_python_class', 'extract_java_class', 'extract_c_component'].includes(actionType)
+    && !parameters.source_class_origin
+  ) {
+    const sourceStem = pathBaseName(sourceFile).replace(/\.[^.]+$/, '');
+    if (String(parameters.source_class || '').trim().toLowerCase() === sourceStem.toLowerCase()) {
+      parameters.source_class_origin = 'file_stem_fallback';
+    }
+  }
+
   return {
     ...action,
-    parameters: {
-      ...(action.parameters || {}),
-      source_file: action.parameters?.source_file || sourceFile,
-    },
+    action_type: actionType,
+    parameters,
   };
 }
 
@@ -536,7 +575,33 @@ function normalizeStep(step) {
   }
 
   if (refactoring === 'extract class') {
-    return unsupportedSemanticAction(step, 'extract_class_requires_multi_file_creation');
+    const sourceFile = extractSourceFileFromPlanItem(step);
+    const explicitSourceClass = params.source_class || params.class_name || target.class || params.class;
+    const inferredSourceClass = pathBaseName(sourceFile).replace(/\.[^.]+$/, '');
+    const sourceClass = explicitSourceClass || inferredSourceClass;
+    const explicitNewClassName = params.new_class_name || params.extracted_class_name || params.destination_class;
+    const newClassName = explicitNewClassName || (sourceClass ? `${sourceClass}Helper` : '');
+    if (!sourceClass || !newClassName) return null;
+    return {
+      action_type: 'extract_class',
+      parameters: {
+        source_class: String(sourceClass),
+        new_class_name: sanitizeIdentifier(String(newClassName)),
+        source_class_origin: explicitSourceClass ? 'rdp_explicit' : 'file_stem_fallback',
+        new_class_name_origin: explicitNewClassName ? 'rdp_explicit' : 'generated',
+        methods_to_extract: Array.isArray(params.methods_to_extract) ? params.methods_to_extract.map(String) : [],
+        fields_to_extract: Array.isArray(params.fields_to_extract) ? params.fields_to_extract.map(String) : [],
+        required_public_methods: Array.isArray(params.required_public_methods) ? params.required_public_methods.map(String) : [],
+        required_public_fields: Array.isArray(params.required_public_fields) ? params.required_public_fields.map(String) : [],
+        preserve_public_api: params.preserve_public_api !== false,
+        delegation_strategy: params.delegation_strategy || 'wrapper',
+        target_file: params.destination_file || params.extracted_file || params.output_file || 'same_file',
+        smell: step.smell || step.smell_type || 'Large Class',
+      },
+      source_step_id: step.step_id ?? null,
+      source_refactoring: step.refactoring ?? null,
+      warnings: [],
+    };
   }
 
   if (refactoring === 'move method') {
@@ -548,7 +613,41 @@ function normalizeStep(step) {
   }
 
   if (refactoring === 'introduce parameter object') {
-    return unsupportedSemanticAction(step, 'introduce_parameter_object_requires_call_site_updates');
+    const sourceFile = extractSourceFileFromPlanItem(step);
+    const normalizedSource = normalizePathForMatch(sourceFile);
+    const methodName = target.method
+      || target.function
+      || params.method
+      || params.method_name
+      || params.function
+      || params.function_name;
+    const objectName = params.parameter_object_name
+      || params.new_class_name
+      || params.parameter_class_name;
+    if (!methodName || !objectName) return null;
+
+    let actionType = 'introduce_parameter_object';
+    if (normalizedSource.endsWith('.java')) actionType = 'introduce_java_parameter_object';
+    else if (normalizedSource.endsWith('.py')) actionType = 'introduce_python_parameter_object';
+
+    return {
+      action_type: actionType,
+      parameters: {
+        method: String(methodName),
+        parameter_object_name: sanitizeIdentifier(String(objectName)),
+        parameter_name: sanitizeIdentifier(String(params.parameter_name || 'params')),
+        source_class: String(target.class || params.source_class || params.class_name || ''),
+        source_class_origin: sourceFile
+          && String(target.class || params.source_class || params.class_name || '').trim().toLowerCase()
+            === pathBaseName(sourceFile).replace(/\.[^.]+$/, '').toLowerCase()
+          ? 'file_stem_fallback'
+          : 'rdp_explicit',
+        smell: step.smell || step.smell_type || 'Long Parameter List',
+      },
+      source_step_id: step.step_id ?? null,
+      source_refactoring: step.refactoring ?? null,
+      warnings: [],
+    };
   }
 
   if ([

@@ -32,20 +32,28 @@ def test_python_rename_symbol_changes_function_name():
     assert "def calculate" in transformed
 
 
-def test_python_extract_method_creates_nested_helper_for_return_block():
-    source = "def total(value):\n    tax = value * 0.1\n    return value + tax\n"
-    transformed, count = python_transformers.apply_extract_method(source, "total_core", 3, 3)
+def test_python_extract_method_creates_sibling_helper_with_data_flow():
+    source = (
+        "def total(value):\n"
+        "    subtotal = value + 10\n"
+        "    discount = subtotal * 0.1\n"
+        "    tax = subtotal * 0.2\n"
+        "    result = subtotal - discount + tax\n"
+        "    print(result)\n"
+        "    return result\n"
+    )
+    transformed, count = python_transformers.apply_extract_method(source, "total_core", 3, 5)
     assert count == 1
-    assert "def total_core()" in transformed
-    assert "return total_core()" in transformed
+    assert "\ndef total_core(" in transformed
+    assert "    def total_core(" not in transformed
+    assert "result = total_core(" in transformed
 
 
-def test_python_extract_method_handles_full_function_range():
+def test_python_extract_method_rejects_trivial_return_only_function():
     source = "def total(value):\n    tax = value * 0.1\n    return value + tax\n"
     transformed, count = python_transformers.apply_extract_method(source, "extracted_total", 1, 3)
-    assert count == 1
-    assert "def extracted_total()" in transformed
-    assert "return extracted_total()" in transformed
+    assert count == 0
+    assert transformed == source
 
 
 def test_python_remove_dead_code_rejects_live_assertion():
@@ -119,6 +127,26 @@ def test_java_extract_constant_does_not_replace_number_inside_longer_string():
     )
     assert count == 0
     assert transformed == source
+
+
+def test_java_explicit_numeric_constant_preserves_text_with_concatenation():
+    source = (
+        "class T {\n"
+        "    void announce() {\n"
+        "        System.out.println(\"Library closes at 5 PM today.\");\n"
+        "    }\n"
+        "}\n"
+    )
+    transformed, count = java_transformers.apply_extract_constant(
+        source,
+        5,
+        "CONSTANT_5",
+        source_line=3,
+    )
+
+    assert count == 1
+    assert "private static final int CONSTANT_5 = 5;" in transformed
+    assert '"Library closes at " + CONSTANT_5 + " PM today."' in transformed
 
 
 def test_java_extract_constant_handles_numeric_string_after_prior_constant_insertion():
@@ -214,52 +242,51 @@ def test_java_rename_symbol_ignores_strings_and_comments():
 
 
 def test_java_extract_method_passes_referenced_local_variables():
-    source = "public class T {\n    int value(int input) {\n        int total = input + 1;\n        return total;\n    }\n}\n"
-    transformed, count = java_transformers.apply_extract_method(source, "valueCore", 4, 4)
+    source = "public class T {\n    int value(int input) {\n        int subtotal = input + 1;\n        int tax = subtotal / 5;\n        int fee = subtotal / 10;\n        int total = subtotal + tax + fee;\n        System.out.println(total);\n        return total;\n    }\n}\n"
+    transformed, count = java_transformers.apply_extract_method(source, "valueCore", 3, 6)
     assert count == 1
-    assert "return valueCore(total);" in transformed
-    assert "private int valueCore(int total)" in transformed
+    assert "int total = valueCore(input);" in transformed
+    assert "private int valueCore(int input)" in transformed
 
 
-def test_java_extract_method_handles_full_method_range():
+def test_java_extract_method_rejects_trivial_full_method_wrapper():
     source = "public class T {\n    int value(int input) {\n        int total = input + 1;\n        return total;\n    }\n}\n"
     transformed, count = java_transformers.apply_extract_method(source, "extractedValue", 2, 5)
-    assert count == 1
-    assert "return extractedValue(input);" in transformed
-    assert "private int extractedValue(int input)" in transformed
+    assert count == 0
+    assert transformed == source
 
 
 def test_java_extract_method_uses_method_name_when_prior_edits_shift_lines():
     source = (
         "public class T {\n"
         "    int first(int a) {\n"
-        "        int x = a + 1;\n"
-        "        return x;\n"
+        "        int x = a + 1;\n        int y = x + 2;\n        int z = y + 3;\n"
+        "        int total = x + y + z;\n        System.out.println(total);\n        return total;\n"
         "    }\n"
         "\n"
         "    int second(int b) {\n"
-        "        int y = b + 2;\n"
-        "        return y;\n"
+        "        int x = b + 2;\n        int y = x + 3;\n        int z = y + 4;\n"
+        "        int total = x + y + z;\n        System.out.println(total);\n        return total;\n"
         "    }\n"
         "}\n"
     )
     shifted, first_count = java_transformers.apply_extract_method(
         source,
         "extractedFirst",
-        2,
-        5,
+        3,
+        6,
         method_name="first",
     )
     transformed, second_count = java_transformers.apply_extract_method(
         shifted,
         "extractedSecond",
-        7,
-        10,
+        11,
+        13,
         method_name="second",
     )
     assert first_count == 1
     assert second_count == 1
-    assert "return extractedSecond(b);" in transformed
+    assert "int total = extractedSecond(b);" in transformed
     assert "private int extractedSecond(int b)" in transformed
 
 
@@ -294,19 +321,18 @@ def test_c_rename_symbol_ignores_strings_and_comments():
 
 
 def test_c_extract_method_passes_referenced_local_variables():
-    source = "int value(int input) {\n    int total = input + 1;\n    return total;\n}\n"
-    transformed, count = c_transformers.apply_extract_method(source, "value_core", 3, 3)
+    source = "int value(int input) {\n    int subtotal = input + 1;\n    int tax = subtotal / 5;\n    int fee = subtotal / 10;\n    int total = subtotal + tax + fee;\n    int observed = total;\n    return observed;\n}\n"
+    transformed, count = c_transformers.apply_extract_method(source, "value_core", 2, 5)
     assert count == 1
-    assert "return value_core(total);" in transformed
-    assert "static int value_core(int total)" in transformed
+    assert "value_core(input, &total);" in transformed
+    assert "static void value_core(int input, int *total_out)" in transformed
 
 
-def test_c_extract_method_handles_full_function_range():
+def test_c_extract_method_rejects_trivial_full_function_wrapper():
     source = "int value(int input) {\n    int total = input + 1;\n    return total;\n}\n"
     transformed, count = c_transformers.apply_extract_method(source, "extracted_value", 1, 4)
-    assert count == 1
-    assert "return extracted_value(input);" in transformed
-    assert "static int extracted_value(int input)" in transformed
+    assert count == 0
+    assert transformed == source
 
 
 def test_c_remove_dead_code_can_remove_safe_line_by_source_line():
