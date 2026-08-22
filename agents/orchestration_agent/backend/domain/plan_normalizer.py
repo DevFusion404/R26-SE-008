@@ -73,7 +73,7 @@ REFACTORING_MAP.update({
 # RDP Agent hand-off
 # ─────────────────────────────────────────────────────────────────────────────
 
-def build_rdp_plan_input(updated_report: dict) -> dict:
+def build_rdp_plan_input(updated_report: Optional[dict]) -> dict:
     """Narrow the updated smell report down to what the RDP agent should plan.
 
     The report keeps every analysed file so the developer can see what was
@@ -88,8 +88,14 @@ def build_rdp_plan_input(updated_report: dict) -> dict:
     filename: RDP copies it into every step's ``parameters.source_file``, and
     the Transformation stage resolves that path against the CUQA workspace.
     """
+    # Bound once rather than `(updated_report or {})` at each use: the repeated
+    # form guards every read but still leaves the last one subscripting the
+    # possibly-None original, which is the kind of near-miss that only stays
+    # correct by accident.
+    report = updated_report or {}
+
     files = []
-    for entry in (updated_report or {}).get("files") or []:
+    for entry in report.get("files") or []:
         smells = entry.get("code_smells") or []
         if not smells:
             continue
@@ -100,12 +106,12 @@ def build_rdp_plan_input(updated_report: dict) -> dict:
     # Recompute every total from the files actually being sent. Carrying the
     # report's own figures through would leave the payload self-contradicting —
     # a summary describing files that are not in it.
-    summary = dict((updated_report or {}).get("summary") or {})
+    summary = dict(report.get("summary") or {})
     summary.update(summarize_files(files))
 
     payload = {"files": files, "summary": summary}
-    if (updated_report or {}).get("repo_name"):
-        payload["repo_name"] = updated_report["repo_name"]
+    if report.get("repo_name"):
+        payload["repo_name"] = report["repo_name"]
     return payload
 
 
