@@ -1,0 +1,61 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches:
+      - main
+      - master
+    paths:
+      - 'agents/rdp_agent/**'
+      - '.github/workflows/ci.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  IMAGE_NAME: rdp-agent
+  IMAGE_TAG: ${{ github.sha }}
+
+jobs:
+  build-and-push:
+    name: Build and push RDP agent image to Azure Container Registry
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Azure Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ secrets.ACR_LOGIN_SERVER }}
+          username: ${{ secrets.ACR_USERNAME }}
+          password: ${{ secrets.ACR_PASSWORD }}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./agents/rdp_agent
+          file: ./agents/rdp_agent/Dockerfile
+          push: true
+          tags: |
+            ${{ secrets.ACR_LOGIN_SERVER }}/${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
+            ${{ secrets.ACR_LOGIN_SERVER }}/${{ env.IMAGE_NAME }}:latest
+
+  deploy-to-azure:
+    name: Deploy RDP agent to Azure Web App
+    needs: build-and-push
+    if: ${{ secrets.AZURE_WEBAPP_NAME != '' && secrets.AZURE_WEBAPP_PUBLISH_PROFILE != '' }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Deploy image to Azure Web App
+        uses: azure/webapps-deploy@v3
+        with:
+          app-name: ${{ secrets.AZURE_WEBAPP_NAME }}
+          publish-profile: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}
+          images: ${{ secrets.ACR_LOGIN_SERVER }}/${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
