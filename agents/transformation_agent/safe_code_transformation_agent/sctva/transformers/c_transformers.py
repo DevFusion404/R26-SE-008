@@ -344,7 +344,58 @@ def apply_normalize_multiline_statement(
     return source_code, 0
 
 
+def _mask_c_non_code(source: str) -> str:
+    """Keep C token positions while masking comments and literals."""
+
+    masked = list(source)
+    index = 0
+    state = "code"
+    while index < len(source):
+        char = source[index]
+        nxt = source[index + 1] if index + 1 < len(source) else ""
+        if state == "line_comment":
+            if char == "\n":
+                state = "code"
+            else:
+                masked[index] = " "
+        elif state == "block_comment":
+            if char == "*" and nxt == "/":
+                masked[index] = masked[index + 1] = " "
+                index += 1
+                state = "code"
+            elif char != "\n":
+                masked[index] = " "
+        elif state in {"string", "char"}:
+            if char == "\\":
+                masked[index] = " "
+                if index + 1 < len(source):
+                    masked[index + 1] = " "
+                    index += 1
+            elif (state == "string" and char == '"') or (state == "char" and char == "'"):
+                masked[index] = " "
+                state = "code"
+            elif char != "\n":
+                masked[index] = " "
+        elif char == "/" and nxt == "/":
+            masked[index] = masked[index + 1] = " "
+            index += 1
+            state = "line_comment"
+        elif char == "/" and nxt == "*":
+            masked[index] = masked[index + 1] = " "
+            index += 1
+            state = "block_comment"
+        elif char == '"':
+            masked[index] = " "
+            state = "string"
+        elif char == "'":
+            masked[index] = " "
+            state = "char"
+        index += 1
+    return "".join(masked)
+
+
 def _find_matching_brace(source: str, start_idx: int) -> Optional[int]:
+    source = _mask_c_non_code(source)
     depth = 0
     for idx in range(start_idx, len(source)):
         char = source[idx]
@@ -355,6 +406,26 @@ def _find_matching_brace(source: str, start_idx: int) -> Optional[int]:
             if depth == 0:
                 return idx
     return None
+
+
+def _line_for_c_index(source: str, index: int) -> int:
+    return source.count("\n", 0, max(0, index)) + 1
+
+
+def _c_brace_depth(source: str, index: int) -> int:
+    masked = _mask_c_non_code(source[:index])
+    return masked.count("{") - masked.count("}")
+
+
+def _remove_c_span(source: str, start: int, end: int) -> Tuple[str, int]:
+    if start < 0 or end <= start or end > len(source):
+        return source, 0
+    # Remove a following newline only when the selected statement owns it.
+    if end < len(source) and source[end] == "\r":
+        end += 1
+    if end < len(source) and source[end] == "\n":
+        end += 1
+    return source[:start] + source[end:], 1
 
 
 def _is_literal_c_initializer(value: str) -> bool:
@@ -396,6 +467,79 @@ def _remove_proven_unused_c_declaration(source_code: str, source_line: int) -> T
     return "".join(lines[: source_line - 1] + lines[source_line:]), 1
 
 
+def _remove_proven_c_false_branch(source_code: str, source_line: int) -> Tuple[str, int]:
+    masked = _mask_c_non_code(source_code)
+    pattern = re.compile(r"\bif\s*\(\s*0\s*\)\s*\{")
+    for match in pattern.finditer(masked):
+        brace_index = masked.find("{", match.start(), match.end())
+        end_brace = _find_matching_brace(masked, brace_index)
+        if end_brace is None:
+            continue
+        start_line = _line_for_c_index(source_code, match.start())
+        end_line = _line_for_c_index(source_code, end_brace)
+        if not start_line <= source_line <= end_line:
+            continue
+        # An else branch has observable behavior and needs a CST move, so retain
+        # it for manual review rather than deleting a valid execution path.
+        if re.match(r"\s*else\b", masked[end_brace + 1 :]):
+            continue
+        statement_start = source_code.rfind("\n", 0, match.start()) + 1
+        return _remove_c_span(source_code, statement_start, end_brace + 1)
+    return source_code, 0
+
+
+def _remove_proven_c_unreachable_statement(source_code: str, source_line: int) -> Tuple[str, int]:
+    masked = _mask_c_non_code(source_code)
+    terminators = re.compile(r"\b(?:return|break|continue|goto\s+[A-Za-z_][A-Za-z0-9_]*)\b")
+    for match in terminators.finditer(masked):
+        terminator_end = masked.find(";", match.end())
+        if terminator_end == -1:
+            continue
+        next_start = terminator_end + 1
+        while next_start < len(masked) and masked[next_start].isspace():
+            next_start += 1
+        if next_start >= len(masked) or masked[next_start] in "}#{":
+            continue
+        depth = _c_brace_depth(source_code, match.start())
+        if _c_brace_depth(source_code, next_start) != depth:
+            continue
+        statement_end = masked.find(";", next_start)
+        next_brace = min(
+            [index for index in (masked.find("{", next_start), masked.find("}", next_start)) if index != -1],
+            default=-1,
+        )
+        if statement_end == -1 or (next_brace != -1 and next_brace < statement_end):
+            continue
+        start_line = _line_for_c_index(source_code, next_start)
+        end_line = _line_for_c_index(source_code, statement_end)
+        if start_line <= source_line <= end_line:
+            return _remove_c_span(source_code, next_start, statement_end + 1)
+    return source_code, 0
+
+
+def _remove_proven_unused_c_static_function(source_code: str, method_name: str) -> Tuple[str, int]:
+    masked = _mask_c_non_code(source_code)
+    pattern = re.compile(
+        rf"(?ms)^[ \t]*(?:[A-Za-z_][A-Za-z0-9_\s\*]*?\s+)+{re.escape(method_name)}\s*\([^;{{}}]*\)\s*\{{"
+    )
+    matches = list(pattern.finditer(masked))
+    if len(matches) != 1 or len(re.findall(rf"\b{re.escape(method_name)}\b", masked)) != 1:
+        return source_code, 0
+    match = matches[0]
+    signature = masked[match.start() : match.end()]
+    if not re.search(r"\bstatic\b", signature):
+        return source_code, 0
+    brace_index = masked.rfind("{", match.start(), match.end())
+    method_end = _find_matching_brace(masked, brace_index)
+    if method_end is None:
+        return source_code, 0
+    region = source_code[match.start() : method_end + 1]
+    if re.search(r"(?m)^\s*#", region):
+        return source_code, 0
+    statement_start = source_code.rfind("\n", 0, match.start()) + 1
+    return _remove_c_span(source_code, statement_start, method_end + 1)
+
+
 def apply_remove_dead_code(
     source_code: str,
     method_name: str,
@@ -406,32 +550,17 @@ def apply_remove_dead_code(
         raise ValueError("remove_dead_code requires 'method_name' or 'source_line'.")
 
     if not method_name and source_line is not None:
-        return _remove_proven_unused_c_declaration(source_code, source_line)
-
-    pattern = re.compile(
-        rf"(?ms)^[ \t]*(?:[A-Za-z_][A-Za-z0-9_\s\*]*?\s+)+{re.escape(method_name)}\s*\([^;{{}}]*\)\s*\{{"
-    )
-    match = pattern.search(source_code)
-    if not match:
+        for remover in (
+            _remove_proven_c_false_branch,
+            _remove_proven_c_unreachable_statement,
+            _remove_proven_unused_c_declaration,
+        ):
+            transformed, replacements = remover(source_code, source_line)
+            if replacements:
+                return transformed, replacements
         return source_code, 0
 
-    signature = source_code[match.start():match.end()]
-    if "static" not in signature.split():
-        return source_code, 0
-    if len(re.findall(rf"\b{re.escape(method_name)}\b", source_code)) != 1:
-        return source_code, 0
-
-    method_start = match.start()
-    brace_idx = match.end() - 1
-    method_end = _find_matching_brace(source_code, brace_idx)
-    if method_end is None:
-        return source_code, 0
-
-    before = source_code[:method_start].rstrip()
-    after = source_code[method_end + 1 :].lstrip()
-    if before and after:
-        return f"{before}\n{after}", 1
-    return f"{before}{after}", 1
+    return _remove_proven_unused_c_static_function(source_code, method_name)
 
 
 def _split_c_params(params_raw: str) -> list[tuple[str, str]]:
@@ -507,38 +636,30 @@ def apply_extract_method(
     start_line: int,
     end_line: int,
 ) -> Tuple[str, int]:
-    if not new_method_name:
-        raise ValueError("extract_method requires 'new_method_name'.")
-    if start_line <= 0 or end_line < start_line:
-        raise ValueError("extract_method requires a valid line range.")
+    """Backward-compatible entry point for semantic C extraction."""
 
-    lines = source_code.splitlines(keepends=True)
-    if end_line > len(lines):
+    from .c_extract_method import _resolve_targets
+    from .c_extract_method import apply_extract_method as apply_semantic_extract_method
+
+    source_offset = sum(
+        len(line)
+        for line in source_code.splitlines(keepends=True)[: max(0, start_line - 1)]
+    )
+    candidates = []
+    for name_match in re.finditer(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*\(", source_code):
+        for candidate in _resolve_targets(source_code, name_match.group(1), ""):
+            if candidate.start <= source_offset <= candidate.end:
+                candidates.append(candidate)
+    if not candidates:
         return source_code, 0
-
-    selected = lines[start_line - 1 : end_line]
-    meaningful = [line for line in selected if line.strip()]
-    if not meaningful or not meaningful[-1].strip().startswith("return"):
-        full_function = _extract_full_c_function(source_code, new_method_name, start_line, end_line)
-        if full_function[1]:
-            return full_function
-        return source_code, 0
-
-    block_indent = min((re.match(r"[ \t]*", line).group(0) for line in meaningful), key=len)
-    source_index = sum(len(line) for line in lines[: start_line - 1])
-    return_type, params, function_body_start = _infer_c_method_context(source_code, source_index)
-    locals_before_selection = _c_local_variables(source_code, function_body_start, source_index)
-    helper_params = _referenced_c_variables("".join(selected), [*params, *locals_before_selection])
-    helper_signature_params = ", ".join(f"{type_name} {name}" for type_name, name in helper_params) or "void"
-    helper_call_args = ", ".join(name for _, name in helper_params)
-    helper_body = [
-        (f"{block_indent}{line[len(block_indent):]}" if line.startswith(block_indent) else f"{block_indent}{line.lstrip()}")
-        for line in selected
-    ]
-    helper = f"static {return_type} {new_method_name}({helper_signature_params}) {{\n" + "".join(helper_body) + "}\n"
-    replacement = [f"{block_indent}return {new_method_name}({helper_call_args});\n"]
-    transformed = "".join(lines[: start_line - 1] + replacement + lines[end_line:])
-    return _insert_c_helper_before_function(transformed, helper, source_index), 1
+    transformed, replacements, _metadata = apply_semantic_extract_method(
+        source_code,
+        new_method_name=new_method_name,
+        method_name=candidates[0].name,
+        start_line=start_line,
+        end_line=end_line,
+    )
+    return transformed, replacements
 
 
 def _extract_full_c_function(
