@@ -10,11 +10,20 @@ import subprocess
 import tempfile
 import time
 import tokenize
+import uuid
 from pathlib import Path
 
 from .c_support import strip_c_comments
 from ..models import ValidationStepResult
 from ..utils.io_helpers import utc_now_iso
+
+
+def _make_syntax_temp_dir(prefix: str) -> Path:
+    root = Path(tempfile.gettempdir()) / "sctva_syntax"
+    root.mkdir(parents=True, exist_ok=True)
+    path = root / f"{prefix}_{uuid.uuid4().hex}"
+    path.mkdir(parents=True, exist_ok=False)
+    return path
 
 
 class SyntaxValidator:
@@ -674,10 +683,11 @@ class SyntaxValidator:
         first_type = SyntaxValidator._JAVA_TYPE_RE.search(source)
         class_name = (public_type or first_type).group(1) if (public_type or first_type) else "SctvaTemp"
 
-        with tempfile.TemporaryDirectory() as temp_dir:
-            classes_dir = Path(temp_dir) / "classes"
+        temp_dir = _make_syntax_temp_dir("java")
+        try:
+            classes_dir = temp_dir / "classes"
             classes_dir.mkdir(parents=True, exist_ok=True)
-            java_file = Path(temp_dir) / f"{class_name}.java"
+            java_file = temp_dir / f"{class_name}.java"
             java_file.write_text(source, encoding="utf-8")
 
             proc = subprocess.run(
@@ -689,6 +699,8 @@ class SyntaxValidator:
             if proc.returncode != 0:
                 stderr = (proc.stderr or proc.stdout or "").strip()
                 return False, f"javac compile check failed: {stderr}"
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
 
         return True, "javac compile check passed."
 
@@ -700,11 +712,12 @@ class SyntaxValidator:
 
         source = source.lstrip("\ufeff")
 
-        with tempfile.TemporaryDirectory() as temp_dir:
-            c_file = Path(temp_dir) / "sctva_temp.c"
+        temp_dir = _make_syntax_temp_dir("c")
+        try:
+            c_file = temp_dir / "sctva_temp.c"
             c_file.write_text(source, encoding="utf-8")
 
-            compile_args = [compiler, "-std=c11", "-fsyntax-only", "-I", temp_dir, str(c_file)]
+            compile_args = [compiler, "-std=c11", "-fsyntax-only", "-I", str(temp_dir), str(c_file)]
             proc = subprocess.run(
                 compile_args,
                 capture_output=True,
@@ -714,5 +727,7 @@ class SyntaxValidator:
             if proc.returncode != 0:
                 stderr = (proc.stderr or proc.stdout or "").strip()
                 return False, f"C compile check failed: {stderr}"
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
 
         return True, f"{compiler} compile check passed."
