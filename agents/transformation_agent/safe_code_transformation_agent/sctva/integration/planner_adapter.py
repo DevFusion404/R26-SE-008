@@ -6,10 +6,19 @@ from typing import Any, Dict, List, Optional
 
 from ..constants import (
     ACTION_ENCAPSULATE_VARIABLE,
+    ACTION_EXTRACT_C_COMPONENT,
+    ACTION_EXTRACT_CLASS,
+    ACTION_EXTRACT_JAVA_CLASS,
     ACTION_EXTRACT_METHOD,
+    ACTION_EXTRACT_PYTHON_CLASS,
     ACTION_FAULT_INJECTION,
+    ACTION_INTRODUCE_JAVA_PARAMETER_OBJECT,
+    ACTION_INTRODUCE_PARAMETER_OBJECT,
+    ACTION_INTRODUCE_PYTHON_PARAMETER_OBJECT,
     ACTION_NOOP,
+    ACTION_NARROW_EXCEPTION_HANDLER,
     ACTION_REPLACE_UNSAFE_FUNCTION,
+    EXTRACT_CLASS_ACTIONS,
 )
 
 
@@ -183,6 +192,8 @@ class PlannerAdapter:
         ref_key = refactoring.lower()
         params = step.get("parameters") or {}
         target = step.get("target") or {}
+        smell_name = str(step.get("smell") or step.get("smell_type") or "").strip()
+        smell_key = " ".join(smell_name.lower().replace("_", " ").split())
 
         if not isinstance(params, dict):
             raise PlannerAdapterError("'parameters' must be an object when provided")
@@ -253,11 +264,19 @@ class PlannerAdapter:
             }
 
         elif ref_key == "extract method":
-            target_method = target.get("method") or params.get("method")
+            target_method = (
+                target.get("method")
+                or target.get("function")
+                or params.get("method")
+                or params.get("method_name")
+                or params.get("function")
+                or params.get("function_name")
+                or params.get("source_method")
+            )
 
             if not target_method:
                 raise PlannerAdapterError(
-                    "extract method mapping requires target.method or parameters.method"
+                    "extract method mapping requires a semantic method/function target"
                 )
 
             start_line, end_line = self._source_range_from_step(
@@ -265,13 +284,13 @@ class PlannerAdapter:
                 params=params,
                 target=target,
             )
-            if start_line is None or end_line is None:
-                raise PlannerAdapterError(
-                    "extract method mapping requires executable source range "
-                    "(start_line/end_line or source_lines/lines)"
-                )
-
-            new_name = params.get("new_method_name") or params.get("extracted_method_name") or f"{target_method}Core"
+            new_name = (
+                params.get("new_method_name")
+                or params.get("extracted_method_name")
+                or params.get("new_function_name")
+                or params.get("extracted_function_name")
+                or f"{target_method}Core"
+            )
 
             action = {
                 "action_type": ACTION_EXTRACT_METHOD,
@@ -280,15 +299,106 @@ class PlannerAdapter:
                     "new_method_name": self._safe_identifier(str(new_name)),
                     "start_line": start_line,
                     "end_line": end_line,
-                    "target_class": target.get("class") or params.get("source_class"),
+                    "source_class": (
+                        target.get("class")
+                        or params.get("source_class")
+                        or params.get("class_name")
+                        or params.get("module_name")
+                    ),
+                    "method_signature": (
+                        target.get("signature")
+                        or params.get("method_signature")
+                        or params.get("function_signature")
+                        or params.get("signature")
+                    ),
+                    "smell": step.get("smell") or step.get("smell_type") or "Long Method",
                 },
             }
 
-        elif ref_key == "extract class":
-            raise PlannerAdapterError(
-                "extract class requires coordinated multi-file class creation; "
-                "SCTVA will not simulate it with a rename"
+        elif ref_key in {
+            "extract class",
+            "extract java class",
+            "extract python class",
+            "extract c component",
+            "extract component",
+        }:
+            source_file = self._source_file_from_step(step, params=params, target=target)
+            explicit_source_class = (
+                params.get("source_class")
+                or params.get("class_name")
+                or target.get("class")
+                or params.get("class")
+                or params.get("module_name")
             )
+            source_class = explicit_source_class
+            explicit_new_class_name = (
+                params.get("new_class_name")
+                or params.get("extracted_class_name")
+                or params.get("destination_class")
+                or params.get("new_component_name")
+            )
+            new_class_name = explicit_new_class_name
+            if not source_class and source_file:
+                source_class = str(source_file).replace("\\", "/").rsplit("/", 1)[-1].rsplit(".", 1)[0]
+            if not source_class:
+                raise PlannerAdapterError(
+                    "extract class mapping requires a source class/module or source file"
+                )
+            if not new_class_name:
+                new_class_name = f"{source_class}Helper"
+
+            methods_to_extract = params.get("methods_to_extract") or params.get("functions_to_extract")
+            fields_to_extract = params.get("fields_to_extract") or params.get("globals_to_extract")
+            required_public_methods = params.get("required_public_methods")
+            required_public_fields = params.get("required_public_fields")
+            destination_file = (
+                params.get("destination_file")
+                or params.get("extracted_file")
+                or params.get("output_file")
+                or "same_file"
+            )
+
+            extract_action_type = self._extract_class_action_type(
+                source_file=source_file,
+                refactoring_key=ref_key,
+            )
+            action = {
+                "action_type": extract_action_type,
+                "parameters": {
+                    "source_class": str(source_class),
+                    "new_class_name": self._safe_identifier(str(new_class_name)),
+                    "source_class_origin": (
+                        "rdp_explicit" if explicit_source_class else "file_stem_fallback"
+                    ),
+                    "new_class_name_origin": (
+                        "rdp_explicit" if explicit_new_class_name else "generated"
+                    ),
+                    "methods_to_extract": (
+                        [str(item) for item in methods_to_extract]
+                        if isinstance(methods_to_extract, list)
+                        else []
+                    ),
+                    "fields_to_extract": (
+                        [str(item) for item in fields_to_extract]
+                        if isinstance(fields_to_extract, list)
+                        else []
+                    ),
+                    "required_public_methods": (
+                        [str(item) for item in required_public_methods]
+                        if isinstance(required_public_methods, list)
+                        else []
+                    ),
+                    "required_public_fields": (
+                        [str(item) for item in required_public_fields]
+                        if isinstance(required_public_fields, list)
+                        else []
+                    ),
+                    "preserve_public_api": bool(params.get("preserve_public_api", True)),
+                    "delegation_strategy": str(params.get("delegation_strategy") or "wrapper"),
+                    "target_file": str(destination_file),
+                    "smell": step.get("smell") or step.get("smell_type") or "Large Class",
+                },
+            }
 
         elif ref_key == "move method":
             raise PlannerAdapterError(
@@ -303,10 +413,57 @@ class PlannerAdapter:
             )
 
         elif ref_key == "introduce parameter object":
-            raise PlannerAdapterError(
-                "introduce parameter object requires a new parameter type and call-site updates; "
-                "SCTVA will not simulate it with a rename"
+            method = (
+                target.get("method")
+                or target.get("function")
+                or params.get("method")
+                or params.get("method_name")
+                or params.get("function")
+                or params.get("function_name")
             )
+            object_name = (
+                params.get("parameter_object_name")
+                or params.get("new_class_name")
+                or params.get("parameter_class_name")
+            )
+            if not method or not object_name:
+                raise PlannerAdapterError(
+                    "introduce parameter object requires method and parameter_object_name"
+                )
+            source_file = self._source_file_from_step(step, params=params, target=target)
+            normalized_file = source_file.replace("\\", "/").lower()
+            action_type = ACTION_INTRODUCE_PARAMETER_OBJECT
+            if normalized_file.endswith(".java"):
+                action_type = ACTION_INTRODUCE_JAVA_PARAMETER_OBJECT
+            elif normalized_file.endswith(".py"):
+                action_type = ACTION_INTRODUCE_PYTHON_PARAMETER_OBJECT
+            action = {
+                "action_type": action_type,
+                "parameters": {
+                    "method": str(method),
+                    "parameter_object_name": self._safe_identifier(str(object_name)),
+                    "parameter_name": self._safe_identifier(str(params.get("parameter_name") or "params")),
+                    "source_class": str(
+                        target.get("class")
+                        or params.get("source_class")
+                        or params.get("class_name")
+                        or ""
+                    ),
+                    "source_class_origin": (
+                        "file_stem_fallback"
+                        if source_file
+                        and str(
+                            target.get("class")
+                            or params.get("source_class")
+                            or params.get("class_name")
+                            or ""
+                        ).strip().lower()
+                        == str(source_file).replace("\\", "/").rsplit("/", 1)[-1].rsplit(".", 1)[0].lower()
+                        else "rdp_explicit"
+                    ),
+                    "smell": step.get("smell") or step.get("smell_type") or "Long Parameter List",
+                },
+            }
 
         elif ref_key in {
             "hide delegate",
@@ -362,6 +519,39 @@ class PlannerAdapter:
                 },
             }
 
+        elif ref_key == "remove dead code" and smell_key in {
+            "bare except",
+            "bareexcept",
+            "exception overreach",
+            "broad exception handling",
+        }:
+            # Some legacy RDP knowledge-base entries recommend Remove Dead
+            # Code for exception smells. A live ``except``/``catch`` block is
+            # not dead code; route it to the dedicated safe operation instead.
+            source_line = self._source_line_from_step(step, params=params, target=target)
+            is_bare_except = smell_key in {"bare except", "bareexcept"}
+            action = {
+                "action_type": ACTION_NARROW_EXCEPTION_HANDLER,
+                "parameters": {
+                    "source_line": source_line,
+                    "method": target.get("method") or params.get("method"),
+                    "class_name": target.get("class") or params.get("source_class"),
+                    "source_file": target.get("file") or params.get("source_file"),
+                    "original_exception_type": "" if is_bare_except else str(
+                        params.get("original_exception_type") or "Exception"
+                    ),
+                    "target_exception_type": str(
+                        params.get("target_exception_type")
+                        or params.get("narrow_exception_type")
+                        or ("Exception" if is_bare_except else "")
+                    ),
+                    "handler_name": str(
+                        params.get("handler_name") or params.get("exception_variable") or ""
+                    ),
+                    "source_smell": smell_name,
+                },
+            }
+
         elif ref_key == "remove dead code":
             method = params.get("method") or target.get("method")
             source_line = self._source_line_from_step(step, params=params, target=target)
@@ -376,6 +566,33 @@ class PlannerAdapter:
                     "method": str(method or ""),
                     "class_name": target.get("class") or params.get("source_class"),
                     "source_line": source_line,
+                    "source_file": target.get("file") or params.get("source_file"),
+                },
+            }
+
+        elif ref_key in {
+            "refactor to narrow exceptions",
+            "narrow exception handling",
+            "narrow exception handler",
+            "replace broad exception handling",
+        }:
+            source_line = self._source_line_from_step(step, params=params, target=target)
+            original_type = params.get("original_exception_type") or params.get("exception_type") or "Exception"
+            target_type = params.get("target_exception_type") or params.get("narrow_exception_type")
+            if source_line is None and not target.get("method"):
+                raise PlannerAdapterError(
+                    "narrow_exception_handler mapping requires a source line or target method"
+                )
+            action = {
+                "action_type": ACTION_NARROW_EXCEPTION_HANDLER,
+                "parameters": {
+                    "source_line": source_line,
+                    "method": target.get("method") or params.get("method"),
+                    "class_name": target.get("class") or params.get("source_class"),
+                    "source_file": target.get("file") or params.get("source_file"),
+                    "original_exception_type": str(original_type),
+                    "target_exception_type": str(target_type or ""),
+                    "handler_name": str(params.get("handler_name") or params.get("exception_variable") or ""),
                 },
             }
 
@@ -441,6 +658,11 @@ class PlannerAdapter:
 
         if action:
             source_file = self._source_file_from_step(step, params=params, target=target)
+            if (
+                action.get("action_type") in EXTRACT_CLASS_ACTIONS
+                and str(source_file).strip().lower() in {"same_file", "same-source-file", "same source file"}
+            ):
+                source_file = ""
             if source_file and "source_file" not in action["parameters"]:
                 action["parameters"]["source_file"] = source_file
             source_line = self._source_line_from_step(step, params=params, target=target)
@@ -451,6 +673,26 @@ class PlannerAdapter:
             action["warnings"] = []
 
         return action
+
+    @staticmethod
+    def _extract_class_action_type(*, source_file: str, refactoring_key: str) -> str:
+        """Map an Extract Class plan to a language-specific SCTVA operation."""
+
+        if refactoring_key == "extract java class":
+            return ACTION_EXTRACT_JAVA_CLASS
+        if refactoring_key == "extract python class":
+            return ACTION_EXTRACT_PYTHON_CLASS
+        if refactoring_key in {"extract c component", "extract component"}:
+            return ACTION_EXTRACT_C_COMPONENT
+
+        normalized = str(source_file or "").replace("\\", "/").lower()
+        if normalized.endswith(".java"):
+            return ACTION_EXTRACT_JAVA_CLASS
+        if normalized.endswith(".py"):
+            return ACTION_EXTRACT_PYTHON_CLASS
+        if normalized.endswith((".c", ".h")):
+            return ACTION_EXTRACT_C_COMPONENT
+        return ACTION_EXTRACT_CLASS
 
     @classmethod
     def _unwrap_planner_output(cls, planner_output: Dict[str, Any]) -> Dict[str, Any]:

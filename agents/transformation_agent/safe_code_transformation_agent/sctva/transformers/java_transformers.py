@@ -401,6 +401,55 @@ def _replace_literal(
     return "".join(lines), replacements
 
 
+def _replace_numeric_inside_java_string(
+    source_code: str,
+    literal_value: Any,
+    constant_name: str,
+    source_line: Optional[int],
+) -> Tuple[str, int]:
+    """Turn text containing a planned number into equivalent concatenation."""
+
+    if not isinstance(literal_value, (int, float)) or isinstance(literal_value, bool):
+        return source_code, 0
+
+    literal_text = str(literal_value)
+    number_pattern = re.compile(
+        rf"(?<![A-Za-z0-9_.]){re.escape(literal_text)}(?![A-Za-z0-9_.])"
+    )
+    candidates: list[tuple[int, int, int, re.Match[str]]] = []
+    for decoded, line_no, start, end in _iter_java_string_literals(source_code):
+        if decoded.strip() == literal_text:
+            # A value such as password "1234" is a String constant, not a
+            # numeric expression. Existing string-constant handling owns it.
+            continue
+        raw_content = source_code[start + 1:end - 1]
+        match = number_pattern.search(raw_content)
+        if match:
+            candidates.append((line_no, start, end, match))
+
+    line_candidates = [item for item in candidates if item[0] == source_line]
+    if line_candidates:
+        selected = line_candidates[0] if len(line_candidates) == 1 else None
+    else:
+        masked = _mask_java_comments_and_literals(source_code)
+        selected = candidates[0] if len(candidates) == 1 and not number_pattern.search(masked) else None
+    if selected is None:
+        return source_code, 0
+
+    _line_no, start, end, match = selected
+    raw_content = source_code[start + 1:end - 1]
+    before = raw_content[:match.start()]
+    after = raw_content[match.end():]
+    expression_parts: list[str] = []
+    if before:
+        expression_parts.append(f'"{before}"')
+    expression_parts.append(constant_name)
+    if after:
+        expression_parts.append(f'"{after}"')
+    expression = " + ".join(expression_parts)
+    return source_code[:start] + expression + source_code[end:], 1
+
+
 def _insert_class_constant(
     source_code: str,
     constant_name: str,
@@ -685,6 +734,18 @@ def apply_extract_constant(
         preferred_name,
         source_line,
     )
+    strict_numeric_name = (
+        isinstance(original_literal_value, (int, float))
+        and not isinstance(original_literal_value, bool)
+        and normalized_name == f"CONSTANT_{str(original_literal_value).replace('-', 'NEG_').replace('.', '_')}"
+    )
+    if replacements == 0 and strict_numeric_name:
+        transformed, replacements = _replace_numeric_inside_java_string(
+            source_code,
+            original_literal_value,
+            preferred_name,
+            source_line,
+        )
     if replacements == 0 and source_line is not None and not protected_string_literal:
         transformed, replacements = _replace_literal(
             source_code,
@@ -727,6 +788,57 @@ def _find_class_span(source: str, class_name: str) -> Optional[Tuple[int, int]]:
     if end_idx is None:
         return None
     return brace_idx, end_idx
+
+
+def apply_narrow_exception_handler(
+    source_code: str,
+    *,
+    source_line: Optional[int] = None,
+    original_exception_type: str = "",
+    target_exception_type: str = "",
+    handler_name: str = "",
+) -> Tuple[str, int]:
+    """Replace one broad Java catch type with a proven concrete type."""
+
+    if not _valid_java_exception_type(target_exception_type):
+        return source_code, 0
+
+    catch_re = re.compile(
+        r"\bcatch\s*\(\s*(?P<final>final\s+)?(?P<type>Exception|Throwable)\s+"
+        r"(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*\)"
+    )
+    candidates = []
+    for match in catch_re.finditer(source_code):
+        if original_exception_type and match.group("type") != original_exception_type:
+            continue
+        if handler_name and match.group("name") != handler_name:
+            continue
+        candidates.append(match)
+
+    if source_line is not None:
+        line_matches = [
+            match for match in candidates
+            if source_code.count("\n", 0, match.start()) + 1 == source_line
+        ]
+        if line_matches:
+            candidates = line_matches
+    if len(candidates) != 1:
+        return source_code, 0
+
+    match = candidates[0]
+    replacement = (
+        "catch ("
+        f"{match.group('final') or ''}{target_exception_type} {match.group('name')}"
+        ")"
+    )
+    return source_code[:match.start()] + replacement + source_code[match.end():], 1
+
+
+def _valid_java_exception_type(value: str) -> bool:
+    names = [part.strip() for part in value.split("|") if part.strip()]
+    if not names or any(name in {"Exception", "Throwable"} for name in names):
+        return False
+    return all(re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.]*", name) for name in names)
 
 
 def apply_remove_dead_code(
@@ -892,58 +1004,36 @@ def apply_extract_method(
     end_line: int,
     method_name: Optional[str] = None,
 ) -> Tuple[str, int]:
-    if not new_method_name:
-        raise ValueError("extract_method requires 'new_method_name'.")
-    if start_line <= 0 or end_line < start_line:
-        raise ValueError("extract_method requires a valid line range.")
+    """Backward-compatible entry point for semantic Java extraction."""
 
-    lines = source_code.splitlines(keepends=True)
-    if end_line > len(lines):
-        return source_code, 0
+    from .java_extract_method import apply_extract_method as apply_semantic_extract_method
+    from .java_extract_method import _resolve_targets
 
-    selected = lines[start_line - 1 : end_line]
-    meaningful = [line for line in selected if line.strip()]
-    if not meaningful or not meaningful[-1].strip().startswith("return"):
-        if method_name and _selected_mentions_method_signature(selected, method_name):
-            by_name = _extract_java_method_by_name(source_code, new_method_name, method_name)
-            if by_name[1]:
-                return by_name
-        full_method = _extract_full_java_method(source_code, new_method_name, start_line, end_line)
-        if full_method[1]:
-            return full_method
-        if method_name:
-            by_name = _extract_java_method_by_name(source_code, new_method_name, method_name)
-            if by_name[1]:
-                return by_name
-        return source_code, 0
-
-    block_indent = min((re.match(r"[ \t]*", line).group(0) for line in meaningful), key=len)
-    method_indent = block_indent[:-4] if block_indent.endswith("    ") else block_indent
-    source_index = sum(len(line) for line in lines[: start_line - 1])
-    return_type, params, method_body_start = _infer_java_method_context(source_code, source_index)
-    locals_before_selection = _java_local_variables(source_code, method_body_start, source_index)
-    helper_params = _referenced_java_variables("".join(selected), [*params, *locals_before_selection])
-    helper_signature_params = ", ".join(f"{type_name} {name}" for type_name, name in helper_params)
-    helper_call_args = ", ".join(name for _, name in helper_params)
-    insertion_index = _class_insert_before_final_brace(source_code, source_index)
-    if insertion_index is None:
-        return source_code, 0
-
-    helper_body = [
-        (f"{block_indent}{line[len(block_indent):]}" if line.startswith(block_indent) else f"{block_indent}{line.lstrip()}")
-        for line in selected
-    ]
-    helper = (
-        f"\n{method_indent}private {return_type} {new_method_name}({helper_signature_params}) {{\n"
-        + "".join(helper_body)
-        + f"{method_indent}}}\n"
+    resolved_name = str(method_name or "").strip()
+    if not resolved_name:
+        source_offset = sum(
+            len(line)
+            for line in source_code.splitlines(keepends=True)[: max(0, start_line - 1)]
+        )
+        candidates = []
+        # Empty-name semantic lookup is intentionally unsupported; inspect
+        # lexical names only to locate the enclosing method for legacy callers.
+        for name_match in re.finditer(r"\b([A-Za-z_$][A-Za-z0-9_$]*)\s*\(", source_code):
+            candidate_name = name_match.group(1)
+            for _model, candidate in _resolve_targets(source_code, candidate_name, "", ""):
+                if candidate.start <= source_offset <= candidate.end:
+                    candidates.append(candidate)
+        if not candidates:
+            return source_code, 0
+        resolved_name = candidates[0].name
+    transformed, replacements, _metadata = apply_semantic_extract_method(
+        source_code,
+        new_method_name=new_method_name,
+        method_name=resolved_name,
+        start_line=start_line,
+        end_line=end_line,
     )
-    replacement = [f"{block_indent}return {new_method_name}({helper_call_args});\n"]
-    transformed_lines = lines[: start_line - 1] + replacement + lines[end_line:]
-    transformed = "".join(transformed_lines)
-    if insertion_index > source_index:
-        insertion_index += len("".join(replacement)) - len("".join(selected))
-    return transformed[:insertion_index] + helper + transformed[insertion_index:], 1
+    return transformed, replacements
 
 
 def _extract_full_java_method(

@@ -38,7 +38,15 @@ def test_python_extract_method_action_runs_through_contract():
     payload = {
         "request_id": "int_extract_001",
         "language": "python",
-        "source_code": "def f(x):\n    total = x + 1\n    return total\n",
+        "source_code": (
+            "def f(x):\n"
+            "    subtotal = x + 1\n"
+            "    doubled = subtotal * 2\n"
+            "    adjusted = doubled + 3\n"
+            "    total = adjusted - 1\n"
+            "    marker = total\n"
+            "    return marker\n"
+        ),
         "refactoring_plan": {
             "plan_id": "plan_extract_001",
             "actions": [
@@ -47,12 +55,10 @@ def test_python_extract_method_action_runs_through_contract():
                     "parameters": {
                         "method": "f",
                         "new_method_name": "f_core",
-                        "start_line": 3,
-                        "end_line": 3,
                     },
                 }
             ],
-            "behavior_tests": [{"name": "value", "call": "f", "args": [2], "expected": 3}],
+            "behavior_tests": [{"name": "value", "call": "f", "args": [2], "expected": 8}],
             "metadata": {},
         },
         "execution_options": {
@@ -66,7 +72,8 @@ def test_python_extract_method_action_runs_through_contract():
     result = agent.execute(payload)
     assert result["rollback_occurred"] is False
     assert result["success"] is True
-    assert "def f_core()" in result["refactored_code"]
+    assert "\ndef f_core(" in result["refactored_code"]
+    assert "    def f_core(" not in result["refactored_code"]
 
 
 def test_zero_replacement_is_not_reported_as_success():
@@ -266,6 +273,246 @@ def test_python_behavior_change_rolls_back():
     result = agent.execute(payload)
     assert result["rollback_occurred"] is True
     assert result["success"] is False
+
+
+def test_extract_class_final_audit_passes_only_after_behavior_validation():
+    source = '''class LibraryManager:
+    def __init__(self):
+        self.notices = []
+        self.enabled = True
+    def add_notice(self, text): self.notices.append(text)
+    def latest_notice(self): return self.notices[-1] if self.notices else None
+    def enabled_state(self): return self.enabled
+    def disable(self): self.enabled = False
+    def utility_a(self): return self.enabled
+    def utility_b(self): return self.enabled
+'''
+    agent = SafeCodeTransformationValidationAgent()
+    result = agent.execute({
+        "request_id": "extract_class_audit",
+        "language": "python",
+        "source_files": [{
+            "file_name": "manager.py",
+            "source_code": source,
+            "language": "python",
+            "source_mode": "raw",
+        }],
+        "refactoring_plan": {
+            "plan_id": "extract_class_plan",
+            "actions": [{
+                "action_type": "extract_class",
+                "parameters": {
+                    "source_file": "manager.py",
+                    "source_class": "LibraryManager",
+                    "new_class_name": "NoticeBoard",
+                    "methods_to_extract": ["add_notice", "latest_notice"],
+                    "fields_to_extract": ["notices"],
+                },
+            }],
+            "behavior_tests": [{
+                "name": "notice_behavior",
+                "expression": "(lambda m: (m.add_notice('x'), m.latest_notice())[1])(LibraryManager())",
+            }],
+            "metadata": {},
+        },
+        "execution_options": {
+            "strict_mode": True,
+            "enable_behavior_tests": True,
+            "timeout_seconds": 10,
+            "require_compilation": False,
+        },
+    })
+
+    log = result["safety_report"]["transformation_log"][0]
+    assert result["success"] is True
+    assert result["rollback_occurred"] is False
+    assert log["metadata"]["final_decision"] == "PASS"
+    assert log["metadata"]["final_checks"]["plan_compliance"] == "PASS"
+    assert log["metadata"]["final_checks"]["structural_refactoring"] == "PASS"
+    assert log["metadata"]["final_checks"]["behavior_preservation"] == "PASS"
+    assert log["metadata"]["final_checks"]["large_class_reduction"] == "PASS"
+
+
+def test_extract_class_large_library_preserves_public_state_and_reduces_raw_size():
+    utilities = "\n".join(
+        f"    def utility_{index}(self): return self.books.get({index})"
+        for index in range(1, 18)
+    )
+    source = f'''class LibraryManager:
+    def __init__(self):
+        self.books = {{}}
+        self.notices = []
+        self.enabled = True
+    def add_notice(self, text): self.notices.append(text)
+    def latest_notice(self): return self.notices[-1] if self.notices else None
+    def enabled_state(self): return self.enabled
+    def disable(self): self.enabled = False
+{utilities}
+'''
+    result = SafeCodeTransformationValidationAgent().execute({
+        "request_id": "extract_class_large_library",
+        "language": "python",
+        "source_files": [{
+            "file_name": "library.py",
+            "source_code": source,
+            "language": "python",
+            "source_mode": "raw",
+        }],
+        "refactoring_plan": {
+            "plan_id": "extract_class_large_library_plan",
+            "actions": [{
+                "action_type": "extract_class",
+                "parameters": {
+                    "source_file": "library.py",
+                    "source_class": "LibraryManager",
+                    "new_class_name": "LibraryManagerHelper",
+                    "methods_to_extract": ["add_notice", "latest_notice"],
+                    "fields_to_extract": ["notices"],
+                    "required_public_methods": ["add_notice", "latest_notice"],
+                    "required_public_fields": ["notices"],
+                },
+            }],
+            "behavior_tests": [{
+                "name": "notice_behavior",
+                "expression": "(lambda m: (m.notices.append('x'), m.latest_notice())[1])(LibraryManager())",
+            }],
+            "metadata": {},
+        },
+        "execution_options": {
+            "strict_mode": True,
+            "enable_behavior_tests": True,
+            "timeout_seconds": 10,
+            "require_compilation": False,
+            "enable_sctva_auto_refactoring": False,
+        },
+    })
+
+    metadata = result["safety_report"]["transformation_log"][0]["metadata"]
+    namespace: dict[str, object] = {}
+    exec(result["refactored_code"], namespace)
+    manager = namespace["LibraryManager"]()
+    manager.notices.append("state-compatible")
+
+    assert result["success"] is True
+    assert result["rollback_occurred"] is False
+    assert manager.notices == ["state-compatible"]
+    assert manager.latest_notice() == "state-compatible"
+    assert metadata["after_metrics"]["method_count"] < metadata["before_metrics"]["method_count"]
+    assert metadata["after_metrics"]["loc"] < metadata["before_metrics"]["loc"]
+    assert metadata["large_class_after"]["detected"] is False
+    assert metadata["final_decision"] == "PASS"
+    assert metadata["final_checks"]["plan_compliance"] == "PASS"
+    assert metadata["final_checks"]["structural_refactoring"] == "PASS"
+    assert metadata["final_checks"]["behavior_preservation"] == "PASS"
+    assert metadata["final_checks"]["full_api_preservation"] == "PASS"
+    assert metadata["final_checks"]["state_compatibility"] == "PASS"
+    assert metadata["final_checks"]["single_state_owner"] == "PASS"
+    assert metadata["final_checks"]["large_class_reduction"] == "PASS"
+
+
+def test_extract_class_behavior_failure_rolls_back_original_source():
+    source = '''class LibraryManager:
+    def __init__(self):
+        self.notices = []
+        self.enabled = True
+    def add_notice(self, text): self.notices.append(text)
+    def latest_notice(self): return self.notices[-1] if self.notices else None
+    def enabled_state(self): return self.enabled
+    def disable(self): self.enabled = False
+    def utility_a(self): return self.enabled
+    def utility_b(self): return self.enabled
+'''
+    agent = SafeCodeTransformationValidationAgent()
+    result = agent.execute({
+        "request_id": "extract_class_rollback",
+        "language": "python",
+        "source_files": [{
+            "file_name": "manager.py",
+            "source_code": source,
+            "language": "python",
+            "source_mode": "raw",
+        }],
+        "refactoring_plan": {
+            "plan_id": "extract_class_rollback_plan",
+            "actions": [{
+                "action_type": "extract_class",
+                "parameters": {
+                    "source_file": "manager.py",
+                    "source_class": "LibraryManager",
+                    "new_class_name": "NoticeBoard",
+                    "methods_to_extract": ["add_notice", "latest_notice"],
+                    "fields_to_extract": ["notices"],
+                    "preserve_public_api": False,
+                },
+            }],
+            "behavior_tests": [{
+                "name": "notice_behavior",
+                "expression": "(lambda m: (m.add_notice('x'), m.latest_notice())[1])(LibraryManager())",
+            }],
+            "metadata": {},
+        },
+        "execution_options": {
+            "strict_mode": True,
+            "enable_behavior_tests": True,
+            "timeout_seconds": 10,
+            "require_compilation": False,
+        },
+    })
+
+    log = result["safety_report"]["transformation_log"][0]
+    assert result["success"] is False
+    assert result["rollback_occurred"] is True
+    assert result["refactored_code"] == source
+    assert log["metadata"]["final_decision"] == "ROLLBACK"
+    assert log["metadata"]["final_checks"]["behavior_preservation"] == "FAIL"
+
+
+def test_extract_class_source_file_is_resolved_from_exact_class_identity():
+    target_source = '''class TargetManager:
+    def __init__(self):
+        self.items = []
+        self.enabled = True
+    def add(self, value): self.items.append(value)
+    def count(self): return len(self.items)
+    def enabled_state(self): return self.enabled
+    def disable(self): self.enabled = False
+'''
+    unrelated_source = "class OtherManager:\n    pass\n"
+    result = SafeCodeTransformationValidationAgent().execute({
+        "request_id": "extract_class_scope_resolution",
+        "language": "python",
+        "source_files": [
+            {"file_name": "unrelated.py", "source_code": unrelated_source, "language": "python"},
+            {"file_name": "target.py", "source_code": target_source, "language": "python"},
+        ],
+        "refactoring_plan": {
+            "plan_id": "extract_class_scope_plan",
+            "actions": [{
+                "action_type": "extract_class",
+                "parameters": {
+                    "source_class": "TargetManager",
+                    "new_class_name": "ItemStore",
+                    "methods_to_extract": ["add", "count"],
+                    "fields_to_extract": ["items"],
+                },
+            }],
+            "behavior_tests": [],
+            "metadata": {},
+        },
+        "execution_options": {
+            "strict_mode": True,
+            "enable_behavior_tests": True,
+            "timeout_seconds": 10,
+            "require_compilation": False,
+            "enable_sctva_auto_refactoring": False,
+        },
+    })
+
+    assert result["file_name"] == "target.py"
+    assert result["success"] is True
+    metadata = result["safety_report"]["transformation_log"][0]["metadata"]
+    assert metadata["source_file"] == "target.py"
+    assert "class ItemStore:" in result["refactored_code"]
 
 
 def test_language_guard_rejects_non_supported():

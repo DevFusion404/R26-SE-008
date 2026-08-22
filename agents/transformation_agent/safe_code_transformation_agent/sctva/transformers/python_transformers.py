@@ -24,10 +24,12 @@ from __future__ import annotations
 
 import ast
 import re
-from typing import Any, Optional, Tuple
+from typing import Any, Optional, Sequence, Tuple
 
 import libcst as cst
 from libcst.metadata import MetadataWrapper, ParentNodeProvider, PositionProvider
+
+from .python_extract_class import apply_extract_class as _apply_extract_class
 
 
 def _parse_module(source_code: str) -> cst.Module:
@@ -449,10 +451,12 @@ class _ExtractConstantTransformer(cst.CSTTransformer):
         literal_value: Any,
         constant_name: str,
         source_line: Optional[int] = None,
+        docstring_lines: Optional[set[int]] = None,
     ) -> None:
         self.literal_value = literal_value
         self.constant_name = constant_name
         self.source_line = source_line
+        self.docstring_lines = docstring_lines or set()
         self.replacements = 0
 
     def _is_target_line(self, node: cst.CSTNode) -> bool:
@@ -506,6 +510,15 @@ class _ExtractConstantTransformer(cst.CSTTransformer):
             current = parent
 
     def _maybe_replace(self, node: cst.CSTNode) -> cst.CSTNode:
+        # A docstring is executable metadata, not a refactoring literal.  The
+        # AST gives us the first statement line for module, class, and function
+        # docstrings, while CST keeps the original spelling and formatting.
+        try:
+            if self.get_metadata(PositionProvider, node).start.line in self.docstring_lines:
+                return node
+        except Exception:
+            pass
+
         if self._is_inside_constant_assignment(node):
             return node
 
@@ -571,9 +584,17 @@ class _ExtractConstantTransformer(cst.CSTTransformer):
 
 
 class _RemoveDeadCodeTransformer(cst.CSTTransformer):
-    def __init__(self, method_name: str, class_name: Optional[str]) -> None:
+    METADATA_DEPENDENCIES = (PositionProvider,)
+
+    def __init__(
+        self,
+        method_name: str,
+        class_name: Optional[str],
+        target_line: int,
+    ) -> None:
         self.method_name = method_name
         self.class_name = class_name
+        self.target_line = target_line
         self.replacements = 0
         self._class_stack: list[str] = []
 
@@ -601,7 +622,11 @@ class _RemoveDeadCodeTransformer(cst.CSTTransformer):
         if self.class_name and current_class != self.class_name:
             return updated_node
 
-        if original_node.name.value == self.method_name:
+        position = self.get_metadata(PositionProvider, original_node)
+        if (
+            original_node.name.value == self.method_name
+            and position.start.line == self.target_line
+        ):
             self.replacements += 1
             return cst.RemoveFromParent()
 
@@ -688,12 +713,14 @@ def apply_extract_constant(
     else:
         preferred_name = _unique_constant_name(module, normalized_constant_name)
 
+    docstring_lines = _python_docstring_lines(source_code)
     updated_code, replacements = _apply_transformer(
         source_code,
         _ExtractConstantTransformer(
             literal_value=literal_value,
             constant_name=preferred_name,
             source_line=source_line,
+            docstring_lines=docstring_lines,
         ),
     )
     if replacements == 0 and source_line is not None:
@@ -703,6 +730,7 @@ def apply_extract_constant(
                 literal_value=literal_value,
                 constant_name=preferred_name,
                 source_line=None,
+                docstring_lines=docstring_lines,
             ),
         )
 
@@ -722,32 +750,332 @@ def apply_extract_constant(
     return updated_code, replacements
 
 
+def _python_docstring_lines(source_code: str) -> set[int]:
+    """Return lines occupied by module, class, and function docstrings."""
+
+    try:
+        tree = ast.parse(source_code)
+    except SyntaxError:
+        return set()
+
+    lines: set[int] = set()
+    scopes: list[ast.AST] = [tree]
+    scopes.extend(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef))
+    )
+    for scope in scopes:
+        body = getattr(scope, "body", [])
+        if not body:
+            continue
+        first = body[0]
+        if not isinstance(first, ast.Expr) or not isinstance(first.value, ast.Constant):
+            continue
+        if not isinstance(first.value.value, str):
+            continue
+        start = int(getattr(first, "lineno", 0) or 0)
+        end = int(getattr(first, "end_lineno", start) or start)
+        lines.update(range(start, end + 1))
+    return lines
+
+
 def apply_remove_dead_code(
     source_code: str,
     method_name: str,
     class_name: Optional[str] = None,
     source_line: Optional[int] = None,
+    *,
+    dead_code_kind: str = "",
+    target_statement_fingerprint: str = "",
 ) -> Tuple[str, int]:
     if not method_name and source_line is None:
         raise ValueError("remove_dead_code requires 'method_name' or 'source_line'.")
 
     if not method_name and source_line is not None:
-        return _remove_proven_dead_python_statement(source_code, source_line)
+        return _remove_proven_dead_python_statement(
+            source_code,
+            source_line,
+            class_name=class_name,
+            dead_code_kind=dead_code_kind,
+            target_statement_fingerprint=target_statement_fingerprint,
+        )
 
-    # A name-only planner instruction is not proof that a callable is dead.
-    # Limit deletion to private helpers with no references outside their own
-    # declaration. Public methods and magic methods may be external APIs.
-    if (
-        not method_name.startswith("_")
-        or (method_name.startswith("__") and method_name.endswith("__"))
-        or len(re.findall(rf"\b{re.escape(method_name)}\b", source_code)) != 1
+    try:
+        tree = ast.parse(source_code)
+    except SyntaxError:
+        return source_code, 0
+
+    target = _find_python_dead_callable(
+        tree,
+        method_name=method_name,
+        class_name=class_name,
+        source_line=source_line,
+    )
+    if target is None or not _is_proven_unused_python_callable(
+        tree,
+        target=target,
+        method_name=method_name,
     ):
         return source_code, 0
 
     return _apply_transformer(
         source_code,
-        _RemoveDeadCodeTransformer(method_name, class_name),
+        _RemoveDeadCodeTransformer(
+            method_name,
+            class_name,
+            target_line=target.lineno,
+        ),
     )
+
+
+def apply_narrow_exception_handler(
+    source_code: str,
+    *,
+    source_line: Optional[int] = None,
+    original_exception_type: str = "",
+    target_exception_type: str = "",
+    handler_name: str = "",
+) -> Tuple[str, int]:
+    """Narrow one Python ``except`` header without touching its body.
+
+    The caller must supply a concrete target type.  This transformer never
+    guesses from arbitrary function calls, and it refuses ambiguous handlers.
+    """
+
+    if not _valid_python_exception_type(target_exception_type):
+        return source_code, 0
+    try:
+        tree = ast.parse(source_code)
+    except SyntaxError:
+        return source_code, 0
+
+    candidates: list[ast.ExceptHandler] = []
+    for handler in (node for node in ast.walk(tree) if isinstance(node, ast.ExceptHandler)):
+        handler_type = _python_exception_expression_name(handler.type)
+        if original_exception_type:
+            if handler_type != original_exception_type:
+                continue
+        elif handler.type is not None:
+            continue
+        if handler_name and str(handler.name or "") != handler_name:
+            continue
+        candidates.append(handler)
+
+    if source_line is not None:
+        line_matches = [
+            handler for handler in candidates
+            if int(getattr(handler, "lineno", 0) or 0) == source_line
+        ]
+        if line_matches:
+            candidates = line_matches
+    if len(candidates) != 1:
+        return source_code, 0
+
+    handler = candidates[0]
+    lines = source_code.splitlines(keepends=True)
+    header_line = int(getattr(handler, "lineno", 0) or 0)
+    if header_line <= 0 or header_line > len(lines):
+        return source_code, 0
+
+    original_line = lines[header_line - 1]
+    content = original_line.rstrip("\r\n")
+    newline = original_line[len(content):]
+    match = re.match(
+        r"^(?P<indent>[ \t]*)except(?:\s+(?P<type>[^:#]+?))?"
+        r"(?P<alias>\s+as\s+[A-Za-z_][A-Za-z0-9_]*)?"
+        r"(?P<suffix>\s*:\s*(?:#.*)?)$",
+        content,
+    )
+    if not match:
+        return source_code, 0
+
+    alias = match.group("alias") or ""
+    replacement = (
+        f"{match.group('indent')}except {target_exception_type}{alias}"
+        f"{match.group('suffix')}{newline}"
+    )
+    if replacement == original_line:
+        return source_code, 0
+    lines[header_line - 1] = replacement
+    transformed = "".join(lines)
+    try:
+        ast.parse(transformed)
+    except SyntaxError:
+        return source_code, 0
+    return transformed, 1
+
+
+def _python_exception_expression_name(expression: ast.AST | None) -> str:
+    if isinstance(expression, ast.Name):
+        return expression.id
+    if isinstance(expression, ast.Attribute):
+        return expression.attr
+    return ""
+
+
+def _valid_python_exception_type(value: str) -> bool:
+    names = [part.strip() for part in value.strip().strip("()").split(",") if part.strip()]
+    if not names:
+        return False
+    return all(re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.]*", name) for name in names)
+
+
+def resolve_dead_code_target(
+    source_code: str,
+    *,
+    method_name: str = "",
+    class_name: Optional[str] = None,
+    source_line: Optional[int] = None,
+) -> tuple[str, str]:
+    """Capture a stable AST anchor for a plan-specified dead-code target.
+
+    RDP plans normally identify a source line. Earlier transformations can add
+    lines before the Remove Dead Code action runs, so the engine records this
+    semantic anchor from the original code and the remover later relocates it.
+    """
+
+    try:
+        tree = ast.parse(source_code)
+    except SyntaxError:
+        return "", ""
+
+    if method_name:
+        target = _find_python_dead_callable(
+            tree,
+            method_name=method_name,
+            class_name=class_name,
+            source_line=source_line,
+        )
+        if target is not None:
+            return "unused_callable", ast.dump(target, include_attributes=False)
+        return "", ""
+
+    if source_line is None:
+        return "", ""
+
+    callable_candidates = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and int(getattr(node, "lineno", 0) or 0) == source_line
+    ]
+    if callable_candidates:
+        target = callable_candidates[0]
+        return "unused_callable", ast.dump(target, include_attributes=False)
+
+    false_branches = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.If)
+        and not node.orelse
+        and _static_python_boolean(node.test) is False
+        and _python_statement_span(node)[0] <= source_line <= _python_statement_span(node)[1]
+    ]
+    if false_branches:
+        target = min(
+            false_branches,
+            key=lambda node: _python_statement_span(node)[1] - _python_statement_span(node)[0],
+        )
+        return "constant_false_branch", ast.dump(target, include_attributes=False)
+
+    for statement in _unreachable_python_statements(tree):
+        start_line, end_line = _python_statement_span(statement)
+        if start_line <= source_line <= end_line:
+            return "unreachable_after_terminator", ast.dump(
+                statement,
+                include_attributes=False,
+            )
+
+    for statement in ast.walk(tree):
+        if not isinstance(statement, (ast.Assign, ast.AnnAssign)):
+            continue
+        start_line, end_line = _python_statement_span(statement)
+        if start_line <= source_line <= end_line:
+            return "unused_literal_assignment", ast.dump(
+                statement,
+                include_attributes=False,
+            )
+    return "", ""
+
+
+def _find_python_dead_callable(
+    tree: ast.Module,
+    *,
+    method_name: str,
+    class_name: Optional[str],
+    source_line: Optional[int] = None,
+) -> Optional[ast.FunctionDef | ast.AsyncFunctionDef]:
+    parents = {
+        child: parent
+        for parent in ast.walk(tree)
+        for child in ast.iter_child_nodes(parent)
+    }
+
+    candidates: list[ast.FunctionDef | ast.AsyncFunctionDef] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if method_name and node.name != method_name:
+            continue
+        if source_line is not None:
+            start, end = _python_statement_span(node)
+            if not start <= source_line <= end:
+                continue
+        if class_name:
+            owner = parents.get(node)
+            while owner is not None and not isinstance(owner, ast.ClassDef):
+                owner = parents.get(owner)
+            if not isinstance(owner, ast.ClassDef) or owner.name != class_name:
+                continue
+        candidates.append(node)
+
+    if source_line is not None:
+        candidates.sort(key=lambda node: _python_statement_span(node)[1] - _python_statement_span(node)[0])
+        return candidates[0] if candidates else None
+    return candidates[0] if len(candidates) == 1 else None
+
+
+def _is_proven_unused_python_callable(
+    tree: ast.Module,
+    *,
+    target: ast.FunctionDef | ast.AsyncFunctionDef,
+    method_name: str,
+) -> bool:
+    """Reject dynamic/publicly ambiguous callables before CST removal."""
+
+    if target.decorator_list or (
+        method_name.startswith("__") and method_name.endswith("__")
+    ):
+        return False
+
+    dynamic_lookup_names = {
+        "getattr",
+        "setattr",
+        "hasattr",
+        "delattr",
+        "globals",
+        "locals",
+        "vars",
+        "eval",
+        "exec",
+        "__import__",
+        "import_module",
+    }
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in dynamic_lookup_names:
+            return False
+        if isinstance(node, ast.Constant) and isinstance(node.value, str) and node.value == method_name:
+            return False
+
+    for node in ast.walk(tree):
+        if node is target:
+            continue
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load) and node.id == method_name:
+            return False
+        if isinstance(node, ast.Attribute) and node.attr == method_name:
+            return False
+    return True
 
 
 def _iter_python_statement_suites(node: ast.AST):
@@ -777,6 +1105,44 @@ def _is_side_effect_free_literal(expression: Optional[ast.AST]) -> bool:
     except (ValueError, TypeError, SyntaxError, MemoryError, RecursionError):
         return False
     return True
+
+
+def _static_python_boolean(expression: ast.AST) -> Optional[bool]:
+    """Evaluate only literal-only conditions; never execute project expressions."""
+
+    if isinstance(expression, ast.Constant):
+        return bool(expression.value)
+    if isinstance(expression, ast.UnaryOp) and isinstance(expression.op, ast.Not):
+        value = _static_python_boolean(expression.operand)
+        return None if value is None else not value
+    if isinstance(expression, ast.BoolOp):
+        values = [_static_python_boolean(item) for item in expression.values]
+        if any(item is None for item in values):
+            return None
+        return all(values) if isinstance(expression.op, ast.And) else any(values)
+    if isinstance(expression, ast.Compare) and len(expression.ops) == 1 and len(expression.comparators) == 1:
+        try:
+            left = ast.literal_eval(expression.left)
+            right = ast.literal_eval(expression.comparators[0])
+        except (ValueError, TypeError, SyntaxError, MemoryError, RecursionError):
+            return None
+        operator = expression.ops[0]
+        try:
+            if isinstance(operator, ast.Eq):
+                return left == right
+            if isinstance(operator, ast.NotEq):
+                return left != right
+            if isinstance(operator, ast.Lt):
+                return left < right
+            if isinstance(operator, ast.LtE):
+                return left <= right
+            if isinstance(operator, ast.Gt):
+                return left > right
+            if isinstance(operator, ast.GtE):
+                return left >= right
+        except (TypeError, ValueError):
+            return None
+    return None
 
 
 def _assigned_local_names(statement: ast.stmt) -> list[str]:
@@ -825,7 +1191,27 @@ def _remove_python_line_span(source_code: str, start_line: int, end_line: int) -
     return candidate, 1
 
 
-def _remove_proven_dead_python_statement(source_code: str, source_line: int) -> Tuple[str, int]:
+def _unreachable_python_statements(tree: ast.Module) -> list[ast.stmt]:
+    statements: list[ast.stmt] = []
+    terminators = (ast.Return, ast.Raise, ast.Break, ast.Continue)
+    for suite in _iter_python_statement_suites(tree):
+        terminated = False
+        for statement in suite:
+            if terminated:
+                statements.append(statement)
+            if isinstance(statement, terminators):
+                terminated = True
+    return statements
+
+
+def _remove_proven_dead_python_statement(
+    source_code: str,
+    source_line: int,
+    *,
+    class_name: Optional[str] = None,
+    dead_code_kind: str = "",
+    target_statement_fingerprint: str = "",
+) -> Tuple[str, int]:
     """Remove only AST-proven unreachable or unused local statements."""
 
     try:
@@ -839,18 +1225,81 @@ def _remove_proven_dead_python_statement(source_code: str, source_line: int) -> 
         for child in ast.iter_child_nodes(parent)
     }
 
-    # Statements after an unconditional terminator in the same suite are
-    # unreachable. Remove the complete statement span, not an arbitrary line.
-    terminators = (ast.Return, ast.Raise, ast.Break, ast.Continue)
-    for suite in _iter_python_statement_suites(tree):
-        terminated = False
-        for statement in suite:
-            start_line, end_line = _python_statement_span(statement)
-            if terminated and start_line <= source_line <= end_line:
-                return _remove_python_line_span(source_code, start_line, end_line)
-            if isinstance(statement, terminators):
-                terminated = True
+    # A stable AST anchor is authoritative. Once earlier actions have shifted
+    # lines, falling back to the old line could target different live code.
+    if target_statement_fingerprint:
+        return _remove_anchored_python_dead_target(
+            source_code,
+            tree=tree,
+            parents=parents,
+            dead_code_kind=dead_code_kind,
+            target_statement_fingerprint=target_statement_fingerprint,
+        )
 
+    # A plan line can point at a function body rather than the ``def`` line.
+    # Resolve the smallest enclosing callable first, then apply the same
+    # reference/dynamic-usage proof used by method-name targets.
+    callable_candidates = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        # A line inside a function is normally a statement target.  Treat a
+        # line target as the callable itself only when it identifies the
+        # definition header; this prevents an ``if False`` or ``assert`` inside
+        # a live function from deleting the enclosing function.
+        and int(getattr(node, "lineno", 0) or 0) == source_line
+    ]
+    if class_name:
+        callable_candidates = [
+            node
+            for node in callable_candidates
+            if _python_callable_class_name(node, parents) == class_name
+        ]
+    callable_candidates.sort(
+        key=lambda node: _python_statement_span(node)[1] - _python_statement_span(node)[0]
+    )
+    if callable_candidates:
+        # The smallest enclosing callable is the AST/CST target for a line
+        # inside a nested function.  Reference analysis remains the gate that
+        # decides whether this candidate may actually be removed.
+        target_callable = callable_candidates[0]
+        if _is_proven_unused_python_callable(
+            tree,
+            target=target_callable,
+            method_name=target_callable.name,
+        ):
+            return _apply_transformer(
+                source_code,
+                _RemoveDeadCodeTransformer(
+                    target_callable.name,
+                    class_name,
+                    target_line=int(getattr(target_callable, "lineno", source_line)),
+                ),
+            )
+
+    # Remove a complete constant-false branch only when it has no ``else``
+    # suite. Replacing an ``if`` with an ``else`` body needs a richer CST move
+    # and is intentionally left for review rather than risking layout changes.
+    false_branches = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.If)
+        and not node.orelse
+        and _static_python_boolean(node.test) is False
+        and _python_statement_span(node)[0] <= source_line <= _python_statement_span(node)[1]
+    ]
+    false_branches.sort(key=lambda node: _python_statement_span(node)[1] - _python_statement_span(node)[0])
+    if false_branches:
+        start_line, end_line = _python_statement_span(false_branches[0])
+        return _remove_python_line_span(source_code, start_line, end_line)
+    # Statements after an unconditional terminator in the same suite are
+    # unreachable. Internal actions carry an AST anchor because earlier plan
+    # actions may have shifted line numbers before this action is applied.
+    unreachable = _unreachable_python_statements(tree)
+    for statement in unreachable:
+        start_line, end_line = _python_statement_span(statement)
+        if start_line <= source_line <= end_line:
+            return _remove_python_line_span(source_code, start_line, end_line)
     # A local assignment is removable only when its value is a literal (so
     # evaluating it has no side effects) and the assigned name is never read.
     candidates = [
@@ -878,6 +1327,94 @@ def _remove_proven_dead_python_statement(source_code: str, source_line: int) -> 
     return source_code, 0
 
 
+def _remove_anchored_python_dead_target(
+    source_code: str,
+    *,
+    tree: ast.Module,
+    parents: dict[ast.AST, ast.AST],
+    dead_code_kind: str,
+    target_statement_fingerprint: str,
+) -> Tuple[str, int]:
+    """Relocate and remove exactly one previously resolved dead-code target."""
+
+    if dead_code_kind == "unused_callable":
+        candidates = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and ast.dump(node, include_attributes=False) == target_statement_fingerprint
+        ]
+        if len(candidates) == 1:
+            target = candidates[0]
+            if _is_proven_unused_python_callable(tree, target=target, method_name=target.name):
+                return _apply_transformer(
+                    source_code,
+                    _RemoveDeadCodeTransformer(
+                        target.name,
+                        _python_callable_class_name(target, parents),
+                        target_line=int(getattr(target, "lineno", 0) or 0),
+                    ),
+                )
+        return source_code, 0
+
+    if dead_code_kind == "constant_false_branch":
+        candidates = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.If)
+            and not node.orelse
+            and _static_python_boolean(node.test) is False
+            and ast.dump(node, include_attributes=False) == target_statement_fingerprint
+        ]
+    elif dead_code_kind == "unreachable_after_terminator":
+        candidates = [
+            node
+            for node in _unreachable_python_statements(tree)
+            if ast.dump(node, include_attributes=False) == target_statement_fingerprint
+        ]
+    elif dead_code_kind == "unused_literal_assignment":
+        candidates = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.stmt)
+            and ast.dump(node, include_attributes=False) == target_statement_fingerprint
+        ]
+    else:
+        return source_code, 0
+
+    if len(candidates) != 1:
+        return source_code, 0
+
+    target = candidates[0]
+    if dead_code_kind == "unused_literal_assignment":
+        names = _assigned_local_names(target)
+        function = _enclosing_python_function(target, parents)
+        if not names or function is None:
+            return source_code, 0
+        loaded_names = {
+            node.id
+            for node in ast.walk(function)
+            if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)
+        }
+        if any(name in loaded_names for name in names):
+            return source_code, 0
+
+    start_line, end_line = _python_statement_span(target)
+    return _remove_python_line_span(source_code, start_line, end_line)
+
+
+def _python_callable_class_name(
+    node: ast.FunctionDef | ast.AsyncFunctionDef,
+    parents: dict[ast.AST, ast.AST],
+) -> Optional[str]:
+    owner = parents.get(node)
+    while owner is not None:
+        if isinstance(owner, ast.ClassDef):
+            return owner.name
+        owner = parents.get(owner)
+    return None
+
+
 def _line_indent(line: str) -> str:
     return line[: len(line) - len(line.lstrip(" \t"))]
 
@@ -888,55 +1425,31 @@ def apply_extract_method(
     start_line: int,
     end_line: int,
 ) -> Tuple[str, int]:
-    """Extract a return-oriented Python block into a nested helper function.
+    """Backward-compatible entry point for the semantic sibling extractor."""
 
-    This intentionally supports only a behavior-preserving subset: the selected
-    range must be inside an existing indented block and end with a return
-    statement. The nested helper can close over local variables, so it avoids
-    unsafe parameter guessing.
-    """
+    from .python_extract_method import apply_extract_method as apply_semantic_extract_method
 
-    if not new_method_name:
-        raise ValueError("extract_method requires 'new_method_name'.")
-    if start_line <= 0 or end_line < start_line:
-        raise ValueError("extract_method requires a valid line range.")
-
-    lines = source_code.splitlines(keepends=True)
-    if end_line > len(lines):
+    try:
+        tree = ast.parse(source_code)
+    except SyntaxError:
         return source_code, 0
-
-    selected = lines[start_line - 1 : end_line]
-    meaningful = [line for line in selected if line.strip()]
-    if not meaningful:
-        return source_code, 0
-
-    if meaningful[0].lstrip().startswith(("def ", "async def ")):
-        return _extract_full_python_function(source_code, new_method_name, start_line, end_line)
-
-    block_indent = min((_line_indent(line) for line in meaningful), key=len)
-    if not block_indent:
-        return source_code, 0
-
-    last_statement = meaningful[-1].strip()
-    if not last_statement.startswith("return"):
-        return source_code, 0
-
-    helper_header = f"{block_indent}def {new_method_name}():\n"
-    helper_body = [
-        (f"{block_indent}    {line[len(block_indent):]}" if line.startswith(block_indent) else f"{block_indent}    {line.lstrip()}")
-        for line in selected
+    candidates = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.lineno <= start_line <= getattr(node, "end_lineno", node.lineno)
     ]
-    if helper_body and helper_body[-1] and not helper_body[-1].endswith(("\n", "\r")):
-        helper_body[-1] += "\n"
-
-    replacement = [
-        helper_header,
-        *helper_body,
-        f"{block_indent}return {new_method_name}()\n",
-    ]
-
-    transformed = lines[: start_line - 1] + replacement + lines[end_line:]
-    return "".join(transformed), 1
+    candidates.sort(key=lambda node: getattr(node, "end_lineno", node.lineno) - node.lineno)
+    if not candidates:
+        return source_code, 0
+    transformed, replacements, _metadata = apply_semantic_extract_method(
+        source_code,
+        new_method_name=new_method_name,
+        method_name=candidates[0].name,
+        start_line=start_line,
+        end_line=end_line,
+    )
+    return transformed, replacements
 
 
 class _ReturnTransformer(ast.NodeTransformer):
@@ -1265,3 +1778,42 @@ def apply_fault_injection_python(
 ) -> Tuple[str, int]:
     """Backward-compatible alias for callers that expect a Python-specific name."""
     return apply_fault_injection(source_code, original_logic, faulty_logic)
+
+
+def apply_extract_class(
+    source_code: str,
+    *,
+    source_file: str = "",
+    current_file_name: str = "",
+    source_class: str,
+    new_class_name: str,
+    methods_to_extract: list[str] | None = None,
+    fields_to_extract: list[str] | None = None,
+    preserve_public_api: bool = True,
+    delegation_strategy: str = "wrapper",
+    target_file: str = "same_file",
+    project_source_files: Sequence[Any] | None = None,
+    repository_complete: bool = False,
+    behavior_tests: Sequence[dict[str, Any]] | None = None,
+    required_public_methods: Sequence[str] | None = None,
+    required_public_fields: Sequence[str] | None = None,
+    source_resolution_error: str = "",
+) -> tuple[str, int, dict[str, Any]]:
+    return _apply_extract_class(
+        source_code,
+        source_file=source_file,
+        current_file_name=current_file_name,
+        source_class=source_class,
+        new_class_name=new_class_name,
+        methods_to_extract=methods_to_extract,
+        fields_to_extract=fields_to_extract,
+        preserve_public_api=preserve_public_api,
+        delegation_strategy=delegation_strategy,
+        target_file=target_file,
+        project_source_files=project_source_files,
+        repository_complete=repository_complete,
+        behavior_tests=behavior_tests,
+        required_public_methods=required_public_methods,
+        required_public_fields=required_public_fields,
+        source_resolution_error=source_resolution_error,
+    )

@@ -16,6 +16,7 @@ class TransformationLogEntry:
     action_type: str
     replacements_count: int
     warnings: List[str] = field(default_factory=list)
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -23,6 +24,7 @@ class TransformationLogEntry:
             "action_type": self.action_type,
             "replacements_count": self.replacements_count,
             "warnings": self.warnings,
+            "metadata": self.metadata,
         }
 
 

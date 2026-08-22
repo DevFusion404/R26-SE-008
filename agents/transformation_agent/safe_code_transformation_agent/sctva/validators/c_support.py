@@ -97,6 +97,7 @@ def expected_c_transform_summary(actions: Sequence[RefactoringAction]) -> Dict[s
     expected_renames: Dict[str, str] = {}
     expected_removed: set[str] = set()
     expected_macros: Dict[str, Any] = {}
+    expected_added_functions: Dict[str, str] = {}
 
     for action in actions:
         action_type = getattr(action, "action_type", "")
@@ -142,10 +143,37 @@ def expected_c_transform_summary(actions: Sequence[RefactoringAction]) -> Dict[s
                 suffix += 1
             expected_macros[unique_name] = literal_value
 
+        elif action_type in {"extract_class", "extract_c_component"}:
+            component_name = str(
+                params.get("new_class_name")
+                or params.get("extracted_class_name")
+                or params.get("destination_class")
+                or params.get("new_component_name")
+                or ""
+            ).strip()
+            functions = params.get("methods_to_extract") or params.get("functions_to_extract") or []
+            if component_name and isinstance(functions, list):
+                for function_name in functions:
+                    cleaned = str(function_name or "").strip()
+                    if cleaned:
+                        expected_added_functions[f"{component_name}_{cleaned}"] = component_name
+
+        elif action_type == "extract_method":
+            helper_name = str(
+                params.get("new_method_name")
+                or params.get("extracted_method_name")
+                or params.get("new_function_name")
+                or params.get("extracted_function_name")
+                or ""
+            ).strip()
+            if helper_name:
+                expected_added_functions[helper_name] = ""
+
     return {
         "expected_renames": expected_renames,
         "expected_removed": sorted(expected_removed),
         "expected_macros": expected_macros,
+        "expected_added_functions": expected_added_functions,
     }
 
 
@@ -170,6 +198,7 @@ def compare_c_static_summaries(
     expected_renames = expected["expected_renames"]
     expected_removed = set(expected["expected_removed"])
     expected_macros = expected["expected_macros"]
+    expected_added_functions = expected["expected_added_functions"]
 
     original_signatures = dict(original_summary.get("functions", {}))
     transformed_signatures = dict(transformed_summary.get("functions", {}))
@@ -184,7 +213,31 @@ def compare_c_static_summaries(
     transformed_signature_set = set(transformed_summary.get("function_signatures", []))
 
     missing_functions = sorted(normalized_expected_original - transformed_signature_set)
-    unexpected_functions = sorted(transformed_signature_set - normalized_expected_original)
+    added_signatures: set[str] = set()
+    missing_added_functions: List[Dict[str, Any]] = []
+    for function_name, component_name in expected_added_functions.items():
+        signature = transformed_signatures.get(function_name)
+        if signature is None:
+            missing_added_functions.append({
+                "name": function_name,
+                "expected_state_type": component_name,
+            })
+            continue
+        if component_name:
+            params = signature.split(":", 1)[1] if ":" in signature else ""
+            normalized_params = re.sub(r"\s+", " ", params).strip()
+            if not re.match(rf"^{re.escape(component_name)}\s*\*\s*state\b", normalized_params):
+                missing_added_functions.append({
+                    "name": function_name,
+                    "expected_state_type": component_name,
+                    "actual_signature": signature,
+                })
+                continue
+        added_signatures.add(signature)
+
+    unexpected_functions = sorted(
+        transformed_signature_set - normalized_expected_original - added_signatures
+    )
 
     transformed_macros = transformed_summary.get("macros", {})
     missing_macros: List[Dict[str, Any]] = []
@@ -201,7 +254,12 @@ def compare_c_static_summaries(
         elif str(actual).strip() != str(expected_value).strip():
             missing_macros.append({"name": name, "expected_value": expected_value, "actual_value": actual})
 
-    matched = not missing_functions and not unexpected_functions and not missing_macros
+    matched = (
+        not missing_functions
+        and not unexpected_functions
+        and not missing_added_functions
+        and not missing_macros
+    )
 
     return {
         "matched": matched,
@@ -211,6 +269,8 @@ def compare_c_static_summaries(
         "expected": expected,
         "missing_functions": missing_functions,
         "unexpected_functions": unexpected_functions,
+        "expected_added_functions": sorted(expected_added_functions),
+        "missing_added_functions": missing_added_functions,
         "missing_macros": missing_macros,
     }
 
