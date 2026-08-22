@@ -389,6 +389,26 @@ export async function fetchProjectStructure({ signal } = {}) {
 }
 
 /**
+ * The original source of ONE analysed file, for the Code Smell Review viewer.
+ *
+ * A thin wrapper over /workspace/sources so a caller that wants one file does
+ * not have to unpack a batch response. `source` is null when the workspace no
+ * longer holds the file — the report describes an analysis that has since been
+ * replaced, which the viewer reports rather than showing an empty editor.
+ */
+export async function fetchFileSource(filePath, { signal } = {}) {
+  const { files, missing } = await fetchWorkspaceSources([filePath], { signal });
+  const entry = files[0];
+
+  return {
+    path: filePath,
+    source: typeof entry?.source_code === "string" ? entry.source_code : null,
+    language: entry?.language || "",
+    missing: missing.includes(filePath) || !entry,
+  };
+}
+
+/**
  * POST /workspace/sources — the raw text of CUQA-analysed files.
  *
  * The orchestrator batches this against SCTVA's workspace reader, so any
