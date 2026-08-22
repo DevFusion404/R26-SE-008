@@ -1,26 +1,98 @@
 name: CI/CD Pipeline
 
+# ---------------------------------------------------------------
+# Triggers
+# ---------------------------------------------------------------
 on:
   push:
     branches:
       - main
       - master
     paths:
+      # Only run the pipeline when relevant source files change.
+      # CI config changes also trigger a run to validate the pipeline itself.
       - 'agents/rdp_agent/**'
+      - 'agents/cuqa_agent/**'
+      - '.github/workflows/ci.yml'
+  pull_request:
+    branches:
+      - main
+      - master
+    paths:
+      - 'agents/rdp_agent/**'
+      - 'agents/cuqa_agent/**'
       - '.github/workflows/ci.yml'
   workflow_dispatch:
+    inputs:
+      force_rdp:
+        description: 'Force rebuild RDP agent even if unchanged'
+        required: false
+        default: 'false'
+        type: boolean
+      force_cuqa:
+        description: 'Force rebuild CUQA agent even if unchanged'
+        required: false
+        default: 'false'
+        type: boolean
 
 permissions:
   contents: read
 
+# ---------------------------------------------------------------
+# Global env
+# ---------------------------------------------------------------
 env:
-  IMAGE_NAME: rdp-agent
   IMAGE_TAG: ${{ github.sha }}
 
+# ===============================================================
+# JOBS
+# ===============================================================
 jobs:
-  build-and-push:
-    name: Build and push RDP agent image to Azure Container Registry
+
+  # -------------------------------------------------------------
+  # 1. Detect which agents actually changed
+  #
+  # Uses dorny/paths-filter to compare the pushed commits against
+  # the previous state. Each output is "true"/"false" and consumed
+  # by later jobs via `needs.detect-changes.outputs.<name>`.
+  # -------------------------------------------------------------
+  detect-changes:
+    name: Detect changed agents
     runs-on: ubuntu-latest
+    outputs:
+      rdp:  ${{ steps.filter.outputs.rdp }}
+      cuqa: ${{ steps.filter.outputs.cuqa }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Detect changed paths
+        id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            rdp:
+              - 'agents/rdp_agent/**'
+            cuqa:
+              - 'agents/cuqa_agent/**'
+
+  # -------------------------------------------------------------
+  # 2a. Build & push RDP agent image
+  #
+  # Runs only when:
+  #   - files under agents/rdp_agent/ changed, OR
+  #   - the workflow was manually dispatched with force_rdp=true
+  # -------------------------------------------------------------
+  build-rdp:
+    name: Build and push RDP agent image
+    needs: detect-changes
+    runs-on: ubuntu-latest
+    if: >
+      needs.detect-changes.outputs.rdp == 'true' ||
+      github.event.inputs.force_rdp == 'true'
+
+    env:
+      IMAGE_NAME: rdp-agent
 
     steps:
       - name: Checkout repository
@@ -36,33 +108,125 @@ jobs:
           username: ${{ secrets.ACR_USERNAME }}
           password: ${{ secrets.ACR_PASSWORD }}
 
-      - name: Build and push Docker image
+      - name: Build and push RDP Docker image
         uses: docker/build-push-action@v5
         with:
           context: ./agents/rdp_agent
           file: ./agents/rdp_agent/Dockerfile
-          push: true
+          push: ${{ github.event_name != 'pull_request' }}
           tags: |
             ${{ secrets.ACR_LOGIN_SERVER }}/${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
             ${{ secrets.ACR_LOGIN_SERVER }}/${{ env.IMAGE_NAME }}:latest
+          cache-from: type=registry,ref=${{ secrets.ACR_LOGIN_SERVER }}/${{ env.IMAGE_NAME }}:latest
+          cache-to: type=inline
 
-  deploy-to-azure:
-    name: Deploy RDP agent to Azure Web App
-    needs: build-and-push
+  # -------------------------------------------------------------
+  # 2b. Build & push CUQA agent image
+  #
+  # Runs only when:
+  #   - files under agents/cuqa_agent/ changed, OR
+  #   - the workflow was manually dispatched with force_cuqa=true
+  # -------------------------------------------------------------
+  build-cuqa:
+    name: Build and push CUQA agent image
+    needs: detect-changes
     runs-on: ubuntu-latest
+    if: >
+      needs.detect-changes.outputs.cuqa == 'true' ||
+      github.event.inputs.force_cuqa == 'true'
+
     env:
-      AZURE_WEBAPP_NAME: ${{ secrets.AZURE_WEBAPP_NAME }}
-      AZURE_WEBAPP_PUBLISH_PROFILE: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}
+      IMAGE_NAME: cuqa-agent
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Azure Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ secrets.ACR_LOGIN_SERVER }}
+          username: ${{ secrets.ACR_USERNAME }}
+          password: ${{ secrets.ACR_PASSWORD }}
+
+      - name: Build and push CUQA Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./agents/cuqa_agent
+          file: ./agents/cuqa_agent/Dockerfile
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: |
+            ${{ secrets.ACR_LOGIN_SERVER }}/${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
+            ${{ secrets.ACR_LOGIN_SERVER }}/${{ env.IMAGE_NAME }}:latest
+          cache-from: type=registry,ref=${{ secrets.ACR_LOGIN_SERVER }}/${{ env.IMAGE_NAME }}:latest
+          cache-to: type=inline
+
+  # -------------------------------------------------------------
+  # 3a. Deploy RDP agent to Azure
+  #
+  # Only runs after a successful RDP build (on push, not PRs).
+  # Skipped automatically if build-rdp was skipped.
+  # -------------------------------------------------------------
+  deploy-rdp:
+    name: Deploy RDP agent to Azure Web App
+    needs: build-rdp
+    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request'
+    env:
+      IMAGE_NAME: rdp-agent
+      AZURE_WEBAPP_NAME: ${{ secrets.AZURE_WEBAPP_NAME_RDP }}
+      AZURE_WEBAPP_PUBLISH_PROFILE: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE_RDP }}
 
     steps:
       - name: Check Azure deployment secrets
-        if: ${{ env.AZURE_WEBAPP_NAME != '' && env.AZURE_WEBAPP_PUBLISH_PROFILE != '' }}
-        run: echo "Azure deployment credentials detected. Proceeding with deployment."
+        if: >
+          env.AZURE_WEBAPP_NAME != '' &&
+          env.AZURE_WEBAPP_PUBLISH_PROFILE != ''
+        run: echo "RDP Azure deployment credentials detected. Proceeding."
 
-      - name: Deploy image to Azure Web App
-        if: ${{ env.AZURE_WEBAPP_NAME != '' && env.AZURE_WEBAPP_PUBLISH_PROFILE != '' }}
+      - name: Deploy RDP image to Azure Web App
+        if: >
+          env.AZURE_WEBAPP_NAME != '' &&
+          env.AZURE_WEBAPP_PUBLISH_PROFILE != ''
         uses: azure/webapps-deploy@v3
         with:
           app-name: ${{ env.AZURE_WEBAPP_NAME }}
           publish-profile: ${{ env.AZURE_WEBAPP_PUBLISH_PROFILE }}
           images: ${{ secrets.ACR_LOGIN_SERVER }}/${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
+
+  # -------------------------------------------------------------
+  # 3b. Deploy CUQA agent to Azure
+  #
+  # Only runs after a successful CUQA build (on push, not PRs).
+  # Skipped automatically if build-cuqa was skipped.
+  # -------------------------------------------------------------
+  deploy-cuqa:
+    name: Deploy CUQA agent to Azure Web App
+    needs: build-cuqa
+    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request'
+    env:
+      IMAGE_NAME: cuqa-agent
+      AZURE_WEBAPP_NAME: ${{ secrets.AZURE_WEBAPP_NAME_CUQA }}
+      AZURE_WEBAPP_PUBLISH_PROFILE: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE_CUQA }}
+
+    steps:
+      - name: Check Azure deployment secrets
+        if: >
+          env.AZURE_WEBAPP_NAME != '' &&
+          env.AZURE_WEBAPP_PUBLISH_PROFILE != ''
+        run: echo "CUQA Azure deployment credentials detected. Proceeding."
+
+      - name: Deploy CUQA image to Azure Web App
+        if: >
+          env.AZURE_WEBAPP_NAME != '' &&
+          env.AZURE_WEBAPP_PUBLISH_PROFILE != ''
+        uses: azure/webapps-deploy@v3
+        with:
+          app-name: ${{ env.AZURE_WEBAPP_NAME }}
+          publish-profile: ${{ env.AZURE_WEBAPP_PUBLISH_PROFILE }}
+          images: ${{ secrets.ACR_LOGIN_SERVER }}/${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
+

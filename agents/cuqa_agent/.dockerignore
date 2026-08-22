@@ -1,0 +1,109 @@
+﻿# ============================================================
+# CUQA Agent - .dockerignore
+# Excludes files that should NOT be copied into the Docker
+# build context. Keeps the image lean and build fast.
+# ============================================================
+
+
+# ------------------------------------------------------------
+# Python artifacts
+# ------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg
+*.egg-info/
+dist/
+build/
+*.whl
+
+
+# ------------------------------------------------------------
+# Virtual environments (never ship the local venv)
+# ------------------------------------------------------------
+venv/
+.venv/
+env/
+.env/
+
+
+# ------------------------------------------------------------
+# Test suite and test data
+# These are only needed during CI, not at runtime.
+# ------------------------------------------------------------
+tests/
+pytest.ini
+requirements-test.txt
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+
+# ------------------------------------------------------------
+# Documentation
+# ------------------------------------------------------------
+README.md
+*.md
+*.rst
+docs/
+
+
+# ------------------------------------------------------------
+# IDE / editor configuration
+# ------------------------------------------------------------
+.vscode/
+.idea/
+*.suo
+*.user
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+
+# ------------------------------------------------------------
+# Version control
+# ------------------------------------------------------------
+.git/
+.gitignore
+.gitattributes
+
+
+# ------------------------------------------------------------
+# CI / CD pipeline config
+# (not needed inside the running container)
+# ------------------------------------------------------------
+.github/
+.gitlab-ci.yml
+azure-pipelines.yml
+Jenkinsfile
+
+
+# ------------------------------------------------------------
+# Temporary / output files
+# CUQA creates these at runtime - they must not be baked in.
+# ------------------------------------------------------------
+outputs/
+*.tmp
+*.log
+
+
+# ------------------------------------------------------------
+# Datasets (large CSV files, not needed at runtime)
+# ------------------------------------------------------------
+datasets/
+
+
+# ------------------------------------------------------------
+# Deprecated code
+# ------------------------------------------------------------
+deprecated/
+
+
+# ------------------------------------------------------------
+# The Dockerfile itself and this file
+# ------------------------------------------------------------
+Dockerfile
+.dockerignore

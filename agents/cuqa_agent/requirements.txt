@@ -1,0 +1,42 @@
+﻿# ============================================================
+# CUQA Agent - Production Requirements
+# Code Understanding & Quality Assessment Agent
+# ============================================================
+
+# ------------------------------------------------------------------
+# Web framework
+# FastAPI for REST endpoints, uvicorn as the ASGI server,
+# gunicorn as the production process manager.
+# ------------------------------------------------------------------
+fastapi>=0.109.0
+uvicorn[standard]>=0.27.0
+gunicorn>=21.0.0
+
+# ------------------------------------------------------------------
+# Data validation
+# ------------------------------------------------------------------
+pydantic>=2.0.0
+
+# ------------------------------------------------------------------
+# HTTP client
+# Used to fetch public GitHub repositories (clone via API / tarball).
+# ------------------------------------------------------------------
+requests>=2.31.0
+
+# ------------------------------------------------------------------
+# File upload support (FastAPI multipart forms)
+# ------------------------------------------------------------------
+python-multipart>=0.0.9
+
+# ------------------------------------------------------------------
+# Java AST parser
+# Optional — gracefully falls back when not installed.
+# ------------------------------------------------------------------
+javalang>=0.13.0
+
+# ------------------------------------------------------------------
+# C AST parser (tree-sitter)
+# Optional — gracefully falls back to regex parser when not installed.
+# The language-pack bundles prebuilt grammars including C.
+# ------------------------------------------------------------------
+tree-sitter-language-pack>=0.0.1
