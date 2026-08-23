@@ -1,11 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import SCTVAAgentService from '../../services/sctvaAgentService';
 import transformBadge from '../../assets/transform-badge.svg';
+import { getEnv } from '../../config/env';
 import './SCTVAAgentPage.css';
 
-const CUQA_API = import.meta.env.VITE_CUQA_AGENT_API_URL
-  || import.meta.env.VITE_CUA_API_URL
-  || 'http://localhost:8080';
+const CUQA_API = getEnv('VITE_CUQA_AGENT_API_URL', getEnv('VITE_CUA_API_URL', 'http://localhost:8080'));
 const CUQA_IMPORT_LIMIT = 1000;
 const RDP_AGENT_SESSION_KEY = 'rdp-agent-page-state';
 const RDP_AGENT_LOCAL_SESSION_KEY = 'rdp_last_session';
