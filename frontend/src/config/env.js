@@ -6,12 +6,27 @@
  * 3. fallback value
  */
 export const getEnv = (key, fallback = '') => {
-  if (typeof window !== 'undefined' && window.__RUNTIME_CONFIG__ && window.__RUNTIME_CONFIG__[key]) {
-    return window.__RUNTIME_CONFIG__[key];
+  if (
+    typeof window !== 'undefined' &&
+    window.__RUNTIME_CONFIG__ &&
+    window.__RUNTIME_CONFIG__[key] &&
+    typeof window.__RUNTIME_CONFIG__[key] === 'string' &&
+    window.__RUNTIME_CONFIG__[key].trim() !== '' &&
+    !window.__RUNTIME_CONFIG__[key].includes('${')
+  ) {
+    return window.__RUNTIME_CONFIG__[key].trim();
   }
-  if (typeof import.meta !== 'undefined' && import.meta.env && import.meta.env[key]) {
-    return import.meta.env[key];
+
+  if (
+    typeof import.meta !== 'undefined' &&
+    import.meta.env &&
+    import.meta.env[key] &&
+    typeof import.meta.env[key] === 'string' &&
+    import.meta.env[key].trim() !== ''
+  ) {
+    return import.meta.env[key].trim();
   }
+
   return fallback;
 };
 

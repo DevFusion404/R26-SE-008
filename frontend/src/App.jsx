@@ -21,7 +21,9 @@ import UserService     from './services/userService.js';
 import AuthPage        from './pages/AuthPage.jsx';
 import ProfilePage     from './pages/ProfilePage.jsx';
 
-const API = 'http://localhost:8080';
+import { getEnv } from './config/env';
+
+const API = getEnv('VITE_CUQA_AGENT_API_URL', getEnv('VITE_CUQA_API_URL', 'http://localhost:8080')).replace(/\/+$/, '');
 
 // ── Sidebar navigation definition ─────────────────────────────────────────
 const NAV_MAIN = [
