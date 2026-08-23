@@ -30,11 +30,11 @@ app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 16 * 1024 * 1024  # 16 MB max upload
 
 # Enable CORS for frontend communication
-CORS(app, resources={
-    r"/generate": {"origins": ["http://localhost:5173", "http://localhost:3000"]},
-    r"/health": {"origins": ["http://localhost:5173", "http://localhost:3000"]},
-    r"/config": {"origins": ["http://localhost:5173", "http://localhost:3000"]},
-})
+rdp_cors_origins = os.getenv("RDP_CORS_ORIGINS", "*")
+if rdp_cors_origins.strip() == "*":
+    CORS(app, resources={r"/*": {"origins": "*"}})
+else:
+    CORS(app, resources={r"/*": {"origins": [o.strip() for o in rdp_cors_origins.split(",") if o.strip()]}})
 
 
 # ---------------------------------------------------------------------------

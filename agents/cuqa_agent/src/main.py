@@ -60,9 +60,18 @@ app = FastAPI(
     version="1.0.0",
 )
 
+cors_origins_env = os.getenv("CUQA_CORS_ORIGINS", "*").strip()
+if cors_origins_env == "*":
+    origins = ["*"]
+    origin_regex = r"https?://.*"
+else:
+    origins = [o.strip() for o in cors_origins_env.split(",") if o.strip()]
+    origin_regex = None
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=origins,
+    allow_origin_regex=origin_regex,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
