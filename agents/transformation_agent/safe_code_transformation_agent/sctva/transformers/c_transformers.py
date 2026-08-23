@@ -755,6 +755,12 @@ def apply_replace_unsafe_function(
     safe_alternative: str,
     source_line: Optional[int] = None,
 ) -> Tuple[str, int]:
+    """Replace a known unsafe C function call with its safe equivalent.
+
+    Handles special two-step rewrite for ``scanf`` → ``fgets`` + ``sscanf``:
+    a temporary char buffer is introduced and the original format string and
+    variable list are preserved so program behaviour is unchanged.
+    """
     lines = source_code.splitlines(keepends=True)
     replacements = 0
     call_pattern = re.compile(rf"\b{re.escape(unsafe_function)}\s*\((.*?)\)")
@@ -783,6 +789,22 @@ def apply_replace_unsafe_function(
                 destination = args[0]
                 rest = ", ".join(args[1:])
                 return f"snprintf({destination}, sizeof({destination}), {rest})"
+            if unsafe_function == "scanf" and safe_alternative == "fgets" and len(args) >= 1:
+                # scanf("%d", &var)  →  char _buf[256]; fgets(_buf, sizeof(_buf), stdin); sscanf(_buf, "%d", &var)
+                replacements += 1
+                fmt = args[0]  # e.g. "%d" or "%f"
+                rest = ", ".join(args[1:])  # e.g. &price
+                # Preserve the leading indent of the original line so the
+                # two-statement expansion keeps the same column alignment.
+                leading = re.match(r"^(\s*)", match.string[match.pos:])
+                indent = leading.group(1) if leading else ""
+                buf_decl = "char _scanf_buf[256]"
+                fgets_call = f"fgets(_scanf_buf, sizeof(_scanf_buf), stdin)"
+                if rest:
+                    sscanf_call = f"sscanf(_scanf_buf, {fmt}, {rest})"
+                else:
+                    sscanf_call = f"sscanf(_scanf_buf, {fmt})"
+                return f"{buf_decl};\n{indent}{fgets_call};\n{indent}{sscanf_call}"
 
             replacements += 1
             return f"{safe_alternative}({match.group(1)})"

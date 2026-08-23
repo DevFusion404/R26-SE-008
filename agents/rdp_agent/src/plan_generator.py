@@ -353,13 +353,16 @@ class PlanGenerator:
             lines = location.get("lines", [])
             if lines:
                 params["source_line"] = lines[0] if isinstance(lines, list) else lines
-            # Safe alternative hint based on common C unsafe functions
+            # Safe alternative hint based on common C unsafe functions.
+            # For scanf, the idiomatic safe pattern is fgets() to read into a
+            # buffer, followed by sscanf() to parse — the transformer handles
+            # this two-step expansion from the single "fgets" key.
             safe_alternatives = {
                 "gets":    "fgets",
                 "strcpy":  "strncpy",
                 "strcat":  "strncat",
                 "sprintf": "snprintf",
-                "scanf":   "sscanf / fgets",
+                "scanf":   "fgets",
             }
             if unsafe_fn in safe_alternatives:
                 params["safe_alternative"] = safe_alternatives[unsafe_fn]
