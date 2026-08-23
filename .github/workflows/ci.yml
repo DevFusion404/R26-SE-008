@@ -9,11 +9,10 @@ on:
       - main
       - master
     paths:
-      # Only run the pipeline when relevant source files change.
-      # CI config changes also trigger a run to validate the pipeline itself.
       - 'agents/rdp_agent/**'
       - 'agents/cuqa_agent/**'
       - 'agents/transformation_agent/**'
+      - 'agents/orchestration_agent/**'
       - 'frontend/**'
       - '.github/workflows/ci.yml'
   pull_request:
@@ -24,6 +23,7 @@ on:
       - 'agents/rdp_agent/**'
       - 'agents/cuqa_agent/**'
       - 'agents/transformation_agent/**'
+      - 'agents/orchestration_agent/**'
       - 'frontend/**'
       - '.github/workflows/ci.yml'
   workflow_dispatch:
@@ -40,6 +40,11 @@ on:
         type: boolean
       force_sctva:
         description: 'Force rebuild Transformation agent even if unchanged'
+        required: false
+        default: 'false'
+        type: boolean
+      force_diwo:
+        description: 'Force rebuild Orchestration agent even if unchanged'
         required: false
         default: 'false'
         type: boolean
@@ -65,19 +70,16 @@ jobs:
 
   # -------------------------------------------------------------
   # 1. Detect which parts actually changed
-  #
-  # Uses dorny/paths-filter to compare the pushed commits against
-  # the previous state. Each output is "true"/"false" and consumed
-  # by later jobs via `needs.detect-changes.outputs.<name>`.
   # -------------------------------------------------------------
   detect-changes:
     name: Detect changed agents
     runs-on: ubuntu-latest
     outputs:
-      rdp:      ${{ steps.filter.outputs.rdp }}
-      cuqa:     ${{ steps.filter.outputs.cuqa }}
-      sctva:    ${{ steps.filter.outputs.sctva }}
-      frontend: ${{ steps.filter.outputs.frontend }}
+      rdp:          ${{ steps.filter.outputs.rdp }}
+      cuqa:         ${{ steps.filter.outputs.cuqa }}
+      sctva:        ${{ steps.filter.outputs.sctva }}
+      diwo:         ${{ steps.filter.outputs.diwo }}
+      frontend:     ${{ steps.filter.outputs.frontend }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -93,15 +95,15 @@ jobs:
               - 'agents/cuqa_agent/**'
             sctva:
               - 'agents/transformation_agent/**'
+            diwo:
+              - 'agents/orchestration_agent/**'
             frontend:
               - 'frontend/**'
 
   # -------------------------------------------------------------
   # 2a. Build & push RDP agent image to ACR
-  #
-  # On pull_request: image is built but NOT pushed (validates
-  # the Dockerfile without polluting the registry).
-  # On push to main/master: image is built AND pushed to ACR.
+  # On pull_request: built but NOT pushed.
+  # On push to main/master: built AND pushed.
   # -------------------------------------------------------------
   build-rdp:
     name: Build and push RDP agent image
@@ -110,10 +112,8 @@ jobs:
     if: >
       needs.detect-changes.outputs.rdp == 'true' ||
       github.event.inputs.force_rdp == 'true'
-
     env:
       IMAGE_NAME: rdp-agent
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -150,10 +150,8 @@ jobs:
     if: >
       needs.detect-changes.outputs.cuqa == 'true' ||
       github.event.inputs.force_cuqa == 'true'
-
     env:
       IMAGE_NAME: cuqa-agent
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -190,10 +188,8 @@ jobs:
     if: >
       needs.detect-changes.outputs.sctva == 'true' ||
       github.event.inputs.force_sctva == 'true'
-
     env:
       IMAGE_NAME: sctva-agent
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -221,15 +217,48 @@ jobs:
           cache-to: type=inline
 
   # -------------------------------------------------------------
-  # 2d. Build & push Frontend image to ACR
+  # 2d. Build & push Orchestration agent (DIWO) image to ACR
   #
-  # Build strategy:
-  #   - Node 20 builder compiles the Vite/React/Tailwind bundle
-  #   - nginx:alpine runtime serves the static dist/ folder
-  #
-  # On push to main/master: image pushed to ACR, then deployed
-  # to Azure Web App (the ONLY component that uses Web App).
-  # On pull_request: image is built only (not pushed).
+  # Build context is backend/ because that is where app.py and
+  # all Python packages live and what the Dockerfile references.
+  # -------------------------------------------------------------
+  build-diwo:
+    name: Build and push Orchestration agent image
+    needs: detect-changes
+    runs-on: ubuntu-latest
+    if: >
+      needs.detect-changes.outputs.diwo == 'true' ||
+      github.event.inputs.force_diwo == 'true'
+    env:
+      IMAGE_NAME: diwo-agent
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Azure Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ secrets.ACR_LOGIN_SERVER }}
+          username: ${{ secrets.ACR_USERNAME }}
+          password: ${{ secrets.ACR_PASSWORD }}
+
+      - name: Build and push DIWO Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./agents/orchestration_agent/backend
+          file: ./agents/orchestration_agent/backend/Dockerfile
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: |
+            ${{ secrets.ACR_LOGIN_SERVER }}/${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
+            ${{ secrets.ACR_LOGIN_SERVER }}/${{ env.IMAGE_NAME }}:latest
+          cache-from: type=registry,ref=${{ secrets.ACR_LOGIN_SERVER }}/${{ env.IMAGE_NAME }}:latest
+          cache-to: type=inline
+
+  # -------------------------------------------------------------
+  # 2e. Build & push Frontend image to ACR
   # -------------------------------------------------------------
   build-frontend:
     name: Build and push Frontend image
@@ -238,10 +267,8 @@ jobs:
     if: >
       needs.detect-changes.outputs.frontend == 'true' ||
       github.event.inputs.force_frontend == 'true'
-
     env:
       IMAGE_NAME: frontend
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -271,9 +298,10 @@ jobs:
   # -------------------------------------------------------------
   # 3. Deploy Frontend to Azure Web App
   #
-  # Runs only after a successful frontend build on a push
-  # (not on pull requests). Azure Web App pulls the container
-  # image from ACR and restarts the app automatically.
+  # The frontend is the only component deployed to Azure Web App.
+  # All agents (rdp, cuqa, sctva, diwo) are pushed to ACR only
+  # and run via Azure Container Apps or similar.
+  # Skipped on pull_request events.
   # -------------------------------------------------------------
   deploy-frontend:
     name: Deploy Frontend to Azure Web App
@@ -284,7 +312,6 @@ jobs:
       IMAGE_NAME: frontend
       AZURE_WEBAPP_NAME: ${{ secrets.AZURE_WEBAPP_NAME_FRONTEND }}
       AZURE_WEBAPP_PUBLISH_PROFILE: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE_FRONTEND }}
-
     steps:
       - name: Deploy Frontend image to Azure Web App
         if: >
