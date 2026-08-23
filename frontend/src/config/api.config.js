@@ -2,11 +2,12 @@
  * API Configuration
  * Centralized configuration for all agent API endpoints
  */
+import { getEnv } from './env';
 
 const API_CONFIG = {
   // === RDP Agent (Refactoring Decision & Planning) ===
   RDP_AGENT: {
-    baseURL: import.meta.env.VITE_RDP_AGENT_API_URL || 'http://localhost:5000',
+    baseURL: getEnv('VITE_RDP_AGENT_API_URL', 'http://localhost:5000'),
     endpoints: {
       generate: '/generate',
       health: '/health',
@@ -17,7 +18,7 @@ const API_CONFIG = {
 
   // === Code Understanding Agent (CUA) ===
   CUA_AGENT: {
-    baseURL: import.meta.env.VITE_CUA_API_URL || 'http://localhost:5001',
+    baseURL: getEnv('VITE_CUA_API_URL', 'http://localhost:5001'),
     endpoints: {
       analyze: '/analyze',
       health: '/health',
@@ -27,7 +28,7 @@ const API_CONFIG = {
 
   // === CUQA Agent (Code Understanding & Quality Assessment) ===
   CUQA_AGENT: {
-    baseURL: import.meta.env.VITE_CUQA_API_URL || 'http://localhost:8080',
+    baseURL: getEnv('VITE_CUQA_AGENT_API_URL', getEnv('VITE_CUQA_API_URL', 'http://localhost:8080')),
     endpoints: {
       health: '/api/health',
       uploadZip: '/api/upload-zip',
@@ -42,7 +43,7 @@ const API_CONFIG = {
 
   // === Safe Transformation Agent ===
   TRANSFORMATION_AGENT: {
-    baseURL: import.meta.env.VITE_TRANSFORMATION_AGENT_API_URL || 'http://localhost:8002',
+    baseURL: getEnv('VITE_TRANSFORMATION_AGENT_API_URL', 'http://localhost:8002'),
     endpoints: {
       execute: '/sctva/execute',
       executeFromRdp: '/sctva/execute_from_rdp',
@@ -53,7 +54,7 @@ const API_CONFIG = {
 
   // === DIWO Agent (Developer Interaction & Workflow Orchestration) ===
   DIWO_AGENT: {
-    baseURL: import.meta.env.VITE_DIWO_API_URL || 'http://localhost:5001/api',
+    baseURL: getEnv('VITE_DIWO_API_URL', getEnv('VITE_API_URL', 'http://localhost:5001/api')),
     endpoints: {
       workflows: '/workflows',
       health: '/health',
@@ -63,7 +64,7 @@ const API_CONFIG = {
 
   // === User Management Service ===
   USER_MANAGEMENT: {
-    baseURL: import.meta.env.VITE_USER_MANAGEMENT_API_URL || 'http://localhost:6000',
+    baseURL: getEnv('VITE_USER_MANAGEMENT_API_URL', 'http://localhost:6000'),
     endpoints: {
       health: '/api/auth/health',
       register: '/api/auth/register',
@@ -81,7 +82,7 @@ const API_CONFIG = {
     defaultTimeout: 30000,
     retryAttempts: 3,
     retryDelay: 1000, // milliseconds
-    enableLogging: import.meta.env.VITE_LOG_LEVEL === 'debug',
+    enableLogging: getEnv('VITE_LOG_LEVEL', '') === 'debug',
   },
 };
 
