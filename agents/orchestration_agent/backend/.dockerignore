@@ -1,0 +1,62 @@
+﻿# ============================================================
+# Orchestration Agent (DIWO) - .dockerignore
+# ============================================================
+
+# Python artifacts
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg
+*.egg-info/
+
+# Virtual environments
+venv/
+.venv/
+
+# Test suite - only needed in CI, not at runtime
+tests/
+pytest.ini
+requirements-test.txt
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# Runtime data - generated at runtime, never baked into image
+runtime/
+*.db
+
+# Environment files - never bake secrets into the image
+.env
+.env.*
+!.env.example
+
+# Git clone root - populated at runtime by git_service.py
+repos/
+
+# Documentation
+README.md
+*.md
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Version control
+.git/
+.gitignore
+.gitattributes
+
+# CI / CD
+.github/
+
+# Feedback model training scripts (not needed at runtime)
+../feedback_model/
+
+# The Docker files themselves
+Dockerfile
+.dockerignore

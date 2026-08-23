@@ -1,5 +1,17 @@
+﻿# ============================================================
+# Orchestration Agent (DIWO) - Production Requirements
+# ============================================================
+
+# Web framework + CORS
 flask==3.0.3
 flask-cors==4.0.1
+
+# Production WSGI server
+gunicorn>=21.0.0
+
+# Database (SQLite built-in; SQLAlchemy + psycopg for future Postgres migration)
 SQLAlchemy>=2.0
 psycopg[binary]>=3.2
+
+# Environment variable loading
 python-dotenv>=1.0
