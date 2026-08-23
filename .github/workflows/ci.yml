@@ -14,6 +14,7 @@ on:
       - 'agents/rdp_agent/**'
       - 'agents/cuqa_agent/**'
       - 'agents/transformation_agent/**'
+      - 'frontend/**'
       - '.github/workflows/ci.yml'
   pull_request:
     branches:
@@ -23,6 +24,7 @@ on:
       - 'agents/rdp_agent/**'
       - 'agents/cuqa_agent/**'
       - 'agents/transformation_agent/**'
+      - 'frontend/**'
       - '.github/workflows/ci.yml'
   workflow_dispatch:
     inputs:
@@ -38,6 +40,11 @@ on:
         type: boolean
       force_sctva:
         description: 'Force rebuild Transformation agent even if unchanged'
+        required: false
+        default: 'false'
+        type: boolean
+      force_frontend:
+        description: 'Force rebuild Frontend even if unchanged'
         required: false
         default: 'false'
         type: boolean
@@ -57,7 +64,7 @@ env:
 jobs:
 
   # -------------------------------------------------------------
-  # 1. Detect which agents actually changed
+  # 1. Detect which parts actually changed
   #
   # Uses dorny/paths-filter to compare the pushed commits against
   # the previous state. Each output is "true"/"false" and consumed
@@ -67,9 +74,10 @@ jobs:
     name: Detect changed agents
     runs-on: ubuntu-latest
     outputs:
-      rdp:   ${{ steps.filter.outputs.rdp }}
-      cuqa:  ${{ steps.filter.outputs.cuqa }}
-      sctva: ${{ steps.filter.outputs.sctva }}
+      rdp:      ${{ steps.filter.outputs.rdp }}
+      cuqa:     ${{ steps.filter.outputs.cuqa }}
+      sctva:    ${{ steps.filter.outputs.sctva }}
+      frontend: ${{ steps.filter.outputs.frontend }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -85,13 +93,11 @@ jobs:
               - 'agents/cuqa_agent/**'
             sctva:
               - 'agents/transformation_agent/**'
+            frontend:
+              - 'frontend/**'
 
   # -------------------------------------------------------------
   # 2a. Build & push RDP agent image to ACR
-  #
-  # Runs only when:
-  #   - files under agents/rdp_agent/ changed, OR
-  #   - the workflow was manually dispatched with force_rdp=true
   #
   # On pull_request: image is built but NOT pushed (validates
   # the Dockerfile without polluting the registry).
@@ -136,10 +142,6 @@ jobs:
 
   # -------------------------------------------------------------
   # 2b. Build & push CUQA agent image to ACR
-  #
-  # Runs only when:
-  #   - files under agents/cuqa_agent/ changed, OR
-  #   - the workflow was manually dispatched with force_cuqa=true
   # -------------------------------------------------------------
   build-cuqa:
     name: Build and push CUQA agent image
@@ -180,10 +182,6 @@ jobs:
 
   # -------------------------------------------------------------
   # 2c. Build & push Transformation agent (SCTVA) image to ACR
-  #
-  # Runs only when:
-  #   - files under agents/transformation_agent/ changed, OR
-  #   - the workflow was manually dispatched with force_sctva=true
   # -------------------------------------------------------------
   build-sctva:
     name: Build and push Transformation agent image
@@ -221,3 +219,79 @@ jobs:
             ${{ secrets.ACR_LOGIN_SERVER }}/${{ env.IMAGE_NAME }}:latest
           cache-from: type=registry,ref=${{ secrets.ACR_LOGIN_SERVER }}/${{ env.IMAGE_NAME }}:latest
           cache-to: type=inline
+
+  # -------------------------------------------------------------
+  # 2d. Build & push Frontend image to ACR
+  #
+  # Build strategy:
+  #   - Node 20 builder compiles the Vite/React/Tailwind bundle
+  #   - nginx:alpine runtime serves the static dist/ folder
+  #
+  # On push to main/master: image pushed to ACR, then deployed
+  # to Azure Web App (the ONLY component that uses Web App).
+  # On pull_request: image is built only (not pushed).
+  # -------------------------------------------------------------
+  build-frontend:
+    name: Build and push Frontend image
+    needs: detect-changes
+    runs-on: ubuntu-latest
+    if: >
+      needs.detect-changes.outputs.frontend == 'true' ||
+      github.event.inputs.force_frontend == 'true'
+
+    env:
+      IMAGE_NAME: frontend
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Azure Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ secrets.ACR_LOGIN_SERVER }}
+          username: ${{ secrets.ACR_USERNAME }}
+          password: ${{ secrets.ACR_PASSWORD }}
+
+      - name: Build and push Frontend Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./frontend
+          file: ./frontend/Dockerfile
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: |
+            ${{ secrets.ACR_LOGIN_SERVER }}/${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
+            ${{ secrets.ACR_LOGIN_SERVER }}/${{ env.IMAGE_NAME }}:latest
+          cache-from: type=registry,ref=${{ secrets.ACR_LOGIN_SERVER }}/${{ env.IMAGE_NAME }}:latest
+          cache-to: type=inline
+
+  # -------------------------------------------------------------
+  # 3. Deploy Frontend to Azure Web App
+  #
+  # Runs only after a successful frontend build on a push
+  # (not on pull requests). Azure Web App pulls the container
+  # image from ACR and restarts the app automatically.
+  # -------------------------------------------------------------
+  deploy-frontend:
+    name: Deploy Frontend to Azure Web App
+    needs: build-frontend
+    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request'
+    env:
+      IMAGE_NAME: frontend
+      AZURE_WEBAPP_NAME: ${{ secrets.AZURE_WEBAPP_NAME_FRONTEND }}
+      AZURE_WEBAPP_PUBLISH_PROFILE: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE_FRONTEND }}
+
+    steps:
+      - name: Deploy Frontend image to Azure Web App
+        if: >
+          env.AZURE_WEBAPP_NAME != '' &&
+          env.AZURE_WEBAPP_PUBLISH_PROFILE != ''
+        uses: azure/webapps-deploy@v3
+        with:
+          app-name: ${{ env.AZURE_WEBAPP_NAME }}
+          publish-profile: ${{ env.AZURE_WEBAPP_PUBLISH_PROFILE }}
+          images: ${{ secrets.ACR_LOGIN_SERVER }}/${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
