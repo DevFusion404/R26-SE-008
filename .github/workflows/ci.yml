@@ -1,4 +1,4 @@
-name: CI/CD Pipeline
+﻿name: CI/CD Pipeline
 
 # ---------------------------------------------------------------
 # Triggers
@@ -87,11 +87,15 @@ jobs:
               - 'agents/transformation_agent/**'
 
   # -------------------------------------------------------------
-  # 2a. Build & push RDP agent image
+  # 2a. Build & push RDP agent image to ACR
   #
   # Runs only when:
   #   - files under agents/rdp_agent/ changed, OR
   #   - the workflow was manually dispatched with force_rdp=true
+  #
+  # On pull_request: image is built but NOT pushed (validates
+  # the Dockerfile without polluting the registry).
+  # On push to main/master: image is built AND pushed to ACR.
   # -------------------------------------------------------------
   build-rdp:
     name: Build and push RDP agent image
@@ -131,7 +135,7 @@ jobs:
           cache-to: type=inline
 
   # -------------------------------------------------------------
-  # 2b. Build & push CUQA agent image
+  # 2b. Build & push CUQA agent image to ACR
   #
   # Runs only when:
   #   - files under agents/cuqa_agent/ changed, OR
@@ -175,73 +179,7 @@ jobs:
           cache-to: type=inline
 
   # -------------------------------------------------------------
-  # 3a. Deploy RDP agent to Azure
-  #
-  # Only runs after a successful RDP build (on push, not PRs).
-  # Skipped automatically if build-rdp was skipped.
-  # -------------------------------------------------------------
-  deploy-rdp:
-    name: Deploy RDP agent to Azure Web App
-    needs: build-rdp
-    runs-on: ubuntu-latest
-    if: github.event_name != 'pull_request'
-    env:
-      IMAGE_NAME: rdp-agent
-      AZURE_WEBAPP_NAME: ${{ secrets.AZURE_WEBAPP_NAME_RDP }}
-      AZURE_WEBAPP_PUBLISH_PROFILE: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE_RDP }}
-
-    steps:
-      - name: Check Azure deployment secrets
-        if: >
-          env.AZURE_WEBAPP_NAME != '' &&
-          env.AZURE_WEBAPP_PUBLISH_PROFILE != ''
-        run: echo "RDP Azure deployment credentials detected. Proceeding."
-
-      - name: Deploy RDP image to Azure Web App
-        if: >
-          env.AZURE_WEBAPP_NAME != '' &&
-          env.AZURE_WEBAPP_PUBLISH_PROFILE != ''
-        uses: azure/webapps-deploy@v3
-        with:
-          app-name: ${{ env.AZURE_WEBAPP_NAME }}
-          publish-profile: ${{ env.AZURE_WEBAPP_PUBLISH_PROFILE }}
-          images: ${{ secrets.ACR_LOGIN_SERVER }}/${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
-
-  # -------------------------------------------------------------
-  # 3b. Deploy CUQA agent to Azure
-  #
-  # Only runs after a successful CUQA build (on push, not PRs).
-  # Skipped automatically if build-cuqa was skipped.
-  # -------------------------------------------------------------
-  deploy-cuqa:
-    name: Deploy CUQA agent to Azure Web App
-    needs: build-cuqa
-    runs-on: ubuntu-latest
-    if: github.event_name != 'pull_request'
-    env:
-      IMAGE_NAME: cuqa-agent
-      AZURE_WEBAPP_NAME: ${{ secrets.AZURE_WEBAPP_NAME_CUQA }}
-      AZURE_WEBAPP_PUBLISH_PROFILE: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE_CUQA }}
-
-    steps:
-      - name: Check Azure deployment secrets
-        if: >
-          env.AZURE_WEBAPP_NAME != '' &&
-          env.AZURE_WEBAPP_PUBLISH_PROFILE != ''
-        run: echo "CUQA Azure deployment credentials detected. Proceeding."
-
-      - name: Deploy CUQA image to Azure Web App
-        if: >
-          env.AZURE_WEBAPP_NAME != '' &&
-          env.AZURE_WEBAPP_PUBLISH_PROFILE != ''
-        uses: azure/webapps-deploy@v3
-        with:
-          app-name: ${{ env.AZURE_WEBAPP_NAME }}
-          publish-profile: ${{ env.AZURE_WEBAPP_PUBLISH_PROFILE }}
-          images: ${{ secrets.ACR_LOGIN_SERVER }}/${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
-
-  # -------------------------------------------------------------
-  # 2c. Build & push Transformation agent (SCTVA) image
+  # 2c. Build & push Transformation agent (SCTVA) image to ACR
   #
   # Runs only when:
   #   - files under agents/transformation_agent/ changed, OR
@@ -283,36 +221,3 @@ jobs:
             ${{ secrets.ACR_LOGIN_SERVER }}/${{ env.IMAGE_NAME }}:latest
           cache-from: type=registry,ref=${{ secrets.ACR_LOGIN_SERVER }}/${{ env.IMAGE_NAME }}:latest
           cache-to: type=inline
-
-  # -------------------------------------------------------------
-  # 3c. Deploy Transformation agent to Azure
-  #
-  # Only runs after a successful SCTVA build (on push, not PRs).
-  # Skipped automatically if build-sctva was skipped.
-  # -------------------------------------------------------------
-  deploy-sctva:
-    name: Deploy Transformation agent to Azure Web App
-    needs: build-sctva
-    runs-on: ubuntu-latest
-    if: github.event_name != 'pull_request'
-    env:
-      IMAGE_NAME: sctva-agent
-      AZURE_WEBAPP_NAME: ${{ secrets.AZURE_WEBAPP_NAME_SCTVA }}
-      AZURE_WEBAPP_PUBLISH_PROFILE: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE_SCTVA }}
-
-    steps:
-      - name: Check Azure deployment secrets
-        if: >
-          env.AZURE_WEBAPP_NAME != '' &&
-          env.AZURE_WEBAPP_PUBLISH_PROFILE != ''
-        run: echo "SCTVA Azure deployment credentials detected. Proceeding."
-
-      - name: Deploy SCTVA image to Azure Web App
-        if: >
-          env.AZURE_WEBAPP_NAME != '' &&
-          env.AZURE_WEBAPP_PUBLISH_PROFILE != ''
-        uses: azure/webapps-deploy@v3
-        with:
-          app-name: ${{ env.AZURE_WEBAPP_NAME }}
-          publish-profile: ${{ env.AZURE_WEBAPP_PUBLISH_PROFILE }}
-          images: ${{ secrets.ACR_LOGIN_SERVER }}/${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
