@@ -1,3 +1,18 @@
+﻿# ============================================================
+# SCTVA - Safe Code Transformation & Validation Agent
+# Production Requirements
+# ============================================================
+
+# ------------------------------------------------------------------
+# Web framework + process manager
+# ------------------------------------------------------------------
 flask>=3.0.0
-pytest>=8.0.0
+flask-cors>=4.0.0
+gunicorn>=21.0.0
+
+# ------------------------------------------------------------------
+# Python CST (Concrete Syntax Tree) library
+# Used by python_extract_class.py and python_parameter_object.py
+# to perform safe structure-preserving Python source rewrites.
+# ------------------------------------------------------------------
 libcst>=1.4.0
