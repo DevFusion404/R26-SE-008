@@ -1,4 +1,4 @@
-﻿# ============================================================
+# ============================================================
 # Frontend - Vite + React + Tailwind CSS
 # Dockerfile
 #
@@ -51,9 +51,13 @@ COPY --from=builder /app/dist /usr/share/nginx/html
 # routing (rewrites all 404s to index.html so React Router works).
 COPY nginx.conf /etc/nginx/conf.d/default.conf
 
+# Copy entrypoint script to inject runtime environment variables into /env-config.js
+COPY docker-entrypoint.sh /docker-entrypoint.sh
+RUN chmod +x /docker-entrypoint.sh
+
 # nginx listens on port 80 inside the container.
 # Azure Static Web Apps / Container Apps maps this to 443 externally.
 EXPOSE 80
 
-# nginx runs as PID 1 in foreground (required for Docker).
+ENTRYPOINT ["/docker-entrypoint.sh"]
 CMD ["nginx", "-g", "daemon off;"]
