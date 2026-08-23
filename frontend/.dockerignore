@@ -1,4 +1,4 @@
-﻿# ============================================================
+# ============================================================
 # Frontend - .dockerignore
 # Keeps the build context lean by excluding files that are
 # not needed to build the Vite production bundle.
@@ -45,4 +45,3 @@ eslint.config.js
 # Docker files themselves
 Dockerfile
 .dockerignore
-nginx.conf
