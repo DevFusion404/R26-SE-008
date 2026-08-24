@@ -224,6 +224,27 @@ class PlanGenerator:
                 return val
             return fallback
 
+        def _source_context() -> str:
+            """Return the best available source container (class > module > base_file).
+
+            This prevents ``source_class: null`` in plans for Python/C module-level
+            functions that have no enclosing class.  The transformation agent uses
+            this value to locate the function in the source file.
+
+            Priority:
+              1. ``location["class"]``  — real class name (Java / OOP Python)
+              2. ``location["module"]`` — module name injected by _translate_cuqa_to_rdp
+                                          for Python/C module-level functions
+              3. ``base_file``           — filename without extension as last resort
+            """
+            cls = _loc("class")
+            if cls:
+                return cls
+            module = location.get("module", "")
+            if module and module != "unknown":
+                return module
+            return base_file
+
         # Add source_file to all refactoring types (always include filename for traceability)
         if source_file and source_file != "unknown":
             params["source_file"] = source_file
@@ -268,9 +289,9 @@ class PlanGenerator:
                     params["constant_name"] = f"CONSTANT_{_val_str}"
 
         elif name == "Move Method":
-            cls = _loc("class")
+            src_ctx = _source_context()
             method = _loc("method")
-            params["source_class"] = cls if cls else None
+            params["source_class"] = src_ctx
             if method:
                 params["method"] = method
             else:
@@ -283,22 +304,22 @@ class PlanGenerator:
                 _class_m = re.search(r"(?:class|of|to|target)\s+'([A-Z]\w+)'", smell.details, re.IGNORECASE)
                 if _class_m:
                     found_name = _class_m.group(1)
-                    if found_name != method and found_name != cls:
+                    if found_name != method and found_name != src_ctx:
                         destination = found_name
 
             if not destination:
-                destination = f"{cls}Target" if cls else "TargetService"
+                destination = f"{src_ctx}Target" if src_ctx else "TargetService"
             params["destination_class"] = destination
 
         elif name == "Extract Class":
-            cls = _loc("class")
-            params["source_class"] = cls
-            params["new_class_name"] = f"{cls}Helper" if cls else "ExtractedClass"
+            src_ctx = _source_context()
+            params["source_class"] = src_ctx
+            params["new_class_name"] = f"{src_ctx}Helper" if src_ctx else "ExtractedClass"
 
         elif name == "Extract Subclass":
-            cls = _loc("class")
-            params["source_class"] = cls
-            params["new_subclass_name"] = f"{cls}Subtype" if cls else "ExtractedSubtype"
+            src_ctx = _source_context()
+            params["source_class"] = src_ctx
+            params["new_subclass_name"] = f"{src_ctx}Subtype" if src_ctx else "ExtractedSubtype"
 
         elif name == "Introduce Parameter Object":
             method = _loc("method")
@@ -306,13 +327,13 @@ class PlanGenerator:
             params["parameter_object_name"] = f"{method}Params" if method else "ParamObject"
 
         elif name == "Replace Conditional with Polymorphism":
-            params["source_class"] = _loc("class")
+            params["source_class"] = _source_context()
             method = _loc("method")
             if method:
                 params["method"] = method
 
         elif name == "Pull Up Method":
-            params["source_class"] = _loc("class")
+            params["source_class"] = _source_context()
             method = _loc("method")
             if method:
                 params["method"] = method
@@ -327,23 +348,26 @@ class PlanGenerator:
                 params["method"] = method
 
         elif name == "Collapse Hierarchy":
-            params["source_class"] = _loc("class")
+            params["source_class"] = _source_context()
             params["parent_class"] = location.get("parent_class", "<parent>")
 
         elif name == "Replace Data Value with Object":
-            params["source_class"] = _loc("class")
+            params["source_class"] = _source_context()
 
         elif name == "Hide Delegate":
-            params["source_class"] = _loc("class")
+            params["source_class"] = _source_context()
+            method = _loc("method")
+            if method:
+                params["method"] = method
 
         elif name == "Remove Dead Code":
-            params["source_class"] = _loc("class")
+            params["source_class"] = _source_context()
             method = _loc("method")
             if method:
                 params["method"] = method
 
         elif name == "Rename Method":
-            params["source_class"] = _loc("class")
+            params["source_class"] = _source_context()
             method = _loc("method")
             if method:
                 params["method"] = method
@@ -386,6 +410,7 @@ class PlanGenerator:
             params["source_file"] = location.get("file", "")
 
         return params
+
 
 
     @staticmethod
