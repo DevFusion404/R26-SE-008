@@ -176,14 +176,19 @@ class PlanGenerator:
         Returns:
             Formatted string like ``OrderProcessor.calculateTotal``.
         """
-        cls = location.get("class", "")
-        method = location.get("method", "")
-        # Treat "unknown" as absent — don't show it in explanations
-        if method in ("unknown", None):
+        cls = location.get("class", "") or ""
+        method = location.get("method", "") or ""
+        source_file = location.get("file", "") or ""
+        base_file = source_file.split("/")[-1].split("\\")[-1].replace(".py", "").replace(".java", "").replace(".c", "").replace(".h", "") if source_file else ""
+
+        if cls in ("unknown", base_file):
+            cls = ""
+        if method in ("unknown", base_file):
             method = ""
+
         if cls and method:
             return f"{cls}.{method}"
-        return cls or method or "(module level)"
+        return cls or method or source_file or "(module level)"
 
     @staticmethod
     def _clean(location: Dict[str, Any], key: str, fallback: str = "") -> str:
@@ -209,14 +214,17 @@ class PlanGenerator:
         params: Dict[str, Any] = {}
         name = candidate["name"]
         location = smell.location
+        source_file = location.get("file", "")
+        base_file = source_file.split("/")[-1].split("\\")[-1].replace(".py", "").replace(".java", "").replace(".c", "").replace(".h", "") if source_file else ""
 
         def _loc(key: str, fallback: str = "") -> str:
-            """Return location[key] if meaningful, else fallback."""
+            """Return location[key] if meaningful and not equal to base filename, else fallback."""
             val = location.get(key, "")
-            return val if val and val != "unknown" else fallback
+            if val and val != "unknown" and val != base_file:
+                return val
+            return fallback
 
         # Add source_file to all refactoring types (always include filename for traceability)
-        source_file = location.get("file", "")
         if source_file and source_file != "unknown":
             params["source_file"] = source_file
 
@@ -227,7 +235,11 @@ class PlanGenerator:
             elif isinstance(lines, list) and len(lines) >= 1:
                 params["source_line"] = lines[0]
             method = _loc("method")
-            params["new_method_name"] = f"extracted_{method}" if method else "extracted_block"
+            if method:
+                params["target_method"] = method
+                params["new_method_name"] = f"extracted_{method}"
+            else:
+                params["new_method_name"] = "extracted_block"
 
         elif name == "Introduce Constant":
             params["source_line"] = location.get("lines", [None])[0]
@@ -236,11 +248,6 @@ class PlanGenerator:
 
             # Generate a meaningful constant_name so the transformation agent does NOT
             # fall back to the ugly MAGIC_NUMBER_65 / MAGIC_NUMBER_75 pattern.
-            # Strategy:
-            #   1. Extract the numeric value from the smell message ("Magic number 65" → 65)
-            #   2. Use the method/entity name to build a domain prefix
-            #   3. Combine: e.g. "calculate_grade" + 65 → "GRADE_THRESHOLD_65"
-            #   4. Fall back to "CONSTANT_{value}" — still better than MAGIC_NUMBER_{value}
             _num_match = re.search(r"[-+]?\d+(?:\.\d+)?", smell.details or "")
             _raw_value = _num_match.group(0) if _num_match else None
             _entity = (_loc("method") or _loc("class") or "").strip()
@@ -249,13 +256,9 @@ class PlanGenerator:
                 _val_str = _raw_value.replace("-", "NEG_").replace(".", "_")
 
                 if _entity and _entity not in ("unknown", ""):
-                    # Turn snake_case/camelCase entity into SCREAMING_SNAKE prefix.
-                    # e.g. "calculate_grade" → "GRADE"
-                    # e.g. "checkStudentMarks"  → "STUDENT_MARKS"
                     _words = re.sub(r"([A-Z])", r"_\1", _entity)   # camelCase split
                     _words = re.sub(r"[^A-Za-z0-9]+", "_", _words)  # non-alnum → _
                     _parts = [w.upper() for w in _words.split("_") if len(w) > 2]
-                    # Take last 1-2 meaningful words as prefix (most domain-specific)
                     _prefix = "_".join(_parts[-2:]) if _parts else ""
                     if _prefix:
                         params["constant_name"] = f"{_prefix}_{_val_str}"
@@ -264,21 +267,28 @@ class PlanGenerator:
                 else:
                     params["constant_name"] = f"CONSTANT_{_val_str}"
 
-
         elif name == "Move Method":
             cls = _loc("class")
-            params["source_class"] = cls
             method = _loc("method")
+            params["source_class"] = cls if cls else None
             if method:
                 params["method"] = method
-            # HIGH #4: try to infer destination from smell details message,
-            # then fall back to a descriptive name so it isn't a raw placeholder
-            if smell.details:
-                _dest_m = re.search(r"'([A-Za-z_]\w+)'", smell.details)
-                destination = _dest_m.group(1) if _dest_m else None
             else:
-                destination = None
-            params["destination_class"] = destination or f"{cls}Target" if cls else "TargetClass"
+                ent = location.get("entity", "")
+                if ent and ent != "unknown" and ent != base_file:
+                    params["method"] = ent
+
+            destination = None
+            if smell.details:
+                _class_m = re.search(r"(?:class|of|to|target)\s+'([A-Z]\w+)'", smell.details, re.IGNORECASE)
+                if _class_m:
+                    found_name = _class_m.group(1)
+                    if found_name != method and found_name != cls:
+                        destination = found_name
+
+            if not destination:
+                destination = f"{cls}Target" if cls else "TargetService"
+            params["destination_class"] = destination
 
         elif name == "Extract Class":
             cls = _loc("class")
