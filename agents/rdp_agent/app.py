@@ -228,6 +228,12 @@ def _translate_cuqa_to_rdp(data: dict) -> dict:
                 "lines": lines_range,
             }
 
+            # For Python/C module-level functions (no class), carry the module name
+            # so plan_generator can use it as source_class fallback instead of null.
+            if loc_class is None and language.lower() in ("python", "c", "c++", "c/c++"):
+                location["module"] = base_name
+
+
             # RDP-FIX: SpeculativeGenerality — parse base class from message so that
             # has_parent_class precondition passes and "Collapse Hierarchy" can be selected.
             # CUQA message format: "Class 'Foo' extends ['ABC', 'Mixin'] — ..."
