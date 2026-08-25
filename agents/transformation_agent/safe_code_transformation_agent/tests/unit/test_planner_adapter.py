@@ -26,7 +26,7 @@ def test_planner_adapter_maps_extract_method_to_extract_action_when_range_exists
     assert normalized["actions"][0]["parameters"]["end_line"] == 5
 
 
-def test_planner_adapter_does_not_simulate_move_method_with_rename():
+def test_planner_adapter_maps_move_method_to_python_move_action():
     adapter = PlannerAdapter()
     planner_output = {
         "plan_id": "p2",
@@ -34,15 +34,22 @@ def test_planner_adapter_does_not_simulate_move_method_with_rename():
             {
                 "step_id": 1,
                 "refactoring": "Move Method",
-                "target": {"method": "a"},
-                "parameters": {},
+                "target": {"method": "print_student_report"},
+                "parameters": {
+                    "source_class": "ReportPrinter",
+                    "destination_class": "Student",
+                    "source_file": "student_report.py",
+                },
             }
         ],
     }
 
     normalized = adapter.normalize_plan(planner_output)
-    assert normalized["actions"][0]["action_type"] == "noop"
-    assert normalized["actions"][0]["parameters"]["reason"] == "malformed_step"
+    action = normalized["actions"][0]
+    assert action["action_type"] == "move_python_method"
+    assert action["parameters"]["method"] == "print_student_report"
+    assert action["parameters"]["source_class"] == "ReportPrinter"
+    assert action["parameters"]["destination_class"] == "Student"
 
 
 def test_planner_adapter_maps_extract_class_to_real_action():
@@ -215,7 +222,7 @@ def test_planner_adapter_maps_encapsulate_variable():
 
     normalized = adapter.normalize_plan(planner_output)
     action = normalized["actions"][0]
-    assert action["action_type"] == "encapsulate_variable"
+    assert action["action_type"] == "encapsulate_c_variable"
     assert action["parameters"]["variable_name"] == "counter"
 
 
