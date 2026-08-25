@@ -73,7 +73,12 @@ def apply_extract_method(
     except SyntaxError:
         return _review(source_code, "SOURCE_PARSE_FAILED", metadata)
 
-    targets = _find_targets(tree, method_name, source_class, method_signature)
+    targets, resolved_source_class = _find_targets_with_stale_class_recovery(
+        tree,
+        method_name=method_name,
+        source_class=source_class,
+        method_signature=method_signature,
+    )
     if not targets:
         return _review(source_code, "METHOD_TARGET_NOT_FOUND", metadata)
     if len(targets) != 1:
@@ -91,7 +96,9 @@ def apply_extract_method(
     body = list(target.node.body)
     if body and _is_docstring(body[0]):
         body = body[1:]
-    if len(body) < 3:
+    # Two top-level statements can still contain a substantial cohesive block,
+    # for example a heading print followed by a large try/except workflow.
+    if len(body) < 2:
         return _review(source_code, "METHOD_HAS_NO_MEANINGFUL_EXTRACTABLE_BLOCK", metadata)
 
     before_metrics = _method_metrics(target.node)
@@ -123,11 +130,21 @@ def apply_extract_method(
         transformed_tree = ast.parse(transformed)
     except SyntaxError:
         return _review(source_code, "CANDIDATE_SYNTAX_FAILED", {**metadata, "before_metrics": before_metrics})
-    transformed_targets = _find_targets(transformed_tree, method_name, source_class, method_signature)
+    transformed_targets, _ = _find_targets_with_stale_class_recovery(
+        transformed_tree,
+        method_name=method_name,
+        source_class=resolved_source_class,
+        method_signature=method_signature,
+    )
     if len(transformed_targets) != 1:
         return _review(source_code, "POST_TRANSFORM_TARGET_VALIDATION_FAILED", {**metadata, "before_metrics": before_metrics})
     after_metrics = _method_metrics(transformed_targets[0].node)
-    helper_matches = _find_targets(transformed_tree, new_method_name, source_class, "")
+    helper_matches, _ = _find_targets_with_stale_class_recovery(
+        transformed_tree,
+        method_name=new_method_name,
+        source_class=resolved_source_class,
+        method_signature="",
+    )
     reduction_passed = _meaningfully_reduced(before_metrics, after_metrics, selected)
     structural_passed = len(helper_matches) == 1 and _target_calls_helper(transformed_targets[0].node, new_method_name)
     if not structural_passed or not reduction_passed:
@@ -162,6 +179,8 @@ def apply_extract_method(
         },
         "behavioral_safety": "PENDING_PIPELINE_VALIDATION",
     })
+    if resolved_source_class != source_class:
+        metadata["source_class_resolution"] = "stale_module_class_ignored"
     return transformed, 1, metadata
 
 
@@ -191,6 +210,43 @@ def _find_targets(
     return targets
 
 
+def _find_targets_with_stale_class_recovery(
+    tree: ast.Module,
+    *,
+    method_name: str,
+    source_class: str,
+    method_signature: str,
+) -> tuple[list[PythonTarget], str]:
+    """Resolve a unique method while rejecting an RDP module-name-as-class error.
+
+    Some RDP plans place a Python filename stem in ``target.class``.  Python
+    module functions do not have a class owner, so a strict lookup would miss
+    an otherwise exact and unambiguous method.  Keep strict resolution first;
+    only drop the class constraint when the routine name identifies exactly one
+    function or method in the parsed module.
+    """
+
+    strict_matches = _find_targets(
+        tree,
+        method_name,
+        source_class,
+        method_signature,
+    )
+    if strict_matches or not source_class:
+        return strict_matches, source_class
+
+    recovered_matches = _find_targets(tree, method_name, "", method_signature)
+    if len(recovered_matches) != 1 and method_signature:
+        # RDP signatures can be stale too. A unique routine name is still a
+        # safe identity; multiple candidates remain deliberately ambiguous.
+        recovered_matches = _find_targets(tree, method_name, "", "")
+    if len(recovered_matches) != 1:
+        return [], source_class
+
+    recovered = recovered_matches[0]
+    return recovered_matches, recovered.parent_class.name if recovered.parent_class else ""
+
+
 def _signature_matches(node: ast.FunctionDef | ast.AsyncFunctionDef, normalized_signature: str) -> bool:
     if not normalized_signature:
         return True
@@ -206,12 +262,17 @@ def _select_candidate(
     end_line: int | None,
 ) -> tuple[list[ast.stmt], PythonFlow] | None:
     windows: list[list[ast.stmt]] = []
+    hinted_window: list[ast.stmt] | None = None
     if start_line and end_line:
         hinted = [
             item for item in body
             if getattr(item, "end_lineno", item.lineno) >= start_line and item.lineno <= end_line
         ]
-        if hinted:
+        # A plan range is semantic intent. If it identifies a proper subset of
+        # the routine, do not silently extract a different larger block merely
+        # because that block has a higher generic complexity score.
+        if hinted and len(hinted) < len(body):
+            hinted_window = hinted
             windows.append(hinted)
     max_width = min(4, len(body) - 1)
     for width in range(max_width, 1, -1):
@@ -230,7 +291,14 @@ def _select_candidate(
             unique.append(window)
 
     scored: list[tuple[float, list[ast.stmt], PythonFlow]] = []
-    for window in unique:
+    candidate_windows = unique
+    if hinted_window is not None:
+        candidate_windows = [
+            window for window in unique
+            if window[0] is hinted_window[0] and window[-1] is hinted_window[-1]
+        ]
+
+    for window in candidate_windows:
         if _unsafe_python_flow(window):
             continue
         start_index = body.index(window[0])
@@ -289,6 +357,16 @@ class _ScopedNameVisitor(ast.NodeVisitor):
             self.loads.add(node.id)
         elif isinstance(node.ctx, (ast.Store, ast.Del)):
             self.stores.add(node.id)
+
+    def visit_AugAssign(self, node: ast.AugAssign) -> None:
+        # ``total += value`` reads the old ``total`` before writing the new
+        # value. Treating it as store-only creates a helper-local unbound name.
+        if isinstance(node.target, ast.Name):
+            self.loads.add(node.target.id)
+            self.stores.add(node.target.id)
+        else:
+            self.visit(node.target)
+        self.visit(node.value)
 
     def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
         return
@@ -467,12 +545,17 @@ def _meaningfully_reduced(
     selected: Sequence[ast.stmt],
 ) -> bool:
     selected_loc = getattr(selected[-1], "end_lineno", selected[-1].lineno) - selected[0].lineno + 1
+    logic_reduced = (
+        after["statement_count"] < before["statement_count"]
+        or after["responsibility_count"] < before["responsibility_count"]
+        or after["complexity"] < before["complexity"]
+        or after["nesting_depth"] < before["nesting_depth"]
+    )
     return (
         selected_loc >= MIN_EXTRACTED_LOC
         and after["loc"] <= before["loc"] - 2
-        and after["statement_count"] < before["statement_count"]
         and after["complexity"] <= before["complexity"]
-        and after["responsibility_count"] < before["responsibility_count"]
+        and logic_reduced
     )
 
 
