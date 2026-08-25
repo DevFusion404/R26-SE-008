@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 
 from ..constants import (
+    ACTION_ENCAPSULATE_C_VARIABLE,
     ACTION_ENCAPSULATE_VARIABLE,
     ACTION_EXTRACT_C_COMPONENT,
     ACTION_EXTRACT_CLASS,
@@ -15,9 +16,14 @@ from ..constants import (
     ACTION_INTRODUCE_JAVA_PARAMETER_OBJECT,
     ACTION_INTRODUCE_PARAMETER_OBJECT,
     ACTION_INTRODUCE_PYTHON_PARAMETER_OBJECT,
+    ACTION_INLINE_PYTHON_CLASS,
+    ACTION_HIDE_DELEGATE,
+    ACTION_MOVE_PYTHON_METHOD,
+    ACTION_MOVE_C_FUNCTION,
     ACTION_NOOP,
     ACTION_NARROW_EXCEPTION_HANDLER,
     ACTION_REPLACE_UNSAFE_FUNCTION,
+    ACTION_REPLACE_CONDITIONAL_WITH_POLYMORPHISM,
     EXTRACT_CLASS_ACTIONS,
 )
 
@@ -65,6 +71,10 @@ class PlannerAdapter:
                             "parameters": {
                                 "reason": "malformed_step",
                                 "step_index": idx,
+                                # Keep the original target data.  SCTVA can
+                                # safely recover a supported semantic action
+                                # after an older planner rejects its shape.
+                                "legacy_step": step,
                             },
                             "source_step_id": None,
                             "source_refactoring": None,
@@ -86,6 +96,10 @@ class PlannerAdapter:
                             "parameters": {
                                 "reason": "malformed_step",
                                 "step_index": idx,
+                                # Retain semantic target details so SCTVA can
+                                # recover a now-supported action instead of
+                                # silently keeping it as a noop.
+                                "legacy_step": step,
                             },
                             "source_step_id": step.get("step_id"),
                             "source_refactoring": step.get("refactoring"),
@@ -205,7 +219,6 @@ class PlannerAdapter:
 
         rename_aliases = {
             "rename function",
-            "rename method",
             "rename variable",
             "rename class",
             "rename parameter",
@@ -245,6 +258,34 @@ class PlannerAdapter:
                     "purpose": params.get("purpose"),
                     "target_class": target.get("class"),
                     "target_method": target.get("method"),
+                },
+            }
+
+        elif ref_key == "rename method":
+            old_name = (
+                params.get("method")
+                or params.get("method_name")
+                or params.get("old_name")
+                or target.get("method")
+            )
+            new_name = (
+                params.get("new_method_name")
+                or params.get("new_name")
+                or params.get("renamed_to")
+            )
+            source_class = params.get("source_class") or target.get("class")
+            source_file = params.get("source_file") or target.get("file") or step.get("source_file")
+
+            if not old_name or not new_name:
+                raise PlannerAdapterError("rename method step requires old/new method names")
+
+            action = {
+                "action_type": "rename_method",
+                "parameters": {
+                    "old_name": str(old_name),
+                    "new_name": self._safe_identifier(str(new_name)),
+                    "source_class": str(source_class or ""),
+                    "source_file": str(source_file or ""),
                 },
             }
 
@@ -400,17 +441,156 @@ class PlannerAdapter:
                 },
             }
 
-        elif ref_key == "move method":
-            raise PlannerAdapterError(
-                "move method requires coordinated edits to source and destination classes; "
-                "SCTVA will not simulate it with a rename"
+        elif ref_key in {"move method", "feature envy"}:
+            # Feature-Envy plans from RDP can contain filename-derived placeholders
+            # instead of real Python symbols.  Example:
+            #   method/source_class = "07_feature_envy_student_report"
+            #   destination_class   = "print_student_report"
+            # Those values are useful hints but are not sufficient reason to turn
+            # the step into noop.  Keep the Move Method action executable and let
+            # SCTVA recover the concrete method/classes from the Python AST.
+            method = (
+                target.get("method")
+                or target.get("function")
+                or params.get("method")
+                or params.get("method_name")
+                or params.get("source_method")
+                or ""
+            )
+            source_class = (
+                params.get("source_class")
+                or params.get("class_name")
+                or target.get("class")
+                or ""
+            )
+            destination_class = (
+                params.get("destination_class")
+                or params.get("target_class")
+                or params.get("destination_type")
+                or ""
+            )
+            source_file = self._source_file_from_step(step, params=params, target=target)
+            source_line = self._source_line_from_step(step, params=params, target=target)
+            raw_lines = target.get("lines")
+            target_lines = (
+                [int(value) for value in raw_lines if isinstance(value, (int, float))]
+                if isinstance(raw_lines, list)
+                else []
             )
 
-        elif ref_key == "replace conditional with polymorphism":
-            raise PlannerAdapterError(
-                "replace conditional with polymorphism requires new strategy/subclass definitions; "
-                "SCTVA will not simulate it with a rename"
+            normalized_source_file = source_file.replace("\\", "/").lower()
+            if normalized_source_file.endswith((".c", ".h")):
+                destination_file = str(
+                    params.get("destination_file")
+                    or params.get("target_file")
+                    or target.get("destination_file")
+                    or target.get("target_file")
+                    or ""
+                ).strip()
+                if not method or not source_file or not destination_file:
+                    raise PlannerAdapterError(
+                        "C Move Method is normalized to Move Function and requires method, source_file, and destination_file"
+                    )
+                action = {
+                    "action_type": ACTION_MOVE_C_FUNCTION,
+                    "parameters": {
+                        "function_name": str(method),
+                        "source_file": source_file,
+                        "destination_file": destination_file,
+                        "header_file": str(params.get("header_file") or ""),
+                    },
+                }
+            elif source_file and not normalized_source_file.endswith(".py"):
+                raise PlannerAdapterError(
+                    "move method is currently implemented for Python source files only"
+                )
+
+            # A source file/line is enough for semantic recovery.  Do not reject a
+            # malformed filename-derived identifier here; rejecting it would map
+            # the step to noop before SCTVA ever sees the source code.
+            if not any(
+                str(value or "").strip()
+                for value in (method, source_class, destination_class, source_file)
+            ) and source_line is None:
+                raise PlannerAdapterError(
+                    "move method requires a method/class hint, source file, or source line"
+                )
+
+            identifier_values = [
+                str(value).strip()
+                for value in (method, source_class, destination_class)
+                if str(value or "").strip()
+            ]
+            identifiers_valid = bool(identifier_values) and all(
+                self._safe_identifier(value) == value
+                for value in identifier_values
             )
+            targets_complete = bool(method and source_class and destination_class)
+
+            if not action:
+                action = {
+                "action_type": ACTION_MOVE_PYTHON_METHOD,
+                "parameters": {
+                    "method": str(method),
+                    "source_class": str(source_class),
+                    "destination_class": str(destination_class),
+                    "destination_parameter": str(params.get("destination_parameter") or ""),
+                    "source_file": source_file,
+                    "source_line": source_line,
+                    "target_lines": target_lines,
+                    "semantic_recovery_required": not (
+                        targets_complete
+                        and identifiers_valid
+                        and str(source_class) != str(destination_class)
+                    ),
+                    "smell": step.get("smell") or step.get("smell_type") or "Feature Envy",
+                },
+                }
+
+        elif ref_key == "replace conditional with polymorphism":
+            method = str(
+                target.get("method")
+                or target.get("function")
+                or params.get("method")
+                or params.get("method_name")
+                or params.get("target_method")
+                or ""
+            ).strip()
+            source_class = str(
+                target.get("class")
+                or params.get("source_class")
+                or params.get("class_name")
+                or ""
+            ).strip()
+            source_file = self._source_file_from_step(step, params=params, target=target)
+            source_line = self._source_line_from_step(step, params=params, target=target)
+            start_line, end_line = self._source_range_from_step(
+                step,
+                params=params,
+                target=target,
+            )
+            if source_file and not source_file.replace("\\", "/").lower().endswith(".py"):
+                raise PlannerAdapterError(
+                    "replace conditional with polymorphism is currently implemented for Python source files only"
+                )
+            if not any((method, source_class, source_file, source_line, start_line, end_line)):
+                raise PlannerAdapterError(
+                    "replace conditional with polymorphism requires a method/class, source file, or source range hint"
+                )
+            action = {
+                "action_type": ACTION_REPLACE_CONDITIONAL_WITH_POLYMORPHISM,
+                "parameters": {
+                    "method": method,
+                    "source_class": source_class,
+                    "source_file": source_file,
+                    "source_line": source_line,
+                    "start_line": start_line,
+                    "end_line": end_line,
+                    "base_class_name": str(params.get("base_class_name") or "").strip(),
+                    "smell": step.get("smell") or step.get("smell_type") or "Switch Statements",
+                    "semantic_recovery_required": not bool(method),
+                },
+            }
 
         elif ref_key == "introduce parameter object":
             method = (
@@ -465,10 +645,76 @@ class PlannerAdapter:
                 },
             }
 
+        elif ref_key == "inline class":
+            class_to_inline = (
+                params.get("class_to_inline")
+                or params.get("source_class")
+                or params.get("class_name")
+                or target.get("class")
+            )
+            source_file = self._source_file_from_step(step, params=params, target=target)
+            source_line = self._source_line_from_step(step, params=params, target=target)
+            if not class_to_inline:
+                raise PlannerAdapterError(
+                    "inline class mapping requires parameters.class_to_inline or target.class"
+                )
+            if self._safe_identifier(str(class_to_inline)) != str(class_to_inline):
+                raise PlannerAdapterError("inline class requires a valid class identifier")
+            if source_file and not source_file.replace("\\", "/").lower().endswith(".py"):
+                raise PlannerAdapterError(
+                    "inline class is currently implemented for Python source files only"
+                )
+            action = {
+                "action_type": ACTION_INLINE_PYTHON_CLASS,
+                "parameters": {
+                    "class_to_inline": str(class_to_inline),
+                    "source_file": source_file,
+                    "source_line": source_line,
+                    "smell": step.get("smell") or step.get("smell_type") or "Lazy Class",
+                },
+            }
+
+        elif ref_key == "hide delegate":
+            source_class = str(
+                params.get("source_class") or target.get("class") or ""
+            ).strip()
+            delegate_member = str(
+                params.get("delegate_member") or params.get("delegate_field") or ""
+            ).strip()
+            delegated_member = str(
+                params.get("delegated_member") or params.get("target_member") or ""
+            ).strip()
+            new_method_name = str(
+                params.get("new_method_name") or params.get("delegate_method_name") or ""
+            ).strip()
+            source_file = self._source_file_from_step(step, params=params, target=target)
+            if not all((source_class, delegate_member, delegated_member)):
+                raise PlannerAdapterError(
+                    "hide delegate requires source_class, delegate_member, and delegated_member"
+                )
+            if any(
+                self._safe_identifier(value) != value
+                for value in (source_class, delegate_member, delegated_member)
+            ):
+                raise PlannerAdapterError("hide delegate requires valid identifiers")
+            normalized_file = source_file.replace("\\", "/").lower()
+            if source_file and not normalized_file.endswith((".py", ".java")):
+                raise PlannerAdapterError("hide delegate is currently supported for Python and Java source files only")
+            action = {
+                "action_type": ACTION_HIDE_DELEGATE,
+                "parameters": {
+                    "source_class": source_class,
+                    "delegate_member": delegate_member,
+                    "delegated_member": delegated_member,
+                    "new_method_name": new_method_name,
+                    "source_file": source_file,
+                    "source_line": self._source_line_from_step(step, params=params, target=target),
+                    "smell": step.get("smell") or step.get("smell_type") or "Message Chains",
+                },
+            }
+
         elif ref_key in {
-            "hide delegate",
             "replace data value with object",
-            "inline class",
             "collapse hierarchy",
             "pull up method",
             "replace parameter with method call",
@@ -572,9 +818,13 @@ class PlannerAdapter:
 
         elif ref_key in {
             "refactor to narrow exceptions",
+            "exception overreach",
             "narrow exception handling",
             "narrow exception handler",
             "replace broad exception handling",
+            "replace broad exception with specific exception",
+            "replace broad exception with specific exceptions",
+            "replace broad exception handler",
         }:
             source_line = self._source_line_from_step(step, params=params, target=target)
             original_type = params.get("original_exception_type") or params.get("exception_type") or "Exception"
@@ -613,15 +863,20 @@ class PlannerAdapter:
                 },
             }
 
-        elif ref_key == "encapsulate variable":
-            variable_name = params.get("variable_name") or target.get("variable")
+        elif ref_key in {"encapsulate variable", "global variable"}:
+            variable_name = (
+                params.get("variable_name")
+                or params.get("variable")
+                or target.get("variable")
+                or target.get("name")
+            )
             if not variable_name:
                 raise PlannerAdapterError(
                     "encapsulate variable mapping requires parameters.variable_name"
                 )
 
             action = {
-                "action_type": ACTION_ENCAPSULATE_VARIABLE,
+                "action_type": ACTION_ENCAPSULATE_C_VARIABLE,
                 "parameters": {
                     "variable_name": str(variable_name),
                     "getter_name": self._safe_identifier(
@@ -629,6 +884,14 @@ class PlannerAdapter:
                     ),
                     "setter_name": self._safe_identifier(
                         str(params.get("setter_name") or f"set_{variable_name}")
+                    ),
+                    "source_file": self._source_file_from_step(step, params=params, target=target),
+                    # Preserve the planner location hint.  RDP sometimes emits
+                    # the placeholder name ``variable`` for C globals; SCTVA
+                    # uses this line plus source analysis to recover the real
+                    # declaration before transformation.
+                    "source_line": self._source_line_from_step(
+                        step, params=params, target=target
                     ),
                 },
             }

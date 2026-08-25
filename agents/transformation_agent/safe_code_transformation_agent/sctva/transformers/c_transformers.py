@@ -815,43 +815,535 @@ def apply_replace_unsafe_function(
     return "".join(lines), replacements
 
 
+def _mask_c_comments_and_strings(source_code: str) -> str:
+    """Mask comments and literals while retaining offsets and line breaks."""
+
+    masked = list(source_code)
+    index = 0
+    state = "code"
+    while index < len(masked):
+        char = masked[index]
+        nxt = masked[index + 1] if index + 1 < len(masked) else ""
+        if state == "code":
+            if char == "/" and nxt == "/":
+                masked[index] = masked[index + 1] = " "
+                index += 2
+                state = "line_comment"
+                continue
+            if char == "/" and nxt == "*":
+                masked[index] = masked[index + 1] = " "
+                index += 2
+                state = "block_comment"
+                continue
+            if char == '"':
+                masked[index] = " "
+                index += 1
+                state = "string"
+                continue
+            if char == "'":
+                masked[index] = " "
+                index += 1
+                state = "char"
+                continue
+        elif state == "line_comment":
+            if char == "\n":
+                state = "code"
+            else:
+                masked[index] = " "
+        elif state == "block_comment":
+            if char == "*" and nxt == "/":
+                masked[index] = masked[index + 1] = " "
+                index += 2
+                state = "code"
+                continue
+            if char != "\n":
+                masked[index] = " "
+        else:
+            if char == "\\":
+                masked[index] = " "
+                if index + 1 < len(masked) and masked[index + 1] != "\n":
+                    masked[index + 1] = " "
+                index += 2
+                continue
+            if (state == "string" and char == '"') or (state == "char" and char == "'"):
+                masked[index] = " "
+                state = "code"
+            elif char != "\n":
+                masked[index] = " "
+        index += 1
+    return "".join(masked)
+
+
+def _c_global_declaration_match(source_code: str, variable_name: str) -> tuple[re.Match[str] | None, str]:
+    """Find one deliberately small scalar C global declaration."""
+
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", variable_name or ""):
+        return None, "INVALID_VARIABLE_NAME"
+    type_part = (
+        r"(?:(?:const|volatile|unsigned|signed|short|long)\s+)*"
+        r"(?:char|int|float|double|_Bool|size_t)"
+        r"(?:\s*\*+\s*(?:const\s*)?)*"
+    )
+    declaration = re.compile(
+        rf"(?m)^(?P<indent>[ \t]*)(?P<storage>static\s+|extern\s+)?"
+        rf"(?P<type>{type_part})\s+{re.escape(variable_name)}"
+        rf"(?P<array>\s*\[[^\]\n]*\])?\s*(?P<initializer>=\s*[^;\n{{}}]+)?\s*;"
+    )
+    matches = list(declaration.finditer(source_code))
+    if len(matches) != 1:
+        array_declaration = re.search(
+            rf"(?m)^\s*(?:static\s+|extern\s+)?[^;\n]*\b{re.escape(variable_name)}\s*\[",
+            source_code,
+        )
+        if array_declaration:
+            return None, "GLOBAL_ARRAY_UNSUPPORTED"
+        return None, "GLOBAL_DECLARATION_NOT_FOUND_OR_AMBIGUOUS"
+    match = matches[0]
+    if match.group("storage") and match.group("storage").strip() == "extern":
+        return None, "EXTERN_GLOBAL_UNSUPPORTED"
+    if "volatile" in str(match.group("type") or "").split():
+        return None, "VOLATILE_GLOBAL_UNSUPPORTED"
+    if match.group("array"):
+        return None, "GLOBAL_ARRAY_UNSUPPORTED"
+    return match, ""
+
+
+def _c_function_body_ranges(masked_code: str) -> list[tuple[int, int]]:
+    """Return balanced brace ranges; global references must be inside one."""
+
+    ranges: list[tuple[int, int]] = []
+    stack: list[int] = []
+    for index, char in enumerate(masked_code):
+        if char == "{":
+            stack.append(index)
+        elif char == "}" and stack:
+            start = stack.pop()
+            ranges.append((start + 1, index))
+    return ranges
+
+
+def _c_statement_bounds(masked_code: str, position: int) -> tuple[int, int]:
+    start = max(
+        masked_code.rfind(";", 0, position),
+        masked_code.rfind("{", 0, position),
+        masked_code.rfind("}", 0, position),
+    ) + 1
+    end = masked_code.find(";", position)
+    return start, end
+
+
+def _c_replace_identifier(
+    source_code: str,
+    masked_code: str,
+    *,
+    start: int,
+    end: int,
+    variable_name: str,
+    replacement: str,
+) -> str:
+    pattern = re.compile(rf"\b{re.escape(variable_name)}\b")
+    return pattern.sub(replacement, source_code[start:end])
+
+
+def _c_access_edits(
+    source_code: str,
+    masked_code: str,
+    *,
+    declaration: re.Match[str],
+    variable_name: str,
+    getter_name: str,
+    setter_name: str,
+    read_only: bool,
+) -> tuple[list[tuple[int, int, str]], bool, str]:
+    """Build non-overlapping edits for simple whole-statement scalar access."""
+
+    function_ranges = _c_function_body_ranges(masked_code)
+    occurrences = list(re.finditer(rf"\b{re.escape(variable_name)}\b", masked_code))
+    edits: list[tuple[int, int, str]] = []
+    write_ranges: list[tuple[int, int]] = []
+    writable = False
+
+    for occurrence in occurrences:
+        start, end = occurrence.span()
+        if declaration.start() <= start < declaration.end():
+            continue
+        if any(range_start <= start < range_end for range_start, range_end in write_ranges):
+            continue
+        if not any(range_start <= start < range_end for range_start, range_end in function_ranges):
+            return [], False, "GLOBAL_REFERENCE_OUTSIDE_FUNCTION"
+        before = masked_code[max(0, start - 16):start]
+        after = masked_code[end:end + 3]
+        if "&" in before[-3:] or after.lstrip().startswith("["):
+            return [], False, "ADDRESS_OR_ARRAY_ACCESS_UNSUPPORTED"
+        # Only '.' and the complete '->' token are C member access.  A plain
+        # comparison such as ``quantity > total_stock`` must not be rejected
+        # merely because the character immediately before the identifier is
+        # '>'.
+        if re.search(r"(?:\.|->)\s*$", before):
+            return [], False, "MEMBER_ACCESS_UNSUPPORTED"
+
+        statement_start, statement_end = _c_statement_bounds(masked_code, start)
+        if statement_end < 0:
+            return [], False, "UNTERMINATED_GLOBAL_ACCESS"
+        statement_mask = masked_code[statement_start:statement_end].strip()
+        source_prefix = source_code[statement_start:start]
+        direct_increment = re.fullmatch(
+            rf"(?:\+\+\s*{re.escape(variable_name)}|{re.escape(variable_name)}\s*\+\+)",
+            statement_mask,
+        )
+        direct_decrement = re.fullmatch(
+            rf"(?:--\s*{re.escape(variable_name)}|{re.escape(variable_name)}\s*--)",
+            statement_mask,
+        )
+        direct_assignment = re.fullmatch(
+            rf"{re.escape(variable_name)}\s*(?P<operator>=|\+=|-=)\s*(?P<value>.+)",
+            statement_mask,
+            re.DOTALL,
+        )
+
+        if direct_increment or direct_decrement:
+            if read_only:
+                return [], False, "WRITE_TO_READ_ONLY_GLOBAL"
+            operator = "+" if direct_increment else "-"
+            edits.append((
+                statement_start,
+                statement_end + 1,
+                f"{source_prefix}{setter_name}({getter_name}() {operator} 1);",
+            ))
+            write_ranges.append((statement_start, statement_end + 1))
+            writable = True
+            continue
+
+        if direct_assignment:
+            if read_only:
+                return [], False, "WRITE_TO_READ_ONLY_GLOBAL"
+            operator = direct_assignment.group("operator")
+            operator_match = re.match(
+                r"\s*(?P<operator>=|\+=|-=)",
+                masked_code[end:statement_end],
+            )
+            if operator_match is None:
+                return [], False, "ASSIGNMENT_OPERATOR_UNSUPPORTED"
+            value_start = end + operator_match.end()
+            value = _c_replace_identifier(
+                source_code,
+                masked_code,
+                start=value_start,
+                end=statement_end,
+                variable_name=variable_name,
+                replacement=f"{getter_name}()",
+            ).strip()
+            if not value:
+                return [], False, "ASSIGNMENT_VALUE_UNSUPPORTED"
+            replacement_value = value if operator == "=" else f"{getter_name}() {operator[0]} ({value})"
+            edits.append((
+                statement_start,
+                statement_end + 1,
+                f"{source_prefix}{setter_name}({replacement_value});",
+            ))
+            write_ranges.append((statement_start, statement_end + 1))
+            writable = True
+            continue
+
+        # Assignment or ++/-- inside an expression (for example a for-loop or
+        # ``total = counter++``) has value semantics that setters cannot safely
+        # preserve without a full C AST. Refuse it instead of changing behavior.
+        if re.match(r"\s*(?:=|\+=|-=|\+\+|--)", after) or before.rstrip().endswith(("++", "--")):
+            return [], False, "COMPLEX_WRITE_CONTEXT_UNSUPPORTED"
+        edits.append((start, end, f"{getter_name}()"))
+
+    ordered = sorted(edits, key=lambda item: (item[0], item[1]))
+    previous_end = -1
+    for start, end, _ in ordered:
+        if start < previous_end:
+            return [], False, "OVERLAPPING_GLOBAL_ACCESS_EDITS"
+        previous_end = end
+    return edits, writable, ""
+
+
+def apply_encapsulate_c_variable(
+    source_code: str,
+    *,
+    variable_name: str,
+    getter_name: str = "",
+    setter_name: str = "",
+) -> tuple[str, int, dict[str, Any]]:
+    """Encapsulate one proven-safe scalar C global using accessors.
+
+    This deliberately supports only a single translation unit and simple
+    scalar access patterns. Every other shape is returned as
+    ``review_required`` with the original source unchanged.
+    """
+
+    def review(reason: str) -> tuple[str, int, dict[str, Any]]:
+        return source_code, 0, {
+            "status": "review_required",
+            "reason": reason,
+            "variable_name": variable_name,
+        }
+
+    declaration, declaration_error = _c_global_declaration_match(source_code, variable_name)
+    if declaration is None:
+        return review(declaration_error)
+    if any(
+        re.match(rf"\s*#.*\b{re.escape(variable_name)}\b", line)
+        for line in source_code.splitlines()
+    ):
+        return review("PREPROCESSOR_DEPENDENT_GLOBAL_UNSUPPORTED")
+
+    type_name = " ".join(str(declaration.group("type") or "").split())
+    read_only = "const" in type_name.split()
+    getter_name = getter_name or f"get_{variable_name}"
+    setter_name = setter_name or f"set_{variable_name}"
+    if not all(re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name or "") for name in (getter_name, setter_name)):
+        return review("INVALID_ACCESSOR_NAME")
+    if re.search(rf"\b(?:{re.escape(getter_name)}|{re.escape(setter_name)})\s*\(", source_code):
+        return review("ACCESSOR_NAME_COLLISION")
+
+    masked = _mask_c_comments_and_strings(source_code)
+    edits, writable, access_error = _c_access_edits(
+        source_code,
+        masked,
+        declaration=declaration,
+        variable_name=variable_name,
+        getter_name=getter_name,
+        setter_name=setter_name,
+        read_only=read_only,
+    )
+    if access_error:
+        return review(access_error)
+    if not edits:
+        return review("NO_GLOBAL_ACCESS_FOUND")
+
+    initializer = str(declaration.group("initializer") or "").strip()
+    static_declaration = (
+        f"{declaration.group('indent') or ''}static {type_name} {variable_name}"
+        f" {initializer}".rstrip()
+        + ";"
+    )
+    # Avoid a second space before an initializer while preserving its text.
+    static_declaration = static_declaration.replace("  =", " =")
+    accessor = (
+        f"\n\n{type_name} {getter_name}(void) {{\n"
+        f"    return {variable_name};\n"
+        f"}}\n"
+    )
+    if writable:
+        accessor += (
+            f"\nvoid {setter_name}({type_name} value) {{\n"
+            f"    {variable_name} = value;\n"
+            f"}}\n"
+        )
+    edits.extend([
+        (declaration.start(), declaration.end(), static_declaration + accessor),
+    ])
+    transformed = source_code
+    for start, end, replacement in sorted(edits, key=lambda item: item[0], reverse=True):
+        transformed = f"{transformed[:start]}{replacement}{transformed[end:]}"
+    return transformed, len(edits), {
+        "status": "success",
+        "variable_name": variable_name,
+        "getter_name": getter_name,
+        "setter_name": setter_name if writable else "",
+        "read_only": read_only,
+        "writable": writable,
+        "global_became_static": True,
+        "effective_action_parameters": {
+            "variable_name": variable_name,
+            "getter_name": getter_name,
+            "setter_name": setter_name if writable else "",
+        },
+    }
+
+
 def apply_encapsulate_variable(
     source_code: str,
     variable_name: str,
     getter_name: str,
     setter_name: str,
 ) -> Tuple[str, int]:
-    if not variable_name:
-        raise ValueError("encapsulate_variable requires 'variable_name'.")
+    """Backward-compatible wrapper for the legacy C action name."""
 
-    declaration_re = re.compile(
-        rf"(?m)^([ \t]*)(?!static\b|extern\b)((?:const\s+)?(?:unsigned\s+|signed\s+)?[A-Za-z_][A-Za-z0-9_]*(?:\s*\*)?)\s+"
-        rf"{re.escape(variable_name)}\s*(=\s*[^;]+)?;"
+    transformed, replacements, metadata = apply_encapsulate_c_variable(
+        source_code,
+        variable_name=variable_name,
+        getter_name=getter_name,
+        setter_name=setter_name,
     )
-    match = declaration_re.search(source_code)
+    # Preserve the legacy wrapper contract: callers that explicitly supplied
+    # a setter name expect that compatibility accessor even when this file has
+    # no current writes.  The dedicated action keeps its stricter minimal-API
+    # behavior.
+    if (
+        replacements > 0
+        and metadata.get("status") == "success"
+        and setter_name
+        and not re.search(rf"\bvoid\s+{re.escape(setter_name)}\s*\(", transformed)
+    ):
+        declaration, _ = _c_global_declaration_match(source_code, variable_name)
+        if declaration is not None:
+            type_name = " ".join(str(declaration.group("type") or "").split())
+            transformed = (
+                transformed.rstrip()
+                + f"\n\nvoid {setter_name}({type_name} value) {{\n"
+                + f"    {variable_name} = value;\n"
+                + "}\n"
+            )
+    # The legacy API reports one logical refactoring, while the dedicated C
+    # implementation reports its declaration/access edit count.
+    return transformed, int(replacements > 0 and transformed != source_code)
+
+
+def _c_accessor_span(masked_code: str, accessor_name: str) -> tuple[int, int] | None:
+    match = re.search(rf"\b{re.escape(accessor_name)}\s*\([^)]*\)\s*\{{", masked_code)
     if not match:
-        return source_code, 0
+        return None
+    opening = masked_code.find("{", match.start(), match.end())
+    if opening < 0:
+        return None
+    depth = 0
+    for index in range(opening, len(masked_code)):
+        if masked_code[index] == "{":
+            depth += 1
+        elif masked_code[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return match.start(), index + 1
+    return None
 
-    indent = match.group(1)
-    type_name = " ".join(match.group(2).split())
-    initializer = f" {match.group(3).strip()}" if match.group(3) else ""
-    static_declaration = f"{indent}static {type_name} {variable_name}{initializer};"
-    helper = (
-        f"\n{type_name} {getter_name}(void) {{\n"
-        f"    return {variable_name};\n"
-        f"}}\n\n"
-        f"void {setter_name}({type_name} value) {{\n"
-        f"    {variable_name} = value;\n"
-        f"}}\n"
-    )
 
-    transformed = (
-        source_code[: match.start()]
-        + static_declaration
-        + helper
-        + source_code[match.end() :]
+def _c_numeric_literal_value(text: str) -> float | int | None:
+    value = str(text or "").strip()
+    if not value:
+        return None
+    # Strip common scalar suffixes without trying to evaluate arbitrary C.
+    value = re.sub(r"(?i)(?:u|l|f)+$", "", value).strip()
+    try:
+        if re.fullmatch(r"[-+]?\d+", value):
+            return int(value, 10)
+        if re.fullmatch(
+            r"[-+]?(?:\d+\.\d*|\.\d+|\d+)(?:[eE][-+]?\d+)?",
+            value,
+        ):
+            return float(value)
+    except ValueError:
+        return None
+    return None
+
+
+def _c_initializer_semantically_equal(
+    original_initializer: str,
+    transformed_initializer: str,
+    transformed_code: str,
+) -> bool:
+    """Compare a literal initializer with a later Introduce Constant macro.
+
+    Structural validation runs after all plan actions.  A valid sequence can
+    therefore change ``= 100`` into ``= CONSTANT_100`` after Encapsulate
+    Variable has already succeeded.  Treat the two as equal only when the
+    macro expands to the same simple scalar literal.
+    """
+
+    before = str(original_initializer or "").strip()
+    after = str(transformed_initializer or "").strip()
+    if before == after:
+        return True
+    before_expr = before[1:].strip() if before.startswith("=") else before
+    after_expr = after[1:].strip() if after.startswith("=") else after
+    before_value = _c_numeric_literal_value(before_expr)
+    after_value = _c_numeric_literal_value(after_expr)
+    if before_value is not None and after_value is not None:
+        return float(before_value) == float(after_value)
+    if before_value is None or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", after_expr):
+        return False
+    macro = re.search(
+        rf"(?m)^\s*#\s*define\s+{re.escape(after_expr)}\s+(?P<value>[^\s/]+)",
+        transformed_code,
     )
-    return transformed, 1
+    if macro is None:
+        return False
+    macro_value = _c_numeric_literal_value(macro.group("value"))
+    return macro_value is not None and float(before_value) == float(macro_value)
+
+
+def validate_c_encapsulated_variable(
+    original_code: str,
+    transformed_code: str,
+    *,
+    variable_name: str,
+    getter_name: str,
+    setter_name: str,
+) -> dict[str, Any]:
+    """Validate that one C scalar global is no longer directly exposed."""
+
+    before, before_error = _c_global_declaration_match(original_code, variable_name)
+    after, after_error = _c_global_declaration_match(transformed_code, variable_name)
+    if before is None or after is None:
+        return {
+            "passed": False,
+            "reason": before_error or after_error or "GLOBAL_DECLARATION_NOT_FOUND",
+            "checks": {"target_global_existed_before": before is not None},
+        }
+    original_type = " ".join(str(before.group("type") or "").split())
+    transformed_type = " ".join(str(after.group("type") or "").split())
+    read_only = "const" in original_type.split()
+    original_masked = _mask_c_comments_and_strings(original_code)
+    _, writable, access_error = _c_access_edits(
+        original_code,
+        original_masked,
+        declaration=before,
+        variable_name=variable_name,
+        getter_name=getter_name,
+        setter_name=setter_name,
+        read_only=read_only,
+    )
+    if access_error:
+        return {
+            "passed": False,
+            "reason": f"original_access_not_safe:{access_error}",
+            "checks": {"target_global_existed_before": True},
+        }
+
+    transformed_masked = _mask_c_comments_and_strings(transformed_code)
+    allowed_spans = [span for span in (
+        _c_accessor_span(transformed_masked, getter_name),
+        _c_accessor_span(transformed_masked, setter_name) if writable else None,
+    ) if span]
+    direct_accesses = []
+    for match in re.finditer(rf"\b{re.escape(variable_name)}\b", transformed_masked):
+        if after.start() <= match.start() < after.end():
+            continue
+        if any(start <= match.start() < end for start, end in allowed_spans):
+            continue
+        direct_accesses.append(match.start())
+    getter_exists = _c_accessor_span(transformed_masked, getter_name) is not None
+    setter_exists = _c_accessor_span(transformed_masked, setter_name) is not None
+    checks = {
+        "target_global_existed_before": True,
+        "global_is_static_after": bool(str(after.group("storage") or "").strip() == "static"),
+        "getter_exists": getter_exists,
+        "setter_exists_when_writable": (not writable) or setter_exists,
+        "direct_unsafe_accesses_replaced": not direct_accesses,
+        # ``_c_global_declaration_match`` above only succeeds for exactly one
+        # scalar definition. Accessor bodies are intentionally excluded from
+        # this declaration-level guarantee.
+        "no_duplicate_global_declaration": True,
+        "original_type_preserved": original_type == transformed_type,
+        "original_initializer_preserved": _c_initializer_semantically_equal(
+            str(before.group("initializer") or ""),
+            str(after.group("initializer") or ""),
+            transformed_code,
+        ),
+    }
+    return {
+        "passed": all(checks.values()),
+        "variable_name": variable_name,
+        "getter_name": getter_name,
+        "setter_name": setter_name if writable else "",
+        "writable": writable,
+        "direct_access_count": len(direct_accesses),
+        "checks": checks,
+    }
 
 
 def apply_inject_syntax_error(source_code: str) -> Tuple[str, int]:
@@ -876,6 +1368,8 @@ __all__ = [
     "apply_extract_method",
     "apply_replace_unsafe_function",
     "apply_encapsulate_variable",
+    "apply_encapsulate_c_variable",
+    "validate_c_encapsulated_variable",
     "apply_remove_dead_code",
     "apply_rename_symbol",
     "apply_replace_literal",
