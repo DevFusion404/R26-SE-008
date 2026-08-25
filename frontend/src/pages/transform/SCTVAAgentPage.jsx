@@ -608,7 +608,33 @@ function normalizeStep(step) {
   }
 
   if (refactoring === 'replace conditional with polymorphism') {
-    return unsupportedSemanticAction(step, 'replace_conditional_with_polymorphism_requires_new_types');
+    const sourceFile = extractSourceFileFromPlanItem(step);
+    const range = extractSourceRangeFromPlanItem(step);
+    const methodName = target.method
+      || target.function
+      || params.method
+      || params.method_name
+      || params.target_method
+      || '';
+    const sourceClass = target.class || params.source_class || params.class_name || '';
+    if (!methodName && !sourceClass && !sourceFile && !range) return null;
+    return {
+      action_type: 'replace_conditional_with_polymorphism',
+      parameters: {
+        method: String(methodName),
+        source_class: String(sourceClass),
+        source_file: sourceFile,
+        source_line: range?.start_line ?? null,
+        start_line: range?.start_line ?? null,
+        end_line: range?.end_line ?? null,
+        base_class_name: String(params.base_class_name || ''),
+        smell: step.smell || step.smell_type || 'Switch Statements',
+        semantic_recovery_required: !methodName,
+      },
+      source_step_id: step.step_id ?? null,
+      source_refactoring: step.refactoring ?? null,
+      warnings: [],
+    };
   }
 
   if (refactoring === 'introduce parameter object') {
