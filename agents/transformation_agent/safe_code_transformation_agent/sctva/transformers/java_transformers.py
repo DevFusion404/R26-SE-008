@@ -583,6 +583,303 @@ def apply_rename_symbol(source_code: str, old_name: str, new_name: str) -> Tuple
     return transformed, count
 
 
+def apply_rename_method(
+    source_code: str,
+    old_name: str,
+    new_name: str,
+    *,
+    source_class: str = "",
+    parameter_types: Optional[list[str]] = None,
+) -> Tuple[str, int, dict[str, Any]]:
+    """Rename one Java method declaration and its statically safe call sites.
+
+    This is intentionally narrower than ``rename_symbol``.  Java overloads and
+    duplicate declarations require type resolution across call sites, so SCTVA
+    returns ``review_required`` unless the target method can be proven unique in
+    the current source file or matched by an explicit signature.
+    """
+
+    metadata: dict[str, Any] = {
+        "refactoring": "Rename Method",
+        "language": "java",
+        "old_name": old_name,
+        "new_name": new_name,
+        "source_class": source_class,
+        "plan_compliance": "UNKNOWN",
+    }
+    if not _is_java_identifier(old_name) or not _is_java_identifier(new_name):
+        return source_code, 0, {**metadata, "status": "review_required", "reason": "INVALID_METHOD_NAME"}
+    if old_name == new_name:
+        return source_code, 0, {**metadata, "status": "already_applied", "reason": "METHOD_NAME_UNCHANGED"}
+
+    try:
+        from .java_extract_class import _parse_java_class, declared_class_names
+    except Exception as exc:  # pragma: no cover - defensive import guard
+        return source_code, 0, {
+            **metadata,
+            "status": "review_required",
+            "reason": "JAVA_METHOD_MODEL_UNAVAILABLE",
+            "error": str(exc),
+        }
+
+    class_names = sorted(declared_class_names(source_code))
+    if source_class:
+        if source_class not in class_names:
+            return source_code, 0, {
+                **metadata,
+                "status": "not_applicable",
+                "reason": "SOURCE_CLASS_NOT_FOUND",
+            }
+        class_names = [source_class]
+
+    method_records: list[tuple[str, Any, list[str]]] = []
+    for class_name in class_names:
+        model = _parse_java_class(source_code, class_name)
+        if model is None:
+            continue
+        for method in model.methods:
+            if method.name != old_name or method.is_constructor:
+                continue
+            method_records.append((class_name, method, _java_method_parameter_types(method)))
+
+    requested_types = [_normalize_java_type(item) for item in (parameter_types or []) if str(item).strip()]
+    if requested_types:
+        method_records = [
+            record for record in method_records
+            if [_normalize_java_type(item) for item in record[2]] == requested_types
+        ]
+        metadata["parameter_types"] = requested_types
+
+    if not method_records:
+        return source_code, 0, {
+            **metadata,
+            "status": "not_applicable",
+            "reason": "METHOD_TARGET_NOT_FOUND",
+        }
+    if len(method_records) > 1:
+        return source_code, 0, {
+            **metadata,
+            "status": "review_required",
+            "reason": "AMBIGUOUS_METHOD_OVERLOAD" if source_class else "AMBIGUOUS_METHOD_TARGET",
+            "candidates": [
+                {"class_name": class_name, "parameter_types": types}
+                for class_name, _method, types in method_records
+            ],
+        }
+
+    resolved_class, target_method, resolved_types = method_records[0]
+    target_model = _parse_java_class(source_code, resolved_class)
+    if target_model is None:
+        return source_code, 0, {**metadata, "status": "review_required", "reason": "SOURCE_CLASS_PARSE_FAILED"}
+    if re.search(r"@\s*Override\b", target_method.header):
+        return source_code, 0, {**metadata, "status": "review_required", "reason": "OVERRIDE_METHOD_REQUIRES_HIERARCHY_UPDATE"}
+    if any(method.name == new_name and method is not target_method for method in target_model.methods):
+        return source_code, 0, {**metadata, "status": "review_required", "reason": "METHOD_NAME_COLLISION"}
+
+    transformed, replacements = _replace_java_method_call_names(source_code, old_name, new_name)
+    if replacements <= 0:
+        return source_code, 0, {**metadata, "status": "review_required", "reason": "NO_METHOD_REFERENCES_RENAMED"}
+
+    verification = validate_java_rename_method(
+        source_code,
+        transformed,
+        old_name=old_name,
+        new_name=new_name,
+        source_class=resolved_class,
+        parameter_types=resolved_types,
+    )
+    status = "success" if verification.get("passed") else "review_required"
+    reason = "RENAMED_METHOD_AND_CALL_SITES" if verification.get("passed") else verification.get("reason", "VALIDATION_FAILED")
+    return transformed, replacements, {
+        **metadata,
+        "status": status,
+        "reason": reason,
+        "source_class": resolved_class,
+        "parameter_types": resolved_types,
+        "declaration_renamed": verification.get("declaration_renamed", False),
+        "old_declaration_removed": verification.get("old_declaration_removed", False),
+        "new_declaration_present": verification.get("new_declaration_present", False),
+        "call_sites_updated": verification.get("call_sites_updated", False),
+        "replacements": replacements,
+        "plan_compliance": "PASS" if verification.get("passed") else "REVIEW_REQUIRED",
+    }
+
+
+def validate_java_rename_method(
+    original_code: str,
+    transformed_code: str,
+    *,
+    old_name: str,
+    new_name: str,
+    source_class: str = "",
+    parameter_types: Optional[list[str]] = None,
+) -> dict[str, Any]:
+    try:
+        from .java_extract_class import _parse_java_class, declared_class_names
+    except Exception as exc:  # pragma: no cover - defensive import guard
+        return {"passed": False, "reason": "java_method_model_unavailable", "error": str(exc)}
+
+    class_names = [source_class] if source_class else sorted(declared_class_names(original_code))
+    requested_types = [_normalize_java_type(item) for item in (parameter_types or []) if str(item).strip()]
+
+    original_matches: list[tuple[str, Any, list[str]]] = []
+    transformed_new_matches: list[tuple[str, Any, list[str]]] = []
+    transformed_old_matches: list[tuple[str, Any, list[str]]] = []
+    for class_name in class_names:
+        original_model = _parse_java_class(original_code, class_name)
+        transformed_model = _parse_java_class(transformed_code, class_name)
+        if original_model is None or transformed_model is None:
+            continue
+        for method in original_model.methods:
+            types = _java_method_parameter_types(method)
+            if method.name == old_name and (not requested_types or [_normalize_java_type(item) for item in types] == requested_types):
+                original_matches.append((class_name, method, types))
+        for method in transformed_model.methods:
+            types = _java_method_parameter_types(method)
+            normalized = [_normalize_java_type(item) for item in types]
+            if method.name == new_name and (not requested_types or normalized == requested_types):
+                transformed_new_matches.append((class_name, method, types))
+            if method.name == old_name and (not requested_types or normalized == requested_types):
+                transformed_old_matches.append((class_name, method, types))
+
+    declaration_renamed = len(original_matches) == 1 and len(transformed_new_matches) == 1
+    old_declaration_removed = not transformed_old_matches
+    new_declaration_present = bool(transformed_new_matches)
+    comments_strings_preserved = _java_literals_and_comments_preserved(original_code, transformed_code, old_name, new_name)
+    remaining_old_invocations = _count_java_method_references(transformed_code, old_name)
+    new_invocations = _count_java_method_references(transformed_code, new_name)
+    call_sites_updated = remaining_old_invocations == 0 and new_invocations > 0
+    passed = (
+        declaration_renamed
+        and old_declaration_removed
+        and new_declaration_present
+        and call_sites_updated
+        and comments_strings_preserved
+    )
+    reason = "java_rename_method_passed" if passed else "java_rename_method_failed"
+    return {
+        "passed": passed,
+        "reason": reason,
+        "source_class": source_class,
+        "old_name": old_name,
+        "new_name": new_name,
+        "parameter_types": requested_types,
+        "declaration_renamed": declaration_renamed,
+        "old_declaration_removed": old_declaration_removed,
+        "new_declaration_present": new_declaration_present,
+        "call_sites_updated": call_sites_updated,
+        "comments_strings_preserved": comments_strings_preserved,
+        "remaining_old_invocations": remaining_old_invocations,
+        "new_invocations": new_invocations,
+        "original_matches": len(original_matches),
+        "transformed_new_matches": len(transformed_new_matches),
+        "transformed_old_matches": len(transformed_old_matches),
+    }
+
+
+def _is_java_identifier(value: str) -> bool:
+    return bool(re.fullmatch(r"[A-Za-z_$][A-Za-z0-9_$]*", str(value or "")))
+
+
+def _normalize_java_type(type_name: Any) -> str:
+    text = str(type_name or "").strip()
+    text = re.sub(r"\bfinal\b", "", text)
+    text = re.sub(r"\s+", "", text)
+    return text
+
+
+def _java_method_parameter_types(method: Any) -> list[str]:
+    header = str(getattr(method, "header", "") or "")
+    name = str(getattr(method, "name", "") or "")
+    match = re.search(rf"\b{re.escape(name)}\s*\((?P<params>[^()]*)\)\s*$", header, re.DOTALL)
+    if not match:
+        return []
+    return [type_name for type_name, _param_name in _split_params(match.group("params"))]
+
+
+def _replace_java_method_call_names(source_code: str, old_name: str, new_name: str) -> Tuple[str, int]:
+    masked = _mask_java_comments_and_literals(source_code)
+    spans: list[tuple[int, int]] = []
+
+    for match in re.finditer(rf"\b{re.escape(old_name)}\b(?=\s*\()", masked):
+        spans.append((match.start(), match.end()))
+
+    for match in re.finditer(rf"::\s*({re.escape(old_name)})\b", masked):
+        spans.append((match.start(1), match.end(1)))
+
+    if not spans:
+        return source_code, 0
+
+    merged = sorted(set(spans), reverse=True)
+    transformed = source_code
+    for start, end in merged:
+        transformed = transformed[:start] + new_name + transformed[end:]
+    return transformed, len(merged)
+
+
+def _count_java_method_references(source_code: str, method_name: str) -> int:
+    masked = _mask_java_comments_and_literals(source_code)
+    calls = len(re.findall(rf"\b{re.escape(method_name)}\b(?=\s*\()", masked))
+    refs = len(re.findall(rf"::\s*{re.escape(method_name)}\b", masked))
+    return calls + refs
+
+
+def _java_literals_and_comments_preserved(
+    original_code: str,
+    transformed_code: str,
+    old_name: str,
+    new_name: str,
+) -> bool:
+    def protected_fragments(source: str) -> list[str]:
+        fragments: list[str] = []
+        state = "code"
+        start = 0
+        index = 0
+        while index < len(source):
+            char = source[index]
+            nxt = source[index + 1] if index + 1 < len(source) else ""
+            if state == "code":
+                if char == "/" and nxt in {"/", "*"}:
+                    state = "line_comment" if nxt == "/" else "block_comment"
+                    start = index
+                    index += 2
+                    continue
+                if char in {'"', "'"}:
+                    state = "string" if char == '"' else "char"
+                    start = index
+                    index += 1
+                    continue
+                index += 1
+                continue
+            if state == "line_comment":
+                if char == "\n":
+                    fragments.append(source[start:index])
+                    state = "code"
+                index += 1
+                continue
+            if state == "block_comment":
+                if char == "*" and nxt == "/":
+                    fragments.append(source[start:index + 2])
+                    state = "code"
+                    index += 2
+                    continue
+                index += 1
+                continue
+            quote = '"' if state == "string" else "'"
+            if char == "\\":
+                index += 2
+                continue
+            if char == quote:
+                fragments.append(source[start:index + 1])
+                state = "code"
+            index += 1
+        if state != "code":
+            fragments.append(source[start:])
+        return fragments
+
+    return protected_fragments(transformed_code) == protected_fragments(original_code)
+
+
 def apply_replace_literal(
     source_code: str,
     old_literal: Any,
