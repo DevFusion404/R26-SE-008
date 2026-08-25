@@ -194,6 +194,88 @@ if __name__ == "__main__":
     assert result["validation"]["invariant"]["passed"] is True
 
 
+def test_python_recovers_filename_derived_rdp_target_and_removes_legacy_helper():
+    source = '''"""Intentionally contains Dead Code. Not refactored."""
+
+def old_number_format(number):
+    return f"OLD-{number}"
+
+def check_number(number):
+    if number % 2 == 0:
+        return "even"
+        print("This line can never run")
+    return "odd"
+
+def main():
+    value = 14
+    if False:
+        print("Legacy diagnostic mode")
+    result = check_number(value)
+    print(value, "is", result)
+
+if __name__ == "__main__":
+    main()
+'''
+    result = SafeCodeTransformationValidationAgent().execute({
+        "request_id": "python_recovered_dead_callable",
+        "language": "python",
+        "source_files": [{
+            "file_name": "05_dead_code_number_checker.py",
+            "source_code": source,
+            "language": "python",
+            "source_mode": "raw",
+        }],
+        "refactoring_plan": {
+            "plan_id": "python_recovered_dead_callable",
+            "actions": [
+                {
+                    "action_type": "introduce_constant",
+                    "parameters": {
+                        "literal_value": 14,
+                        "constant_name": "MAIN_14",
+                        "source_line": 13,
+                        "source_file": "05_dead_code_number_checker.py",
+                    },
+                },
+                {
+                    "action_type": "remove_dead_code",
+                    "parameters": {
+                        "method": "05_dead_code_number_checker",
+                        "class_name": "05_dead_code_number_checker",
+                        "source_line": 1,
+                        "source_file": "05_dead_code_number_checker.py",
+                    },
+                },
+            ],
+            "behavior_tests": [],
+            "metadata": {},
+        },
+        "execution_options": {
+            **_options(),
+            "enable_sctva_auto_refactoring": True,
+        },
+    })
+
+    assert result["success"] is True, result
+    assert result["rollback_occurred"] is False
+    assert "def old_number_format" not in result["refactored_code"]
+    assert "This line can never run" not in result["refactored_code"]
+    assert "Legacy diagnostic mode" not in result["refactored_code"]
+    rdp_log = result["safety_report"]["transformation_log"][1]
+    assert rdp_log["action_type"] == "remove_dead_code"
+    assert rdp_log["replacements_count"] == 1
+    assert rdp_log["metadata"]["final_decision"] == "PASS"
+    assert any(
+        "Recovered stale RDP Remove Dead Code target" in warning
+        for warning in rdp_log["warnings"]
+    )
+    assert not any(
+        "Dead-code removal skipped" in warning
+        for entry in result["safety_report"]["transformation_log"]
+        for warning in entry["warnings"]
+    )
+
+
 def test_c_dead_code_pipeline_removes_only_static_target_and_passes_validation():
     source = '''static int old_calculation(int value) {
     return value * 100;
