@@ -36,22 +36,60 @@
  * the rest, renumbers step_id from 1 and returns a new plan_id. The new
  * plan_id tripped the reset below, so the approval the developer had just made
  * was wiped a moment after it appeared — and the renumbering meant a decision
- * key no longer pointed at the step it was made on. Preference changes (risk
- * tolerance / impact focus) still ask the backend to re-rank, and decisions
- * are carried across that by step identity rather than by position.
+ * key no longer pointed at the step it was made on. Only a developer-goal
+ * change asks the backend to re-rank, and decisions are carried across that by
+ * step identity rather than by position.
+ *
+ * DECISION SUPPORT
+ * ----------------
+ * Each step arrives carrying `decision_support`, computed by the DIWO backend
+ * (domain/planning_recommendation.py) from RDP's own score, the Stage 1 impact
+ * record, the live SCTVA capability probe, the developer's goal and — once
+ * enough real observations exist — their own acceptance history. This page
+ * RENDERS that assessment; it never computes one. Two implementations of one
+ * scoring formula would be two answers to the same question.
+ *
+ * The recommendation is advice. `Select Recommended` sets local state on the
+ * green steps and nothing else: it calls no agent, submits no plan and starts
+ * no transformation. The developer still presses Forward, and a step they did
+ * not approve never leaves this page.
  */
 
 import { useState } from "react";
 import { PLAN_DATA } from "../data/diwoData";
 import { C, Card, Badge, Pill, impactColor, riskColor, severityColor } from "../diwoTheme.jsx";
+import PlanningDecisionSummary from "../components/PlanningDecisionSummary";
+import PlanningRecommendationBadge from "../components/PlanningRecommendationBadge";
+import PlanStepDrawer from "../components/PlanStepDrawer";
+import {
+  CATEGORY_ORDER, categoryOf, categoryStyle,
+  groupBreakdown, isAutoSelectable, planSummary, supportOf,
+} from "../utils/planningDecisionSupport";
 
-/** A stable colour per file, so each file's header is identifiable at a glance. */
-const FILE_COLORS = ["#00d4aa", "#3b82f6", "#f59e0b", "#a855f7", "#ec4899", "#22c55e", "#06b6d4", "#f97316"];
-const fileColor = (path = "") => {
-  let hash = 0;
-  for (let i = 0; i < path.length; i += 1) hash = (hash * 31 + path.charCodeAt(i)) >>> 0;
-  return FILE_COLORS[hash % FILE_COLORS.length];
-};
+/**
+ * One accent colour for every file header.
+ *
+ * This used to be hashed from the path, giving each file its own colour out of
+ * eight. On a plan touching several files that painted a column of unrelated
+ * greens, ambers and reds down the page — the same four colours the
+ * recommendation badges use to mean something specific. A file header is
+ * structure, not status, so it takes one neutral accent and leaves the palette
+ * to the signal that needs it.
+ */
+const FILE_ACCENT = C.info;
+
+const STATUS_FILTERS = ["all", "approved", "rejected", "pending"];
+
+/**
+ * Structured reasons offered when the developer overrides a recommendation.
+ * Optional — the workflow is never blocked on one. They exist because a
+ * disagreement with DIWO is the most informative feedback the system can
+ * collect, and a free-text box collects it least often.
+ */
+const OVERRIDE_REASONS = [
+  "Too risky", "Not useful", "Wrong refactoring", "Too much scope",
+  "Prefer manual change", "Insufficient explanation", "Other",
+];
 
 export default function RefactoringPlanApprovalPage({
   onApprove,
@@ -65,10 +103,14 @@ export default function RefactoringPlanApprovalPage({
   const [opinion, setOpinion] = useState("");
   const [showOpinion, setShowOpinion] = useState(false);
   const [filter, setFilter] = useState("all");
-  const [riskTolerance, setRiskTolerance] = useState("balanced");
-  const [impactFocus, setImpactFocus] = useState("high");
-  const [expanded, setExpanded] = useState(() => new Set());
+  const [impactFilter, setImpactFilter] = useState("any");
+  const [strategy, setStrategy] = useState("balanced");
+  // The step whose explanation dialog is open, by step_id. One at a time — the
+  // same shape Stage 1 uses for its impact drawer.
+  const [explaining, setExplaining] = useState(null);
   const [useSample, setUseSample] = useState(false);
+  // step_id -> short reason, for decisions that went against the recommendation.
+  const [overrideReasons, setOverrideReasons] = useState({});
 
   // ── Resolve the plan actually being rendered ───────────────────────────────
   const currentPlan = planData || (useSample ? PLAN_DATA : null);
@@ -81,7 +123,8 @@ export default function RefactoringPlanApprovalPage({
 
   // A step's identity across plan revisions. step_id cannot be used: the
   // preference re-ranker renumbers steps from 1, so step 1 of a new plan is
-  // usually a different refactoring than step 1 of the old one.
+  // usually a different refactoring than step 1 of the old one. The backend
+  // uses the same triple for its feedback rows (domain step_identity).
   const identityOf = (step) =>
     `${step.smell_id ?? ""}|${step.refactoring ?? ""}|${step.target?.file ?? ""}`;
 
@@ -94,21 +137,29 @@ export default function RefactoringPlanApprovalPage({
   const [prevSteps, setPrevSteps] = useState(steps);
   if (planKey !== prevPlanKey) {
     const byIdentity = new Map();
+    const reasonsByIdentity = new Map();
     prevSteps.forEach((step) => {
       const decision = decisions[step.step_id];
       if (decision) byIdentity.set(identityOf(step), decision);
+      const reason = overrideReasons[step.step_id];
+      if (reason) reasonsByIdentity.set(identityOf(step), reason);
     });
 
     const carried = {};
+    const carriedReasons = {};
     steps.forEach((step) => {
-      const decision = byIdentity.get(identityOf(step));
+      const identity = identityOf(step);
+      const decision = byIdentity.get(identity);
       if (decision) carried[step.step_id] = decision;
+      const reason = reasonsByIdentity.get(identity);
+      if (reason) carriedReasons[step.step_id] = reason;
     });
 
     setPrevPlanKey(planKey);
     setPrevSteps(steps);
     setDecisions(carried);
-    setExpanded(new Set());
+    setOverrideReasons(carriedReasons);
+    setExplaining(null);
   }
 
   /** Approve / reject one step. Local only — never regenerates the plan. */
@@ -132,35 +183,50 @@ export default function RefactoringPlanApprovalPage({
     });
 
   /**
-   * Ask the backend to re-rank the plan for a new preference. This is the only
-   * thing that replaces the plan mid-review, and decisions survive it via the
-   * identity carry-over above.
+   * Ask the backend to re-rank and re-score the plan for a new developer goal.
+   * This is the only thing that replaces the plan mid-review, and decisions
+   * survive it via the identity carry-over above.
+   *
+   * The goal is sent as `developer_strategy`; the backend expands it to the
+   * risk_tolerance / impact_focus pair the re-ranker has always taken, and
+   * both are sent as well so an older backend still understands the request.
    */
-  const applyPreferences = (next) => {
+  const applyStrategy = (next) => {
+    setStrategy(next);
     const preferences = {
-      risk_tolerance: next.riskTolerance ?? riskTolerance,
-      impact_focus: next.impactFocus ?? impactFocus,
+      developer_strategy: next,
+      ...({
+        safety_first: { risk_tolerance: "conservative", impact_focus: "medium" },
+        balanced: { risk_tolerance: "balanced", impact_focus: "high" },
+        max_improvement: { risk_tolerance: "aggressive", impact_focus: "high" },
+      }[next] || { risk_tolerance: "balanced", impact_focus: "high" }),
     };
-    if (next.riskTolerance !== undefined) setRiskTolerance(next.riskTolerance);
-    if (next.impactFocus !== undefined) setImpactFocus(next.impactFocus);
     onDecisionChange?.({ decisions, preferences });
   };
 
-  const toggleExpanded = (id) => setExpanded(prev => {
-    const next = new Set(prev);
-    if (next.has(id)) next.delete(id);
-    else next.add(id);
-    return next;
-  });
+  /**
+   * Approve exactly the steps the backend marked `auto_select_eligible`.
+   *
+   * LOCAL STATE ONLY. No RDP call, no SCTVA call, no plan submission — the
+   * developer still presses Forward, and may change any of these before they
+   * do. Review, not-recommended and manual-only steps are left pending on
+   * purpose: they are the ones worth reading.
+   */
+  const selectRecommended = () =>
+    setDecisions((prev) => {
+      const next = { ...prev };
+      steps.forEach((step) => {
+        if (isAutoSelectable(step)) next[step.step_id] = "approve";
+      });
+      return next;
+    });
 
-  const allApproved = steps.length > 0 && steps.every(step => decisions[step.step_id] === "approve");
+  const selectAll = () =>
+    setDecisions(Object.fromEntries(steps.map((step) => [step.step_id, "approve"])));
 
-  const toggleSelectAll = () => {
-    if (allApproved) {
-      setDecisions({});
-      return;
-    }
-    setDecisions(Object.fromEntries(steps.map(step => [step.step_id, "approve"])));
+  const clearDecisions = () => {
+    setDecisions({});
+    setOverrideReasons({});
   };
 
   // ── Loading / error states ─────────────────────────────────────────────────
@@ -179,12 +245,21 @@ export default function RefactoringPlanApprovalPage({
     );
   }
 
-  const filtered = filter === "all" ? steps : steps.filter(s => {
-    if (filter === "approved") return decisions[s.step_id] === "approve";
-    if (filter === "rejected") return decisions[s.step_id] === "reject";
-    if (filter === "pending") return !decisions[s.step_id];
-    return (s.impact || s.expected_impact) === filter;
-  });
+  const summary = planSummary(currentPlan, strategy);
+
+  const matchesStatus = (step) => {
+    if (filter === "all") return true;
+    if (filter === "approved") return decisions[step.step_id] === "approve";
+    if (filter === "rejected") return decisions[step.step_id] === "reject";
+    if (filter === "pending") return !decisions[step.step_id];
+    // Anything else is a recommendation category.
+    return categoryOf(step) === filter;
+  };
+
+  const matchesImpact = (step) =>
+    impactFilter === "any" || (step.impact || step.expected_impact) === impactFilter;
+
+  const filtered = steps.filter((step) => matchesStatus(step) && matchesImpact(step));
 
   // Steps are grouped under the file they touch, the same way the Code Smell
   // Review page groups smells: the file is the unit of review, and its header
@@ -212,13 +287,48 @@ export default function RefactoringPlanApprovalPage({
     : `Total steps: ${currentPlan.summary?.total_steps || steps.length} · High impact: ${currentPlan.summary?.high_impact || 0}`;
   const skipped = currentPlan.skipped_smells || [];
 
+  // Steps where the developer went against the recommendation. Surfaced before
+  // submit, not to argue with them, but because a disagreement is worth one
+  // sentence of context for whoever reads the audit trail later.
+  const overrides = steps.filter((step) => {
+    const category = categoryOf(step);
+    const verdict = decisions[step.step_id];
+    if (!category || !verdict) return false;
+    return (verdict === "approve" && (category === "not_recommended" || category === "manual_only"))
+      || (verdict === "reject" && category === "recommended");
+  });
+
+  const explainedStep = explaining === null
+    ? null
+    : steps.find((step) => step.step_id === explaining) || null;
+
   const submit = () => {
     if (!canProceed) return;
+
+    // The structured override reasons ride along with the free-text note, so
+    // the backend's plan-decision feedback keeps them without a schema change.
+    const overrideNote = overrides
+      .map((step) => {
+        const reason = overrideReasons[step.step_id];
+        const verdict = decisions[step.step_id] === "approve" ? "approved" : "rejected";
+        return `step ${step.step_id} (${step.refactoring}) ${verdict} against DIWO's ${categoryOf(step)}${reason ? `: ${reason}` : ""}`;
+      })
+      .join("; ");
+
     onApprove({
       decisions,
-      opinion,
+      opinion: [opinion, overrideNote && `Overrides — ${overrideNote}`]
+        .filter(Boolean).join(" | "),
       plan: currentPlan,
-      preferences: { risk_tolerance: riskTolerance, impact_focus: impactFocus },
+      preferences: {
+        developer_strategy: strategy,
+        ...({
+          safety_first: { risk_tolerance: "conservative", impact_focus: "medium" },
+          balanced: { risk_tolerance: "balanced", impact_focus: "high" },
+          max_improvement: { risk_tolerance: "aggressive", impact_focus: "high" },
+        }[strategy]),
+      },
+      override_reasons: overrideReasons,
     });
   };
 
@@ -226,11 +336,31 @@ export default function RefactoringPlanApprovalPage({
     <div>
       <SourceBanner origin={origin} meta={planMeta} />
 
-      <Card style={{ marginBottom: 20 }} glow={C.accentGlow}>
+      <PlanningDecisionSummary
+        summary={summary}
+        totalSteps={steps.length}
+        approved={approved}
+        rejected={rejected}
+        pending={pending}
+        strategy={strategy}
+        onStrategyChange={applyStrategy}
+        strategyBusy={loading}
+        onSelectRecommended={selectRecommended}
+        onSelectAll={selectAll}
+        onClearSelection={clearDecisions}
+        activeFilter={filter}
+        onFilterCategory={(category) =>
+          setFilter((prev) => (prev === category ? "all" : category))}
+        planSource={planMeta?.plan_source}
+      />
+
+      {/* The RDP plan's own identity, kept intact: DIWO's assessment sits
+          above it, it does not replace it. */}
+      <Card style={{ marginBottom: 14 }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: 12 }}>
           <div>
             <div style={{ fontSize: 11, color: C.textMuted, textTransform: "uppercase", letterSpacing: 1, marginBottom: 4 }}>Refactoring Planning Agent Output</div>
-            <div style={{ fontSize: 16, fontWeight: 700, color: C.text, marginBottom: 6 }}>
+            <div style={{ fontSize: 15, fontWeight: 700, color: C.text, marginBottom: 6 }}>
               {currentPlan.plan_id}
               {currentPlan.target && (
                 <span style={{ fontSize: 12, fontWeight: 500, color: C.textMuted, marginLeft: 10, fontFamily: "monospace" }}>
@@ -238,24 +368,11 @@ export default function RefactoringPlanApprovalPage({
                 </span>
               )}
             </div>
-            <div style={{ fontSize: 13, color: C.textSub, maxWidth: 620 }}>{summaryText}</div>
+            <div style={{ fontSize: 12, color: C.textSub, maxWidth: 620 }}>{summaryText}</div>
           </div>
-          <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
             {refactoringTypes.map(t => <Badge key={t} label={t} color={C.info} />)}
           </div>
-        </div>
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 10, marginTop: 16 }}>
-          {[
-            { label: "Total Steps", val: steps.length, color: C.text },
-            { label: "Approved", val: approved, color: C.accent },
-            { label: "Rejected", val: rejected, color: C.danger },
-            { label: "Pending", val: pending, color: C.warn },
-          ].map(({ label, val, color }) => (
-            <div key={label} style={{ background: C.bg, borderRadius: 8, padding: "12px", textAlign: "center" }}>
-              <div style={{ fontSize: 22, fontWeight: 800, color, fontFamily: "monospace" }}>{val}</div>
-              <div style={{ fontSize: 10, color: C.textMuted, textTransform: "uppercase", letterSpacing: 1 }}>{label}</div>
-            </div>
-          ))}
         </div>
         {(skipped.length > 0 || currentPlan.reordered) && (
           <div style={{ marginTop: 12, display: "flex", gap: 16, flexWrap: "wrap", fontSize: 11, color: C.textMuted }}>
@@ -271,33 +388,40 @@ export default function RefactoringPlanApprovalPage({
         )}
       </Card>
 
-      <div style={{ display: "flex", gap: 8, marginBottom: 14, flexWrap: "wrap" }}>
-        {["all", "approved", "rejected", "pending", "high", "medium", "low"].map(f => (
+      {/* ── Filters ─────────────────────────────────────────────────────────
+          Status here; recommendation categories are the counters in the header
+          above, which double as filters. Two rows of pills would crowd the
+          control strip for no extra reach. */}
+      <div style={{ display: "flex", gap: 8, marginBottom: 14, flexWrap: "wrap", alignItems: "center" }}>
+        {STATUS_FILTERS.map(f => (
           <button key={f} onClick={() => setFilter(f)} style={{
             padding: "5px 12px", borderRadius: 20, fontSize: 11, fontWeight: 600, cursor: "pointer", textTransform: "capitalize",
             background: filter === f ? C.accent : C.panel, color: filter === f ? "#000" : C.textMuted, border: `1px solid ${filter === f ? C.accent : C.border}`
           }}>{f}</button>
         ))}
-        <button onClick={toggleSelectAll} style={{
-          padding: "5px 12px", borderRadius: 20, fontSize: 11, fontWeight: 700, cursor: "pointer", border: `1px solid ${C.accent}`,
-          background: `${C.accent}15`, color: C.accent, textTransform: "uppercase"
-        }}>
-          {allApproved ? "Deselect All" : "Select All"}
-        </button>
+
+        {CATEGORY_ORDER.includes(filter) && (
+          <span style={{
+            padding: "5px 12px", borderRadius: 20, fontSize: 11, fontWeight: 700,
+            background: `${categoryStyle(filter).color}18`,
+            border: `1px solid ${categoryStyle(filter).color}`,
+            color: categoryStyle(filter).color,
+          }}>
+            {categoryStyle(filter).icon} {categoryStyle(filter).label}
+            <button onClick={() => setFilter("all")} title="Clear this filter" style={{
+              background: "none", border: "none", color: "inherit", cursor: "pointer",
+              marginLeft: 6, padding: 0, fontWeight: 800,
+            }}>✕</button>
+          </span>
+        )}
+
         <select
-          value={riskTolerance}
-          onChange={(e) => applyPreferences({ riskTolerance: e.target.value })}
-          style={{ padding: "5px 10px", borderRadius: 8, fontSize: 11, background: C.panel, color: C.text, border: `1px solid ${C.border}` }}
+          value={impactFilter}
+          onChange={(e) => setImpactFilter(e.target.value)}
+          aria-label="Filter by expected impact"
+          style={{ padding: "5px 10px", borderRadius: 8, fontSize: 11, background: C.panel, color: C.text, border: `1px solid ${C.border}`, marginLeft: "auto" }}
         >
-          <option value="conservative">Risk: Conservative</option>
-          <option value="balanced">Risk: Balanced</option>
-          <option value="aggressive">Risk: Aggressive</option>
-        </select>
-        <select
-          value={impactFocus}
-          onChange={(e) => applyPreferences({ impactFocus: e.target.value })}
-          style={{ padding: "5px 10px", borderRadius: 8, fontSize: 11, background: C.panel, color: C.text, border: `1px solid ${C.border}` }}
-        >
+          <option value="any">Impact: any</option>
           <option value="high">Impact: High</option>
           <option value="medium">Impact: Medium</option>
           <option value="low">Impact: Low</option>
@@ -324,10 +448,12 @@ export default function RefactoringPlanApprovalPage({
             key={group.file}
             group={group}
             decisions={decisions}
-            expanded={expanded}
+            overrideReasons={overrideReasons}
             onDecide={decide}
             onDecideGroup={decideGroup}
-            onToggleExpanded={toggleExpanded}
+            onExplain={setExplaining}
+            onOverrideReason={(id, reason) =>
+              setOverrideReasons((prev) => ({ ...prev, [id]: reason }))}
           />
         ))}
       </div>
@@ -337,6 +463,19 @@ export default function RefactoringPlanApprovalPage({
           Showing {filtered.length} step{filtered.length > 1 ? "s" : ""} across {groups.length} file{groups.length > 1 ? "s" : ""}
           {filtered.length < steps.length && ` (${steps.length - filtered.length} hidden by the current filter)`}.
           {" "}Approving or rejecting a file applies to every step planned for it.
+        </div>
+      )}
+
+      {overrides.length > 0 && (
+        <div style={{
+          marginTop: 14, padding: "12px 16px", borderRadius: 10,
+          background: `${C.info}0a`, border: `1px solid ${C.info}40`,
+          fontSize: 12, color: C.textSub, lineHeight: 1.6,
+        }}>
+          <b style={{ color: C.info }}>ⓘ You went against DIWO on {overrides.length} step{overrides.length > 1 ? "s" : ""}.</b>
+          {" "}That is exactly what this stage is for — DIWO advises, you decide.
+          A one-word reason on those steps (optional) helps DIWO learn where its
+          recommendations do not fit how you work.
         </div>
       )}
 
@@ -381,6 +520,22 @@ export default function RefactoringPlanApprovalPage({
           )}
         </button>
       </div>
+
+      {/* Mounted only while a step is being explained, so a twelve-step plan
+          never builds twelve score breakdowns nobody opened. Looked up against
+          `steps` rather than `filtered`: changing a filter must not yank the
+          dialog out from under the developer reading it. */}
+      {explainedStep && (
+        <PlanStepDrawer
+          // Keyed by step, so opening a different one mounts a fresh dialog
+          // scrolled back to the top rather than mid-way down the last.
+          key={explainedStep.step_id}
+          step={explainedStep}
+          decision={decisions[explainedStep.step_id]}
+          onDecide={decide}
+          onClose={() => setExplaining(null)}
+        />
+      )}
     </div>
   );
 }
@@ -428,8 +583,15 @@ function FilePathBar({ file, color, children }) {
  * while each row keeps its own buttons for overriding a single step afterwards.
  * The card is never height-capped: it grows with the number of steps, and
  * flexShrink: 0 stops the scrolling parent squeezing it.
+ *
+ * When the file's steps do not all carry the same recommendation, the mix is
+ * spelled out above the "All ✓" button. Approving four steps at once must not
+ * imply that all four are equally safe when one of them is manual-only.
  */
-function PlanFileGroup({ group, decisions, expanded, onDecide, onDecideGroup, onToggleExpanded }) {
+function PlanFileGroup({
+  group, decisions, overrideReasons,
+  onDecide, onDecideGroup, onExplain, onOverrideReason,
+}) {
   const total = group.steps.length;
   const approved = group.steps.filter(s => decisions[s.step_id] === "approve").length;
   const rejected = group.steps.filter(s => decisions[s.step_id] === "reject").length;
@@ -438,7 +600,8 @@ function PlanFileGroup({ group, decisions, expanded, onDecide, onDecideGroup, on
   const allApproved = approved === total;
   const allRejected = rejected === total;
   const borderColor = pending > 0 ? C.border : approved > 0 ? C.accent : C.danger;
-  const color = fileColor(group.file);
+  const color = FILE_ACCENT;
+  const breakdown = groupBreakdown(group.steps);
 
   return (
     <div style={{
@@ -458,14 +621,18 @@ function PlanFileGroup({ group, decisions, expanded, onDecide, onDecideGroup, on
         <div style={{ display: "flex", gap: 8, flexShrink: 0 }}>
           <button
             onClick={() => onDecideGroup(group, "approve")}
-            title={`Approve all ${total} step(s) planned for this file`}
+            title={
+              breakdown.mixed
+                ? `Approve all ${total} step(s) for this file — they do NOT all carry the same recommendation`
+                : `Approve all ${total} step(s) planned for this file`
+            }
             style={{
               padding: "6px 14px", borderRadius: 7, fontSize: 12, fontWeight: 700, cursor: "pointer", border: "none",
               background: allApproved ? C.accent : `${C.accent}18`, color: allApproved ? "#000" : C.accent,
               transition: "all 0.2s",
             }}
           >
-           All ✓ 
+           All ✓
           </button>
           <button
             onClick={() => onDecideGroup(group, "reject")}
@@ -481,6 +648,26 @@ function PlanFileGroup({ group, decisions, expanded, onDecide, onDecideGroup, on
         </div>
       </FilePathBar>
 
+      {/* §47: what "All ✓" is actually about to approve. */}
+      {breakdown.mixed && (
+        <div style={{
+          display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap",
+          padding: "7px 16px", background: `${C.warn}0a`,
+          borderBottom: `1px solid ${C.border}`, fontSize: 11, color: C.textSub,
+        }}>
+          <span style={{ color: C.warn, fontWeight: 700 }}>⚠ Mixed recommendations:</span>
+          {CATEGORY_ORDER.filter((c) => breakdown.counts[c] > 0).map((c) => (
+            <span key={c} style={{ color: categoryStyle(c).color, fontWeight: 600 }}>
+              {categoryStyle(c).icon} {breakdown.counts[c]} {categoryStyle(c).short.toLowerCase()}
+            </span>
+          ))}
+          {breakdown.unassessed > 0 && (
+            <span style={{ color: C.textMuted }}>○ {breakdown.unassessed} not assessed</span>
+          )}
+          <span style={{ color: C.textMuted }}>— approving the file approves all of them.</span>
+        </div>
+      )}
+
       <div style={{ display: "flex", flexDirection: "column" }}>
         {group.steps.map((step, rowIdx) => (
           <PlanStepRow
@@ -488,9 +675,10 @@ function PlanFileGroup({ group, decisions, expanded, onDecide, onDecideGroup, on
             step={step}
             rowIdx={rowIdx}
             decision={decisions[step.step_id]}
-            isOpen={expanded.has(step.step_id)}
+            overrideReason={overrideReasons[step.step_id]}
             onDecide={onDecide}
-            onToggleExpanded={onToggleExpanded}
+            onExplain={onExplain}
+            onOverrideReason={onOverrideReason}
           />
         ))}
       </div>
@@ -498,15 +686,44 @@ function PlanFileGroup({ group, decisions, expanded, onDecide, onDecideGroup, on
   );
 }
 
-/** One planned refactoring step — same content and controls as before, now a
- *  row inside its file's group rather than a standalone card. */
-function PlanStepRow({ step, rowIdx, decision, isOpen, onDecide, onToggleExpanded }) {
+/**
+ * One planned refactoring step: a fixed-height row that answers the
+ * approve/reject question and nothing more.
+ *
+ * The recommendation badge and score, the refactoring, impact, risk, smell
+ * type, RDP's own score, SCTVA status, the target, RDP's explanation, and
+ * DIWO's verdict in one sentence. That is the whole row, so twelve of them are
+ * still a list a developer can scan.
+ *
+ * Everything else — the full reason list, the projected effect, the deferral
+ * cost, the score breakdown, the transformation parameters, RDP's prediction
+ * and its rejected alternatives — lives in PlanStepDrawer, opened from the
+ * button below. It is taller than the viewport, so expanding it here would
+ * push the rest of the plan off screen; and it is never built for a step
+ * nobody opened.
+ */
+function PlanStepRow({
+  step, rowIdx, decision, overrideReason,
+  onDecide, onExplain, onOverrideReason,
+}) {
+  const support = supportOf(step);
+  const category = support?.category || null;
+  const style = categoryStyle(category);
+
   const bgColor =
     decision === "approve" ? `${C.accent}0a` : decision === "reject" ? `${C.danger}0a` : "transparent";
   const targetLabel =
     [step.target?.class, step.target?.method].filter(Boolean).join(".") ||
     step.target?.file ||
     "(module level)";
+
+  // Only the capability is read here, for the SCTVA chip in the header. The
+  // impact, deferral and factor figures belong to the drawer.
+  const capability = support?.capability;
+
+  const isOverride =
+    (decision === "approve" && (category === "not_recommended" || category === "manual_only")) ||
+    (decision === "reject" && category === "recommended");
 
   return (
     <div style={{
@@ -519,18 +736,33 @@ function PlanStepRow({ step, rowIdx, decision, isOpen, onDecide, onToggleExpande
         <div style={{ flex: 1, minWidth: 0 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", marginBottom: 6 }}>
             <span style={{ fontSize: 11, color: C.textMuted, fontFamily: "monospace" }}>Step {step.step_id}</span>
+            <PlanningRecommendationBadge support={support} />
             <Badge label={step.refactoring} color={C.info} />
             <Pill label={`Impact: ${step.impact || step.expected_impact || "medium"}`} color={impactColor(step.impact || step.expected_impact || "medium")} />
             <Pill label={`Risk: ${step.risk}`} color={riskColor(step.risk)} />
             {step.smell_type && (
               <Pill label={step.smell_type} color={severityColor(step.severity)} />
             )}
+            {/* RDP's own score is preserved beside DIWO's, never replaced by it. */}
             {typeof step.score === "number" && (
-              <span style={{ fontSize: 10, color: C.textMuted, fontFamily: "monospace" }} title={`MCDA score (${step.scoring_method || "mcda"})`}>
-                score {step.score.toFixed(2)}
+              <span style={{ fontSize: 10, color: C.textMuted, fontFamily: "monospace" }} title={`RDP MCDA score (${step.scoring_method || "mcda"})`}>
+                RDP {step.score.toFixed(2)}
+              </span>
+            )}
+            {capability && (
+              <span
+                title={capability.reason || ""}
+                style={{
+                  fontSize: 10, fontFamily: "monospace", fontWeight: 700,
+                  color: capability.actual_step_mappable ? C.accent : C.warn,
+                }}
+              >
+                SCTVA {String(capability.status || "unknown").toUpperCase()}
+                {capability.actual_step_mappable ? " ✓" : " ⚠"}
               </span>
             )}
           </div>
+
           <div style={{ fontSize: 13, fontWeight: 600, color: C.text, marginBottom: 4 }}>
             {targetLabel}
             {Array.isArray(step.target?.lines) && step.target.lines.length > 0 && (
@@ -539,96 +771,103 @@ function PlanStepRow({ step, rowIdx, decision, isOpen, onDecide, onToggleExpande
               </span>
             )}
           </div>
+
           <div style={{ fontSize: 12, color: C.textSub, lineHeight: 1.5 }}>{step.explanation}</div>
 
-          <button onClick={() => onToggleExpanded(step.step_id)} style={{
-            background: "none", border: "none", padding: 0, marginTop: 8, cursor: "pointer",
-            color: C.textMuted, fontSize: 11, fontWeight: 600, display: "flex", alignItems: "center", gap: 5,
-          }}>
-            <span>{isOpen ? "▾" : "▸"}</span> Transformation details
+          {/* The verdict in one sentence, always visible — a badge and a number
+              with nothing behind them is exactly what this stage replaced.
+              Everything that BACKS it up sits behind the toggle: a card
+              carrying the full reason list, the projected effect, the deferral
+              cost and the score breakdown is unreadable twelve times down a
+              page, and the developer only needs that depth on the steps they
+              stop at. */}
+          {support && (
+            <div style={{
+              marginTop: 9, padding: "8px 12px", borderRadius: 8,
+              background: `${style.color}0a`, borderLeft: `3px solid ${style.color}`,
+              fontSize: 12, color: C.textSub, lineHeight: 1.5,
+            }}>
+              <b style={{ color: style.color }}>{style.verb}:</b> {support.summary}
+            </div>
+          )}
+
+          {/* Opens the explanation in a dialog rather than expanding here. The
+              evidence is taller than the viewport, so inline expansion pushed
+              every other step off screen and cost the developer their place in
+              the plan. Nothing below this row moves when it is clicked. */}
+          <button
+            onClick={() => onExplain?.(step.step_id)}
+            aria-haspopup="dialog"
+            title="Open the full explanation, score breakdown and transformation details"
+            style={{
+              marginTop: 9, padding: "5px 12px", borderRadius: 7, cursor: "pointer",
+              background: C.bg, color: C.textSub, border: `1px solid ${C.border}`,
+              fontSize: 11, fontWeight: 600,
+              display: "inline-flex", alignItems: "center", gap: 6,
+            }}
+          >
+            <span aria-hidden="true">ⓘ</span>
+            {support ? "Why this recommendation? · Transformation details" : "Transformation details"}
           </button>
 
-          {isOpen && <StepDetails step={step} />}
+          {/* §48: optional, never blocking. */}
+          {isOverride && (
+            <div style={{
+              marginTop: 10, padding: "9px 12px", borderRadius: 8,
+              background: `${C.info}0a`, border: `1px dashed ${C.info}50`,
+            }}>
+              <div style={{ fontSize: 11, color: C.textSub, marginBottom: 6 }}>
+                DIWO marked this <b style={{ color: style.color }}>{style.short.toLowerCase()}</b>, and you{" "}
+                {decision === "approve" ? "approved" : "rejected"} it. Optional — why?
+              </div>
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                {OVERRIDE_REASONS.map((reason) => (
+                  <button
+                    key={reason}
+                    onClick={() => onOverrideReason(step.step_id, overrideReason === reason ? "" : reason)}
+                    style={{
+                      padding: "3px 10px", borderRadius: 20, fontSize: 10.5, fontWeight: 600,
+                      cursor: "pointer",
+                      background: overrideReason === reason ? `${C.info}25` : C.bg,
+                      color: overrideReason === reason ? C.info : C.textMuted,
+                      border: `1px solid ${overrideReason === reason ? C.info : C.border}`,
+                    }}
+                  >
+                    {reason}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
-        <div style={{ display: "flex", gap: 8, flexShrink: 0 }}>
-          <button onClick={() => onDecide(step.step_id, "approve")} style={{
-            padding: "6px 14px", borderRadius: 7, fontSize: 12, fontWeight: 700, cursor: "pointer", border: "none",
-            background: decision === "approve" ? C.accent : `${C.accent}18`, color: decision === "approve" ? "#000" : C.accent,
-            transition: "all 0.2s"
-          }}>✓ Approve</button>
-          <button onClick={() => onDecide(step.step_id, "reject")} style={{
-            padding: "6px 14px", borderRadius: 7, fontSize: 12, fontWeight: 700, cursor: "pointer", border: "none",
-            background: decision === "reject" ? C.danger : `${C.danger}18`, color: decision === "reject" ? "#fff" : C.danger,
-            transition: "all 0.2s"
-          }}>✕ Reject</button>
+
+        <div style={{ display: "flex", flexDirection: "column", gap: 8, flexShrink: 0 }}>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button onClick={() => onDecide(step.step_id, "approve")} style={{
+              padding: "6px 14px", borderRadius: 7, fontSize: 12, fontWeight: 700, cursor: "pointer", border: "none",
+              background: decision === "approve" ? C.accent : `${C.accent}18`, color: decision === "approve" ? "#000" : C.accent,
+              transition: "all 0.2s"
+            }}>✓ Approve</button>
+            <button onClick={() => onDecide(step.step_id, "reject")} style={{
+              padding: "6px 14px", borderRadius: 7, fontSize: 12, fontWeight: 700, cursor: "pointer", border: "none",
+              background: decision === "reject" ? C.danger : `${C.danger}18`, color: decision === "reject" ? "#fff" : C.danger,
+              transition: "all 0.2s"
+            }}>✕ Reject</button>
+          </div>
+
+          {/* Approving a step DIWO warned about is allowed, and says so. */}
+          {decision === "approve" && category === "not_recommended" && (
+            <span style={{ fontSize: 10, color: C.danger, maxWidth: 150, textAlign: "right", lineHeight: 1.4 }}>
+              ⚠ Approved against DIWO's advice
+            </span>
+          )}
+          {decision === "approve" && category === "manual_only" && (
+            <span style={{ fontSize: 10, color: C.info, maxWidth: 150, textAlign: "right", lineHeight: 1.4 }}>
+              ⓘ Will not change code automatically
+            </span>
+          )}
         </div>
       </div>
-    </div>
-  );
-}
-
-/**
- * The parameters block is what the Safe Transformation Agent actually executes,
- * so it is shown verbatim: a placeholder like "<parent>" here is the developer's
- * only warning that a step will not transform cleanly.
- */
-function StepDetails({ step }) {
-  const params = Object.entries(step.parameters || {});
-  const prediction = step.prediction;
-
-  return (
-    <div style={{ marginTop: 10, paddingTop: 10, borderTop: `1px solid ${C.borderAcc}`, display: "flex", flexDirection: "column", gap: 10 }}>
-      <div>
-        <div style={{ fontSize: 10, color: C.textMuted, textTransform: "uppercase", letterSpacing: 1, marginBottom: 6 }}>
-          Transformation parameters · smell {step.smell_id}
-        </div>
-        {params.length === 0 ? (
-          <div style={{ fontSize: 11, color: C.textMuted }}>No parameters — the agent inferred nothing to configure.</div>
-        ) : (
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-            {params.map(([key, value]) => (
-              <span key={key} style={{
-                fontSize: 11, fontFamily: "monospace", padding: "3px 8px", borderRadius: 6,
-                background: C.bg, border: `1px solid ${C.border}`, color: C.textSub,
-              }}>
-                <span style={{ color: C.textMuted }}>{key}:</span>{" "}
-                {typeof value === "object" ? JSON.stringify(value) : String(value)}
-              </span>
-            ))}
-          </div>
-        )}
-      </div>
-
-      {prediction && (
-        <div>
-          <div style={{ fontSize: 10, color: C.textMuted, textTransform: "uppercase", letterSpacing: 1, marginBottom: 6 }}>
-            Predicted effect
-          </div>
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 14, fontSize: 11, color: C.textSub }}>
-            <span>complexity after: <b style={{ color: C.text }}>{prediction.predicted_complexity_after}</b></span>
-            <span>coupling: <b style={{ color: prediction.coupling_change <= 0 ? C.accent : C.warn }}>{prediction.coupling_change}</b></span>
-            <span>cohesion: <b style={{ color: prediction.cohesion_change >= 0 ? C.accent : C.warn }}>{prediction.cohesion_change}</b></span>
-            <span>maintainability: <b style={{ color: C.accent }}>+{prediction.maintainability_improvement}</b></span>
-            <span>risk: <b style={{ color: riskColor(step.risk) }}>{prediction.risk_score}</b></span>
-          </div>
-        </div>
-      )}
-
-      {step.alternatives?.length > 0 && (
-        <div>
-          <div style={{ fontSize: 10, color: C.textMuted, textTransform: "uppercase", letterSpacing: 1, marginBottom: 6 }}>
-            Alternatives considered
-          </div>
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-            {step.alternatives.map(alt => (
-              <span key={alt.name} style={{ fontSize: 11, color: C.textMuted }}>
-                {alt.name}
-                {typeof alt.score === "number" ? ` (${alt.score.toFixed(2)})` : ""}
-              </span>
-            ))}
-          </div>
-        </div>
-      )}
     </div>
   );
 }
@@ -669,6 +908,11 @@ function SourceBanner({ origin, meta }) {
           {meta?.plan_warning && (
             <div style={{ fontSize: 11, color: C.warn, marginTop: 2 }}>
               RDP agent unavailable: {meta.plan_warning}
+            </div>
+          )}
+          {origin !== "rdp" && (
+            <div style={{ fontSize: 11, color: C.warn, marginTop: 2 }}>
+              Recommendations for this plan were computed without RDP's scoring evidence.
             </div>
           )}
         </div>

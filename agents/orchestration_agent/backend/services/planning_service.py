@@ -24,13 +24,13 @@ from clients.rdp_client import (
 )
 from db.workflow_repository import log_event
 from domain.plan_normalizer import (
-    build_rdp_plan_input, generate_refactoring_plan, normalize_rdp_plan,
-    generate_updated_plan_report, build_approved_plan,
+    build_rdp_plan_input, fold_trace_into_plan, generate_refactoring_plan,
+    normalize_rdp_plan, generate_updated_plan_report, build_approved_plan,
 )
 
 __all__ = [
     "plan_from_rdp", "build_rdp_plan_input", "normalize_rdp_plan",
-    "generate_updated_plan_report", "build_approved_plan",
+    "generate_updated_plan_report", "build_approved_plan", "fold_trace_into_plan",
 ]
 
 
@@ -69,6 +69,11 @@ def plan_from_rdp(updated_report: dict, selected: list, target: str,
         )
 
     plan = normalize_rdp_plan(result["plan"], rdp_input)
+    # RDP keeps the ratings, the MCDA score, the impact prediction and the
+    # rejected candidates in the trace rather than on the steps. Fold them on
+    # here, so the decision-support pass downstream scores each step from the
+    # same numbers Stage 2 renders next to its badge.
+    plan = fold_trace_into_plan(plan, result.get("trace"))
 
     if wf_id:
         log_event(wf_id, "plan_approval", "rdp_plan_generated", {

@@ -351,7 +351,15 @@ export default function DIWOAgentPage() {
       const updatedPlan = res.updated_planning_report || null;
       if (updatedPlan) {
         setPlanData(updatedPlan);
-        addLog("Updated plan regenerated from developer preferences.", "info");
+        const support = res.decision_support_summary || updatedPlan.decision_support_summary;
+        addLog(
+          support
+            ? `Plan re-ranked for the ${res.developer_strategy || "balanced"} goal — ` +
+              `${support.recommended ?? 0} recommended, ${support.review ?? 0} to review, ` +
+              `${support.not_recommended ?? 0} not recommended, ${support.manual_only ?? 0} manual only.`
+            : "Updated plan regenerated from developer preferences.",
+          "info"
+        );
       }
     } catch (e) {
       addLog(`Plan preference update failed: ${e.message}`, "warn");
@@ -360,7 +368,7 @@ export default function DIWOAgentPage() {
     }
   };
 
-  const handlePlanApproved = async ({ decisions, opinion, plan }) => {
+  const handlePlanApproved = async ({ decisions, opinion, plan, preferences }) => {
     if (backendBusy) return; // FIX [F2]
 
     // The page hands back the plan it rendered (RDP-generated or workflow copy),
@@ -370,6 +378,26 @@ export default function DIWOAgentPage() {
     const approved = Object.values(decisions).filter((d) => d === "approve").length;
     const rejected = Object.values(decisions).filter((d) => d === "reject").length;
     addLog(`${approved} steps approved, ${rejected} rejected — forwarding to Transformation Agent`, "success");
+
+    // How the developer's verdicts compared with what DIWO advised. The
+    // research claim is that DIWO recommends and the developer decides, so the
+    // disagreements are the interesting half and belong in the session log.
+    const overrides = (activePlan?.steps || []).filter((step) => {
+      const category = step?.decision_support?.category;
+      const verdict = decisions[step.step_id];
+      if (!category || !verdict) return false;
+      return (verdict === "approve" && (category === "not_recommended" || category === "manual_only"))
+        || (verdict === "reject" && category === "recommended");
+    }).length;
+    if (overrides > 0) {
+      addLog(
+        `${overrides} step(s) decided against DIWO's recommendation (developer authority preserved).`,
+        "info"
+      );
+    }
+    if (preferences?.developer_strategy) {
+      addLog(`Developer goal at approval: ${preferences.developer_strategy}.`, "info");
+    }
     if (opinion) addLog(`Developer note: "${opinion.slice(0, 80)}"`, "info");
 
     if (!workflowId || !activePlan) {
