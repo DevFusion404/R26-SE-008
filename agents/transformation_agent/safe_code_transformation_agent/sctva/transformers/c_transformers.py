@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from typing import Any, Optional, Tuple
+from typing import Any, Optional, Sequence, Tuple
 
 
 _INCLUDE_RE = re.compile(r"^\s*#\s*include\b.*$", re.MULTILINE)
@@ -517,27 +517,265 @@ def _remove_proven_c_unreachable_statement(source_code: str, source_line: int) -
     return source_code, 0
 
 
-def _remove_proven_unused_c_static_function(source_code: str, method_name: str) -> Tuple[str, int]:
+_C_FUNCTION_DEFINITION_RE = re.compile(
+    r"(?ms)^[ \t]*(?P<prefix>(?:[A-Za-z_][A-Za-z0-9_\s\*]*?\s+)+)"
+    r"(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*\([^;{}]*\)\s*\{"
+)
+
+
+def _c_function_definitions(source_code: str) -> list[dict[str, Any]]:
+    """Return top-level C function definitions with balanced source spans."""
+
     masked = _mask_c_non_code(source_code)
-    pattern = re.compile(
-        rf"(?ms)^[ \t]*(?:[A-Za-z_][A-Za-z0-9_\s\*]*?\s+)+{re.escape(method_name)}\s*\([^;{{}}]*\)\s*\{{"
+    definitions: list[dict[str, Any]] = []
+    for match in _C_FUNCTION_DEFINITION_RE.finditer(masked):
+        name = match.group("name")
+        if name in {"if", "for", "while", "switch", "case", "default"}:
+            continue
+        if _c_brace_depth(masked, match.start()) != 0:
+            continue
+        brace_index = masked.rfind("{", match.start(), match.end())
+        method_end = _find_matching_brace(masked, brace_index)
+        if method_end is None:
+            continue
+        definitions.append({
+            "name": name,
+            "start": match.start(),
+            "name_start": match.start("name"),
+            "name_end": match.end("name"),
+            "end": method_end + 1,
+            "start_line": _line_for_c_index(source_code, match.start()),
+            "end_line": _line_for_c_index(source_code, method_end),
+            "signature": masked[match.start() : match.end()],
+            "static": bool(re.search(r"\bstatic\b", match.group("prefix"))),
+        })
+    return definitions
+
+
+def c_function_definition_count(source_code: str, method_name: str) -> int:
+    """Count concrete definitions for a named C function in one source file."""
+
+    target = str(method_name or "").strip()
+    if not target:
+        return 0
+    return sum(item["name"] == target for item in _c_function_definitions(source_code))
+
+
+def _project_c_sources(
+    source_code: str,
+    *,
+    project_source_files: Sequence[Any] | None,
+    current_file_name: str,
+) -> list[dict[str, Any]]:
+    """Normalize the repository snapshot used for conservative reference checks."""
+
+    current_path = str(current_file_name or "").replace("\\", "/").lower()
+    normalized: list[dict[str, Any]] = []
+    current_included = False
+    for item in project_source_files or []:
+        if isinstance(item, dict):
+            file_name = str(
+                item.get("file_name") or item.get("name") or item.get("path") or ""
+            )
+            item_source = str(item.get("source_code") or item.get("code") or "")
+            language = str(item.get("language") or "").strip().lower()
+        else:
+            file_name = str(
+                getattr(item, "file_name", "")
+                or getattr(item, "name", "")
+                or getattr(item, "path", "")
+            )
+            item_source = str(
+                getattr(item, "source_code", "") or getattr(item, "code", "")
+            )
+            language = str(getattr(item, "language", "") or "").strip().lower()
+
+        normalized_name = file_name.replace("\\", "/")
+        relevant = language == "c" or normalized_name.lower().endswith((".c", ".h"))
+        if not relevant or not item_source:
+            continue
+        normalized_path = normalized_name.lower()
+        same_current_file = bool(
+            current_path
+            and (
+                normalized_path == current_path
+                or normalized_path.endswith(f"/{current_path}")
+                or current_path.endswith(f"/{normalized_path}")
+            )
+        )
+        if same_current_file:
+            item_source = source_code
+            current_included = True
+        normalized.append({
+            "file_name": normalized_name,
+            "source_code": item_source,
+            "is_current": same_current_file,
+        })
+
+    if not current_included:
+        normalized.append({
+            "file_name": str(current_file_name or "<current>"),
+            "source_code": source_code,
+            "is_current": True,
+        })
+    return normalized
+
+
+def _identifier_occurrences(source_code: str, identifier: str) -> list[tuple[int, int]]:
+    masked = _mask_c_non_code(source_code)
+    return [
+        (match.start(), match.end())
+        for match in re.finditer(rf"\b{re.escape(identifier)}\b", masked)
+    ]
+
+
+def _c_string_mentions_identifier(source_code: str, identifier: str) -> bool:
+    """Treat string-based lookup/registration as a possible dynamic reference."""
+
+    string_literal = re.compile(r'"(?:\\.|[^"\\])*"')
+    return any(
+        re.search(rf"\b{re.escape(identifier)}\b", match.group(0))
+        for match in string_literal.finditer(source_code)
     )
-    matches = list(pattern.finditer(masked))
-    if len(matches) != 1 or len(re.findall(rf"\b{re.escape(method_name)}\b", masked)) != 1:
-        return source_code, 0
-    match = matches[0]
-    signature = masked[match.start() : match.end()]
-    if not re.search(r"\bstatic\b", signature):
-        return source_code, 0
-    brace_index = masked.rfind("{", match.start(), match.end())
-    method_end = _find_matching_brace(masked, brace_index)
-    if method_end is None:
-        return source_code, 0
-    region = source_code[match.start() : method_end + 1]
+
+
+def analyze_c_dead_code_target(
+    source_code: str,
+    method_name: str = "",
+    *,
+    source_line: Optional[int] = None,
+    project_source_files: Sequence[Any] | None = None,
+    current_file_name: str = "",
+) -> dict[str, Any]:
+    """Prove whether one internal C function can be safely removed.
+
+    The proof is deliberately textual and conservative: every C/H file in the
+    supplied repository snapshot is scanned, and any identifier occurrence
+    outside the target definition blocks removal. This covers ordinary calls,
+    function-pointer assignments, preprocessor use, and extern/prototype use.
+    """
+
+    requested = str(method_name or "").strip()
+    definitions = _c_function_definitions(source_code)
+    if requested:
+        candidates = [item for item in definitions if item["name"] == requested]
+    elif source_line is not None:
+        candidates = [
+            item for item in definitions
+            if item["start_line"] <= source_line <= item["end_line"]
+        ]
+    else:
+        candidates = [item for item in definitions if item["static"] and item["name"] != "main"]
+
+    if len(candidates) != 1:
+        return {
+            "status": "not_found" if not candidates else "ambiguous",
+            "target": requested,
+            "removable": False,
+            "candidate_count": len(candidates),
+        }
+
+    candidate = candidates[0]
+    target = str(candidate["name"])
+    result = {
+        "status": "review_required",
+        "target": target,
+        "removable": False,
+        "candidate_count": 1,
+        "static_internal": bool(candidate["static"]),
+        "start_line": int(candidate["start_line"]),
+        "end_line": int(candidate["end_line"]),
+        "repository_reference_count": 0,
+    }
+    if target == "main":
+        result.update(status="protected_entry_point", reason="main_is_never_removed")
+        return result
+    if not candidate["static"]:
+        result.update(status="external_linkage", reason="function_is_not_static_internal")
+        return result
+
+    repository_sources = _project_c_sources(
+        source_code,
+        project_source_files=project_source_files,
+        current_file_name=current_file_name,
+    )
+    reference_count = 0
+    for item in repository_sources:
+        occurrences = _identifier_occurrences(item["source_code"], target)
+        if item.get("is_current") is True:
+            occurrences = [
+                span for span in occurrences
+                if span != (candidate["name_start"], candidate["name_end"])
+            ]
+        reference_count += len(occurrences)
+        if _c_string_mentions_identifier(item["source_code"], target):
+            reference_count += 1
+
+    result["repository_reference_count"] = reference_count
+    if reference_count:
+        result.update(status="live_reference", reason="repository_reference_found")
+        return result
+
+    region = source_code[candidate["start"] : candidate["end"]]
     if re.search(r"(?m)^\s*#", region):
+        result.update(status="preprocessor_sensitive", reason="directive_inside_function")
+        return result
+
+    result.update(status="proven_dead", removable=True, reason="unused_static_internal_function")
+    return result
+
+
+def proven_unused_static_functions(
+    source_code: str,
+    *,
+    project_source_files: Sequence[Any] | None = None,
+    current_file_name: str = "",
+) -> list[str]:
+    """List only repository-proven unused static functions in this file."""
+
+    proven: list[str] = []
+    for definition in _c_function_definitions(source_code):
+        if not definition["static"] or definition["name"] == "main":
+            continue
+        analysis = analyze_c_dead_code_target(
+            source_code,
+            str(definition["name"]),
+            project_source_files=project_source_files,
+            current_file_name=current_file_name,
+        )
+        if analysis.get("removable") is True:
+            proven.append(str(definition["name"]))
+    return proven
+
+
+def _remove_proven_unused_c_static_function(
+    source_code: str,
+    method_name: str,
+    *,
+    source_line: Optional[int] = None,
+    project_source_files: Sequence[Any] | None = None,
+    current_file_name: str = "",
+) -> Tuple[str, int]:
+    analysis = analyze_c_dead_code_target(
+        source_code,
+        method_name,
+        source_line=source_line,
+        project_source_files=project_source_files,
+        current_file_name=current_file_name,
+    )
+    if analysis.get("removable") is not True:
         return source_code, 0
-    statement_start = source_code.rfind("\n", 0, match.start()) + 1
-    return _remove_c_span(source_code, statement_start, method_end + 1)
+
+    target = str(analysis["target"])
+    candidates = [
+        item for item in _c_function_definitions(source_code)
+        if item["name"] == target
+    ]
+    if len(candidates) != 1:
+        return source_code, 0
+    candidate = candidates[0]
+    statement_start = source_code.rfind("\n", 0, int(candidate["start"])) + 1
+    return _remove_c_span(source_code, statement_start, int(candidate["end"]))
 
 
 def apply_remove_dead_code(
@@ -545,11 +783,26 @@ def apply_remove_dead_code(
     method_name: str,
     class_name: Optional[str] = None,
     source_line: Optional[int] = None,
+    *,
+    project_source_files: Sequence[Any] | None = None,
+    current_file_name: str = "",
+    repository_complete: bool = False,
 ) -> Tuple[str, int]:
-    if not method_name and source_line is None:
-        raise ValueError("remove_dead_code requires 'method_name' or 'source_line'.")
-
     if not method_name and source_line is not None:
+        function_analysis = analyze_c_dead_code_target(
+            source_code,
+            source_line=source_line,
+            project_source_files=project_source_files,
+            current_file_name=current_file_name,
+        )
+        if function_analysis.get("removable") is True:
+            return _remove_proven_unused_c_static_function(
+                source_code,
+                str(function_analysis.get("target") or ""),
+                source_line=source_line,
+                project_source_files=project_source_files,
+                current_file_name=current_file_name,
+            )
         for remover in (
             _remove_proven_c_false_branch,
             _remove_proven_c_unreachable_statement,
@@ -560,7 +813,23 @@ def apply_remove_dead_code(
                 return transformed, replacements
         return source_code, 0
 
-    return _remove_proven_unused_c_static_function(source_code, method_name)
+    if not method_name:
+        candidates = proven_unused_static_functions(
+            source_code,
+            project_source_files=project_source_files,
+            current_file_name=current_file_name,
+        )
+        if len(candidates) != 1:
+            return source_code, 0
+        method_name = candidates[0]
+
+    return _remove_proven_unused_c_static_function(
+        source_code,
+        method_name,
+        source_line=source_line,
+        project_source_files=project_source_files,
+        current_file_name=current_file_name,
+    )
 
 
 def _split_c_params(params_raw: str) -> list[tuple[str, str]]:
