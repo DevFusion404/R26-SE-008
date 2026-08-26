@@ -423,7 +423,7 @@ class BehavioralValidator:
         removed_functions: set[str] = set()
         for action in actions:
             action_type = getattr(action, "action_type", "")
-            if action_type == "rename_symbol":
+            if action_type in {"rename_symbol", "rename_method"}:
                 old_name = str(action.parameters.get("old_name") or "").strip()
                 new_name = str(action.parameters.get("new_name") or "").strip()
                 if old_name and new_name:
@@ -897,7 +897,7 @@ class BehavioralValidator:
 
         for action in actions:
             action_type = getattr(action, "action_type", "")
-            if action_type == "rename_symbol":
+            if action_type in {"rename_symbol", "rename_method"}:
                 old_name = str(action.parameters.get("old_name") or "").strip()
                 new_name = str(action.parameters.get("new_name") or "").strip()
                 if old_name and new_name:
@@ -1903,13 +1903,14 @@ class BehavioralValidator:
         original_classes = set(original_summary.get("class_names", []))
 
         for action in actions:
-            if getattr(action, "action_type", "") != "rename_symbol":
+            action_type = getattr(action, "action_type", "")
+            if action_type not in {"rename_symbol", "rename_method"}:
                 continue
             old_name = str(action.parameters.get("old_name") or "").strip()
             new_name = str(action.parameters.get("new_name") or "").strip()
             if not old_name or not new_name:
                 continue
-            if old_name in original_classes:
+            if action_type == "rename_symbol" and old_name in original_classes:
                 class_renames[old_name] = new_name
             else:
                 method_renames[old_name] = new_name
@@ -2190,7 +2191,7 @@ class BehavioralValidator:
                 class_renames[old_name] = new_name
 
         for action in actions:
-            if action.action_type != "rename_symbol":
+            if action.action_type not in {"rename_symbol", "rename_method"}:
                 continue
 
             old_name = str(action.parameters.get("old_name") or "").strip()
@@ -2213,6 +2214,14 @@ class BehavioralValidator:
                 continue
 
             seen.add(key)
+            method_candidates = {
+                candidate["name"]: candidate
+                for candidate in self._extract_java_method_candidates(
+                    original_code=original_code,
+                    class_name=owner_class,
+                )
+            }
+            param_types = method_candidates.get(old_name, {}).get("param_types", [])
 
             inferred.append(
                 {
@@ -2221,7 +2230,10 @@ class BehavioralValidator:
                     "original_target_method": old_name,
                     "transformed_target_class": transformed_class,
                     "transformed_target_method": transformed_method,
-                    "args": [],
+                    "args": [
+                        self._java_raw_arg_for_type(type_name)
+                        for type_name in param_types
+                    ],
                     "timeout_seconds": self.DEFAULT_JAVA_TIMEOUT_SECONDS,
                     "auto_generated": True,
                     "source_step_id": action.source_step_id,

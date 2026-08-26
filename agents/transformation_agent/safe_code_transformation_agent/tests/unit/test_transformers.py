@@ -1,6 +1,7 @@
 from agents.transformation_agent.safe_code_transformation_agent.sctva.transformers import python_transformers
 from sctva.transformers import c_transformers
 from sctva.transformers import java_transformers
+import ast
 
 
 def test_python_extract_constant_replaces_literals():
@@ -30,6 +31,74 @@ def test_python_rename_symbol_changes_function_name():
     transformed, count = python_transformers.apply_rename_symbol(source, "calc", "calculate")
     assert count >= 1
     assert "def calculate" in transformed
+
+
+def test_python_rename_method_updates_module_function_and_references():
+    source = (
+        "def calc(x):\n"
+        "    return x + 1\n\n"
+        "def run():\n"
+        "    fn = calc\n"
+        "    return calc(2) + fn(3)\n"
+    )
+    transformed, count, metadata = python_transformers.apply_rename_method(
+        source,
+        "calc",
+        "calculate",
+    )
+    assert metadata["status"] == "success"
+    assert count == 3
+    assert "def calculate(x):" in transformed
+    assert "fn = calculate" in transformed
+    assert "return calculate(2) + fn(3)" in transformed
+    function_names = {
+        node.name for node in ast.parse(transformed).body if isinstance(node, ast.FunctionDef)
+    }
+    assert "calc" not in function_names
+
+
+def test_python_rename_method_updates_class_method_and_attribute_calls():
+    source = (
+        "class PaymentService:\n"
+        "    def process_payment(self, amount):\n"
+        "        return amount + 1\n\n"
+        "    def run(self):\n"
+        "        return self.process_payment(2)\n\n"
+        "def execute(service):\n"
+        "    return service.process_payment(3)\n"
+    )
+    transformed, count, metadata = python_transformers.apply_rename_method(
+        source,
+        "process_payment",
+        "calculate_payment",
+        source_class="PaymentService",
+    )
+    assert metadata["status"] == "success"
+    assert count == 3
+    assert "def calculate_payment(self, amount):" in transformed
+    assert "self.calculate_payment(2)" in transformed
+    assert "service.calculate_payment(3)" in transformed
+    assert ".process_payment(" not in transformed
+
+
+def test_python_rename_method_rejects_ambiguous_class_method_without_owner():
+    source = (
+        "class A:\n"
+        "    def value(self):\n"
+        "        return 1\n\n"
+        "class B:\n"
+        "    def value(self):\n"
+        "        return 2\n"
+    )
+    transformed, count, metadata = python_transformers.apply_rename_method(
+        source,
+        "value",
+        "renamed_value",
+    )
+    assert transformed == source
+    assert count == 0
+    assert metadata["status"] == "review_required"
+    assert metadata["reason"] == "AMBIGUOUS_METHOD_TARGET"
 
 
 def test_python_extract_method_creates_sibling_helper_with_data_flow():
@@ -239,6 +308,72 @@ def test_java_rename_symbol_ignores_strings_and_comments():
     assert '"processPayment"' in transformed
     assert "// processPayment" in transformed
     assert "int pay()" in transformed
+
+
+def test_java_rename_method_updates_declaration_calls_and_method_references():
+    source = (
+        'public class T {\n'
+        '    String text = "processPayment"; // processPayment\n'
+        '    int processPayment(int amount) { return amount + 1; }\n'
+        '    int run() { return processPayment(2) + this.processPayment(3); }\n'
+        '    java.util.function.IntUnaryOperator op = this::processPayment;\n'
+        '}\n'
+    )
+    transformed, count, metadata = java_transformers.apply_rename_method(
+        source,
+        "processPayment",
+        "calculatePayment",
+        source_class="T",
+    )
+    assert metadata["status"] == "success"
+    assert count == 4
+    assert "int calculatePayment(int amount)" in transformed
+    assert "return calculatePayment(2) + this.calculatePayment(3);" in transformed
+    assert "this::calculatePayment" in transformed
+    assert '"processPayment"' in transformed
+    assert "// processPayment" in transformed
+    assert "processPayment(" not in transformed
+
+
+def test_java_rename_method_rejects_ambiguous_overload_without_signature():
+    source = (
+        "public class T {\n"
+        "    int value(int input) { return input; }\n"
+        "    int value(String input) { return input.length(); }\n"
+        "    int run() { return value(1); }\n"
+        "}\n"
+    )
+    transformed, count, metadata = java_transformers.apply_rename_method(
+        source,
+        "value",
+        "renamedValue",
+        source_class="T",
+    )
+    assert transformed == source
+    assert count == 0
+    assert metadata["status"] == "review_required"
+    assert metadata["reason"] == "AMBIGUOUS_METHOD_OVERLOAD"
+
+
+def test_java_rename_method_uses_explicit_signature_for_overload():
+    source = (
+        "public class T {\n"
+        "    int value(int input) { return input; }\n"
+        "    int text(String input) { return input.length(); }\n"
+        "    int run() { return value(1); }\n"
+        "}\n"
+    )
+    transformed, count, metadata = java_transformers.apply_rename_method(
+        source,
+        "value",
+        "renamedValue",
+        source_class="T",
+        parameter_types=["int"],
+    )
+    assert metadata["status"] == "success"
+    assert count == 2
+    assert "int renamedValue(int input)" in transformed
+    assert "return renamedValue(1);" in transformed
 
 
 def test_java_extract_method_passes_referenced_local_variables():

@@ -26,7 +26,7 @@ def test_planner_adapter_maps_extract_method_to_extract_action_when_range_exists
     assert normalized["actions"][0]["parameters"]["end_line"] == 5
 
 
-def test_planner_adapter_does_not_simulate_move_method_with_rename():
+def test_planner_adapter_maps_move_method_to_python_move_action():
     adapter = PlannerAdapter()
     planner_output = {
         "plan_id": "p2",
@@ -34,15 +34,22 @@ def test_planner_adapter_does_not_simulate_move_method_with_rename():
             {
                 "step_id": 1,
                 "refactoring": "Move Method",
-                "target": {"method": "a"},
-                "parameters": {},
+                "target": {"method": "print_student_report"},
+                "parameters": {
+                    "source_class": "ReportPrinter",
+                    "destination_class": "Student",
+                    "source_file": "student_report.py",
+                },
             }
         ],
     }
 
     normalized = adapter.normalize_plan(planner_output)
-    assert normalized["actions"][0]["action_type"] == "noop"
-    assert normalized["actions"][0]["parameters"]["reason"] == "malformed_step"
+    action = normalized["actions"][0]
+    assert action["action_type"] == "move_python_method"
+    assert action["parameters"]["method"] == "print_student_report"
+    assert action["parameters"]["source_class"] == "ReportPrinter"
+    assert action["parameters"]["destination_class"] == "Student"
 
 
 def test_planner_adapter_maps_extract_class_to_real_action():
@@ -194,6 +201,46 @@ def test_planner_adapter_maps_line_only_dead_code():
     assert action["parameters"]["source_file"] == "demo.py"
 
 
+def test_planner_adapter_discards_legacy_python_filename_class_hints():
+    planner_output = {
+        "plan_id": "legacy_filename_classes",
+        "steps": [
+            {
+                "step_id": 1,
+                "refactoring": "Move Method",
+                "target": {
+                    "file": "02_large_class_library_system.py",
+                    "method": "main",
+                    "lines": [44],
+                },
+                "parameters": {
+                    "source_class": "02_large_class_library_system",
+                    "destination_class": "02_large_class_library_systemTarget",
+                },
+            },
+            {
+                "step_id": 2,
+                "refactoring": "Remove Dead Code",
+                "target": {
+                    "file": "02_large_class_library_system.py",
+                    "method": "remove_book",
+                    "lines": [12],
+                },
+                "parameters": {
+                    "source_class": "02_large_class_library_system",
+                },
+            },
+        ],
+    }
+
+    actions = PlannerAdapter().normalize_plan(planner_output)["actions"]
+
+    assert actions[0]["parameters"]["source_class"] == ""
+    assert actions[0]["parameters"]["destination_class"] == ""
+    assert actions[0]["parameters"]["semantic_recovery_required"] is True
+    assert actions[1]["parameters"]["class_name"] is None
+
+
 def test_planner_adapter_maps_encapsulate_variable():
     adapter = PlannerAdapter()
     planner_output = {
@@ -215,7 +262,7 @@ def test_planner_adapter_maps_encapsulate_variable():
 
     normalized = adapter.normalize_plan(planner_output)
     action = normalized["actions"][0]
-    assert action["action_type"] == "encapsulate_variable"
+    assert action["action_type"] == "encapsulate_c_variable"
     assert action["parameters"]["variable_name"] == "counter"
 
 
