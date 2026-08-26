@@ -265,9 +265,13 @@ if __name__ == "__main__":
     assert rdp_log["action_type"] == "remove_dead_code"
     assert rdp_log["replacements_count"] == 1
     assert rdp_log["metadata"]["final_decision"] == "PASS"
-    assert any(
-        "Recovered stale RDP Remove Dead Code target" in warning
-        for warning in rdp_log["warnings"]
+    assert rdp_log["metadata"]["dead_code_target_resolution"] == (
+        "stale_target_recovered_from_ast"
+    )
+    assert not rdp_log["warnings"]
+    assert not any(
+        "Recovered stale RDP Remove Dead Code target" in message
+        for message in result["safety_report"]["human_messages"]
     )
     assert not any(
         "Dead-code removal skipped" in warning

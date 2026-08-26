@@ -64,6 +64,111 @@ def check_number(number):
     assert ast.get_docstring(ast.parse(transformed)) == "Invoice helpers."
 
 
+def test_python_dead_code_recovers_unique_method_from_stale_class_and_line_hints():
+    source = '''class LibraryManager:
+    def remove_book(self, code):
+        self.books.pop(code, None)
+
+    def active_book(self, code):
+        return self.books.get(code)
+'''
+
+    kind, fingerprint = python_transformers.resolve_dead_code_target(
+        source,
+        method_name="remove_book",
+        class_name="02_large_class_library_system",
+        source_line=99,
+    )
+    transformed, count = python_transformers.apply_remove_dead_code(
+        source,
+        "remove_book",
+        class_name="02_large_class_library_system",
+        source_line=99,
+    )
+
+    assert kind == "unused_callable"
+    assert "remove_book" in fingerprint
+    assert count == 1
+    assert "def remove_book" not in transformed
+    assert "def active_book" in transformed
+
+
+def test_python_unused_callable_anchor_survives_unrelated_generated_getattr():
+    original = '''class LibraryManager:
+    def remove_book(self, code):
+        self.books.pop(code, None)
+'''
+    kind, fingerprint = python_transformers.resolve_dead_code_target(
+        original,
+        method_name="remove_book",
+        class_name="LibraryManager",
+        source_line=2,
+    )
+    after_extract_class = '''class ForwardedMember:
+    def __get__(self, instance, owner=None):
+        return getattr(instance, self.member_name)
+
+class LibraryManager:
+    def remove_book(self, code):
+        self.books.pop(code, None)
+'''
+
+    transformed, count = python_transformers.apply_remove_dead_code(
+        after_extract_class,
+        "remove_book",
+        class_name="LibraryManager",
+        source_line=2,
+        dead_code_kind=kind,
+        target_statement_fingerprint=fingerprint,
+    )
+
+    assert kind == "unused_callable"
+    assert count == 1
+    assert "def remove_book" not in transformed
+    assert "def __get__" in transformed
+
+
+def test_python_inferred_dead_code_owner_is_metadata_not_a_warning():
+    source = '''class Catalog:
+    def obsolete_lookup(self, code):
+        return None
+
+    def active_lookup(self, code):
+        return code
+'''
+    result = SafeCodeTransformationValidationAgent().execute({
+        "request_id": "dead_code_owner_inference",
+        "language": "python",
+        "source_files": [{
+            "file_name": "catalog.py",
+            "source_code": source,
+            "language": "python",
+            "source_mode": "raw",
+        }],
+        "refactoring_plan": {
+            "plan_id": "dead_code_owner_inference",
+            "actions": [{
+                "action_type": "remove_dead_code",
+                "parameters": {
+                    "method": "obsolete_lookup",
+                    "source_line": 2,
+                    "source_file": "catalog.py",
+                },
+            }],
+            "behavior_tests": [],
+            "metadata": {},
+        },
+        "execution_options": _options(),
+    })
+
+    log = result["safety_report"]["transformation_log"][0]
+    assert log["replacements_count"] == 1
+    assert log["metadata"]["dead_code_target_resolution"] == "owner_inferred_from_ast"
+    assert not log["warnings"]
+    assert "transformation_warning" not in result["safety_report"]["risk_flags"]
+    assert "def obsolete_lookup" not in result["refactored_code"]
+
+
 def test_python_removes_unreachable_return_and_raise_statements():
     after_return = '''def value():
     return 1
