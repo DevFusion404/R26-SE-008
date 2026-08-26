@@ -42,6 +42,7 @@ from .models import SCTVAResult, TransformationLogEntry
 from .reporting.safety_reporter import SafetyReporter
 from .rollback.rollback_manager import RollbackManager
 from .scoring.confidence_scorer import ConfidenceScorer
+from .transformers import c_transformers, python_transformers
 from .transformers.engine import TransformationEngine
 from .transformers.c_extract_method import target_match_count as c_method_target_count
 from .transformers.java_extract_class import _parse_java_class, declared_class_names
@@ -80,11 +81,26 @@ class SafeCodeTransformationValidationAgent:
         # whose source_refactoring is still "Move Method".
         self._promote_move_method_noops(request.refactoring_plan.actions)
         self._promote_inline_class_noops(request.refactoring_plan.actions)
+        self._canonicalize_inline_class_targets(request.refactoring_plan.actions)
         self._promote_hide_delegate_noops(request.refactoring_plan.actions)
         self._promote_polymorphism_noops(request.refactoring_plan.actions)
         self._resolve_action_source_files(
             request.refactoring_plan.actions,
             file_entries,
+        )
+        # Bind unscoped C Remove Dead Code actions before the immutable file
+        # scope index is built. Without this pass, the presence of any other
+        # file-scoped action caused an unscoped dead-code action to disappear
+        # from every file execution.
+        self._resolve_c_dead_code_source_files(
+            request.refactoring_plan.actions,
+            file_entries,
+            fallback_language=request.language,
+        )
+        self._resolve_python_dead_code_source_files(
+            request.refactoring_plan.actions,
+            file_entries,
+            fallback_language=request.language,
         )
         self._resolve_hide_delegate_source_files(
             request.refactoring_plan.actions,
@@ -361,6 +377,233 @@ class SafeCodeTransformationValidationAgent:
             params["source_resolution_error"] = reason
             params["source_resolution_status"] = status
 
+    @classmethod
+    def _resolve_c_dead_code_source_files(
+        cls,
+        actions: List[RefactoringAction],
+        file_entries: List[SourceFileContract],
+        *,
+        fallback_language: str,
+    ) -> None:
+        """Resolve C dead-code actions against all imported C/H sources.
+
+        Resolution is conservative and happens before file/action scoping. A
+        named function is bound only when its definition is unique in the
+        imported repository. An unnamed action is bound only when exactly one
+        repository-proven unused static function exists. Ambiguous actions are
+        retained as an explicit review-required log on a C file rather than
+        being silently filtered out.
+        """
+
+        c_files = [
+            entry for entry in file_entries
+            if (entry.language or "").strip().lower() == "c"
+            or entry.file_name.lower().endswith((".c", ".h"))
+        ]
+        if not c_files and str(fallback_language or "").strip().lower() == "c":
+            c_files = list(file_entries)
+        if not c_files:
+            return
+
+        project_files = [entry.to_dict() for entry in file_entries]
+        for action in actions:
+            if action.action_type != ACTION_REMOVE_DEAD_CODE:
+                continue
+            params = action.parameters
+            configured_file = cls._action_source_file(action)
+            if (
+                str(fallback_language or "").strip().lower() != "c"
+                and not configured_file.lower().endswith((".c", ".h"))
+            ):
+                continue
+            configured_matches = [
+                entry for entry in c_files
+                if configured_file
+                and cls._file_matches(
+                    action_source_file=configured_file,
+                    file_name=entry.file_name,
+                )
+            ]
+            if configured_file and len(configured_matches) == 1:
+                candidates = configured_matches
+            elif configured_file:
+                candidates = []
+            else:
+                candidates = list(c_files)
+
+            method = str(
+                params.get("method")
+                or params.get("method_name")
+                or params.get("function")
+                or params.get("function_name")
+                or ""
+            ).strip()
+            raw_line = params.get("source_line")
+            source_line = int(raw_line) if isinstance(raw_line, (int, float)) else None
+
+            definition_matches: list[tuple[SourceFileContract, str]] = []
+            if method:
+                definition_matches = [
+                    (entry, method)
+                    for entry in candidates
+                    if c_transformers.c_function_definition_count(
+                        entry.source_code,
+                        method,
+                    ) == 1
+                ]
+            elif len(candidates) == 1 and source_line is not None:
+                analysis = c_transformers.analyze_c_dead_code_target(
+                    candidates[0].source_code,
+                    source_line=source_line,
+                    project_source_files=project_files,
+                    current_file_name=candidates[0].file_name,
+                )
+                target = (
+                    str(analysis.get("target") or "").strip()
+                    if analysis.get("removable") is True
+                    else ""
+                )
+                definition_matches = [(candidates[0], target)]
+            else:
+                for entry in candidates:
+                    if source_line is not None:
+                        analysis = c_transformers.analyze_c_dead_code_target(
+                            entry.source_code,
+                            source_line=source_line,
+                            project_source_files=project_files,
+                            current_file_name=entry.file_name,
+                        )
+                        target = str(analysis.get("target") or "").strip()
+                        if target and analysis.get("removable") is True:
+                            definition_matches.append((entry, target))
+                        continue
+                    for target in c_transformers.proven_unused_static_functions(
+                        entry.source_code,
+                        project_source_files=project_files,
+                        current_file_name=entry.file_name,
+                    ):
+                        definition_matches.append((entry, target))
+
+            if len(definition_matches) == 1:
+                entry, resolved_method = definition_matches[0]
+                params["source_file"] = entry.file_name
+                if resolved_method:
+                    params["method"] = resolved_method
+                params["source_file_resolution"] = {
+                    "status": "success",
+                    "strategy": "repository_c_dead_code_target",
+                    "requested": configured_file,
+                    "resolved": entry.file_name,
+                }
+                params["dead_code_scope_resolution"] = "repository_wide_c_h_scan"
+                params.pop("source_file_resolution_error", None)
+                params.pop("source_resolution_error", None)
+                continue
+
+            # Keep the action visible in a per-file report when the target is
+            # missing or ambiguous. It must never vanish merely because other
+            # actions happen to be file-scoped.
+            diagnostic_file = configured_matches[0] if configured_matches else c_files[0]
+            reason = (
+                "AMBIGUOUS_C_DEAD_CODE_TARGET"
+                if len(definition_matches) > 1
+                else "C_DEAD_CODE_TARGET_NOT_FOUND"
+            )
+            params["source_file"] = diagnostic_file.file_name
+            params["unresolved_legacy_target"] = True
+            params["unresolved_status"] = "review_required"
+            params["unresolved_reason"] = reason
+            params["source_resolution_error"] = reason
+            params["dead_code_scope_resolution"] = "repository_wide_c_h_scan_failed"
+
+    @classmethod
+    def _resolve_python_dead_code_source_files(
+        cls,
+        actions: List[RefactoringAction],
+        file_entries: List[SourceFileContract],
+        *,
+        fallback_language: str,
+    ) -> None:
+        """Keep named/line-targeted Python dead-code actions through scoping."""
+
+        python_files = [
+            entry for entry in file_entries
+            if (entry.language or "").strip().lower() == "python"
+            or entry.file_name.lower().endswith(".py")
+        ]
+        if not python_files and str(fallback_language or "").strip().lower() == "python":
+            python_files = list(file_entries)
+        if not python_files:
+            return
+
+        for action in actions:
+            if action.action_type != ACTION_REMOVE_DEAD_CODE:
+                continue
+            params = action.parameters
+            configured_file = cls._action_source_file(action)
+            if (
+                str(fallback_language or "").strip().lower() != "python"
+                and not configured_file.lower().endswith(".py")
+            ):
+                continue
+            configured_matches = [
+                entry for entry in python_files
+                if configured_file
+                and cls._file_matches(
+                    action_source_file=configured_file,
+                    file_name=entry.file_name,
+                )
+            ]
+            if configured_file and len(configured_matches) == 1:
+                continue
+            candidates = configured_matches if configured_file else python_files
+            method = str(
+                params.get("method") or params.get("method_name") or ""
+            ).strip()
+            class_name = str(
+                params.get("class_name")
+                or params.get("source_class")
+                or params.get("target_class")
+                or ""
+            ).strip() or None
+            raw_line = params.get("source_line")
+            source_line = int(raw_line) if isinstance(raw_line, (int, float)) else None
+            matches = []
+            if method or source_line is not None:
+                for entry in candidates:
+                    kind, fingerprint = python_transformers.resolve_dead_code_target(
+                        entry.source_code,
+                        method_name=method,
+                        class_name=class_name,
+                        source_line=source_line,
+                    )
+                    if kind and fingerprint:
+                        matches.append(entry)
+
+            if len(matches) == 1:
+                params["source_file"] = matches[0].file_name
+                params["source_file_resolution"] = {
+                    "status": "success",
+                    "strategy": "python_dead_code_ast_target",
+                    "requested": configured_file,
+                    "resolved": matches[0].file_name,
+                }
+                params["dead_code_scope_resolution"] = "python_ast_scan"
+                params.pop("source_file_resolution_error", None)
+                params.pop("source_resolution_error", None)
+                continue
+
+            diagnostic_file = configured_matches[0] if configured_matches else python_files[0]
+            params["source_file"] = diagnostic_file.file_name
+            params["unresolved_legacy_target"] = True
+            params["unresolved_status"] = "review_required"
+            params["unresolved_reason"] = (
+                "AMBIGUOUS_PYTHON_DEAD_CODE_TARGET"
+                if len(matches) > 1
+                else "PYTHON_DEAD_CODE_TARGET_NOT_FOUND"
+            )
+            params["dead_code_scope_resolution"] = "python_ast_scan_failed"
+
     def _execute_single_file(
         self,
         *,
@@ -497,6 +740,9 @@ class SafeCodeTransformationValidationAgent:
             behavioral_passed=behavioral_step.passed,
             invariant_passed=invariant_step.passed,
             rollback_occurred=rollback_occurred,
+            dead_code_validation=list(
+                structural_step.details.get("dead_code_validation") or []
+            ),
         )
 
         final_code = file_entry.source_code if rollback_occurred else transformed_code
@@ -533,15 +779,15 @@ class SafeCodeTransformationValidationAgent:
             for action in actions
             if action.action_type == ACTION_MOVE_PYTHON_METHOD
         )
-        successful_move_count = sum(
+        completed_move_count = sum(
             1
             for log_entry in transformation_log
-            if log_entry.replacements_count > 0
-            and str(
+            if str(
                 log_entry.metadata.get("reclassified_action_type")
                 or log_entry.action_type
             ).strip() == ACTION_MOVE_PYTHON_METHOD
-            and str(log_entry.metadata.get("status") or "success").lower() == "success"
+            and str(log_entry.metadata.get("status") or "success").lower()
+            in {"success", "already_applied"}
         )
         unresolved_move_count = sum(
             1
@@ -557,7 +803,7 @@ class SafeCodeTransformationValidationAgent:
         )
         move_method_plan_complete = (
             requested_move_count == 0
-            or successful_move_count + unresolved_move_count == requested_move_count
+            or completed_move_count + unresolved_move_count == requested_move_count
         )
         if requested_move_count and not move_method_plan_complete:
             safety_report.risk_flags.append("plan_compliance_failed:move_method")
@@ -585,6 +831,17 @@ class SafeCodeTransformationValidationAgent:
             for log_entry in transformation_log
             if log_entry.action_type == ACTION_INLINE_PYTHON_CLASS
             and str(log_entry.metadata.get("status") or "").lower() == "not_applicable"
+            and str(log_entry.metadata.get("reason") or "")
+            != "SMELL_RESOLVED_BY_PRIOR_REFACTORING"
+        )
+        resolved_by_prior_refactoring_inline_count = sum(
+            1
+            for log_entry in transformation_log
+            if log_entry.action_type == ACTION_INLINE_PYTHON_CLASS
+            and str(log_entry.metadata.get("status") or "").lower()
+            in {"not_applicable", "satisfied"}
+            and str(log_entry.metadata.get("reason") or "")
+            == "SMELL_RESOLVED_BY_PRIOR_REFACTORING"
         )
         review_inline_count = sum(
             1
@@ -594,7 +851,9 @@ class SafeCodeTransformationValidationAgent:
         )
         inline_class_plan_complete = (
             requested_inline_count == 0
-            or successful_inline_count + unresolved_inline_count + review_inline_count
+            or successful_inline_count
+            + unresolved_inline_count
+            + resolved_by_prior_refactoring_inline_count
             == requested_inline_count
         )
         if requested_inline_count and not inline_class_plan_complete:
@@ -840,6 +1099,63 @@ class SafeCodeTransformationValidationAgent:
                     )
                 )
             ]
+
+    @staticmethod
+    def _canonicalize_inline_class_targets(actions: List[RefactoringAction]) -> None:
+        """Preserve one semantic Inline Class target across planner formats."""
+
+        for action in actions:
+            if action.action_type != ACTION_INLINE_PYTHON_CLASS:
+                continue
+            params = action.parameters
+            requested_target = params.get("requested_target")
+            requested_target = (
+                requested_target if isinstance(requested_target, dict) else {}
+            )
+            legacy_step = params.get("legacy_step")
+            legacy_step = legacy_step if isinstance(legacy_step, dict) else {}
+            legacy_params = legacy_step.get("parameters")
+            legacy_params = legacy_params if isinstance(legacy_params, dict) else {}
+            legacy_target = legacy_step.get("target")
+            legacy_target = legacy_target if isinstance(legacy_target, dict) else {}
+
+            target_class = str(
+                params.get("class_to_inline")
+                or params.get("target_class")
+                or params.get("source_class")
+                or params.get("class_name")
+                or requested_target.get("class_to_inline")
+                or legacy_params.get("class_to_inline")
+                or legacy_params.get("target_class")
+                or legacy_params.get("source_class")
+                or legacy_target.get("class")
+                or ""
+            ).strip()
+            source_file = str(
+                params.get("source_file")
+                or requested_target.get("source_file")
+                or legacy_params.get("source_file")
+                or legacy_target.get("source_file")
+                or ""
+            ).strip()
+
+            params["class_to_inline"] = target_class
+            params["target_class"] = target_class
+            if source_file:
+                params["source_file"] = source_file
+            params["requested_target"] = {
+                "class_to_inline": target_class,
+                "source_file": source_file,
+            }
+            if target_class:
+                params.pop("target_resolution_error", None)
+                if params.get("source_resolution_error") == "INLINE_CLASS_TARGET_MISSING":
+                    params.pop("source_resolution_error", None)
+                continue
+
+            params["target_resolution_error"] = "INLINE_CLASS_TARGET_MISSING"
+            params["source_resolution_error"] = "INLINE_CLASS_TARGET_MISSING"
+            params["source_resolution_status"] = "review_required"
 
     @staticmethod
     def _promote_hide_delegate_noops(actions: List[RefactoringAction]) -> None:
@@ -1144,14 +1460,18 @@ class SafeCodeTransformationValidationAgent:
                 continue
             params = action.parameters
             configured_file = cls._action_source_file(action)
-            candidate_entries = [
+            python_entries = [
                 entry
                 for entry in file_entries
                 if (
                     ((entry.language or "").strip().lower() == "python")
                     or entry.file_name.lower().endswith(".py")
                 )
-                and (
+            ]
+            candidate_entries = [
+                entry
+                for entry in python_entries
+                if (
                     not configured_file
                     or cls._file_matches(
                         action_source_file=configured_file,
@@ -1159,16 +1479,21 @@ class SafeCodeTransformationValidationAgent:
                     )
                 )
             ]
-            if configured_file and not candidate_entries:
-                params["source_resolution_error"] = "SOURCE_FILE_TARGET_MISMATCH"
-                params["source_resolution_status"] = "not_applicable"
-                continue
 
-            requested = str(params.get("class_to_inline") or "").strip()
+            requested = str(
+                params.get("class_to_inline")
+                or params.get("target_class")
+                or ""
+            ).strip()
             explicit_matches: list[SourceFileContract] = []
             parse_failures = 0
             if requested:
-                for entry in candidate_entries:
+                # A path in an RDP plan can be stale even when its explicit
+                # class symbol is valid.  Recover that symbol across the
+                # imported Python workspace before declaring the action stale.
+                # This runs before local Lazy Class detection by design.
+                explicit_candidates = candidate_entries or python_entries
+                for entry in explicit_candidates:
                     try:
                         tree = ast.parse(entry.source_code)
                     except SyntaxError:
@@ -1191,10 +1516,19 @@ class SafeCodeTransformationValidationAgent:
                 entry = explicit_matches[0]
                 params["source_file"] = entry.file_name
                 params["class_to_inline"] = requested
+                params["target_class"] = requested
+                params["requested_target"] = {
+                    "class_to_inline": requested,
+                    "source_file": entry.file_name,
+                }
                 params["target_resolution"] = "explicit_plan_target"
                 params["inline_target_resolution"] = "explicit_plan_target"
                 params["source_resolution_status"] = "success"
                 params.pop("source_resolution_error", None)
+                params.pop("source_file_resolution_error", None)
+                params.pop("not_applicable_to_source", None)
+                params.pop("not_applicable_reason", None)
+                params.pop("not_applicable_action_type", None)
                 continue
             if len(explicit_matches) > 1:
                 params["source_resolution_error"] = "AMBIGUOUS_EXPLICIT_CLASS_FILE"
@@ -1245,6 +1579,11 @@ class SafeCodeTransformationValidationAgent:
             entry, resolution = matches[0]
             params["source_file"] = entry.file_name
             params["class_to_inline"] = str(resolution["class_to_inline"])
+            params["target_class"] = params["class_to_inline"]
+            params["requested_target"] = {
+                "class_to_inline": requested or params["class_to_inline"],
+                "source_file": entry.file_name,
+            }
             if requested and requested != params["class_to_inline"]:
                 params["requested_class_to_inline"] = requested
             strategy = str(resolution.get("target_resolution") or resolution.get("strategy") or "python_ast_semantic_recovery")
@@ -2217,6 +2556,22 @@ class SafeCodeTransformationValidationAgent:
             if entry.action_type != ACTION_EXTRACT_METHOD:
                 continue
             metadata = entry.metadata
+            if str(metadata.get("status") or "").lower() == "not_applicable":
+                metadata["final_checks"] = {
+                    "plan_compliance": "NOT_APPLICABLE",
+                    "extract_method_structural_validation": "NOT_APPLICABLE",
+                    "long_method_reduction": "NOT_APPLICABLE",
+                    "behavior_preservation": "PASS" if behavioral_passed else "FAIL",
+                    "compilation_syntax_validation": "PASS" if syntax_passed else "FAIL",
+                    "invariant_preservation": "PASS" if invariant_passed else "FAIL",
+                    "no_severe_new_smell": "NOT_APPLICABLE",
+                }
+                metadata["syntax"] = metadata["final_checks"]["compilation_syntax_validation"]
+                metadata["behavior"] = metadata["final_checks"]["behavior_preservation"]
+                metadata["smell_reduction"] = "NOT_APPLICABLE"
+                metadata["final_status"] = "NOT_APPLICABLE"
+                metadata["final_decision"] = "NOT_APPLICABLE"
+                continue
             internal = metadata.get("validation") or {}
             checks = {
                 "plan_compliance": "PASS" if metadata.get("plan_compliance") == "PASS" else "FAIL",
@@ -2300,12 +2655,28 @@ class SafeCodeTransformationValidationAgent:
         behavioral_passed: bool,
         invariant_passed: bool,
         rollback_occurred: bool,
+        dead_code_validation: List[Dict[str, Any]] | None = None,
     ) -> None:
         """Make skipped or unsafe dead-code actions explicit in the report."""
 
+        validation_iter = iter(dead_code_validation or [])
         for entry in transformation_log:
             if entry.action_type != ACTION_REMOVE_DEAD_CODE:
                 continue
+
+            validation = next(validation_iter, None) if entry.replacements_count > 0 else None
+            if isinstance(validation, dict):
+                validation_status = str(validation.get("status") or "").upper()
+                entry.metadata["dead_code_validation"] = validation_status
+                for key in (
+                    "original_function_count",
+                    "transformed_function_count",
+                    "expected_removed",
+                ):
+                    if key in validation:
+                        entry.metadata[key] = validation[key]
+                if not entry.metadata.get("target"):
+                    entry.metadata["target"] = str(validation.get("target") or "")
 
             # A planner step can incorrectly point at a live/referenced method.
             # The transformation engine records that as NOT_APPLICABLE.  This
@@ -2354,6 +2725,7 @@ class SafeCodeTransformationValidationAgent:
             }
             if all(checks.values()) and entry.replacements_count > 0:
                 entry.metadata["status"] = "pass"
+                entry.metadata["target_removed"] = True
                 entry.metadata["final_decision"] = "PASS"
             else:
                 entry.metadata["status"] = "review_required"
@@ -2665,7 +3037,13 @@ class SafeCodeTransformationValidationAgent:
     ) -> List[RefactoringAction]:
         effective_actions: List[RefactoringAction] = []
         for action, log_entry in zip(actions, transformation_log):
-            if log_entry.replacements_count <= 0:
+            satisfied_inline_class = (
+                action.action_type == ACTION_INLINE_PYTHON_CLASS
+                and str(log_entry.metadata.get("reason") or "")
+                == "SMELL_RESOLVED_BY_PRIOR_REFACTORING"
+                and str(log_entry.metadata.get("plan_compliance") or "") == "PASS"
+            )
+            if log_entry.replacements_count <= 0 and not satisfied_inline_class:
                 continue
 
             effective_type = str(
