@@ -576,6 +576,27 @@ def apply_owned_inline_class(
     constructor = next((item for item in methods if item.name == "__init__"), None)
     business_methods = [item for item in methods if item.name != "__init__"]
 
+    # A prior Move Method can legitimately leave an ownerless ``class X:
+    # pass``.  This is not an owned-composition rewrite candidate; allow the
+    # main Inline Class transformer to perform its stricter empty-class
+    # cleanup analysis instead of incorrectly returning review_required.
+    non_docstring_members = list(target_class.body)
+    if (
+        non_docstring_members
+        and isinstance(non_docstring_members[0], ast.Expr)
+        and isinstance(non_docstring_members[0].value, ast.Constant)
+        and isinstance(non_docstring_members[0].value.value, str)
+    ):
+        non_docstring_members = non_docstring_members[1:]
+    if not business_methods and all(
+        isinstance(member, ast.Pass) for member in non_docstring_members
+    ):
+        return _not_applicable(
+            source_code,
+            class_to_inline=class_to_inline,
+            reason="EMPTY_CLASS_CLEANUP_CANDIDATE",
+        )
+
     if not business_methods or len(business_methods) > 3:
         return _review(
             source_code,
