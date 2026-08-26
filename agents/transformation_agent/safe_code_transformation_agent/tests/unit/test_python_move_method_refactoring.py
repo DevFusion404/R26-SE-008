@@ -39,6 +39,43 @@ def run_report():
 '''
 
 
+MULTILINE_REPORT_SOURCE = '''class Student:
+    def __init__(self, name, maths, science, english):
+        self.name = name
+        self.maths = maths
+        self.science = science
+        self.english = english
+
+
+class ReportPrinter:
+    def print_student_report(self, student):
+        total = student.maths + student.science + student.english
+        average = (
+            student.maths +
+            student.science +
+            student.english
+        ) / 3
+        highest = max(
+            student.maths,
+            student.science,
+            student.english
+        )
+        lowest = min(student.maths, student.science, student.english)
+        passed = lowest >= 35
+        print(f"Student: {student.name}")
+        print(f"Marks: {student.maths} {student.science} {student.english}")
+        print(f"Total: {total} Average: {average:.2f}")
+        print(f"Highest: {highest} Lowest: {lowest} Passed: {passed}")
+        return total, average, highest, lowest, passed
+
+
+def run_report():
+    student = Student("Maya", 78, 69, 88)
+    printer = ReportPrinter()
+    return printer.print_student_report(student)
+'''
+
+
 def _move(source=SOURCE, **overrides):
     params = {
         "method_name": "print_student_report",
@@ -121,6 +158,122 @@ def test_feature_envy_move_method_structural_validation_proves_real_move():
     assert all(checks.values())
 
 
+def test_move_method_structural_validation_normalizes_destination_receiver_logic():
+    transformed, replacements, metadata = _move(MULTILINE_REPORT_SOURCE)
+
+    assert metadata["status"] == "success"
+    assert replacements == 2
+    result = StructuralValidator().validate(
+        language="python",
+        original_code=MULTILINE_REPORT_SOURCE,
+        transformed_code=transformed,
+        actions=[_move_action()],
+    )
+
+    assert result.passed is True
+    validation = result.details["move_method_validation"][0]
+    checks = validation["checks"]
+    assert checks["actual_method_logic_moved"] is True
+    assert validation["logic_equivalence"] == "PASS"
+    assert validation["receiver_normalization"] == "PASS"
+    assert validation["signature_migration"] == "PASS"
+    assert "def print_student_report(self):" in transformed
+    assert "self.maths +\n            self.science +\n            self.english" in transformed
+
+
+def test_duplicate_move_method_action_is_already_applied_not_review_required():
+    first, first_replacements, first_metadata = _move()
+    second, second_replacements, second_metadata = _move(first)
+
+    assert first_metadata["status"] == "success"
+    assert first_replacements == 2
+    assert second == first
+    assert second_replacements == 0
+    assert second_metadata["status"] == "already_applied"
+    assert second_metadata["reason"] == "MOVE_METHOD_ALREADY_APPLIED"
+
+
+def test_agent_pipeline_accepts_duplicate_move_method_as_already_applied():
+    agent = SafeCodeTransformationValidationAgent()
+    duplicate_action = {
+        "action_type": "move_python_method",
+        "parameters": {
+            "method": "print_student_report",
+            "source_class": "ReportPrinter",
+            "destination_class": "Student",
+            "destination_parameter": "student",
+        },
+    }
+    result = agent.execute({
+        "request_id": "feature_envy_duplicate_move",
+        "language": "python",
+        "source_code": SOURCE,
+        "refactoring_plan": {
+            "plan_id": "feature_envy_duplicate_move_plan",
+            "actions": [duplicate_action, duplicate_action],
+            "behavior_tests": [],
+        },
+        "execution_options": {
+            "strict_mode": True,
+            "enable_behavior_tests": False,
+            "require_compilation": False,
+            "enable_sctva_auto_refactoring": False,
+        },
+    })
+
+    assert result["success"] is True
+    assert result["rollback_occurred"] is False
+    assert result["plan_compliance"]["move_method"] == "PASS"
+    move_logs = [
+        entry for entry in result["safety_report"]["transformation_log"]
+        if entry["action_type"] == "move_python_method"
+    ]
+    assert move_logs[0]["metadata"]["status"] == "success"
+    assert move_logs[1]["metadata"]["status"] == "already_applied"
+    assert "MOVE_METHOD_TARGET_NOT_FOUND" not in str(result["safety_report"])
+
+
+def test_agent_pipeline_preserves_move_proof_for_recovered_legacy_noop():
+    """Legacy RDP noops must carry the same proof into final validation."""
+
+    agent = SafeCodeTransformationValidationAgent()
+    result = agent.execute({
+        "request_id": "feature_envy_legacy_move_noop",
+        "language": "python",
+        "source_code": SOURCE,
+        "refactoring_plan": {
+            "plan_id": "feature_envy_legacy_move_noop_plan",
+            "actions": [{
+                "action_type": "noop",
+                "source_refactoring": "Move Method",
+                "warnings": ["Move Method was mapped to noop."],
+                "parameters": {
+                    "method": "print_student_report",
+                    "source_class": "ReportPrinter",
+                    "destination_class": "Student",
+                    "destination_parameter": "student",
+                },
+            }],
+            "behavior_tests": [],
+        },
+        "execution_options": {
+            "strict_mode": True,
+            "enable_behavior_tests": False,
+            "require_compilation": False,
+            "enable_sctva_auto_refactoring": False,
+        },
+    })
+
+    assert result["success"] is True
+    assert result["rollback_occurred"] is False
+    assert result["validation"]["structural"]["passed"] is True
+    move_validation = result["validation"]["structural"]["details"][
+        "move_method_validation"
+    ][0]
+    assert move_validation["checks"]["actual_method_logic_moved"] is True
+    assert move_validation["validation_evidence"]["reason"] == "action_time_semantic_proof"
+
+
 
 
 def test_move_method_structural_validation_accepts_later_introduced_constants():
@@ -152,6 +305,40 @@ def test_move_method_structural_validation_accepts_later_introduced_constants():
     assert result.passed is True
     validation = result.details["move_method_validation"][0]
     assert validation["passed"] is True
+    assert validation["checks"]["actual_method_logic_moved"] is True
+
+
+def test_move_method_action_time_proof_survives_later_safe_method_change():
+    """Final validation must retain the verified move after later plan steps.
+
+    This models a later safe refactoring whose AST differs from the original
+    body but retains the value of the expression.  The final stage still
+    checks that the method remains moved, non-duplicated, callable, and real;
+    the action-time proof supplies the semantic evidence for the move itself.
+    """
+
+    transformed, _, metadata = _move()
+    assert metadata["status"] == "success"
+    transformed = transformed.replace(
+        "average = total / 3",
+        "average = total / (1 + 2)",
+    )
+    action = _move_action()
+    action.parameters["move_method_validation_evidence"] = metadata[
+        "move_method_validation_evidence"
+    ]
+
+    result = StructuralValidator().validate(
+        language="python",
+        original_code=SOURCE,
+        transformed_code=transformed,
+        actions=[action],
+    )
+
+    assert result.passed is True
+    validation = result.details["move_method_validation"][0]
+    assert validation["logic_equivalence"] == "PASS"
+    assert validation["validation_evidence"]["reason"] == "action_time_semantic_proof"
     assert validation["checks"]["actual_method_logic_moved"] is True
 
 
