@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any, Dict, List, Optional
 
 from ..constants import (
@@ -22,6 +23,7 @@ from ..constants import (
     ACTION_MOVE_C_FUNCTION,
     ACTION_NOOP,
     ACTION_NARROW_EXCEPTION_HANDLER,
+    ACTION_REMOVE_DEAD_CODE,
     ACTION_REPLACE_UNSAFE_FUNCTION,
     ACTION_REPLACE_CONDITIONAL_WITH_POLYMORPHISM,
     EXTRACT_CLASS_ACTIONS,
@@ -198,12 +200,23 @@ class PlannerAdapter:
         }
 
     def _map_step(self, step: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        refactoring = str(step.get("refactoring", "")).strip()
+        refactoring = str(
+            step.get("refactoring")
+            or step.get("action_type")
+            or step.get("action")
+            or step.get("name")
+            or ""
+        ).strip()
 
         if not refactoring:
             raise PlannerAdapterError("missing 'refactoring' in step")
 
-        ref_key = refactoring.lower()
+        # RDP payloads use both display labels (``Remove Dead Code``) and
+        # canonical action identifiers (``remove_dead_code``). Normalize both
+        # into the planner adapter's display-key vocabulary.
+        ref_key = " ".join(
+            re.sub(r"[_-]+", " ", refactoring.lower()).split()
+        )
         params = step.get("parameters") or {}
         target = step.get("target") or {}
         smell_name = str(step.get("smell") or step.get("smell_type") or "").strip()
@@ -212,8 +225,10 @@ class PlannerAdapter:
         if not isinstance(params, dict):
             raise PlannerAdapterError("'parameters' must be an object when provided")
 
+        if isinstance(target, str):
+            target = {"function": target}
         if not isinstance(target, dict):
-            raise PlannerAdapterError("'target' must be an object when provided")
+            raise PlannerAdapterError("'target' must be an object or symbol name when provided")
 
         action: Optional[Dict[str, Any]] = None
 
@@ -305,6 +320,11 @@ class PlannerAdapter:
             }
 
         elif ref_key == "extract method":
+            source_file = self._source_file_from_step(
+                step,
+                params=params,
+                target=target,
+            )
             target_method = (
                 target.get("method")
                 or target.get("function")
@@ -332,6 +352,13 @@ class PlannerAdapter:
                 or params.get("extracted_function_name")
                 or f"{target_method}Core"
             )
+            source_class = self._semantic_class_hint(
+                target.get("class")
+                or params.get("source_class")
+                or params.get("class_name")
+                or params.get("module_name"),
+                source_file=source_file,
+            )
 
             action = {
                 "action_type": ACTION_EXTRACT_METHOD,
@@ -340,12 +367,7 @@ class PlannerAdapter:
                     "new_method_name": self._safe_identifier(str(new_name)),
                     "start_line": start_line,
                     "end_line": end_line,
-                    "source_class": (
-                        target.get("class")
-                        or params.get("source_class")
-                        or params.get("class_name")
-                        or params.get("module_name")
-                    ),
+                    "source_class": source_class,
                     "method_signature": (
                         target.get("signature")
                         or params.get("method_signature")
@@ -449,6 +471,7 @@ class PlannerAdapter:
             # Those values are useful hints but are not sufficient reason to turn
             # the step into noop.  Keep the Move Method action executable and let
             # SCTVA recover the concrete method/classes from the Python AST.
+            source_file = self._source_file_from_step(step, params=params, target=target)
             method = (
                 target.get("method")
                 or target.get("function")
@@ -457,19 +480,19 @@ class PlannerAdapter:
                 or params.get("source_method")
                 or ""
             )
-            source_class = (
+            source_class = self._semantic_class_hint(
                 params.get("source_class")
                 or params.get("class_name")
-                or target.get("class")
-                or ""
+                or target.get("class"),
+                source_file=source_file,
             )
-            destination_class = (
+            destination_class = self._semantic_class_hint(
                 params.get("destination_class")
                 or params.get("target_class")
                 or params.get("destination_type")
-                or ""
+                or "",
+                source_file=source_file,
             )
-            source_file = self._source_file_from_step(step, params=params, target=target)
             source_line = self._source_line_from_step(step, params=params, target=target)
             raw_lines = target.get("lines")
             target_lines = (
@@ -648,6 +671,7 @@ class PlannerAdapter:
         elif ref_key == "inline class":
             class_to_inline = (
                 params.get("class_to_inline")
+                or params.get("target_class")
                 or params.get("source_class")
                 or params.get("class_name")
                 or target.get("class")
@@ -668,9 +692,14 @@ class PlannerAdapter:
                 "action_type": ACTION_INLINE_PYTHON_CLASS,
                 "parameters": {
                     "class_to_inline": str(class_to_inline),
+                    "target_class": str(class_to_inline),
                     "source_file": source_file,
                     "source_line": source_line,
                     "smell": step.get("smell") or step.get("smell_type") or "Lazy Class",
+                    "requested_target": {
+                        "class_to_inline": str(class_to_inline),
+                        "source_file": source_file,
+                    },
                 },
             }
 
@@ -799,20 +828,35 @@ class PlannerAdapter:
             }
 
         elif ref_key == "remove dead code":
-            method = params.get("method") or target.get("method")
+            method = (
+                params.get("method")
+                or params.get("method_name")
+                or params.get("function")
+                or params.get("function_name")
+                or params.get("target_method")
+                or params.get("target_function")
+                or target.get("method")
+                or target.get("function")
+                or target.get("target_method")
+                or target.get("target_function")
+                or target.get("name")
+                or target.get("symbol")
+                or params.get("name")
+                or params.get("symbol")
+            )
             source_line = self._source_line_from_step(step, params=params, target=target)
-            if not method and source_line is None:
-                raise PlannerAdapterError(
-                    "remove dead code mapping requires parameters.method, target.method, or source line"
-                )
+            source_file = self._source_file_from_step(step, params=params, target=target)
 
             action = {
-                "action_type": "remove_dead_code",
+                "action_type": ACTION_REMOVE_DEAD_CODE,
                 "parameters": {
                     "method": str(method or ""),
-                    "class_name": target.get("class") or params.get("source_class"),
+                    "class_name": self._semantic_class_hint(
+                        target.get("class") or params.get("source_class"),
+                        source_file=source_file,
+                    ) or None,
                     "source_line": source_line,
-                    "source_file": target.get("file") or params.get("source_file"),
+                    "source_file": source_file,
                 },
             }
 
@@ -1019,6 +1063,22 @@ class PlannerAdapter:
                     return value.strip()
 
         return ""
+
+    @staticmethod
+    def _semantic_class_hint(value: Any, *, source_file: str) -> str:
+        """Discard legacy Python class hints fabricated from a file name."""
+
+        class_name = str(value or "").strip()
+        normalized_file = str(source_file or "").replace("\\", "/")
+        if not class_name or not normalized_file.lower().endswith(".py"):
+            return class_name
+
+        file_stem = normalized_file.rsplit("/", 1)[-1].rsplit(".", 1)[0]
+        normalized_class = re.sub(r"[^a-z0-9]", "", class_name.lower())
+        normalized_stem = re.sub(r"[^a-z0-9]", "", file_stem.lower())
+        if normalized_class in {normalized_stem, f"{normalized_stem}target"}:
+            return ""
+        return class_name
 
     @staticmethod
     def _source_line_from_step(
