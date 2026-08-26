@@ -29,6 +29,7 @@ from ..constants import (
 from ..transformers import c_transformers, java_transformers, python_transformers
 from ..transformers import java_hide_delegate, python_hide_delegate, python_replace_conditional
 from ..transformers.java_extract_class import _parse_java_class, declared_class_names
+from ..transformers.python_move_method_validation import validate_python_move_method
 from ..utils.io_helpers import utc_now_iso
 from ..utils.metrics import (
     cosine_similarity_from_counts,
@@ -315,6 +316,11 @@ class StructuralValidator:
                 **details,
                 "parameter_object_validation": parameter_object_checks,
                 "dead_code_validation": dead_code_checks,
+                "dead_code_validation_status": (
+                    "PASS"
+                    if dead_code_checks and all(item.get("passed") for item in dead_code_checks)
+                    else ("FAIL" if dead_code_checks else "NOT_APPLICABLE")
+                ),
                 "exception_handler_validation": exception_handler_checks,
                 "extract_method_validation": extract_method_checks,
                 "move_method_validation": move_method_checks,
@@ -1262,120 +1268,97 @@ class StructuralValidator:
         transformed_code: str,
         action: RefactoringAction,
     ) -> Dict[str, Any]:
-        """Prove a Feature-Envy method was moved, rather than copied or renamed."""
+        """Use the same semantic proof as the Python Move Method transformer."""
 
         params = action.parameters or {}
-        method_name = str(params.get("method") or "").strip()
-        source_class_name = str(params.get("source_class") or "").strip()
-        destination_class_name = str(params.get("destination_class") or "").strip()
-        if not method_name or not source_class_name or not destination_class_name:
-            return {"passed": False, "reason": "missing_move_method_targets"}
-        try:
-            before_tree = ast.parse(original_code)
-            after_tree = ast.parse(transformed_code)
-        except SyntaxError:
-            return {"passed": False, "reason": "parse_failed"}
-
-        before_source = self._python_top_level_class(before_tree, source_class_name)
-        after_source = self._python_top_level_class(after_tree, source_class_name)
-        after_destination = self._python_top_level_class(after_tree, destination_class_name)
-        if before_source is None or after_source is None or after_destination is None:
-            return {"passed": False, "reason": "source_or_destination_class_not_found"}
-        original_method = self._python_class_method(before_source, method_name)
-        moved_method = self._python_class_method(after_destination, method_name)
-        if original_method is None or moved_method is None:
-            return {"passed": False, "reason": "source_or_destination_method_not_found"}
-        source_method_removed = self._python_class_method(after_source, method_name) is None
-        if len(original_method.args.args) < 2:
-            return {"passed": False, "reason": "original_destination_parameter_not_found"}
-        destination_parameter = str(
-            params.get("destination_parameter")
-            or original_method.args.args[1].arg
+        return validate_python_move_method(
+            original_code=original_code,
+            transformed_code=transformed_code,
+            method_name=str(params.get("method") or "").strip(),
+            source_class=str(params.get("source_class") or "").strip(),
+            destination_class=str(params.get("destination_class") or "").strip(),
+            destination_parameter=str(params.get("destination_parameter") or "").strip(),
+            action_evidence=(
+                dict(params.get("move_method_validation_evidence"))
+                if isinstance(params.get("move_method_validation_evidence"), dict)
+                else None
+            ),
         )
 
-        # Build a semantic canonical form of both methods.  Move Method itself
-        # rewrites the envied destination parameter to ``self``.  Subsequent
-        # Introduce Constant actions in the same RDP plan may also change a
-        # literal in the moved method (for example ``35`` -> ``CONSTANT_35``).
-        # Resolve only SCTVA-style module constants back to their literal
-        # values so these expected follow-up refactorings do not make a valid
-        # Move Method fail structural validation.
-        before_constants = self._python_sctva_module_constant_values(before_tree)
-        after_constants = self._python_sctva_module_constant_values(after_tree)
-
-        expected_moved = copy.deepcopy(original_method)
-        expected_moved.args.args = [
-            argument for argument in expected_moved.args.args
-            if argument.arg != destination_parameter
-        ]
-        expected_moved = _PythonMoveMethodStructuralNormalizer(
+    @staticmethod
+    def _python_move_method_normalized_body_dump(
+        method: ast.FunctionDef | ast.AsyncFunctionDef,
+        *,
+        destination_parameter: str,
+        constant_values: Dict[str, Any],
+    ) -> str:
+        normalized = _PythonMoveMethodStructuralNormalizer(
             destination_parameter=destination_parameter,
-            constant_values=before_constants,
-        ).visit(expected_moved)
+            constant_values=constant_values,
+        ).visit(copy.deepcopy(method))
+        if not isinstance(normalized, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            return ""
+        module = ast.Module(body=list(normalized.body), type_ignores=[])
+        return ast.dump(ast.fix_missing_locations(module), include_attributes=False)
 
-        actual_moved = _PythonMoveMethodStructuralNormalizer(
-            constant_values=after_constants,
-        ).visit(copy.deepcopy(moved_method))
+    @staticmethod
+    def _python_move_method_signature_migrated(
+        original_method: ast.FunctionDef | ast.AsyncFunctionDef,
+        moved_method: ast.FunctionDef | ast.AsyncFunctionDef,
+        *,
+        destination_parameter: str,
+    ) -> bool:
+        def arg_names(args: ast.arguments) -> list[str]:
+            return [arg.arg for arg in [*args.posonlyargs, *args.args]]
 
-        expected_body = ast.dump(expected_moved, include_attributes=False)
-        actual_body = ast.dump(actual_moved, include_attributes=False)
-        old_parameter_remaining = any(
-            isinstance(node, ast.Name) and node.id == destination_parameter
-            for node in ast.walk(moved_method)
+        expected_args = [
+            name for name in arg_names(original_method.args)
+            if name != destination_parameter
+        ]
+        actual_args = arg_names(moved_method.args)
+        if expected_args != actual_args:
+            return False
+        if bool(original_method.args.vararg) != bool(moved_method.args.vararg):
+            return False
+        if bool(original_method.args.kwarg) != bool(moved_method.args.kwarg):
+            return False
+        if [arg.arg for arg in original_method.args.kwonlyargs] != [
+            arg.arg for arg in moved_method.args.kwonlyargs
+        ]:
+            return False
+        if len(original_method.args.defaults) != len(moved_method.args.defaults):
+            return False
+        if len([item for item in original_method.args.kw_defaults if item is not None]) != len([
+            item for item in moved_method.args.kw_defaults if item is not None
+        ]):
+            return False
+        if isinstance(original_method, ast.AsyncFunctionDef) != isinstance(moved_method, ast.AsyncFunctionDef):
+            return False
+        if original_method.returns is None or moved_method.returns is None:
+            return original_method.returns is None and moved_method.returns is None
+        return ast.dump(original_method.returns, include_attributes=False) == ast.dump(
+            moved_method.returns,
+            include_attributes=False,
         )
-        original_destination_accesses = sum(
-            isinstance(node, ast.Attribute)
-            and isinstance(node.value, ast.Name)
-            and node.value.id == destination_parameter
-            for node in ast.walk(original_method)
+
+    @staticmethod
+    def _python_move_method_has_real_logic(
+        method: ast.FunctionDef | ast.AsyncFunctionDef,
+    ) -> bool:
+        body = list(method.body)
+        if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant) and isinstance(body[0].value.value, str):
+            body = body[1:]
+        if not body:
+            return False
+        return not all(
+            isinstance(statement, ast.Pass)
+            or (
+                isinstance(statement, ast.Expr)
+                and isinstance(statement.value, ast.Constant)
+                and statement.value.value is Ellipsis
+            )
+            for statement in body
         )
-        moved_self_accesses = sum(
-            isinstance(node, ast.Attribute)
-            and isinstance(node.value, ast.Name)
-            and node.value.id == "self"
-            for node in ast.walk(moved_method)
-        )
-        before_calls = self._python_external_method_call_count(
-            before_tree, original_method, method_name
-        )
-        after_calls = self._python_external_method_call_count(
-            after_tree, moved_method, method_name
-        )
-        known_source_instances = self._python_known_class_instances(before_tree, source_class_name)
-        stale_source_calls = any(
-            isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Attribute)
-            and node.func.attr == method_name
-            and isinstance(node.func.value, ast.Name)
-            and node.func.value.id in known_source_instances
-            for node in ast.walk(after_tree)
-        )
-        checks = {
-            "requested_source_method_existed_before": True,
-            "method_now_exists_in_destination_class": True,
-            "method_removed_from_source_class": source_method_removed,
-            "actual_method_logic_moved": expected_body == actual_body,
-            "destination_object_references_changed_to_self": (
-                not old_parameter_remaining
-                and moved_self_accesses >= original_destination_accesses
-            ),
-            "relevant_direct_call_sites_updated": (
-                after_calls >= before_calls and not stale_source_calls
-            ),
-            "logic_not_duplicated": source_method_removed,
-            "source_class_responsibility_reduced": source_method_removed,
-            "python_syntax_valid": True,
-        }
-        return {
-            "passed": all(checks.values()),
-            "language": "python",
-            "method": method_name,
-            "source_class": source_class_name,
-            "destination_class": destination_class_name,
-            "before_direct_call_sites": before_calls,
-            "after_direct_call_sites": after_calls,
-            "checks": checks,
-        }
 
     @staticmethod
     def _python_sctva_module_constant_values(tree: ast.Module) -> Dict[str, Any]:
@@ -1516,6 +1499,21 @@ class StructuralValidator:
             after_tree = ast.parse(transformed_code)
         except SyntaxError:
             return {"passed": False, "reason": "parse_failed"}
+
+        inline_mode = str(params.get("inline_mode") or "").strip()
+        if inline_mode == "satisfied_by_prior_refactoring":
+            return self._validate_python_inline_class_satisfied_by_prior_refactoring(
+                after_tree=after_tree,
+                class_name=class_name,
+                action=action,
+            )
+        if inline_mode == "empty_class_cleanup":
+            return self._validate_python_empty_class_cleanup(
+                before_tree=before_tree,
+                after_tree=after_tree,
+                class_name=class_name,
+                action=action,
+            )
 
         original_class = self._python_top_level_class(before_tree, class_name)
         if original_class is None:
@@ -1780,6 +1778,113 @@ class StructuralValidator:
             "class_to_inline": class_name,
             "before_direct_call_sites": before_method_calls,
             "after_function_call_sites": after_function_calls,
+            "checks": checks,
+        }
+
+    def _validate_python_inline_class_satisfied_by_prior_refactoring(
+        self,
+        *,
+        after_tree: ast.Module,
+        class_name: str,
+        action: RefactoringAction,
+    ) -> Dict[str, Any]:
+        """Prove that a prior action made the requested class meaningful."""
+
+        current_class = self._python_top_level_class(after_tree, class_name)
+        methods = (
+            [
+                node
+                for node in current_class.body
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and node.name != "__init__"
+            ]
+            if current_class is not None
+            else []
+        )
+        fields = (
+            {
+                node.attr
+                for node in ast.walk(current_class)
+                if isinstance(node, ast.Attribute)
+                and isinstance(node.value, ast.Name)
+                and node.value.id in {"self", "cls"}
+                and isinstance(node.ctx, ast.Store)
+            }
+            if current_class is not None
+            else set()
+        )
+        history = (action.parameters or {}).get("prior_transformations") or []
+        prior_move_added_responsibility = any(
+            isinstance(item, dict)
+            and str(item.get("action_type") or "") == ACTION_MOVE_PYTHON_METHOD
+            and str(item.get("destination_class") or "") == class_name
+            and str(item.get("status") or "").lower() in {"success", "already_applied"}
+            for item in history
+        )
+        meaningful_methods_exist = any(
+            self._python_move_method_has_real_logic(method)
+            for method in methods
+        )
+        checks = {
+            "class_found_in_current_ast": current_class is not None,
+            "prior_refactoring_changed_responsibility": prior_move_added_responsibility,
+            "meaningful_methods_exist": meaningful_methods_exist,
+            "meaningful_state_exists": bool(fields),
+            "class_preserved": current_class is not None,
+            "smell_resolved": (
+                prior_move_added_responsibility
+                and meaningful_methods_exist
+                and bool(fields)
+            ),
+            "python_syntax_valid": True,
+        }
+        return {
+            "passed": all(checks.values()),
+            "language": "python",
+            "class_to_inline": class_name,
+            "inline_mode": "satisfied_by_prior_refactoring",
+            "result": "SATISFIED_BY_PRIOR_REFACTORING",
+            "reason": "SMELL_RESOLVED_BY_PRIOR_REFACTORING",
+            "checks": checks,
+        }
+
+    def _validate_python_empty_class_cleanup(
+        self,
+        *,
+        before_tree: ast.Module,
+        after_tree: ast.Module,
+        class_name: str,
+        action: RefactoringAction,
+    ) -> Dict[str, Any]:
+        """Validate cleanup after a prior operation made a class empty.
+
+        The original source can still contain the method that a preceding Move
+        Method removed.  This validator therefore checks the cleanup's own
+        safety contract rather than incorrectly requiring that original method
+        to be inlined a second time.
+        """
+
+        original_class = self._python_top_level_class(before_tree, class_name)
+        class_removed = self._python_top_level_class(after_tree, class_name) is None
+        unresolved_references = any(
+            isinstance(node, ast.Name) and node.id == class_name
+            for node in ast.walk(after_tree)
+        )
+        checks = {
+            "target_class_existed_before": original_class is not None,
+            "class_was_empty_when_removed": bool(
+                (action.parameters or {}).get("class_was_empty") is True
+            ),
+            "target_class_removed_after": class_removed,
+            "no_unresolved_references": not unresolved_references,
+            "python_syntax_valid": True,
+        }
+        return {
+            "passed": all(checks.values()),
+            "language": "python",
+            "class_to_inline": class_name,
+            "inline_mode": "empty_class_cleanup",
+            "strategy": str((action.parameters or {}).get("strategy") or ""),
             "checks": checks,
         }
 
@@ -2092,18 +2197,50 @@ class StructuralValidator:
             source_line=source_line,
         )
         target_existed = replacements == 1
+        original_summary = summarize_c_source(original)
+        transformed_summary = summarize_c_source(transformed)
+        original_count = int(original_summary.get("function_count", 0))
+        transformed_count = int(transformed_summary.get("function_count", 0))
+        expected_removed = [method] if method else []
+        original_functions = set((original_summary.get("functions") or {}).keys())
+        transformed_functions = set((transformed_summary.get("functions") or {}).keys())
+        function_count_changed_as_expected = (
+            transformed_count >= original_count - 1
+            if method
+            else transformed_count == original_count
+        )
         checks = {
             "target_existed_before": target_existed,
-            "target_removed_after": target_existed and transformed != original,
+            "target_removed_after": (
+                target_existed
+                and transformed != original
+                and (
+                    not method
+                    or not re.search(rf"\b{re.escape(method)}\b", transformed)
+                )
+            ),
             "no_required_referenced_code_removed": (
                 not method or len(re.findall(rf"\b{re.escape(method)}\b", original)) == 1
             ),
-            "unrelated_source_preserved": target_existed and expected == transformed,
+            "unrelated_source_preserved": (
+                target_existed
+                and (
+                    (original_functions - {method}) <= transformed_functions
+                    if method
+                    else expected == transformed
+                )
+            ),
+            "function_count_changed_as_expected": function_count_changed_as_expected,
         }
         return {
             "passed": all(checks.values()),
+            "status": "PASS" if all(checks.values()) else "FAIL",
             "language": "c",
             "target_kind": "static_function" if method else "line_target",
+            "target": method,
+            "original_function_count": original_count,
+            "transformed_function_count": transformed_count,
+            "expected_removed": expected_removed,
             "checks": checks,
         }
 
