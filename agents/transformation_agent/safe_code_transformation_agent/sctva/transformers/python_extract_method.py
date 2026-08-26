@@ -12,6 +12,7 @@ from .extract_method_common import MAX_EXTRACTED_PARAMETERS, MIN_EXTRACTED_LOC, 
 
 
 REVIEW_REQUIRED = "review_required"
+NOT_APPLICABLE = "not_applicable"
 ALREADY_APPLIED = "already_applied"
 
 
@@ -99,7 +100,11 @@ def apply_extract_method(
     # Two top-level statements can still contain a substantial cohesive block,
     # for example a heading print followed by a large try/except workflow.
     if len(body) < 2:
-        return _review(source_code, "METHOD_HAS_NO_MEANINGFUL_EXTRACTABLE_BLOCK", metadata)
+        return _not_applicable(
+            source_code,
+            "METHOD_HAS_NO_MEANINGFUL_EXTRACTABLE_BLOCK",
+            metadata,
+        )
 
     before_metrics = _method_metrics(target.node)
     candidate = _select_candidate(
@@ -599,5 +604,20 @@ def _review(source_code: str, reason: str, metadata: dict[str, Any]) -> tuple[st
         "reason": reason,
         "plan_compliance": "FAIL",
         "final_decision": "REVIEW_REQUIRED",
+        "behavioral_safety": "NOT_EVALUATED_NO_CHANGE",
+    }
+
+
+def _not_applicable(
+    source_code: str,
+    reason: str,
+    metadata: dict[str, Any],
+) -> tuple[str, int, dict[str, Any]]:
+    return source_code, 0, {
+        **metadata,
+        "status": NOT_APPLICABLE,
+        "reason": reason,
+        "plan_compliance": "NOT_APPLICABLE",
+        "final_decision": "NOT_APPLICABLE",
         "behavioral_safety": "NOT_EVALUATED_NO_CHANGE",
     }

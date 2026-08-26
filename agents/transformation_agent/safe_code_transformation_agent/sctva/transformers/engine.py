@@ -424,11 +424,9 @@ class TransformationEngine:
                         action.parameters["method"] = resolved_method
                         action.parameters["class_name"] = resolved_class
                         action.parameters["dead_code_target_resolution"] = (
-                            "unique_unreferenced_legacy_callable"
-                        )
-                        action.warnings.append(
-                            "Recovered stale RDP Remove Dead Code target as the unique "
-                            f"unreferenced legacy callable '{resolved_method}'."
+                            "owner_inferred_from_ast"
+                            if resolved_method == method_name and not class_name
+                            else "stale_target_recovered_from_ast"
                         )
                 exception_action = self._exception_action_at_source_line(
                     language=language,
@@ -442,9 +440,112 @@ class TransformationEngine:
             warnings = list(action.warnings)
             replacements = 0
             action_metadata: Dict[str, Any] = {}
+            inline_action_trace: Dict[str, Any] = {}
             before_action_code = current_code
 
             try:
+                # Inline Class is order-sensitive.  An earlier Move Method can
+                # change the target's responsibility without changing its
+                # class symbol.  Never let a preflight stale-file diagnostic
+                # suppress an explicit class that still exists in the current
+                # transformed AST.
+                if language == "python" and action.action_type == ACTION_INLINE_PYTHON_CLASS:
+                    requested_target = action.parameters.get("requested_target")
+                    requested_target = (
+                        requested_target if isinstance(requested_target, dict) else {}
+                    )
+                    requested_inline_class = str(
+                        action.parameters.get("class_to_inline")
+                        or action.parameters.get("target_class")
+                        or action.parameters.get("source_class")
+                        or requested_target.get("class_to_inline")
+                        or ""
+                    ).strip()
+                    try:
+                        current_classes = sorted(
+                            (
+                                python_transformers.build_python_symbol_table(current_code)
+                                .get("classes", {})
+                                .keys()
+                            )
+                        )
+                    except (SyntaxError, TypeError, ValueError):
+                        current_classes = []
+                    inline_action_trace = {
+                        "action_type": ACTION_INLINE_PYTHON_CLASS,
+                        "raw_parameters": dict(action.parameters),
+                        "raw_target": dict(requested_target),
+                        "requested_target": {
+                            "class_to_inline": requested_inline_class,
+                            "source_file": str(
+                                action.parameters.get("source_file")
+                                or requested_target.get("source_file")
+                                or current_file_name
+                            ),
+                        },
+                        "normalized_target_class": requested_inline_class,
+                        "source_file": str(
+                            action.parameters.get("source_file") or current_file_name
+                        ),
+                        "current_classes_before": current_classes,
+                        "current_ast_version": idx,
+                    }
+                    if requested_inline_class:
+                        recovered_stale_inline_target = any(
+                            action.parameters.get(key) is True
+                            for key in (
+                                "not_applicable_to_source",
+                                "unresolved_legacy_target",
+                            )
+                        ) or bool(
+                            action.parameters.get("source_resolution_error")
+                            or action.parameters.get("source_file_resolution_error")
+                        )
+                        current_resolution = python_transformers.resolve_inline_class_target(
+                            current_code,
+                            class_to_inline=requested_inline_class,
+                        )
+                        if (
+                            current_resolution.get("status") == "success"
+                            and str(current_resolution.get("class_to_inline") or "")
+                            == requested_inline_class
+                        ):
+                            resolved_inline_class = str(
+                                current_resolution["class_to_inline"]
+                            )
+                            action.parameters.pop("not_applicable_to_source", None)
+                            action.parameters.pop("not_applicable_reason", None)
+                            action.parameters.pop("not_applicable_action_type", None)
+                            action.parameters.pop("unresolved_legacy_target", None)
+                            action.parameters.pop("unresolved_reason", None)
+                            action.parameters.pop("source_resolution_error", None)
+                            action.parameters.pop("source_file_resolution_error", None)
+                            action.parameters.pop("target_resolution_error", None)
+                            action.parameters["class_to_inline"] = resolved_inline_class
+                            action.parameters["target_class"] = resolved_inline_class
+                            if recovered_stale_inline_target:
+                                action.parameters["target_resolution"] = (
+                                    "current_transformed_ast_explicit_target"
+                                )
+                                action.parameters["inline_target_resolution"] = (
+                                    "current_transformed_ast_explicit_target"
+                                )
+                                inline_action_trace["preflight_target_recovered"] = True
+                            inline_action_trace["normalized_target_class"] = (
+                                resolved_inline_class
+                            )
+                            inline_action_trace["target_resolution_strategy"] = (
+                                "current_transformed_ast_explicit_target"
+                            )
+                        else:
+                            inline_action_trace["target_resolution_strategy"] = str(
+                                current_resolution.get("target_resolution")
+                                or "current_transformed_ast_not_resolved"
+                            )
+                    else:
+                        inline_action_trace["target_resolution_strategy"] = (
+                            "missing_canonical_target"
+                        )
                 # Stale/filename-derived RDP targets that do not exist in this
                 # source are plan diagnostics, not transformation failures.
                 # This guard runs before language-specific dispatch so a
@@ -544,6 +645,11 @@ class TransformationEngine:
                                 source_line=source_line,
                             )
                             action_metadata = dict(move_metadata)
+                            validation_evidence = action_metadata.get("move_method_validation_evidence")
+                            if isinstance(validation_evidence, dict):
+                                effective_params["move_method_validation_evidence"] = dict(
+                                    validation_evidence
+                                )
                             action_metadata["reclassified_action_type"] = ACTION_MOVE_PYTHON_METHOD
                             action_metadata["effective_action_parameters"] = effective_params
                             action_metadata["recovered_from_noop"] = True
@@ -866,7 +972,8 @@ class TransformationEngine:
                     # Keep the semantically resolved target in the action so
                     # downstream structural validation sees the operation that
                     # was actually applied rather than stale planner hints.
-                    if action_metadata.get("status") == "success":
+                    move_status = str(action_metadata.get("status") or "").lower()
+                    if move_status in {"success", "already_applied"}:
                         effective_params = {
                             "method": str(action_metadata.get("method") or method_name),
                             "source_class": str(action_metadata.get("source_class") or source_class),
@@ -876,12 +983,34 @@ class TransformationEngine:
                             ),
                             "source_file": str(action.parameters.get("source_file") or ""),
                         }
+                        validation_evidence = action_metadata.get("move_method_validation_evidence")
+                        if isinstance(validation_evidence, dict):
+                            effective_params["move_method_validation_evidence"] = dict(
+                                validation_evidence
+                            )
                         action_metadata["reclassified_action_type"] = ACTION_MOVE_PYTHON_METHOD
                         action_metadata["effective_action_parameters"] = effective_params
-                    if action_metadata.get("status") != "success":
+                    if move_status not in {"success", "already_applied"}:
                         warnings.append(
                             "Feature Envy Move Method requires review: "
                             f"{action_metadata.get('reason', 'unsafe move candidate')}."
+                        )
+                    elif move_status == "already_applied":
+                        warnings = [
+                            warning
+                            for warning in warnings
+                            if not (
+                                "move method" in str(warning).lower()
+                                and (
+                                    "richer semantic edits" in str(warning).lower()
+                                    or "not simulated with a rename" in str(warning).lower()
+                                    or "mapped to noop" in str(warning).lower()
+                                )
+                            )
+                        ]
+                        warnings.append(
+                            f"Feature Envy Move Method already applied: {method_name} is already on "
+                            f"{destination_class}."
                         )
                     else:
                         # Older planner versions attached a warning saying Move
@@ -991,9 +1120,28 @@ class TransformationEngine:
                         )
                     )
                     if owned_metadata.get("status") == "not_applicable":
+                        prior_transformations = [
+                            {
+                                "action_type": str(
+                                    entry.metadata.get("reclassified_action_type")
+                                    or entry.action_type
+                                ),
+                                "status": str(entry.metadata.get("status") or "success"),
+                                "source_class": str(entry.metadata.get("source_class") or ""),
+                                "destination_class": str(entry.metadata.get("destination_class") or ""),
+                                "method": str(entry.metadata.get("method") or ""),
+                                "class_removed": bool(entry.metadata.get("class_removed") is True),
+                            }
+                            for entry in logs
+                            if str(entry.metadata.get("status") or "success").lower()
+                            in {"success", "already_applied"}
+                        ]
                         current_code, replacements, action_metadata = python_transformers.apply_inline_class(
                             current_code,
                             class_to_inline=class_to_inline,
+                            prior_transformations=prior_transformations,
+                            project_source_files=project_source_files or [],
+                            current_file_name=current_file_name,
                         )
                     else:
                         current_code = owned_code
@@ -1002,6 +1150,7 @@ class TransformationEngine:
 
                     if action_metadata.get("status") == "success":
                         action_metadata["reclassified_action_type"] = ACTION_INLINE_PYTHON_CLASS
+                        action_metadata["plan_compliance"] = "PASS"
                         effective_parameters = {
                             "class_to_inline": str(
                                 action_metadata.get("class_to_inline") or class_to_inline
@@ -1026,9 +1175,20 @@ class TransformationEngine:
                             effective_parameters["inline_mode"] = str(
                                 action_metadata.get("inline_mode")
                             )
+                        if action_metadata.get("class_was_empty") is True:
+                            effective_parameters["class_was_empty"] = True
+                        if action_metadata.get("strategy"):
+                            effective_parameters["strategy"] = str(
+                                action_metadata.get("strategy")
+                            )
                         action_metadata["effective_action_parameters"] = effective_parameters
 
-                        if action_metadata.get("inline_mode") == "owner_class":
+                        if action_metadata.get("inline_mode") == "empty_class_cleanup":
+                            warnings.append(
+                                "Inline Class cleanup applied: "
+                                f"removed proven-unused empty class {class_to_inline}."
+                            )
+                        elif action_metadata.get("inline_mode") == "owner_class":
                             warnings.append(
                                 "Inline Class applied: "
                                 f"{class_to_inline} was inlined into "
@@ -1037,6 +1197,32 @@ class TransformationEngine:
                         else:
                             warnings.append(
                                 f"Inline Class applied: {class_to_inline} was safely inlined."
+                            )
+                    elif action_metadata.get("status") in {"not_applicable", "satisfied"}:
+                        # A previous safe transformation can make a planned
+                        # Lazy Class target meaningful.  Keep this outcome in
+                        # the log without incorrectly presenting it as an
+                        # unsafe Inline Class failure.
+                        if action_metadata.get("reason") == "SMELL_RESOLVED_BY_PRIOR_REFACTORING":
+                            action_metadata["reclassified_action_type"] = ACTION_INLINE_PYTHON_CLASS
+                            action_metadata["class_exists"] = True
+                            action_metadata["class_removed"] = False
+                            action_metadata["outcome_status"] = "satisfied"
+                            action_metadata["plan_compliance"] = "PASS"
+                            action_metadata["effective_action_parameters"] = {
+                                "class_to_inline": class_to_inline,
+                                "source_file": str(action.parameters.get("source_file") or ""),
+                                "inline_mode": "satisfied_by_prior_refactoring",
+                                "reason": "SMELL_RESOLVED_BY_PRIOR_REFACTORING",
+                                "class_exists": True,
+                                "class_removed": False,
+                                "prior_transformations": list(
+                                    action_metadata.get("prior_transformations") or []
+                                ),
+                            }
+                            warnings.append(
+                                "Inline Class satisfied by prior refactoring: "
+                                f"{class_to_inline} now has meaningful responsibility."
                             )
                     else:
                         warnings.append(
@@ -1225,7 +1411,7 @@ class TransformationEngine:
                                 )
                             target = action_metadata.get("extracted_class") or new_class_name
                             refactoring_name = action_metadata.get("refactoring") or "Extract Class"
-                            warnings.append(
+                            action_metadata["message"] = (
                                 f"{refactoring_name} applied: moved methods to {target}"
                                 + (f" ({moved})." if moved else ".")
                             )
@@ -1408,6 +1594,21 @@ class TransformationEngine:
                     source_line = action.parameters.get("source_line")
                     source_line = int(source_line) if isinstance(source_line, (int, float)) else None
                     dead_code_kind = str(action.parameters.get("dead_code_kind") or "").strip()
+                    dead_code_target_resolution = str(
+                        action.parameters.get("dead_code_target_resolution") or ""
+                    ).strip()
+                    if dead_code_target_resolution:
+                        action_metadata["dead_code_target_resolution"] = (
+                            dead_code_target_resolution
+                        )
+                        action_metadata["requested_dead_code_method"] = str(
+                            action.parameters.get("requested_dead_code_method") or ""
+                        )
+                        action_metadata["requested_dead_code_class"] = str(
+                            action.parameters.get("requested_dead_code_class") or ""
+                        )
+                        action_metadata["resolved_dead_code_method"] = method_name
+                        action_metadata["resolved_dead_code_class"] = str(class_name or "")
                     target_statement_fingerprint = str(
                         action.parameters.get("target_statement_fingerprint") or ""
                     ).strip()
@@ -1416,7 +1617,7 @@ class TransformationEngine:
                         dead_code_kind = dead_code_kind or anchor_kind
                         target_statement_fingerprint = anchor_fingerprint
 
-                    if not method_name and source_line is None:
+                    if language != "c" and not method_name and source_line is None:
                         raise ValueError("remove_dead_code requires 'method' or 'source_line'.")
 
                     if class_name is not None:
@@ -1482,9 +1683,52 @@ class TransformationEngine:
                             target_statement_fingerprint=target_statement_fingerprint,
                         )
                     elif language == "c":
-                        current_code, replacements = c_transformers.apply_remove_dead_code(
-                            current_code, method_name, class_name, source_line
+                        named_c_target = bool(method_name)
+                        c_analysis = c_transformers.analyze_c_dead_code_target(
+                            current_code,
+                            method_name,
+                            source_line=source_line,
+                            project_source_files=project_source_files,
+                            current_file_name=current_file_name,
                         )
+                        resolved_target = str(c_analysis.get("target") or method_name).strip()
+                        if resolved_target and (
+                            named_c_target or c_analysis.get("removable") is True
+                        ):
+                            method_name = resolved_target
+                            action.parameters["method"] = resolved_target
+                            action_metadata["target"] = resolved_target
+                        action_metadata["c_dead_code_analysis"] = dict(c_analysis)
+                        blocked_statuses = {
+                            "live_reference",
+                            "protected_entry_point",
+                            "external_linkage",
+                        }
+                        if (
+                            named_c_target
+                            and str(c_analysis.get("status") or "") in blocked_statuses
+                        ):
+                            action_metadata.update({
+                                "dead_code_target_status": "live",
+                                "status": "not_applicable",
+                                "final_decision": "NOT_APPLICABLE",
+                                "reason": str(
+                                    c_analysis.get("reason")
+                                    or "C function is not proven dead and was preserved."
+                                ),
+                            })
+                        else:
+                            current_code, replacements = c_transformers.apply_remove_dead_code(
+                                current_code,
+                                method_name,
+                                class_name,
+                                source_line,
+                                project_source_files=project_source_files,
+                                current_file_name=current_file_name,
+                                repository_complete=repository_complete,
+                            )
+                            if replacements:
+                                action_metadata["target_removed"] = True
                     else:
                         current_code, replacements = java_transformers.apply_remove_dead_code(
                             current_code, method_name, class_name, source_line
@@ -1569,6 +1813,18 @@ class TransformationEngine:
                 )
 
             source_file_resolution = action.parameters.get("source_file_resolution")
+            if inline_action_trace:
+                for key, value in inline_action_trace.items():
+                    action_metadata.setdefault(key, value)
+                action_metadata.setdefault(
+                    "target_resolution_strategy",
+                    str(
+                        action_metadata.get("target_resolution")
+                        or action.parameters.get("target_resolution")
+                        or inline_action_trace.get("target_resolution_strategy")
+                        or "transformer_input"
+                    ),
+                )
             if isinstance(source_file_resolution, dict):
                 action_metadata.setdefault(
                     "source_file_resolution",
@@ -1581,10 +1837,45 @@ class TransformationEngine:
                     )
 
             if (
+                language == "python"
+                and action.action_type in {
+                    ACTION_MOVE_PYTHON_METHOD,
+                    ACTION_INLINE_PYTHON_CLASS,
+                    ACTION_EXTRACT_CLASS,
+                    ACTION_EXTRACT_PYTHON_CLASS,
+                    ACTION_REMOVE_DEAD_CODE,
+                }
+                and str(action_metadata.get("status") or "").lower()
+                in {"success", "already_applied", "not_applicable", "satisfied"}
+            ):
+                symbol_table = python_transformers.build_python_symbol_table(current_code)
+                action_metadata["current_symbol_table"] = symbol_table
+                action_metadata["current_ast_version"] = idx
+                action_metadata.setdefault("source_file", current_file_name)
+                if action.action_type == ACTION_MOVE_PYTHON_METHOD:
+                    source_class_name = str(action_metadata.get("source_class") or "")
+                    destination_class_name = str(action_metadata.get("destination_class") or "")
+                    method_name = str(action_metadata.get("method") or "")
+                    classes = symbol_table.get("classes") or {}
+                    source_state = classes.get(source_class_name) or {}
+                    action_metadata["affected_class"] = source_class_name
+                    action_metadata["methods_removed"] = [method_name] if method_name else []
+                    action_metadata["methods_added"] = [method_name] if method_name else []
+                    action_metadata["source_class_became_empty"] = bool(
+                        source_state.get("empty") is True
+                    )
+                    action_metadata["current_symbol_state"] = {
+                        "source_class": source_state,
+                        "destination_class": classes.get(destination_class_name) or {},
+                    }
+
+            if (
                 replacements == 0
                 and action.action_type != ACTION_NOOP
                 and not dead_code_not_applicable
                 and str(action_metadata.get("status") or "").lower() != "not_applicable"
+                and str(action_metadata.get("status") or "").lower() != "already_applied"
+                and str(action_metadata.get("status") or "").lower() != "satisfied"
                 and not self._suppress_no_replacements_warning(action, current_code)
             ):
                 warnings.append("No replacements were applied.")
@@ -1602,7 +1893,10 @@ class TransformationEngine:
             # this source (typically a stale/false-positive RDP target).  Keep
             # diagnostics in the per-action log but do not elevate them to the
             # Safety Report's transformation_warning risk.
-            if str(action_metadata.get("status") or "").lower() != "not_applicable":
+            if str(action_metadata.get("status") or "").lower() not in {
+                "not_applicable",
+                "satisfied",
+            }:
                 global_warnings.extend(warnings)
 
         return current_code, logs, global_warnings
