@@ -707,3 +707,276 @@ def test_legacy_inline_class_noop_is_promoted_resolved_and_applied():
         "not simulated with a rename" in message.lower()
         for message in result["safety_report"]["human_messages"]
     )
+
+
+def test_inline_class_rechecks_current_symbols_after_move_method_and_cleans_empty_source_class():
+    """Regression for a plan containing Move Method, Inline Student, Inline ReportPrinter."""
+
+    result = SafeCodeTransformationValidationAgent().execute({
+        "request_id": "move_then_inline_current_symbol_state",
+        "language": "python",
+        "source_files": [{
+            "file_name": "student_report.py",
+            "source_code": SIMPLE_SOURCE,
+            "language": "python",
+            "source_mode": "raw",
+        }],
+        "refactoring_plan": {
+            "plan_id": "move_then_inline_current_symbol_state_plan",
+            "actions": [
+                {
+                    "action_type": "move_python_method",
+                    "parameters": {
+                        "method": "print_report",
+                        "source_class": "ReportPrinter",
+                        "destination_class": "Student",
+                        "destination_parameter": "student",
+                        "source_file": "student_report.py",
+                    },
+                },
+                {
+                    "action_type": "inline_python_class",
+                    "parameters": {
+                        "class_to_inline": "Student",
+                        "source_file": "student_report.py",
+                    },
+                },
+                {
+                    "action_type": "inline_python_class",
+                    "parameters": {
+                        "class_to_inline": "ReportPrinter",
+                        "source_file": "student_report.py",
+                    },
+                },
+            ],
+            "behavior_tests": [],
+        },
+        "execution_options": {
+            "strict_mode": True,
+            "enable_behavior_tests": True,
+            "timeout_seconds": 10,
+            "require_compilation": False,
+            "enable_sctva_auto_refactoring": False,
+        },
+    })
+
+    assert result["success"] is True, result
+    assert result["rollback_occurred"] is False
+    assert result["plan_compliance"]["inline_class"] == "PASS"
+    assert "class ReportPrinter" not in result["refactored_code"]
+    assert "printer = ReportPrinter()" not in result["refactored_code"]
+    assert "return student.print_report()" in result["refactored_code"]
+    assert _run(SIMPLE_SOURCE, "run_report") == _run(
+        result["refactored_code"], "run_report"
+    )
+
+    logs = result["safety_report"]["transformation_log"]
+    assert logs[0]["metadata"]["status"] == "success"
+    assert logs[1]["metadata"]["status"] == "satisfied"
+    assert logs[1]["metadata"]["reason"] == "SMELL_RESOLVED_BY_PRIOR_REFACTORING"
+    assert logs[2]["metadata"]["status"] == "success"
+    assert logs[2]["metadata"]["inline_mode"] == "empty_class_cleanup"
+    assert result["validation"]["structural"]["passed"] is True
+    inline_validation = result["validation"]["structural"]["details"][
+        "inline_class_validation"
+    ]
+    assert len(inline_validation) == 2
+    assert inline_validation[0]["result"] == "SATISFIED_BY_PRIOR_REFACTORING"
+    assert inline_validation[0]["passed"] is True
+    assert inline_validation[1]["inline_mode"] == "empty_class_cleanup"
+    assert inline_validation[1]["passed"] is True
+    move_history = logs[0]["metadata"]
+    assert move_history["source_class_became_empty"] is True
+    assert move_history["current_symbol_table"]["classes"]["Student"]["methods"] == [
+        "__init__",
+        "print_report",
+    ]
+
+
+def test_inline_class_preserves_mixed_rdp_target_shapes_through_full_pipeline():
+    """RDP target aliases must survive contract parsing and stale-target guards."""
+
+    result = SafeCodeTransformationValidationAgent().execute({
+        "request_id": "inline_class_mixed_rdp_targets",
+        "language": "python",
+        "source_files": [{
+            "file_name": "07_feature_envy_student_report.py",
+            "source_code": SIMPLE_SOURCE,
+            "language": "python",
+            "source_mode": "raw",
+        }],
+        "refactoring_plan": {
+            "plan_id": "inline_class_mixed_rdp_targets_plan",
+            "actions": [
+                {
+                    "action_type": "move_python_method",
+                    "parameters": {
+                        "method": "print_report",
+                        "source_class": "ReportPrinter",
+                        "destination_class": "Student",
+                        "destination_parameter": "student",
+                        "source_file": "07_feature_envy_student_report.py",
+                    },
+                },
+                {
+                    "action_type": "inline_python_class",
+                    "parameters": {
+                        "source_file": "07_feature_envy_student_report.py",
+                    },
+                    "target": {"class": "Student"},
+                },
+                {
+                    "action_type": "inline_python_class",
+                    "parameters": {
+                        "target_class": "ReportPrinter",
+                        "source_file": "07_feature_envy_student_report.py",
+                    },
+                },
+            ],
+            "behavior_tests": [],
+        },
+        "execution_options": {
+            "strict_mode": True,
+            "enable_behavior_tests": True,
+            "timeout_seconds": 10,
+            "require_compilation": False,
+            "enable_sctva_auto_refactoring": False,
+        },
+    })
+
+    assert result["success"] is True, result
+    assert result["rollback_occurred"] is False
+    assert result["plan_compliance"]["inline_class"] == "PASS"
+    assert "class ReportPrinter" not in result["refactored_code"]
+    logs = result["safety_report"]["transformation_log"]
+    assert logs[1]["metadata"]["normalized_target_class"] == "Student"
+    assert logs[1]["metadata"]["requested_target"]["class_to_inline"] == "Student"
+    assert logs[1]["metadata"]["status"] == "satisfied"
+    assert logs[1]["metadata"]["reason"] == "SMELL_RESOLVED_BY_PRIOR_REFACTORING"
+    assert logs[2]["metadata"]["normalized_target_class"] == "ReportPrinter"
+    assert logs[2]["metadata"]["requested_target"]["class_to_inline"] == "ReportPrinter"
+    assert logs[2]["metadata"]["status"] == "success"
+    assert logs[2]["metadata"]["reason"] == "SAFE_EMPTY_CLASS_REMOVAL"
+    inline_validation = result["validation"]["structural"]["details"][
+        "inline_class_validation"
+    ]
+    assert len(inline_validation) == 2
+    assert all(item["passed"] is True for item in inline_validation)
+
+
+def test_empty_inline_class_cleanup_requires_review_when_instance_is_still_live():
+    source = '''class ReportPrinter:
+    pass
+
+
+def run_report():
+    printer = ReportPrinter()
+    return printer
+'''
+
+    transformed, replacements, metadata = python_transformers.apply_inline_class(
+        source,
+        class_to_inline="ReportPrinter",
+    )
+
+    assert transformed == source
+    assert replacements == 0
+    assert metadata["status"] == "review_required"
+    assert metadata["reason"] == "EMPTY_CLASS_INSTANCE_STILL_LIVE"
+
+
+def test_explicit_inline_target_recovers_from_stale_rdp_file_before_engine_guard():
+    """A stale RDP path must not block a class found in the imported AST."""
+
+    action = RefactoringAction(
+        action_type="inline_python_class",
+        parameters={
+            "class_to_inline": "ReportPrinter",
+            "source_file": "obsolete_rdp_path.py",
+        },
+    )
+    source = SourceFileContract(
+        file_name="current_report.py",
+        source_code=SIMPLE_SOURCE,
+        language="python",
+        source_mode="raw",
+    )
+
+    SafeCodeTransformationValidationAgent._resolve_action_source_files(
+        [action], [source]
+    )
+    SafeCodeTransformationValidationAgent._resolve_inline_class_source_files(
+        [action], [source]
+    )
+
+    assert action.parameters["source_file"] == "current_report.py"
+    assert action.parameters["source_resolution_status"] == "success"
+    assert action.parameters["target_resolution"] == "explicit_plan_target"
+    assert "source_resolution_error" not in action.parameters
+    assert "source_file_resolution_error" not in action.parameters
+
+
+def test_engine_rechecks_current_ast_before_honoring_stale_inline_guard():
+    source = '''class ReportPrinter:
+    pass
+
+
+def run_report():
+    printer = ReportPrinter()
+    return "done"
+'''
+    action = RefactoringAction(
+        action_type="inline_python_class",
+        parameters={
+            "class_to_inline": "ReportPrinter",
+            "not_applicable_to_source": True,
+            "not_applicable_reason": "INLINE_CLASS_TARGET_NOT_FOUND",
+        },
+    )
+
+    transformed, logs, _ = TransformationEngine().apply_actions(
+        language="python",
+        source_code=source,
+        actions=[action],
+        strict_mode=True,
+    )
+
+    assert logs[0].metadata["status"] == "success"
+    assert logs[0].metadata["inline_mode"] == "empty_class_cleanup"
+    assert "class ReportPrinter" not in transformed
+    assert "stale_rdp_target_guard" not in str(logs[0].metadata)
+
+
+def test_empty_class_cleanup_is_blocked_by_repository_reference():
+    source = '''class ReportPrinter:
+    pass
+'''
+    action = RefactoringAction(
+        action_type="inline_python_class",
+        parameters={"class_to_inline": "ReportPrinter"},
+    )
+    transformed, logs, _ = TransformationEngine().apply_actions(
+        language="python",
+        source_code=source,
+        actions=[action],
+        strict_mode=True,
+        current_file_name="report_printer.py",
+        project_source_files=[
+            {
+                "file_name": "report_printer.py",
+                "language": "python",
+                "source_code": source,
+            },
+            {
+                "file_name": "consumer.py",
+                "language": "python",
+                "source_code": "from report_printer import ReportPrinter\n",
+            },
+        ],
+        repository_complete=True,
+    )
+
+    assert transformed == source
+    assert logs[0].metadata["status"] == "review_required"
+    assert logs[0].metadata["reason"] == "EXTERNAL_REPOSITORY_REFERENCE"
+    assert logs[0].metadata["reference_file"] == "consumer.py"

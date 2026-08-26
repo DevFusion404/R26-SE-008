@@ -68,6 +68,25 @@ def test_extract_method_recovers_a_module_function_when_rdp_sends_a_filename_as_
     )
 
 
+def test_extract_method_marks_a_single_statement_method_not_applicable():
+    source = '''class LibraryManager:
+    def remove_book(self, code):
+        self.books.pop(code, None)
+'''
+
+    transformed, count, metadata = apply_extract_method(
+        source,
+        method_name="remove_book",
+        new_method_name="extracted_remove_book",
+    )
+
+    assert transformed == source
+    assert count == 0
+    assert metadata["status"] == "not_applicable"
+    assert metadata["final_decision"] == "NOT_APPLICABLE"
+    assert metadata["reason"] == "METHOD_HAS_NO_MEANINGFUL_EXTRACTABLE_BLOCK"
+
+
 def test_extract_method_structural_validation_accepts_later_constant_introduction():
     source = '''def calculate_grade(mark):
     label = "F"

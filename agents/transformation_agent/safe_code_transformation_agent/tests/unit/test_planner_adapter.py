@@ -201,6 +201,46 @@ def test_planner_adapter_maps_line_only_dead_code():
     assert action["parameters"]["source_file"] == "demo.py"
 
 
+def test_planner_adapter_discards_legacy_python_filename_class_hints():
+    planner_output = {
+        "plan_id": "legacy_filename_classes",
+        "steps": [
+            {
+                "step_id": 1,
+                "refactoring": "Move Method",
+                "target": {
+                    "file": "02_large_class_library_system.py",
+                    "method": "main",
+                    "lines": [44],
+                },
+                "parameters": {
+                    "source_class": "02_large_class_library_system",
+                    "destination_class": "02_large_class_library_systemTarget",
+                },
+            },
+            {
+                "step_id": 2,
+                "refactoring": "Remove Dead Code",
+                "target": {
+                    "file": "02_large_class_library_system.py",
+                    "method": "remove_book",
+                    "lines": [12],
+                },
+                "parameters": {
+                    "source_class": "02_large_class_library_system",
+                },
+            },
+        ],
+    }
+
+    actions = PlannerAdapter().normalize_plan(planner_output)["actions"]
+
+    assert actions[0]["parameters"]["source_class"] == ""
+    assert actions[0]["parameters"]["destination_class"] == ""
+    assert actions[0]["parameters"]["semantic_recovery_required"] is True
+    assert actions[1]["parameters"]["class_name"] is None
+
+
 def test_planner_adapter_maps_encapsulate_variable():
     adapter = PlannerAdapter()
     planner_output = {
