@@ -497,9 +497,38 @@ function normalizeAction(action) {
     throw new Error('Each action must include action_type.');
   }
 
+  let actionType = String(action.action_type).trim().toLowerCase();
+  const parameters = isPlainObject(action.parameters) ? { ...action.parameters } : {};
+  const target = isPlainObject(action.target) ? action.target : {};
+  const sourceRefactoring = String(action.source_refactoring || '').trim();
+  const isInlineClass = ['inline_class', 'inline_python_class'].includes(actionType)
+    || sourceRefactoring.toLowerCase() === 'inline class';
+
+  if (isInlineClass) {
+    const targetClass = firstStringValue([
+      parameters.class_to_inline,
+      parameters.target_class,
+      parameters.source_class,
+      parameters.class_name,
+      action.class_to_inline,
+      action.target_class,
+      target.class,
+    ]);
+    const sourceFile = extractSourceFileFromPlanItem(action);
+    actionType = 'inline_python_class';
+    parameters.class_to_inline = targetClass;
+    parameters.target_class = targetClass;
+    if (sourceFile) parameters.source_file = parameters.source_file || sourceFile;
+    parameters.requested_target = {
+      class_to_inline: targetClass,
+      source_file: parameters.source_file || sourceFile || '',
+    };
+    if (!targetClass) parameters.target_resolution_error = 'INLINE_CLASS_TARGET_MISSING';
+  }
+
   return {
-    action_type: String(action.action_type).trim().toLowerCase(),
-    parameters: isPlainObject(action.parameters) ? action.parameters : {},
+    action_type: actionType,
+    parameters,
     source_step_id: action.source_step_id ?? null,
     source_refactoring: action.source_refactoring ?? null,
     warnings: Array.isArray(action.warnings) ? action.warnings.map(String) : [],
@@ -675,10 +704,38 @@ function normalizeStep(step) {
     };
   }
 
+  if (refactoring === 'inline class') {
+    const sourceFile = extractSourceFileFromPlanItem(step);
+    const classToInline = firstStringValue([
+      params.class_to_inline,
+      params.target_class,
+      params.source_class,
+      params.class_name,
+      target.class,
+    ]);
+    return {
+      action_type: 'inline_python_class',
+      parameters: {
+        class_to_inline: classToInline,
+        target_class: classToInline,
+        source_file: sourceFile,
+        source_line: extractSourceLineFromPlanItem(step),
+        smell: step.smell || step.smell_type || 'Lazy Class',
+        requested_target: {
+          class_to_inline: classToInline,
+          source_file: sourceFile,
+        },
+        ...(classToInline ? {} : { target_resolution_error: 'INLINE_CLASS_TARGET_MISSING' }),
+      },
+      source_step_id: step.step_id ?? null,
+      source_refactoring: step.refactoring ?? null,
+      warnings: classToInline ? [] : ['Inline Class target is missing from the RDP step.'],
+    };
+  }
+
   if ([
     'hide delegate',
     'replace data value with object',
-    'inline class',
     'collapse hierarchy',
     'pull up method',
     'replace parameter with method call',
@@ -782,7 +839,16 @@ function normalizeStep(step) {
   }
 
   if (refactoring === 'remove dead code') {
-    const methodName = params.method || target.method;
+    const methodName = params.method
+      || params.method_name
+      || params.function
+      || params.function_name
+      || params.target_method
+      || params.target_function
+      || target.method
+      || target.function
+      || target.target_method
+      || target.target_function;
     const sourceLine = extractSourceLineFromPlanItem(step);
     if (!methodName && !sourceLine) return null;
     return {
