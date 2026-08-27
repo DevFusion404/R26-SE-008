@@ -83,6 +83,8 @@ SMELL_CATEGORY_MAP: dict[str, tuple[str, str]] = {
     # ── Dispensables ─────────────────────────────────────────────────────────
     # Pointless things whose absence would make the code cleaner.
     "DeadCode":             ("Dispensables", "low"),
+    "UnreachableCode":      ("Dispensables", "low"),
+    "UnusedVariable":       ("Dispensables", "low"),
     "LazyClass":            ("Dispensables", "low"),
     "Comments":             ("Dispensables", "low"),
     "SpeculativeGenerality":("Dispensables", "low"),
@@ -227,6 +229,291 @@ _JAVA_SAFE_NUMS = {"0", "1", "-1", "2", "0.0", "1.0", "0f", "1f", "0L", "1L"}
 
 
 # ---------------------------------------------------------------------------
+# Repository-wide name index (for cross-file dead code detection)
+# ---------------------------------------------------------------------------
+
+def build_repo_name_index(sources: list[tuple[str, str]]) -> set[str]:
+    """Build a set of every name *referenced* (not defined) across the entire
+    Python repository.
+
+    Used by the dead-code detector: if a function/class name appears anywhere
+    in this index, it is live and must NOT be flagged as dead code — even if
+    it is never called within its own file.
+
+    Algorithm
+    ---------
+    For every Python source file passed in ``sources``:
+    1. Parse with ``ast.parse``; skip files that fail.
+    2. Walk the resulting AST and collect:
+       - Every ``Name`` node whose context is ``Load`` (a plain reference).
+       - Every ``Attribute.attr`` string (handles ``obj.method()`` calls and
+         ``module.ClassName`` accesses).
+       - Every aliased import target (``import X as Y`` → add ``X`` and ``Y``;
+         ``from M import F as G`` → add ``F`` and ``G``).
+    3. Union all collected sets.
+
+    The resulting ``set[str]`` is compared against defined function/class names
+    when deciding whether to emit a ``DeadCode`` smell.  Presence in the index
+    means the name is referenced somewhere in the repo → not dead.
+    """
+    live: set[str] = set()
+    for _filename, src in sources:
+        try:
+            tree = pyast.parse(src)
+        except SyntaxError:
+            continue
+        for node in pyast.walk(tree):
+            # Plain name references (Load context = actually used, not defined)
+            if isinstance(node, pyast.Name) and isinstance(node.ctx, pyast.Load):
+                live.add(node.id)
+            # Attribute accesses: obj.method, module.Class, etc.
+            elif isinstance(node, pyast.Attribute):
+                live.add(node.attr)
+            # import X / import X as Y  →  both X and Y are "known alive"
+            elif isinstance(node, pyast.Import):
+                for alias in node.names:
+                    live.add(alias.name.split(".")[0])   # top-level package
+                    if alias.asname:
+                        live.add(alias.asname)
+            # from M import F / from M import F as G
+            elif isinstance(node, pyast.ImportFrom):
+                for alias in node.names:
+                    if alias.name != "*":
+                        live.add(alias.name)
+                    if alias.asname:
+                        live.add(alias.asname)
+    return live
+
+
+# ---------------------------------------------------------------------------
+# Unreachable-code & unused-variable helpers  (pure functions, no side-effects)
+# ---------------------------------------------------------------------------
+
+def _detect_unreachable_code(
+    func_node: pyast.FunctionDef | pyast.AsyncFunctionDef,
+) -> list[tuple[int, str]]:
+    """Detect statements that can never execute because an earlier sibling
+    terminates control flow unconditionally.
+
+    Scanned statement lists
+    -----------------------
+    - The function body itself
+    - The ``body`` / ``orelse`` / ``finalbody`` / ``handlers`` of nested
+      ``if``, ``for``, ``while``, ``try``, and ``with`` blocks inside the
+      function — detected one level deep (sufficient for most real smells).
+
+    Terminal nodes
+    --------------
+    ``Return``, ``Raise``, ``Break``, ``Continue`` — each makes every
+    subsequent sibling in the **same block** unreachable.
+
+    Returns
+    -------
+    List of ``(lineno, node_type_label)`` for every unreachable statement.
+    """
+    TERMINALS = (pyast.Return, pyast.Raise, pyast.Break, pyast.Continue)
+
+    def _scan_block(stmts: list) -> list[tuple[int, str]]:
+        found: list[tuple[int, str]] = []
+        terminal_seen = False
+        for stmt in stmts:
+            if terminal_seen:
+                found.append((stmt.lineno, type(stmt).__name__))
+            elif isinstance(stmt, TERMINALS):
+                terminal_seen = True
+        return found
+
+    results: list[tuple[int, str]] = []
+
+    # Top-level function body
+    results.extend(_scan_block(func_node.body))
+
+    # Nested blocks one level deep
+    for stmt in pyast.walk(func_node):
+        if stmt is func_node:
+            continue
+        for attr in ("body", "orelse", "finalbody"):
+            block = getattr(stmt, attr, None)
+            if isinstance(block, list) and block:
+                results.extend(_scan_block(block))
+        # try/except handlers
+        if isinstance(stmt, pyast.Try):
+            for handler in (stmt.handlers or []):
+                results.extend(_scan_block(handler.body))
+
+    return results
+
+
+def _detect_unused_variables(
+    func_node: pyast.FunctionDef | pyast.AsyncFunctionDef,
+) -> list[tuple[int, str]]:
+    """Detect local variables that are assigned inside *func_node* but never
+    subsequently read within that same function.
+
+    What counts as a store (definition)
+    ------------------------------------
+    - ``Name`` with ``Store`` context (plain ``x = ...``)
+    - ``AnnAssign`` with a ``Name`` target (``x: int = ...``)
+    - Loop variables in ``For`` statements
+    - ``NamedExpr`` walrus operator targets (``y := expr``)
+
+    What counts as a load (use)
+    ---------------------------
+    - ``Name`` with ``Load`` context anywhere inside the function
+
+    Exclusions
+    ----------
+    - Names equal to ``"_"`` (conventional throwaway)
+    - Names starting with ``"__"`` (dunder)
+    - Function parameters (already declared by the signature)
+    - Names used in augmented assignment (``x += 1``) — the ``AugAssign``
+      target appears as ``Store`` in CPython's AST but semantically the
+      variable must already have a value, so it is *read first*.
+
+    Returns
+    -------
+    List of ``(lineno, variable_name)`` for each unused local.
+    """
+    # Collect parameter names — these are not "unused variables"
+    param_names: set[str] = set()
+    for arg in (
+        func_node.args.args
+        + func_node.args.posonlyargs
+        + func_node.args.kwonlyargs
+        + ([func_node.args.vararg] if func_node.args.vararg else [])
+        + ([func_node.args.kwarg] if func_node.args.kwarg else [])
+    ):
+        param_names.add(arg.arg)
+
+    # Augmented-assignment targets (x += 1): the variable must exist, treat as load
+    aug_names: set[str] = set()
+    for node in pyast.walk(func_node):
+        if isinstance(node, pyast.AugAssign) and isinstance(node.target, pyast.Name):
+            aug_names.add(node.target.id)
+
+    # Bare annotations (x: int  with NO value) generate a Name/Store node in
+    # pyast.walk but are NOT real assignments — exclude them from the store set.
+    bare_ann_names: set[str] = set()
+    for node in pyast.walk(func_node):
+        if (
+            isinstance(node, pyast.AnnAssign)
+            and isinstance(node.target, pyast.Name)
+            and node.value is None          # bare annotation, no assignment
+        ):
+            bare_ann_names.add(node.target.id)
+
+    stored: dict[str, int] = {}   # name → first-assignment lineno
+    loaded: set[str] = set()
+
+    for node in pyast.walk(func_node):
+        # Plain assignment target
+        if isinstance(node, pyast.Name):
+            if isinstance(node.ctx, pyast.Store):
+                name = node.id
+                if (
+                    name != "_"
+                    and not name.startswith("__")
+                    and name not in param_names
+                    and name not in aug_names
+                    and name not in bare_ann_names  # exclude bare type hints
+                    and name not in stored          # keep the first assignment lineno
+                ):
+                    stored[name] = node.lineno
+            elif isinstance(node.ctx, pyast.Load):
+                loaded.add(node.id)
+        # Annotated assignment:  x: int = 5
+        elif isinstance(node, pyast.AnnAssign) and isinstance(node.target, pyast.Name):
+            name = node.target.id
+            if (
+                node.value is not None   # skip bare annotations like  x: int
+                and name != "_"
+                and not name.startswith("__")
+                and name not in param_names
+                and name not in aug_names
+                and name not in stored
+            ):
+                stored[name] = node.target.lineno
+        # Walrus operator  (y := expr)
+        elif isinstance(node, pyast.NamedExpr):
+            name = node.target.id
+            if name != "_" and not name.startswith("__") and name not in param_names:
+                stored.setdefault(name, node.target.lineno)
+        # For loop variable
+        elif isinstance(node, pyast.For) and isinstance(node.target, pyast.Name):
+            name = node.target.id
+            if name != "_" and not name.startswith("__") and name not in param_names:
+                stored.setdefault(name, node.target.lineno)
+
+    unused = [(lineno, name) for name, lineno in stored.items() if name not in loaded]
+    unused.sort(key=lambda t: t[0])
+    return unused
+
+
+_CONST_PREFIXES = ("MAX_", "MIN_", "DEFAULT_", "CONST_", "NUM_", "TIMEOUT_", "PORT_", "LIMIT_", "TOTAL_")
+
+def _count_code_lines(source_lines: list[str], start_line: int, end_line: int) -> int:
+    """Count non-blank and non-comment lines of code within [start_line, end_line] (1-indexed)."""
+    if not source_lines:
+        return max(0, end_line - start_line)
+    count = 0
+    in_multiline = False
+    for i in range(max(0, start_line - 1), min(len(source_lines), end_line)):
+        line = source_lines[i].strip()
+        if not line:
+            continue
+        if line.startswith("#") or line.startswith("//"):
+            continue
+        if line.startswith(('"""', "'''")):
+            if line.endswith(('"""', "'''")) and len(line) > 3:
+                continue
+            in_multiline = not in_multiline
+            continue
+        if in_multiline:
+            if line.endswith(('"""', "'''")):
+                in_multiline = False
+            continue
+        count += 1
+    return count
+
+
+def _is_python_constant_assignment(node: pyast.Constant) -> bool:
+    """Return True if node is assigned to a constant identifier (e.g. MAX_RETRY = 5)."""
+    parent = getattr(node, "parent", None)
+    while parent and isinstance(parent, (pyast.UnaryOp, pyast.BinOp)):
+        parent = getattr(parent, "parent", None)
+
+    if not parent:
+        return False
+
+    def _is_const_name(name: str) -> bool:
+        if not name:
+            return False
+        if name.isupper() or any(name.startswith(p) for p in _CONST_PREFIXES):
+            return True
+        return False
+
+    if isinstance(parent, pyast.Assign):
+        for target in parent.targets:
+            if isinstance(target, pyast.Name) and _is_const_name(target.id):
+                return True
+            elif isinstance(target, pyast.Attribute) and _is_const_name(target.attr):
+                return True
+            elif isinstance(target, (pyast.Tuple, pyast.List)):
+                for elt in target.elts:
+                    name = elt.id if isinstance(elt, pyast.Name) else getattr(elt, "attr", "")
+                    if _is_const_name(name):
+                        return True
+
+    elif isinstance(parent, pyast.AnnAssign):
+        target = parent.target
+        name = target.id if isinstance(target, pyast.Name) else getattr(target, "attr", "")
+        if _is_const_name(name):
+            return True
+
+    return False
+
+
+# ---------------------------------------------------------------------------
 # Code smell detectors (Python)
 # ---------------------------------------------------------------------------
 
@@ -237,6 +524,7 @@ class _PythonSmellVisitor(pyast.NodeVisitor):
         self.smells: list[dict] = []
         self._class_stack: list[str] = []
         self._func_stack: list[str] = []  # tracks enclosing function names
+        self.source_lines: list[str] = []
 
     def _add(self, smell_type: str, message: str, line: int | None,
              severity: str = "medium", entity: str | None = None, **extra: Any):
@@ -264,20 +552,20 @@ class _PythonSmellVisitor(pyast.NodeVisitor):
     def visit_FunctionDef(self, node: pyast.FunctionDef):
         self._func_stack.append(node.name)
 
-        body_lines = (node.end_lineno or node.lineno) - node.lineno
+        end_line = node.end_lineno or node.lineno
+        code_lines = _count_code_lines(self.source_lines, node.lineno + 1, end_line) if self.source_lines else ((node.end_lineno or node.lineno) - node.lineno)
         # Exclude self/cls from parameter count (FIX-01)
         real_args = [a for a in node.args.args if a.arg not in ("self", "cls")]
         # FIX-04: compute CC once, reuse for all smells on this function
         cc = _estimate_cc(node)
-        end_line = node.end_lineno or node.lineno
 
-        if body_lines > 30:
+        if code_lines > 30:
             # FIX-01: parameter_count
             # FIX-02: start_line / end_line
             # FIX-04: cyclomatic_complexity
             self._add(
                 "LongMethod",
-                f"Function '{node.name}' has {body_lines} lines (>30)",
+                f"Function '{node.name}' has {code_lines} lines of code (>30)",
                 node.lineno, "high", entity=node.name,
                 parameter_count=len(real_args),
                 start_line=node.lineno,
@@ -324,6 +612,29 @@ class _PythonSmellVisitor(pyast.NodeVisitor):
                         chain_length=depth,
                     )
                     break  # one report per function is sufficient
+
+        # ── UnreachableCode — real dead statements after return/raise ─────────
+        unreachable = _detect_unreachable_code(node)
+        for lineno, label in unreachable:
+            self._add(
+                "UnreachableCode",
+                f"Unreachable statement '{label}' after unconditional return/raise "
+                f"in '{node.name}' — consider Remove Dead Code",
+                lineno, "low", entity=node.name,
+                start_line=node.lineno,
+                end_line=end_line,
+            )
+
+        # ── UnusedVariable — assigned but never read locals ───────────────────
+        unused_vars = _detect_unused_variables(node)
+        for lineno, varname in unused_vars:
+            self._add(
+                "UnusedVariable",
+                f"Variable '{varname}' is assigned in '{node.name}' but never used — "
+                "consider Remove Dead Code or inline the value",
+                lineno, "low", entity=node.name,
+                variable_name=varname,
+            )
 
         self.generic_visit(node)
         self._func_stack.pop()
@@ -447,6 +758,9 @@ class _PythonSmellVisitor(pyast.NodeVisitor):
 
     def visit_Constant(self, node: pyast.Constant):
         if isinstance(node.value, (int, float)) and node.value not in (0, 1, -1, 2, True, False):
+            if _is_python_constant_assignment(node):
+                return  # Constant assignment -> NOT a magic number
+
             parent = getattr(node, "parent", None)
             while parent and isinstance(parent, (pyast.UnaryOp, pyast.BinOp)):
                 parent = getattr(parent, "parent", None)
@@ -490,7 +804,24 @@ class _PythonSmellVisitor(pyast.NodeVisitor):
         self.generic_visit(node)
 
 
-def _analyze_python_smells(source: str) -> list[dict]:
+def _analyze_python_smells(
+    source: str,
+    repo_ref_index: set[str] | None = None,
+) -> list[dict]:
+    """Analyse a single Python source file for code smells.
+
+    Parameters
+    ----------
+    source:
+        Raw source text of the file.
+    repo_ref_index:
+        Optional set of all names referenced anywhere in the repository
+        (built by :func:`build_repo_name_index`).  When provided, dead-code
+        detection uses repository-wide visibility: a function/class is only
+        flagged if it is absent from **both** the current file's own AST walk
+        *and* this cross-file index.  When ``None``, the check is restricted
+        to the current file only (single-file analysis mode).
+    """
     try:
         tree = pyast.parse(source)
         for parent in pyast.walk(tree):
@@ -502,12 +833,26 @@ def _analyze_python_smells(source: str) -> list[dict]:
     except SyntaxError:
         return []
 
-
     visitor = _PythonSmellVisitor()
+    visitor.source_lines = source.splitlines()
     visitor.visit(tree)
     smells = list(visitor.smells)
 
-    # ── FIX-07: DeadCode — defined-but-unreferenced functions/classes ─────────
+    # ── DeadCode — defined-but-unreferenced functions/classes ─────────────────
+    #
+    # REPOSITORY-WIDE mode (repo_ref_index provided)
+    # -----------------------------------------------
+    # A function/class is dead only when its name is absent from:
+    #   1. The current file's AST (same-file call sites), AND
+    #   2. The repository-wide name index (cross-file imports/usages).
+    # This eliminates false positives where a function is exported and
+    # consumed by another module — the most common cause of spurious
+    # re-detection after refactoring.
+    #
+    # SINGLE-FILE mode (repo_ref_index is None)
+    # ------------------------------------------
+    # Falls back to checking only within the current file.  The message
+    # explicitly says "within this file" to avoid misleading the developer.
     try:
         defined_funcs: dict[str, int] = {}
         defined_classes: dict[str, int] = {}
@@ -519,24 +864,44 @@ def _analyze_python_smells(source: str) -> list[dict]:
                 if node.name not in defined_classes:
                     defined_classes[node.name] = node.lineno
 
+        # Build the set of names actually used inside THIS file (Load context)
+        # We use Load-context Name nodes which represent actual references, not
+        # definitions — this is more precise than the old approach that counted
+        # all Name occurrences (which included the definition itself).
+        locally_loaded: set[str] = {
+            node.id
+            for node in pyast.walk(tree)
+            if isinstance(node, pyast.Name) and isinstance(node.ctx, pyast.Load)
+        }
+
+        # Names that are "definitely alive": present in local load set OR repo index
+        alive: set[str] = locally_loaded
+        if repo_ref_index is not None:
+            alive = locally_loaded | repo_ref_index
+
+        # Determine scope label for the smell message
+        scope_label = "this repository" if repo_ref_index is not None else "this file"
+
+        # Well-known entry-point / framework names that must never be flagged
+        _SAFE_NAMES = {
+            "main", "setup", "teardown", "run", "test", "app",
+            "handler", "lambda_handler", "wsgi", "asgi",
+        }
+
         for name, lineno in {**defined_funcs, **defined_classes}.items():
-            # Skip dunder names and well-known entry-points (false-positive prone)
-            if name.startswith("__") or name in (
-                "main", "setup", "teardown", "run", "test",
-            ):
+            # Skip dunder names — they are called via protocol, not by name
+            if name.startswith("__"):
                 continue
-            # A name used as a Name node anywhere (call, assign RHS, etc.)
-            usage_count = sum(
-                1 for node in pyast.walk(tree)
-                if isinstance(node, pyast.Name) and node.id == name
-            )
-            # usage_count == 0 means the name never appears as a Name reference
-            if usage_count == 0:
+            # Skip well-known framework entry points
+            if name in _SAFE_NAMES or name.startswith("test_"):
+                continue
+            # Only flag if the name is genuinely absent from the live set
+            if name not in alive:
                 smells.append({
                     "type": "DeadCode",
                     "message": (
-                        f"'{name}' is defined but never referenced within this file — "
-                        "consider Remove Dead Code"
+                        f"'{name}' is defined but never referenced in "
+                        f"{scope_label} — consider Remove Dead Code"
                     ),
                     "line": lineno,
                     "severity": "low",
@@ -688,6 +1053,19 @@ def _python_metrics(source: str, filename: str) -> dict:
 # Code smell detectors (Java - structural heuristics)
 # ---------------------------------------------------------------------------
 
+def _is_java_constant_line(line_str: str) -> bool:
+    if not line_str:
+        return False
+    if "final" in line_str or "#define" in line_str:
+        return True
+    m = re.search(r'\b([A-Za-z0-9_]*[A-Z][A-Z0-9_]*)\s*=\s*', line_str)
+    if m:
+        name = m.group(1)
+        if name.isupper() or any(name.startswith(p) for p in _CONST_PREFIXES):
+            return True
+    return False
+
+
 def _analyze_java_smells(source: str) -> list[dict]:
     smells = []
     if not JAVALANG_AVAILABLE:
@@ -714,7 +1092,7 @@ def _analyze_java_smells(source: str) -> list[dict]:
 
             if start_line is not None:
                 end_line = _java_method_end_line(source_lines, start_line)
-                method_loc = end_line - start_line
+                method_loc = _count_code_lines(source_lines, start_line + 1, end_line)
                 method_body = "\n".join(source_lines[start_line - 1:end_line])
                 cc = _java_cc(method_body)  # FIX-14
 
@@ -790,6 +1168,10 @@ def _analyze_java_smells(source: str) -> list[dict]:
 
                     pos = getattr(node, "position", None)
                     line_no = getattr(pos, "line", None) if pos else None
+                    line_str = source_lines[line_no - 1] if line_no and line_no <= len(source_lines) else ""
+                    if _is_java_constant_line(line_str):
+                        continue  # Constant definition -> NOT a magic number
+
                     parent = path[-1] if path else None
                     var_context = None
                     if isinstance(parent, javalang.tree.BinaryOperation):
@@ -841,6 +1223,9 @@ def _analyze_java_smells(source: str) -> list[dict]:
 
             split_lines = clean_java.splitlines()
             line_str = split_lines[line_no - 1] if line_no <= len(split_lines) else ""
+            if _is_java_constant_line(line_str):
+                continue  # Constant definition -> NOT a magic number
+
             var_context = None
             m_left = COMP_LEFT_RE.search(line_str)
             m_right = COMP_RIGHT_RE.search(line_str)
@@ -976,10 +1361,10 @@ def _analyze_c_smells(source: str, filename: str) -> list[dict]:
     smells: list[dict] = []
     ext = os.path.splitext(filename)[-1].lower()
 
-    # ── 1 & 2: LongFunction / TooManyParameters ──────────────────────────────
+    source_lines = source.splitlines()
     funcs = _find_functions_regex(source)
     for fn in funcs:
-        body_lines = fn["end_line"] - fn["start_line"]
+        body_lines = _count_code_lines(source_lines, fn["start_line"] + 1, fn["end_line"])
         if body_lines > 40:
             smells.append({
                 "type": "LongFunction",
@@ -1114,21 +1499,45 @@ def _build_smell_overview(smells: list[dict]) -> dict:
 # Public API
 # ---------------------------------------------------------------------------
 
-def generate_file_report(source: str, filename: str) -> dict:
+# ---------------------------------------------------------------------------
+# Public API Functions
+# ---------------------------------------------------------------------------
+
+def generate_file_report(
+    source: str,
+    filename: str,
+    repo_ref_index: set[str] | None = None,
+) -> dict:
     """
-    Generate a quality report for a single source file.
+    SPECIAL FUNCTION: Generate a comprehensive Quality & Code Smell Report for a single file.
+
+    -------------------------------------------------------------------------
+    VIVA/INTERVIEW NOTE (Single File Quality Analysis Workflow):
+    1. Language Routing: Dispatches file to language-specific smell detectors & metric analyzers
+       (`.py` -> Python visitors, `.java` -> Java visitors, `.c`/`.h` -> C detectors).
+    2. Comments Smell heuristic: Triggers if LOC > 50 and comment ratio > 30% (signals over-complex code).
+    3. Category Enrichment (`_enrich_smells_with_category`): Maps each smell to its canonical taxonomy group
+       (Bloaters, OO Abusers, Change Preventers, Dispensables, Couplers, Security).
+    4. Quality Scoring (`_compute_score`): Computes 0-100 score by deducting points per smell based on severity.
+    5. Dead-Code Accuracy: When `repo_ref_index` is supplied (by `generate_repo_report`), Python dead-code
+       detection checks across the entire repository — functions/classes imported by other files are never
+       flagged.  Without the index (single-file mode), detection is scoped to the file itself.
+    -------------------------------------------------------------------------
 
     Args:
-        source:   Raw source code string.
-        filename: Original filename (used for language detection).
+        source (str): Raw source code text.
+        filename (str): Target filename for language detection and entity tagging.
+        repo_ref_index (set[str] | None): Optional cross-file name index built by
+            `build_repo_name_index`.  Pass ``None`` (default) for standalone single-file analysis.
 
     Returns:
-        CUQA quality report dict for the file.
+        dict: Complete CUQA Quality Report dict for the file.
     """
     ext = os.path.splitext(filename)[-1].lower()
 
     if ext == ".py":
-        smells = _analyze_python_smells(source)
+        # Pass the repo index so dead-code detection is cross-file aware
+        smells = _analyze_python_smells(source, repo_ref_index=repo_ref_index)
         metrics = _python_metrics(source, filename)
         language = "python"
     elif ext == ".java":
@@ -1146,7 +1555,7 @@ def generate_file_report(source: str, filename: str) -> dict:
             "error": f"Unsupported file type: '{ext}'",
         }
 
-    # FIX-08: Comments smell — high comment ratio signals complex code
+    # Comments smell heuristic — high comment density often indicates complex or unreadable logic
     if language in ("python", "java"):
         loc = metrics.get("lines_of_code", 0)
         comment_lines = metrics.get("comment_lines", 0)
@@ -1165,7 +1574,7 @@ def generate_file_report(source: str, filename: str) -> dict:
     # Enrich each smell with category + category_priority fields
     _enrich_smells_with_category(smells)
 
-    # Build structured overview grouped by category
+    # Build structured overview grouped by category taxonomy
     smell_overview = _build_smell_overview(smells)
 
     severity_counts = {"high": 0, "medium": 0, "low": 0}
@@ -1184,16 +1593,92 @@ def generate_file_report(source: str, filename: str) -> dict:
     }
 
 
-def generate_repo_report(file_reports: list[dict]) -> dict:
+def generate_repo_report(
+    file_reports: list[dict],
+    sources: list[tuple[str, str]] | None = None,
+) -> dict:
     """
-    Aggregate per-file reports into a repository-level quality report.
+    SPECIAL FUNCTION: Aggregate single-file reports into a repository-level quality report.
+
+    -------------------------------------------------------------------------
+    VIVA/INTERVIEW NOTE (Repository Aggregation & RDP Integration):
+    - Sums total Lines of Code (LOC) and total code smells across all analyzed files.
+    - Aggregates severity distributions (High, Medium, Low).
+    - Computes repository-wide average quality score (0.0 to 100.0).
+    - Produces a consolidated `code_smell_overview` across all files for downstream RDP Agent consumption.
+
+    ACCURACY NOTE — Cross-file Dead Code Detection:
+    When `sources` is provided (list of (filename, source_text) pairs for every Python file
+    in the repo), this function:
+      1. Calls `build_repo_name_index(sources)` once to gather every name referenced anywhere
+         in the repository (imports, attribute accesses, Load-context Names).
+      2. Re-analyses each Python file's smells using that index so that functions/classes
+         imported by other modules are never falsely flagged as dead code.
+      3. Rebuilds each Python file report's `code_smells`, `code_smell_overview`,
+         `smell_summary`, and `quality_score` in-place with the more accurate results.
+    Non-Python files (Java, C) are not affected.
+    -------------------------------------------------------------------------
 
     Args:
-        file_reports: List of results from generate_file_report().
+        file_reports (list[dict]): Array of file report dictionaries generated by `generate_file_report`.
+        sources (list[tuple[str,str]] | None): Optional list of ``(relative_path, source_text)``
+            pairs for **all** Python files in the repo.  Supply this from the
+            `/api/quality-report` endpoint to enable repository-wide dead-code accuracy.
 
     Returns:
-        Aggregated CUQA quality report.
+        dict: Repository-level quality report dictionary.
     """
+    # ── Repository-wide dead-code re-analysis (Python only) ──────────────────
+    # When source texts are available, rebuild a cross-file name index and
+    # re-run Python smell detection for every Python file with that index.
+    # This is the core fix: a function is only "dead" if NOTHING anywhere in
+    # the repo references it — not just nothing in the same file.
+    if sources:
+        py_sources = [
+            (fname, src) for fname, src in sources
+            if os.path.splitext(fname)[-1].lower() == ".py"
+        ]
+        if py_sources:
+            repo_index = build_repo_name_index(py_sources)
+
+            # Re-run analysis for every Python file report and update it in place
+            source_map: dict[str, str] = {fname: src for fname, src in py_sources}
+            for report in file_reports:
+                fname = report.get("file", "")
+                if os.path.splitext(fname)[-1].lower() != ".py":
+                    continue
+                src = source_map.get(fname)
+                if src is None:
+                    continue
+                # Re-detect smells with full cross-file context
+                accurate_smells = _analyze_python_smells(src, repo_ref_index=repo_index)
+                metrics = report.get("metrics", {})
+                # Reapply comments smell heuristic
+                loc = metrics.get("lines_of_code", 0)
+                comment_lines = metrics.get("comment_lines", 0)
+                if loc > 50 and comment_lines / max(loc, 1) > 0.3:
+                    accurate_smells.append({
+                        "type": "Comments",
+                        "message": (
+                            f"Comment ratio {comment_lines / loc:.0%} (>30%) suggests "
+                            "overly complex code — consider Extract Method or Rename Method"
+                        ),
+                        "line": None,
+                        "severity": "low",
+                        "entity": fname,
+                    })
+                _enrich_smells_with_category(accurate_smells)
+                severity_counts = {"high": 0, "medium": 0, "low": 0}
+                for smell in accurate_smells:
+                    s = smell.get("severity", "medium")
+                    severity_counts[s] = severity_counts.get(s, 0) + 1
+                # Update report in-place with accurate results
+                report["code_smells"] = accurate_smells
+                report["code_smell_overview"] = _build_smell_overview(accurate_smells)
+                report["smell_summary"] = severity_counts
+                report["quality_score"] = _compute_score(accurate_smells, metrics)
+
+    # ── Aggregate cross-file metrics ─────────────────────────────────────────
     total_loc = sum(r.get("metrics", {}).get("lines_of_code", 0) for r in file_reports)
     total_smells = sum(len(r.get("code_smells", [])) for r in file_reports)
     high_smells = sum(r.get("smell_summary", {}).get("high", 0) for r in file_reports)
@@ -1205,16 +1690,11 @@ def generate_repo_report(file_reports: list[dict]) -> dict:
         if files_analyzed else 100
     )
 
-    # ── Aggregate code_smell_overview across all file reports ────────────────
-    # Collect every individual smell from all files (already enriched with
-    # category / category_priority by generate_file_report) and rebuild a
-    # single repo-level overview so callers get one consolidated view.
+    # Collect and aggregate code_smell_overview across all files
     all_smells: list[dict] = []
     for r in file_reports:
         all_smells.extend(r.get("code_smells", []))
 
-    # If for some reason smells haven't been enriched yet (e.g. error reports),
-    # run enrichment defensively before building the overview.
     _enrich_smells_with_category(all_smells)
     repo_smell_overview = _build_smell_overview(all_smells)
 
@@ -1236,10 +1716,23 @@ def generate_repo_report(file_reports: list[dict]) -> dict:
 
 
 def _compute_score(smells: list[dict], metrics: dict) -> float:
-    """Compute a 0–100 quality score (higher = better)."""
+    """
+    SPECIAL ALGORITHM: Compute a 0–100 Code Quality Score.
+
+    -------------------------------------------------------------------------
+    VIVA/INTERVIEW NOTE (Quality Score Formula):
+    - Base Score = 100.0
+    - Point Deductions:
+        - High Severity Smell   (-8 points)
+        - Medium Severity Smell (-4 points)
+        - Low Severity Smell    (-1 point)
+    - Minimum Floor: 0.0 points.
+    -------------------------------------------------------------------------
+    """
     score = 100.0
     for smell in smells:
         severity = smell.get("severity", "medium")
         deduction = {"high": 8, "medium": 4, "low": 1}.get(severity, 2)
         score -= deduction
     return max(0.0, round(score, 1))
+

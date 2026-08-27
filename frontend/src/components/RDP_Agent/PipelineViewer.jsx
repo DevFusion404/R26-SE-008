@@ -697,7 +697,7 @@ export default function PipelineViewer({ trace, id = 'pipeline-section' }) {
       </div>
 
       {/* Active Panel Content */}
-      <div style={{ padding: '12px', background: 'rgba(139,92,246,0.02)', borderRadius: '6px', border: '1px solid rgba(139,92,246,0.1)', marginLeft: 'var(--sp-5)', marginRight: 'var(--sp-5)', marginBottom: 'var(--sp-5)' }}>
+      <div style={{ marginLeft: 'var(--sp-5)', marginRight: 'var(--sp-5)', marginBottom: 'var(--sp-5)' }}>
         {getActivePanel()}
       </div>
     </section>

@@ -147,7 +147,7 @@ export default function Overview({ onNavigate }) {
       {/* ── Hero ─────────────────────────────────────────────── */}
       <div style={{ padding: '4px 0 0' }}>
         <span className="badge badge-accent" style={{ marginBottom: 16, display: 'inline-flex', gap: 6 }}>
-          ⚠ RESEARCH PROTOTYPE · R26-SE-008
+          ⚡ AUTOMATED REFACTORING PLATFORM
         </span>
 
         <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 24, flexWrap: 'wrap' }}>

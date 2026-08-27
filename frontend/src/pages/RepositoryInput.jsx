@@ -9,8 +9,9 @@
  * and stored alongside each analysis entry.
  */
 
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef } from 'react';
 import CUQAAgentService from '../services/cuqaAgentService';
+import { cacheSourceFiles, readSourceFilesFromZip, saveSourceContext } from '../utils/sourceCache';
 
 const HISTORY_KEY = 'cuqa_analysis_history';
 const MAX_HISTORY  = 20;
@@ -90,13 +91,8 @@ export default function RepositoryInput({ onLoaded }) {
   const [success,       setSuccess]       = useState(null);
   // detectedLangs: { breakdown:{Python:12,Java:3}, detected_languages:['Python','Java'], primary_language:'Python', is_polyglot:true }
   const [detectedLangs, setDetectedLangs] = useState(null);
-  const [history,       setHistory]       = useState([]);
+  const [history,       setHistory]       = useState(() => loadHistory());
   const fileRef = useRef(null);
-
-  // Load persisted history on mount
-  useEffect(() => {
-    setHistory(loadHistory());
-  }, []);
 
   function toggleFilter(key) {
     setFilters(f => ({ ...f, [key]: !f[key] }));
@@ -170,6 +166,15 @@ export default function RepositoryInput({ onLoaded }) {
 
     try {
       const data = await CUQAAgentService.uploadZip(file);
+      try {
+        const sourceFiles = await readSourceFilesFromZip(file);
+        cacheSourceFiles(sourceFiles, {
+          repoName: data.repo_name || file.name,
+          origin: 'uploaded_zip',
+        });
+      } catch {
+        saveSourceContext({ repoName: data.repo_name || file.name, origin: 'uploaded_zip' });
+      }
 
       // Store detected language info in state so we can display it
       const langInfo = {
@@ -194,6 +199,11 @@ export default function RepositoryInput({ onLoaded }) {
 
     try {
       const data = await CUQAAgentService.loadGithubRepo(githubUrl);
+      saveSourceContext({
+        repoName: data.repo_name || '',
+        repoUrl: githubUrl.trim(),
+        origin: 'github',
+      });
 
       // Store detected language info in state so we can display it
       const langInfo = {

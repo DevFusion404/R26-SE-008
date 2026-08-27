@@ -4,6 +4,8 @@ const HOSTED_AGENT_DEFAULTS = {
   VITE_CUQA_AGENT_API_URL: 'https://cuqaagent.gentleglacier-0204e61b.southeastasia.azurecontainerapps.io',
   VITE_CUQA_API_URL: 'https://cuqaagent.gentleglacier-0204e61b.southeastasia.azurecontainerapps.io',
   VITE_TRANSFORMATION_AGENT_API_URL: 'https://sctvaagent.gentleglacier-0204e61b.southeastasia.azurecontainerapps.io',
+  VITE_DIWO_API_URL: 'https://diwoagent.gentleglacier-0204e61b.southeastasia.azurecontainerapps.io/api',
+  VITE_API_URL: 'https://diwoagent.gentleglacier-0204e61b.southeastasia.azurecontainerapps.io/api',
 };
 
 const LOCAL_URL_RE = /^https?:\/\/(?:localhost|127\.0\.0\.1|\[::1\])(?::\d+)?(?:[/?#]|$)/i;

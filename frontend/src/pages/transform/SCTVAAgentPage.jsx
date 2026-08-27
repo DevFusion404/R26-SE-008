@@ -2,9 +2,15 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import SCTVAAgentService from '../../services/sctvaAgentService';
 import transformBadge from '../../assets/transform-badge.svg';
 import { getEnv } from '../../config/env';
+import {
+  cacheSourceFiles,
+  fetchGithubSourceFiles,
+  getCachedSourceFiles,
+  getSourceContext,
+} from '../../utils/sourceCache';
 import './SCTVAAgentPage.css';
 
-const CUQA_API = getEnv('VITE_CUQA_AGENT_API_URL', getEnv('VITE_CUA_API_URL', 'http://localhost:8080'));
+const CUQA_API = getEnv('VITE_CUQA_AGENT_API_URL', getEnv('VITE_CUA_API_URL', 'http://localhost:8080')).replace(/\/+$/, '');
 const CUQA_IMPORT_LIMIT = 1000;
 const RDP_AGENT_SESSION_KEY = 'rdp-agent-page-state';
 const RDP_AGENT_LOCAL_SESSION_KEY = 'rdp_last_session';
@@ -965,11 +971,10 @@ function formatFileList(files, limit = 5) {
 }
 
 function replaceSourceFilesByRawImport(currentFiles, rawImport) {
-  const rawSources = rawImport?.filesByPath || new Map();
-  if (!rawSources.size) return currentFiles;
+  if (!rawImport?.filesByPath?.size) return currentFiles;
 
   return currentFiles.map(file => {
-    const imported = rawSources.get(normalizePathForMatch(file.name));
+    const imported = findRawSourceForPath(rawImport, file.name);
     if (!imported) return file;
 
     return {
@@ -980,6 +985,86 @@ function replaceSourceFilesByRawImport(currentFiles, rawImport) {
       sourceMode: imported.source_mode || 'raw',
     };
   });
+}
+
+function buildRawSourceImport(files, source = 'workspace') {
+  const normalizedFiles = (files || [])
+    .filter(file => file?.file_name && typeof file.source_code === 'string')
+    .map(file => ({
+      ...file,
+      source_mode: file.source_mode || 'raw',
+      origin: file.origin || source,
+    }));
+
+  return {
+    filesByPath: new Map(normalizedFiles.map(file => [normalizePathForMatch(file.file_name), file])),
+    files: normalizedFiles,
+    imported: normalizedFiles.length,
+    source,
+  };
+}
+
+function findRawSourceForPath(rawImport, filePath) {
+  const rawSources = rawImport?.filesByPath || new Map();
+  if (!rawSources.size) return null;
+
+  const fileKey = normalizePathForMatch(filePath);
+  const fileBase = pathBaseName(fileKey);
+  const exact = rawSources.get(fileKey);
+  if (exact) return exact;
+
+  const values = [...rawSources.values()];
+  const pathMatch = values.find(file => {
+    const sourceKey = normalizePathForMatch(file.file_name);
+    return sourceKey.endsWith(`/${fileKey}`) || fileKey.endsWith(`/${sourceKey}`);
+  });
+  if (pathMatch) return pathMatch;
+
+  const baseMatches = values.filter(file => pathBaseName(file.file_name) === fileBase);
+  return baseMatches.length === 1 ? baseMatches[0] : null;
+}
+
+function mergeRawSourceImports(primary, fallback) {
+  const merged = buildRawSourceImport(primary?.files || [...(primary?.filesByPath?.values?.() || [])], primary?.source || 'workspace');
+  const existingKeys = new Set(merged.filesByPath.keys());
+
+  (fallback?.files || [...(fallback?.filesByPath?.values?.() || [])]).forEach(file => {
+    if (!file?.file_name || typeof file.source_code !== 'string') return;
+    const key = normalizePathForMatch(file.file_name);
+    if (existingKeys.has(key) || findRawSourceForPath(merged, file.file_name)) return;
+    existingKeys.add(key);
+    merged.files.push(file);
+    merged.filesByPath.set(key, file);
+  });
+
+  merged.imported = merged.files.length;
+  return {
+    ...primary,
+    ...merged,
+    missing: (fallback?.missing || primary?.missing || []).filter(path => !findRawSourceForPath(merged, path)),
+    error: primary?.error || fallback?.error || '',
+    endpointMissing: Boolean(primary?.endpointMissing && !fallback?.imported),
+    source: primary?.source || fallback?.source || merged.source,
+  };
+}
+
+async function fetchBrowserFallbackSources(filePaths, context) {
+  const cached = getCachedSourceFiles(filePaths);
+  if (!cached.missing.length || !context?.repoUrl) return cached;
+
+  try {
+    const github = await fetchGithubSourceFiles(cached.missing, context.repoUrl);
+    if (github.imported) {
+      cacheSourceFiles(github.files, {
+        repoName: context.repoName,
+        repoUrl: context.repoUrl,
+        origin: 'github_raw',
+      });
+    }
+    return mergeRawSourceImports(cached, github);
+  } catch {
+    return cached;
+  }
 }
 
 function fileMatchesPlanTarget(fileName, targetFiles) {
@@ -1503,14 +1588,9 @@ async function fetchSctvaCuqaWorkspaceSources(filePaths) {
       };
     }
 
-    const filesByPath = new Map(
-      data.files
-        .filter(file => file?.file_name && typeof file.source_code === 'string')
-        .map(file => [normalizePathForMatch(file.file_name), file])
-    );
+    const sourceImport = buildRawSourceImport(data.files, 'sctva_cuqa_sources');
     return {
-      filesByPath,
-      imported: filesByPath.size,
+      ...sourceImport,
       missing: Array.isArray(data.missing) ? data.missing : [],
       error: '',
       endpointMissing: false,
@@ -1523,6 +1603,52 @@ async function fetchSctvaCuqaWorkspaceSources(filePaths) {
       error: 'SCTVA CUQA source import endpoint is unavailable.',
       endpointMissing: true,
     };
+  }
+}
+
+async function fetchCuqaWorkspaceSources(filePaths) {
+  const context = getSourceContext();
+  try {
+    const data = await fetchCuqaJson('/api/source-files', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ file_paths: filePaths }),
+    });
+
+    if (!Array.isArray(data.files)) {
+      throw new Error('CUQA source-files response did not include files.');
+    }
+
+    const sourceImport = buildRawSourceImport(data.files, data.source || 'cuqa_workspace');
+    if (sourceImport.imported) {
+      cacheSourceFiles(sourceImport.files, {
+        repoName: context.repoName,
+        repoUrl: context.repoUrl,
+        origin: 'cuqa_workspace',
+      });
+    }
+
+    return mergeRawSourceImports({
+      ...sourceImport,
+      missing: Array.isArray(data.missing) ? data.missing : [],
+      error: '',
+      endpointMissing: false,
+      source: data.source || 'cuqa_workspace',
+    }, await fetchBrowserFallbackSources(filePaths, context));
+  } catch (error) {
+    const fallback = await fetchSctvaCuqaWorkspaceSources(filePaths);
+    if (fallback.imported) {
+      cacheSourceFiles(fallback.files || [...fallback.filesByPath.values()], {
+        repoName: context.repoName,
+        repoUrl: context.repoUrl,
+        origin: 'sctva_cuqa_sources',
+      });
+    }
+    return mergeRawSourceImports({
+      ...fallback,
+      error: fallback.error || error.message || 'CUQA raw source import endpoint is unavailable.',
+      endpointMissing: fallback.endpointMissing,
+    }, await fetchBrowserFallbackSources(filePaths, context));
   }
 }
 
@@ -2368,6 +2494,7 @@ export default function SCTVAAgentPage() {
           sourceMode: 'raw',
         }))
       );
+      cacheSourceFiles(loaded, { origin: 'manual_upload' });
 
       setSourceFiles(loaded);
       setSourceFileName(summarizeSourceFiles(loaded));
@@ -2413,20 +2540,19 @@ export default function SCTVAAgentPage() {
       }
 
       const selectedPaths = paths.slice(0, CUQA_IMPORT_LIMIT);
-      const cuqaRawImport = await fetchSctvaCuqaWorkspaceSources(selectedPaths);
-      const cuqaRawSources = cuqaRawImport.filesByPath;
+      const cuqaRawImport = await fetchCuqaWorkspaceSources(selectedPaths);
       if (cuqaRawImport.imported) {
         pushLog(
           'INFO',
-          `Imported ${cuqaRawImport.imported} raw source file${cuqaRawImport.imported === 1 ? '' : 's'} from the CUQA temp workspace through SCTVA.`
+          `Imported ${cuqaRawImport.imported} raw source file${cuqaRawImport.imported === 1 ? '' : 's'} from the CUQA workspace.`
         );
       } else if (cuqaRawImport.endpointMissing) {
         pushLog(
           'WARN',
-          'The running SCTVA backend does not expose /sctva/cuqa-sources yet. Restart SCTVA backend to enable automatic raw CUQA source import.'
+          'No raw source endpoint or browser-cached source was available for the current CUQA workspace.'
         );
       }
-      const rawSourceFor = filePath => cuqaRawSources.get(normalizePathForMatch(filePath))?.source_code || '';
+      const rawSourceFor = filePath => findRawSourceForPath(cuqaRawImport, filePath)?.source_code || '';
       const firstParsed = await fetchCuqaParsedFile(selectedPaths[0], rawSourceFor(selectedPaths[0]));
       let loaded;
 
@@ -2613,7 +2739,7 @@ export default function SCTVAAgentPage() {
       `Recovering raw CUQA source for ${reconstructedTargets.length} RDP target file${reconstructedTargets.length === 1 ? '' : 's'} before transformation.`
     );
 
-    const rawImport = await fetchSctvaCuqaWorkspaceSources(reconstructedTargets.map(file => file.name));
+    const rawImport = await fetchCuqaWorkspaceSources(reconstructedTargets.map(file => file.name));
     if (rawImport.imported) {
       const updatedFiles = replaceSourceFilesByRawImport(currentFiles, rawImport);
       setSourceFiles(updatedFiles);
@@ -2627,14 +2753,14 @@ export default function SCTVAAgentPage() {
 
     const message = rawImport.endpointMissing
       ? [
-        'The running SCTVA backend is outdated and cannot import raw CUQA source files automatically.',
-        'Restart agents/transformation_agent/safe_code_transformation_agent, refresh this page, and SCTVA will auto-import CUQA files, RDP plan, and run transformation.',
+        'SCTVA could not recover raw source for the RDP target files from CUQA, browser cache, or the remembered GitHub URL.',
+        'Upload the target source files manually in SCTVA and run again.',
       ].join(' ')
       : [
         'SCTVA could not recover raw CUQA source for the RDP target files.',
         rawImport.error || '',
         rawImport.missing?.length ? `Missing: ${rawImport.missing.slice(0, 5).join(', ')}${rawImport.missing.length > 5 ? ` and ${rawImport.missing.length - 5} more` : ''}.` : '',
-        'Keep the CUQA backend workspace active, then refresh SCTVA and run again.',
+        'Load the same ZIP/GitHub repository in the Repository Input page, or upload the target files manually in SCTVA.',
       ].filter(Boolean).join(' ');
     throw new Error(message);
   }

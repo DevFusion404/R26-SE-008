@@ -30,6 +30,7 @@ from clients.sctva_client import (
 )
 from db.workflow_repository import log_event, parse_json_field
 from domain.metrics import compute_metrics_after
+from domain.audit_detail import DETAIL_LIMIT, capped
 from domain.sctva_mapper import (
     DEFAULT_EXECUTION_OPTIONS, collect_plan_source_paths, normalize_execute_result,
     normalize_language, normalize_plan_for_sctva,
@@ -95,6 +96,7 @@ def run_transformation(plan: dict, language: Optional[str] = None,
         sources = fetch_workspace_sources(paths)
     except SCTVAError as exc:
         if wf_id:
+            # Named paths, because "could not read 3 files" is not fixable.
             log_event(wf_id, "transformation", "sctva_sources_failed",
                       {"sctva_url": sctva_base_url(), "status": exc.status,
                        "reason": exc.message}, actor="system")
@@ -144,6 +146,21 @@ def run_transformation(plan: dict, language: Optional[str] = None,
     result = normalize_execute_result(raw, sources["files"])
 
     if wf_id:
+        # Per FILE, and counts for the rest.
+        #
+        # There is deliberately no per-ACTION list here. The actions are a
+        # one-to-one restatement of the approved plan steps, which the
+        # plan_approved entry already itemises as smell -> refactoring -> file;
+        # repeating them under a second name produced a block of rows carrying
+        # nothing the reader had not just read. The totals below say how many
+        # were dispatched, and the plan entry says what they were.
+        files_touched, files_omitted = capped([
+            {"file": f["path"], "changed": f["changed"], "success": f["success"],
+             "replacements": f["total_replacements"],
+             "rolled_back": f["rollback_occurred"]}
+            for f in result.get("files") or []
+        ])
+
         log_event(wf_id, "transformation", "sctva_transformation_executed", {
             "sctva_url":     sctva_base_url(),
             "request_id":    result["requestId"],
@@ -155,6 +172,9 @@ def run_transformation(plan: dict, language: Optional[str] = None,
             "files_missing": len(sources["missing"]),
             "success":       result["success"],
             "rollback":      result["rollbackOccurred"],
+            "file_detail":   files_touched,
+            "missing_files": sources["missing"][:DETAIL_LIMIT],
+            **({"files_omitted": files_omitted} if files_omitted else {}),
         }, actor="system")
 
     return {

@@ -92,6 +92,11 @@ export default function CodeSmellApprovalPage({
   const [filter, setFilter] = useState("all");
   const [search, setSearch] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
+  // Which half of the hand-off is running: "filtering" (fast, local to the
+  // backend) or "planning" (the RDP agent, which is the one worth waiting on).
+  // Named rather than a bare boolean because "it is still working" and "it is
+  // waiting on another agent" are different things to be told.
+  const [submitPhase, setSubmitPhase] = useState(null);
 
   // Which file's original source is open, and which smell inside it is focused.
   // { file, focusId } — focusId is null when the whole file was opened.
@@ -367,6 +372,27 @@ export default function CodeSmellApprovalPage({
         selection_mode: "file",
       };
 
+  /**
+   * Commit the selection and hand off to planning.
+   *
+   * Two requests, and the second one is slow:
+   *
+   *   POST /smell-selection-pass   filters the report — fast, no agent call
+   *   POST /select-smells          forwards it to the RDP agent, which plans
+   *                                the refactorings and can take many seconds
+   *
+   * The second is issued by the PARENT, inside `onProceed`. It used to be
+   * called without `await`, so this function's `finally` ran the instant the
+   * request was dispatched: the button re-enabled and its label went back to
+   * "Approve Selected Smells" while RDP was still working. The developer saw a
+   * normal-looking button doing nothing, clicked it again, and the parent's own
+   * `backendBusy` guard swallowed the second click silently — which is exactly
+   * the "the button doesn't work" this is fixing.
+   *
+   * Awaiting it keeps the stage disabled and the progress visible for the whole
+   * hand-off. `handleSmellsSelected` catches its own errors, so this resolves
+   * either way and the button can never stick.
+   */
   const handleApproveSelection = async () => {
     if (selectionCount === 0 || isSubmitting) return;
 
@@ -376,9 +402,13 @@ export default function CodeSmellApprovalPage({
     }
 
     setIsSubmitting(true);
+    setSubmitPhase("filtering");
     try {
       // The authoritative projection, recorded alongside the selection. Local
       // aggregation drives the live panel; this is what the audit trail gets.
+      // Deliberately not awaited — it is a side record, and blocking the
+      // hand-off on it would make the developer wait for a number they can
+      // already see in the panel.
       if (impacts) {
         analyseSelectionImpact(workflowId, selectionPayload)
           .then((result) => setInteractionNotes(result.interaction_notes || []))
@@ -393,12 +423,15 @@ export default function CodeSmellApprovalPage({
             : "File-wise selection in CodeSmellApprovalPage",
         },
       });
-      onProceed?.(report);
+
+      setSubmitPhase("planning");
+      await onProceed?.(report);
     } catch (error) {
       console.error("Smell approval failed:", error);
       alert(error.message);
     } finally {
       setIsSubmitting(false);
+      setSubmitPhase(null);
     }
   };
 
@@ -607,14 +640,39 @@ export default function CodeSmellApprovalPage({
             </span>
           )}
         </div>
-        <button onClick={handleApproveSelection} disabled={selectionCount === 0 || isSubmitting} style={{
-          padding: "10px 24px", borderRadius: 8, fontWeight: 700, fontSize: 13, cursor: selectionCount > 0 ? "pointer" : "not-allowed",
-          background: selectionCount > 0 ? C.accent : C.border, color: selectionCount > 0 ? "#000" : C.textMuted, border: "none",
-          boxShadow: selectionCount > 0 ? `0 0 20px ${C.accentGlow}` : "none", transition: "all 0.2s"
-        }}>
-          {isSubmitting ? "Generating report..." : "Approve Selected Smells →"}
+        <button
+          onClick={handleApproveSelection}
+          disabled={selectionCount === 0 || isSubmitting}
+          title={
+            isSubmitting
+              ? "Working — the Refactoring Planning Agent is generating the plan"
+              : undefined
+          }
+          style={{
+            padding: "10px 24px", borderRadius: 8, fontWeight: 700, fontSize: 13,
+            cursor: isSubmitting ? "wait" : selectionCount > 0 ? "pointer" : "not-allowed",
+            background: selectionCount > 0 ? C.accent : C.border,
+            color: selectionCount > 0 ? "#000" : C.textMuted,
+            border: "none",
+            boxShadow: selectionCount > 0 && !isSubmitting ? `0 0 20px ${C.accentGlow}` : "none",
+            opacity: isSubmitting ? 0.75 : 1,
+            transition: "all 0.2s",
+            display: "flex", alignItems: "center", gap: 9,
+          }}
+        >
+          {isSubmitting && <Spinner />}
+          {isSubmitting
+            ? submitPhase === "planning"
+              ? "Planning refactorings…"
+              : "Filtering report…"
+            : "Approve Selected Smells →"}
         </button>
       </div>
+
+      {/* Why the wait, and how far along it is. The planning step calls another
+          agent over HTTP, so a bare disabled button leaves the developer with
+          no way to tell "working" from "broken". */}
+      {isSubmitting && <SubmitProgress phase={submitPhase} smellCount={selectedSmells.length} />}
 
       {impactSummary && (
         <TradeOffPanel
@@ -654,6 +712,86 @@ export default function CodeSmellApprovalPage({
           onClose={() => setViewing(null)}
         />
       )}
+    </div>
+  );
+}
+
+/** A small indeterminate spinner, for a wait whose length cannot be predicted. */
+function Spinner({ size = 13, color = "currentColor" }) {
+  return (
+    <>
+      <span
+        aria-hidden="true"
+        style={{
+          width: size, height: size, borderRadius: "50%", flexShrink: 0,
+          border: `2px solid ${color}`, borderTopColor: "transparent",
+          display: "inline-block", animation: "diwoSpin 0.7s linear infinite",
+        }}
+      />
+      <style>{"@keyframes diwoSpin { to { transform: rotate(360deg); } }"}</style>
+    </>
+  );
+}
+
+/**
+ * The hand-off, step by step.
+ *
+ * Stage 1 makes two requests on approval and the second one waits on the RDP
+ * agent, which is where the seconds go. Naming the step that is running — and
+ * saying that it is another agent doing the work — is the difference between a
+ * developer waiting and a developer clicking again because nothing is moving.
+ */
+function SubmitProgress({ phase, smellCount }) {
+  const steps = [
+    {
+      key: "filtering",
+      label: "Filtering the report to your selection",
+      detail: `${smellCount} smell${smellCount === 1 ? "" : "s"} kept`,
+    },
+    {
+      key: "planning",
+      label: "Refactoring Planning Agent is generating the plan",
+      detail: "interpreting smells, scoring candidates (MCDA), sequencing steps",
+    },
+  ];
+  const activeIndex = steps.findIndex((s) => s.key === phase);
+
+  return (
+    <div style={{
+      marginTop: 10, padding: "12px 16px", borderRadius: 10,
+      background: `${C.accent}0a`, border: `1px solid ${C.accent}40`,
+    }}>
+      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+        {steps.map((step, i) => {
+          const done = activeIndex > i;
+          const active = activeIndex === i;
+          const color = done ? C.accent : active ? C.text : C.textMuted;
+          return (
+            <div key={step.key} style={{ display: "flex", alignItems: "center", gap: 9 }}>
+              <span style={{
+                width: 14, display: "inline-flex", justifyContent: "center", flexShrink: 0,
+              }}>
+                {done
+                  ? <span style={{ color: C.accent, fontWeight: 900, fontSize: 12 }}>✓</span>
+                  : active
+                    ? <Spinner size={11} color={C.accent} />
+                    : <span style={{
+                        width: 6, height: 6, borderRadius: "50%", background: C.border,
+                      }} />}
+              </span>
+              <span style={{ fontSize: 12, color, fontWeight: active ? 700 : 500 }}>
+                {step.label}
+              </span>
+              <span style={{ fontSize: 11, color: C.textMuted }}>· {step.detail}</span>
+            </div>
+          );
+        })}
+      </div>
+      <div style={{ marginTop: 9, fontSize: 11, color: C.textMuted, lineHeight: 1.5 }}>
+        Planning runs on another agent over HTTP, so this can take a few seconds on a
+        large selection. The page moves to the Refactoring Plan stage on its own —
+        no need to click again.
+      </div>
     </div>
   );
 }

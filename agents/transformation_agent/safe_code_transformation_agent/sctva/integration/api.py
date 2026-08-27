@@ -271,8 +271,10 @@ def create_sctva_blueprint() -> Blueprint:
     agent = SafeCodeTransformationValidationAgent()
     adapter = PlannerAdapter()
 
-    @bp.get("/sctva/health")
+    @bp.route("/sctva/health", methods=["GET", "OPTIONS"])
     def sctva_health() -> Any:
+        if request.method == "OPTIONS":
+            return jsonify({"status": "ok"}), 200
         return jsonify(
             {
                 "status": "ok",
@@ -292,8 +294,10 @@ def create_sctva_blueprint() -> Blueprint:
             }
         ), 200
 
-    @bp.post("/sctva/cuqa-sources")
+    @bp.route("/sctva/cuqa-sources", methods=["POST", "OPTIONS"])
     def sctva_cuqa_sources() -> Any:
+        if request.method == "OPTIONS":
+            return jsonify({"status": "ok"}), 200
         try:
             payload = request.get_json(silent=True)
             if not isinstance(payload, dict):
@@ -356,8 +360,10 @@ def create_sctva_blueprint() -> Blueprint:
         except Exception as exc:
             return jsonify({"error": f"Unable to import CUQA workspace sources: {exc}"}), 500
 
-    @bp.post("/sctva/execute")
+    @bp.route("/sctva/execute", methods=["POST", "OPTIONS"])
     def sctva_execute() -> Any:
+        if request.method == "OPTIONS":
+            return jsonify({"status": "ok"}), 200
         try:
             payload = request.get_json(silent=True)
             if not isinstance(payload, dict):
@@ -375,8 +381,10 @@ def create_sctva_blueprint() -> Blueprint:
         except Exception as exc:
             return jsonify({"error": f"Internal execution error: {exc}"}), 500
 
-    @bp.post("/sctva/execute_from_rdp")
+    @bp.route("/sctva/execute_from_rdp", methods=["POST", "OPTIONS"])
     def sctva_execute_from_rdp() -> Any:
+        if request.method == "OPTIONS":
+            return jsonify({"status": "ok"}), 200
         try:
             payload = request.get_json(silent=True)
             if not isinstance(payload, dict):
