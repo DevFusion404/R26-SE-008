@@ -24,6 +24,10 @@ from db.workflow_repository import (
     create_workflow, get_workflow, list_workflows, update_workflow,
     log_event, save_feedback, parse_json_field, recorded_plan_step_keys, now_iso,
 )
+from domain.audit_detail import (
+    DETAIL_LIMIT, capped, decision_digest, plan_digest, severity_totals,
+    smell_digest, smell_type_totals, smells_by_file, transformation_digest,
+)
 from domain.cuqa_normalizer import build_report_from_smells, filter_cuqa_report
 from domain.metrics import compute_metrics_before
 from domain.planning_recommendation import step_identity
@@ -170,9 +174,18 @@ def persist_new_workflow(target: str, language: str, smells: list,
         metrics_before_json=json.dumps(metrics_before),
         cuqa_report_json=json.dumps(cuqa_report) if cuqa_report else None,
     )
+    # The opening entry of the trail, and the only place the ORIGINAL detected
+    # set is recorded — later stages only ever see what survived selection.
+    listed, omitted = capped(smells)
     log_event(wf_id, "smell_review", "workflow_started",
               {"target": target, "language": language,
-               "smell_count": len(smells), "source": source})
+               "smell_count": len(smells), "source": source,
+               "files_affected": len(smells_by_file(smells)),
+               "by_file": smells_by_file(smells),
+               "smell_types": smell_type_totals(smells),
+               "severities": severity_totals(smells),
+               "smells": [smell_digest(s) for s in listed],
+               **({"smells_omitted": omitted} if omitted else {})})
 
     return wf_id, metrics_before
 
@@ -254,14 +267,28 @@ def commit_smell_selection(wf, selected_ids, selected_files, selection_mode,
 
     update_workflow(wf["id"], status="smell_selection",
                     selected_smells_json=json.dumps(selected))
+    # What the developer actually kept, and what they dropped — by file, by
+    # smell type, and itemised. The ids alone made this entry unreadable
+    # without the report beside it, which is exactly when an audit trail is
+    # consulted and exactly when the report is no longer to hand.
+    kept_listed, kept_omitted = capped(selected)
+    dropped_listed, dropped_omitted = capped(excluded)
     log_event(wf["id"], "smell_selection", "smells_selected",
-              {"selected": selected_ids, "excluded": [s["id"] for s in excluded],
-               "selection_mode": selection_mode,
+              {"selection_mode": selection_mode,
                "replanned_after_fallback": replanning,
-               "selected_files": sorted({
-                   s.get("location", {}).get("file") for s in selected
-                   if s.get("location", {}).get("file")
-               })})
+               "selected_count": len(selected),
+               "excluded_count": len(excluded),
+               "selected_files": [row["file"] for row in smells_by_file(selected)],
+               "by_file": smells_by_file(selected),
+               "smell_types": smell_type_totals(selected),
+               "severities": severity_totals(selected),
+               "selected_smells": [smell_digest(s) for s in kept_listed],
+               "excluded_smells": [smell_digest(s) for s in dropped_listed],
+               **({"selected_omitted": kept_omitted} if kept_omitted else {}),
+               **({"excluded_omitted": dropped_omitted} if dropped_omitted else {}),
+               # Kept for machine consumers that already read these.
+               "selected": selected_ids,
+               "excluded": [s["id"] for s in excluded]})
 
     for s in excluded:
         save_feedback(wf["id"], "smell_selection", "smell_excluded",
@@ -288,10 +315,14 @@ def commit_smell_selection(wf, selected_ids, selected_files, selection_mode,
     update_workflow(wf["id"], status="plan_approval",
                     plan_json=plan_serialized, plan_full_json=plan_serialized)
     support_summary = plan.get("decision_support_summary") or {}
+    # The itemised plan: smell type -> refactoring, per file, with the
+    # recommendation DIWO attached to each. "12 steps" told nobody what the
+    # system had decided to do about anything.
     log_event(wf["id"], "plan_approval", "plan_generated",
               {"plan_id": plan.get("plan_id"),
                "steps": plan["summary"]["total_steps"],
                "source": plan_source,
+               **plan_digest(plan.get("steps")),
                # What DIWO recommended, before the developer touched anything.
                # Recorded so the audit trail can later be read against what
                # they actually approved.
@@ -512,6 +543,10 @@ def apply_plan_decision(wf, decision, data):
             "steps_after":  len(plan.get("steps") or []),
             "approved_ids": (plan.get("approval") or {}).get("approved_step_ids"),
             "rejected_ids": (plan.get("approval") or {}).get("rejected_step_ids"),
+            # Itemised against the ORIGINAL steps: build_approved_plan() has
+            # already dropped the rejected ones from `plan`, so asking it what
+            # was rejected would come back empty.
+            **decision_digest(original_steps, decisions if isinstance(decisions, dict) else {}),
         })
         save_feedback(wf["id"], "plan_approval", "plan_modified",
                       reason=feedback.get("reason"), rating=feedback.get("rating"),
@@ -563,7 +598,11 @@ def apply_plan_decision(wf, decision, data):
                "steps": len(plan.get("steps") or []),
                "approved_ids": approval.get("approved_step_ids"),
                "manual_step_ids": [m["step_id"] for m in manual_steps],
-               "overrides": _recommendation_overrides(original_steps, approve_decisions)})
+               "overrides": _recommendation_overrides(original_steps, approve_decisions),
+               # Which refactorings the developer authorised, which they turned
+               # down, and which they kept for themselves — each named with its
+               # smell and its file.
+               **decision_digest(original_steps, approve_decisions)})
     save_feedback(wf["id"], "plan_approval", "plan_approved",
                   reason=feedback.get("reason"), rating=feedback.get("rating"),
                   accepted=True)
@@ -595,8 +634,13 @@ def apply_plan_decision(wf, decision, data):
                     status="transformation",
                     transformation_result_json=json.dumps(tr),
                     metrics_after_json=json.dumps(metrics_after))
+    # Per-step outcome. "9 passed, 1 failed" cannot be acted on: the failing
+    # step is the only interesting row and the trail did not name it.
     log_event(wf["id"], "transformation", "transformation_completed",
-              {"status": tr["status"], "passed": tr["steps_passed"], "failed": tr["steps_failed"]},
+              {"status": tr["status"], "passed": tr["steps_passed"],
+               "failed": tr["steps_failed"],
+               "plan_id": plan.get("plan_id"),
+               **transformation_digest(tr)},
               actor="system")
 
     return {
@@ -645,6 +689,18 @@ def apply_transformation_decision(wf, decision, data):
     def _paths(key):
         value = data.get(key) or []
         return [str(p) for p in value if isinstance(p, (str, int))] if isinstance(value, list) else []
+
+    reverted_plan = parse_json_field(wf, "plan_json") or {}
+
+    def reverted_refactorings(path):
+        """Which planned refactorings touched this file, for the audit entry."""
+        return sorted({
+            step.get("refactoring")
+            for step in (reverted_plan.get("steps") or [])
+            if isinstance(step, dict)
+            and (step.get("target") or {}).get("file") == path
+            and step.get("refactoring")
+        })
 
     accepted_files = _paths("accepted_files")
     rejected_files = _paths("rejected_files")
@@ -698,7 +754,12 @@ def apply_transformation_decision(wf, decision, data):
     # rejections, and a file-level reject is a stronger signal than the
     # session-level accept above.
     for path in rejected_files:
-        log_event(wf["id"], "comparison", "refactoring_reverted", {"file": path})
+        # Name what was undone, not just where. The approved plan is read
+        # from the workflow row here because this function never loads it —
+        # a reverted file is meaningless in the trail without the refactoring
+        # it is reverting.
+        log_event(wf["id"], "comparison", "refactoring_reverted",
+                  {"file": path, "refactorings": reverted_refactorings(path)})
         save_feedback(wf["id"], "comparison", "refactoring_reverted",
                       reason=f"Developer rejected the refactoring of {path}; "
                              "file reverted to its original source.",
