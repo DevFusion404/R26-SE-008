@@ -176,14 +176,19 @@ class PlanGenerator:
         Returns:
             Formatted string like ``OrderProcessor.calculateTotal``.
         """
-        cls = location.get("class", "")
-        method = location.get("method", "")
-        # Treat "unknown" as absent — don't show it in explanations
-        if method in ("unknown", None):
+        cls = location.get("class", "") or ""
+        method = location.get("method", "") or ""
+        source_file = location.get("file", "") or ""
+        base_file = source_file.split("/")[-1].split("\\")[-1].replace(".py", "").replace(".java", "").replace(".c", "").replace(".h", "") if source_file else ""
+
+        if cls in ("unknown", base_file):
+            cls = ""
+        if method in ("unknown", base_file):
             method = ""
+
         if cls and method:
             return f"{cls}.{method}"
-        return cls or method or "(module level)"
+        return cls or method or source_file or "(module level)"
 
     @staticmethod
     def _clean(location: Dict[str, Any], key: str, fallback: str = "") -> str:
@@ -209,14 +214,38 @@ class PlanGenerator:
         params: Dict[str, Any] = {}
         name = candidate["name"]
         location = smell.location
+        source_file = location.get("file", "")
+        base_file = source_file.split("/")[-1].split("\\")[-1].replace(".py", "").replace(".java", "").replace(".c", "").replace(".h", "") if source_file else ""
 
         def _loc(key: str, fallback: str = "") -> str:
-            """Return location[key] if meaningful, else fallback."""
+            """Return location[key] if meaningful and not equal to base filename, else fallback."""
             val = location.get(key, "")
-            return val if val and val != "unknown" else fallback
+            if val and val != "unknown" and val != base_file:
+                return val
+            return fallback
+
+        def _source_context() -> str:
+            """Return the best available source container (class > module > base_file).
+
+            This prevents ``source_class: null`` in plans for Python/C module-level
+            functions that have no enclosing class.  The transformation agent uses
+            this value to locate the function in the source file.
+
+            Priority:
+              1. ``location["class"]``  — real class name (Java / OOP Python)
+              2. ``location["module"]`` — module name injected by _translate_cuqa_to_rdp
+                                          for Python/C module-level functions
+              3. ``base_file``           — filename without extension as last resort
+            """
+            cls = _loc("class")
+            if cls:
+                return cls
+            module = location.get("module", "")
+            if module and module != "unknown":
+                return module
+            return base_file
 
         # Add source_file to all refactoring types (always include filename for traceability)
-        source_file = location.get("file", "")
         if source_file and source_file != "unknown":
             params["source_file"] = source_file
 
@@ -227,7 +256,11 @@ class PlanGenerator:
             elif isinstance(lines, list) and len(lines) >= 1:
                 params["source_line"] = lines[0]
             method = _loc("method")
-            params["new_method_name"] = f"extracted_{method}" if method else "extracted_block"
+            if method:
+                params["target_method"] = method
+                params["new_method_name"] = f"extracted_{method}"
+            else:
+                params["new_method_name"] = "extracted_block"
 
         elif name == "Introduce Constant":
             params["source_line"] = location.get("lines", [None])[0]
@@ -236,11 +269,6 @@ class PlanGenerator:
 
             # Generate a meaningful constant_name so the transformation agent does NOT
             # fall back to the ugly MAGIC_NUMBER_65 / MAGIC_NUMBER_75 pattern.
-            # Strategy:
-            #   1. Extract the numeric value from the smell message ("Magic number 65" → 65)
-            #   2. Use the method/entity name to build a domain prefix
-            #   3. Combine: e.g. "calculate_grade" + 65 → "GRADE_THRESHOLD_65"
-            #   4. Fall back to "CONSTANT_{value}" — still better than MAGIC_NUMBER_{value}
             _num_match = re.search(r"[-+]?\d+(?:\.\d+)?", smell.details or "")
             _raw_value = _num_match.group(0) if _num_match else None
             _entity = (_loc("method") or _loc("class") or "").strip()
@@ -249,13 +277,9 @@ class PlanGenerator:
                 _val_str = _raw_value.replace("-", "NEG_").replace(".", "_")
 
                 if _entity and _entity not in ("unknown", ""):
-                    # Turn snake_case/camelCase entity into SCREAMING_SNAKE prefix.
-                    # e.g. "calculate_grade" → "GRADE"
-                    # e.g. "checkStudentMarks"  → "STUDENT_MARKS"
                     _words = re.sub(r"([A-Z])", r"_\1", _entity)   # camelCase split
                     _words = re.sub(r"[^A-Za-z0-9]+", "_", _words)  # non-alnum → _
                     _parts = [w.upper() for w in _words.split("_") if len(w) > 2]
-                    # Take last 1-2 meaningful words as prefix (most domain-specific)
                     _prefix = "_".join(_parts[-2:]) if _parts else ""
                     if _prefix:
                         params["constant_name"] = f"{_prefix}_{_val_str}"
@@ -264,31 +288,38 @@ class PlanGenerator:
                 else:
                     params["constant_name"] = f"CONSTANT_{_val_str}"
 
-
         elif name == "Move Method":
-            cls = _loc("class")
-            params["source_class"] = cls
+            src_ctx = _source_context()
             method = _loc("method")
+            params["source_class"] = src_ctx
             if method:
                 params["method"] = method
-            # HIGH #4: try to infer destination from smell details message,
-            # then fall back to a descriptive name so it isn't a raw placeholder
-            if smell.details:
-                _dest_m = re.search(r"'([A-Za-z_]\w+)'", smell.details)
-                destination = _dest_m.group(1) if _dest_m else None
             else:
-                destination = None
-            params["destination_class"] = destination or f"{cls}Target" if cls else "TargetClass"
+                ent = location.get("entity", "")
+                if ent and ent != "unknown" and ent != base_file:
+                    params["method"] = ent
+
+            destination = None
+            if smell.details:
+                _class_m = re.search(r"(?:class|of|to|target)\s+'([A-Z]\w+)'", smell.details, re.IGNORECASE)
+                if _class_m:
+                    found_name = _class_m.group(1)
+                    if found_name != method and found_name != src_ctx:
+                        destination = found_name
+
+            if not destination:
+                destination = f"{src_ctx}Target" if src_ctx else "TargetService"
+            params["destination_class"] = destination
 
         elif name == "Extract Class":
-            cls = _loc("class")
-            params["source_class"] = cls
-            params["new_class_name"] = f"{cls}Helper" if cls else "ExtractedClass"
+            src_ctx = _source_context()
+            params["source_class"] = src_ctx
+            params["new_class_name"] = f"{src_ctx}Helper" if src_ctx else "ExtractedClass"
 
         elif name == "Extract Subclass":
-            cls = _loc("class")
-            params["source_class"] = cls
-            params["new_subclass_name"] = f"{cls}Subtype" if cls else "ExtractedSubtype"
+            src_ctx = _source_context()
+            params["source_class"] = src_ctx
+            params["new_subclass_name"] = f"{src_ctx}Subtype" if src_ctx else "ExtractedSubtype"
 
         elif name == "Introduce Parameter Object":
             method = _loc("method")
@@ -296,13 +327,13 @@ class PlanGenerator:
             params["parameter_object_name"] = f"{method}Params" if method else "ParamObject"
 
         elif name == "Replace Conditional with Polymorphism":
-            params["source_class"] = _loc("class")
+            params["source_class"] = _source_context()
             method = _loc("method")
             if method:
                 params["method"] = method
 
         elif name == "Pull Up Method":
-            params["source_class"] = _loc("class")
+            params["source_class"] = _source_context()
             method = _loc("method")
             if method:
                 params["method"] = method
@@ -317,23 +348,26 @@ class PlanGenerator:
                 params["method"] = method
 
         elif name == "Collapse Hierarchy":
-            params["source_class"] = _loc("class")
+            params["source_class"] = _source_context()
             params["parent_class"] = location.get("parent_class", "<parent>")
 
         elif name == "Replace Data Value with Object":
-            params["source_class"] = _loc("class")
+            params["source_class"] = _source_context()
 
         elif name == "Hide Delegate":
-            params["source_class"] = _loc("class")
+            params["source_class"] = _source_context()
+            method = _loc("method")
+            if method:
+                params["method"] = method
 
         elif name == "Remove Dead Code":
-            params["source_class"] = _loc("class")
+            params["source_class"] = _source_context()
             method = _loc("method")
             if method:
                 params["method"] = method
 
         elif name == "Rename Method":
-            params["source_class"] = _loc("class")
+            params["source_class"] = _source_context()
             method = _loc("method")
             if method:
                 params["method"] = method
@@ -353,13 +387,16 @@ class PlanGenerator:
             lines = location.get("lines", [])
             if lines:
                 params["source_line"] = lines[0] if isinstance(lines, list) else lines
-            # Safe alternative hint based on common C unsafe functions
+            # Safe alternative hint based on common C unsafe functions.
+            # For scanf, the idiomatic safe pattern is fgets() to read into a
+            # buffer, followed by sscanf() to parse — the transformer handles
+            # this two-step expansion from the single "fgets" key.
             safe_alternatives = {
                 "gets":    "fgets",
                 "strcpy":  "strncpy",
                 "strcat":  "strncat",
                 "sprintf": "snprintf",
-                "scanf":   "sscanf / fgets",
+                "scanf":   "fgets",
             }
             if unsafe_fn in safe_alternatives:
                 params["safe_alternative"] = safe_alternatives[unsafe_fn]
@@ -373,6 +410,7 @@ class PlanGenerator:
             params["source_file"] = location.get("file", "")
 
         return params
+
 
 
     @staticmethod

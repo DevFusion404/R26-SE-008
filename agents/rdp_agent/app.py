@@ -30,11 +30,11 @@ app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 16 * 1024 * 1024  # 16 MB max upload
 
 # Enable CORS for frontend communication
-CORS(app, resources={
-    r"/generate": {"origins": ["http://localhost:5173", "http://localhost:3000"]},
-    r"/health": {"origins": ["http://localhost:5173", "http://localhost:3000"]},
-    r"/config": {"origins": ["http://localhost:5173", "http://localhost:3000"]},
-})
+rdp_cors_origins = os.getenv("RDP_CORS_ORIGINS", "*")
+if rdp_cors_origins.strip() == "*":
+    CORS(app, resources={r"/*": {"origins": "*"}})
+else:
+    CORS(app, resources={r"/*": {"origins": [o.strip() for o in rdp_cors_origins.split(",") if o.strip()]}})
 
 
 # ---------------------------------------------------------------------------
@@ -159,41 +159,39 @@ def _translate_cuqa_to_rdp(data: dict) -> dict:
             normalised_type = SMELL_TYPE_MAP.get(raw_type, raw_type)
 
             # Resolve the entity (function / class / method name)
-            # Priority: explicit "entity" field → parse message → None for module-level smells
             entity = raw.get("entity")
+            parsed_class = None
 
-            if not entity:
-                # CUQA messages look like: "Function 'foo' has ..." or "Class 'Bar' has ..."
-                _m = re.search(r"(?:Function|Method|Class)\s+'([^']+)'", raw.get("message", ""))
-                entity = _m.group(1) if _m else None
+            if not entity or entity == "unknown":
+                # CUQA messages look like: "Function 'foo' has ...", "Method 'foo' in class 'Bar' ...", "Class 'Bar' has ..."
+                _m_cm = re.search(r"(?:Method|Function)\s+'([^']+)'\s+(?:in|of)\s+class\s+'([^']+)'", raw.get("message", ""), re.IGNORECASE)
+                if _m_cm:
+                    entity = _m_cm.group(1)
+                    parsed_class = _m_cm.group(2)
+                else:
+                    _m = re.search(r"(?:Function|Method|Class)\s+'([^']+)'", raw.get("message", ""), re.IGNORECASE)
+                    entity = _m.group(1) if _m else None
 
-            # RDP-FIX-03: Don't force file basename as class/method for module-level smells
-            # (e.g. MagicNumber with entity=null lives at module scope, not inside a class).
-            # Only fall back to basename for method/class smells where it makes sense.
-            is_module_level_smell = normalised_type in (
-                "Magic Numbers", "Comments", "Dead Code",
-                # C module-level smells (no class/method context in C)
-                "Deep Nesting", "Global Variable", "Large Header File",
-                "Unsafe Function Usage",
-            )
-            if (not entity or entity == "unknown") and not is_module_level_smell:
-                entity = file_name.replace(".java", "").replace(".py", "").replace(".c", "").replace(".h", "")
-
-            # Build location dict based on smell type
-            line = raw.get("line")
             base_name = file_name.replace(".java", "").replace(".py", "").replace(".c", "").replace(".h", "")
-            
-            # Determine whether entity is a class or method based on smell type
-            is_class_smell = normalised_type in ("Large Class", "Lazy Class", "God Class")
-            is_method_smell = normalised_type in (
-                "Long Method", "Long Parameter List", "Too Many Parameters",
-                # C function-level smells
-                "Long Function", "Unsafe Function Usage",
+
+            # Classify smell scope
+            is_class_smell = normalised_type in (
+                "Large Class", "Lazy Class", "God Class", "Inline Class", "Extract Class", "Extract Subclass"
             )
-            
+            is_method_smell = normalised_type in (
+                "Long Method", "Long Function", "Long Parameter List", "Too Many Parameters",
+                "Message Chains", "Feature Envy", "Duplicate Code", "Data Clumps",
+                "Switch Statements", "Inappropriate Intimacy", "Primitive Obsession",
+                "Shotgun Surgery", "Complex Method", "Bare Except", "Dead Code",
+                "Unsafe Function Usage", "Replace Conditional with Polymorphism",
+                "Replace Temp with Query", "Introduce Parameter Object"
+            )
+            is_module_level_smell = normalised_type in (
+                "Magic Numbers", "Comments", "Deep Nesting", "Global Variable", "Large Header File"
+            )
+
             # RDP-FIX-02: Build line range [start, end] when CUQA provides both endpoints.
-            # has_code_block precondition requires len(lines) >= 2 to evaluate properly.
-            # Falls back to [line] (single point) for older CUQA output without end_line.
+            line = raw.get("line")
             start_line = raw.get("start_line", line)
             end_line   = raw.get("end_line", line)
             if start_line and end_line and start_line != end_line:
@@ -201,16 +199,40 @@ def _translate_cuqa_to_rdp(data: dict) -> dict:
             else:
                 lines_range = [line] if line else []
 
+            # Determine class and method targets cleanly
+            valid_entity = entity if (entity and entity != "unknown" and entity != base_name) else None
+
+            if is_class_smell:
+                loc_class = entity if (entity and entity != "unknown") else base_name
+                loc_method = None
+            elif is_method_smell:
+                loc_method = valid_entity
+                if parsed_class:
+                    loc_class = parsed_class
+                elif language.lower() == "java":
+                    loc_class = base_name
+                else:
+                    loc_class = None
+            elif is_module_level_smell:
+                loc_class = None
+                loc_method = valid_entity
+            else:
+                loc_method = valid_entity
+                loc_class = base_name if language.lower() == "java" else None
+
             location = {
                 "file": file_name,
                 "language": language,
-                "class": entity if is_class_smell else (None if is_module_level_smell else base_name),
-                "method": entity if is_method_smell else (None if (is_class_smell or is_module_level_smell) else base_name),
+                "class": loc_class,
+                "method": loc_method,
                 "lines": lines_range,
             }
-            # Clean up None values
-            if location["method"] is None or location["method"] == "unknown":
-                location["method"] = base_name if not (is_class_smell or is_module_level_smell) else None
+
+            # For Python/C module-level functions (no class), carry the module name
+            # so plan_generator can use it as source_class fallback instead of null.
+            if loc_class is None and language.lower() in ("python", "c", "c++", "c/c++"):
+                location["module"] = base_name
+
 
             # RDP-FIX: SpeculativeGenerality — parse base class from message so that
             # has_parent_class precondition passes and "Collapse Hierarchy" can be selected.

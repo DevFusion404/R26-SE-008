@@ -169,6 +169,24 @@ def expected_c_transform_summary(actions: Sequence[RefactoringAction]) -> Dict[s
             if helper_name:
                 expected_added_functions[helper_name] = ""
 
+        elif action_type in {"encapsulate_variable", "encapsulate_c_variable"}:
+            variable_name = str(
+                params.get("variable_name") or params.get("variable") or ""
+            ).strip()
+            getter_name = str(
+                params.get("getter_name") or (f"get_{variable_name}" if variable_name else "")
+            ).strip()
+            setter_name = str(
+                params.get("setter_name") or (f"set_{variable_name}" if variable_name else "")
+            ).strip()
+            if getter_name:
+                expected_added_functions[getter_name] = ""
+            # A const global does not require a setter. The static comparer is
+            # permissive here; action-specific structural validation decides
+            # whether a required writable setter was actually generated.
+            if setter_name:
+                expected_added_functions[setter_name] = ""
+
     return {
         "expected_renames": expected_renames,
         "expected_removed": sorted(expected_removed),

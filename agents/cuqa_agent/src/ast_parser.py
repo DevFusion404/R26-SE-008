@@ -1,22 +1,40 @@
 """
 ast_parser.py
 -------------
-Language dispatcher for the CUQA Agent AST parsing pipeline.
-Detects file language by extension and routes to the correct parser.
+Language Dispatcher Module for the CUQA (Code Understanding & Quality Assessment) Agent.
 
-Supported languages:
-  .py   → python_ast_parser  (built-in ast module)
-  .java → java_ast_parser    (javalang library)
-  .c    → c_ast_parser       (tree-sitter or regex fallback)
-  .h    → c_ast_parser       (same as .c)
+===============================================================================
+SPECIAL FUNCTION & ARCHITECTURAL OVERVIEW FOR CODE VIVA / PRESENTATION:
+===============================================================================
+1. PURPOSE:
+   This module serves as the central router/dispatcher in the CUQA parsing pipeline.
+   Instead of forcing the API or caller to know which parser to invoke, `ast_parser.py`
+   inspects file extensions and dynamically routes the source code to the appropriate
+   language-specific parser (`python_ast_parser`, `java_ast_parser`, `c_ast_parser`).
+
+2. KEY DESIGN PATTERN — Strategy / Dispatcher Pattern:
+   - Encapsulates parser selection behind a unified API (`parse_file`, `parse_source`).
+   - Standardizes output structure into a uniform CUQA AST JSON schema regardless
+     of the underlying parsing engine (Python `ast`, `javalang`, `tree-sitter`, or `regex`).
+
+3. SUPPORTED LANGUAGES & ROUTING:
+   - `.py`       -> Python Parser (`python_ast_parser.py` using Python's native `ast`)
+   - `.java`     -> Java Parser   (`java_ast_parser.py` using `javalang` AST visitor)
+   - `.c`, `.h`  -> C Parser      (`c_ast_parser.py` using `tree-sitter` with Regex fallback)
+===============================================================================
 """
 
 import os
 from typing import Union
+# Import language-specific parsing functions from sibling modules
 from python_ast_parser import parse_python_file, parse_python_source
 from java_ast_parser import parse_java_file, parse_java_source
 from c_ast_parser import parse_c_file, parse_c_source
 
+# ---------------------------------------------------------------------------
+# Language Mapping Registry
+# Maps file extensions (lowercase) to canonical language identifiers.
+# ---------------------------------------------------------------------------
 SUPPORTED_LANGUAGES = {
     ".py": "python",
     ".java": "java",
@@ -26,26 +44,53 @@ SUPPORTED_LANGUAGES = {
 
 
 def detect_language(filename: str) -> str:
-    """Return the language identifier for a file, or 'unknown'."""
+    """
+    Detect the programming language of a file based on its extension.
+
+    -------------------------------------------------------------------------
+    VIVA/INTERVIEW NOTE: How Language Detection Works:
+    1. Uses `os.path.splitext(filename)` to extract the file extension (e.g. '.py').
+    2. Converts extension to lowercase to handle cases like '.JAVA' or '.C'.
+    3. Looks up the extension in `SUPPORTED_LANGUAGES`.
+    4. Returns 'unknown' if the extension is not supported (prevents runtime KeyErrors).
+    -------------------------------------------------------------------------
+
+    Args:
+        filename (str): Name or path of the file (e.g., 'main.py' or '/path/to/App.java').
+
+    Returns:
+        str: Language identifier ('python', 'java', 'c', or 'unknown').
+    """
     ext = os.path.splitext(filename)[-1].lower()
     return SUPPORTED_LANGUAGES.get(ext, "unknown")
 
 
 def parse_file(file_path: str) -> dict:
     """
-    Parse a source file and return the CUQA AST JSON.
+    Parse a source code file on disk and return a standardized CUQA AST JSON dict.
 
-    Dispatches to the correct language parser based on file extension.
+    -------------------------------------------------------------------------
+    VIVA/INTERVIEW NOTE: Central Dispatch Logic:
+    - Extracts extension from file_path.
+    - Dispatches execution to the corresponding language-specific parser function.
+    - If unsupported, returns a graceful error JSON structure instead of crashing.
+      This ensures the pipeline remains robust when scanning mixed/polyglot repos.
+    -------------------------------------------------------------------------
 
     Args:
-        file_path: Path to the source file.
+        file_path (str): Path to the source file on disk.
 
     Returns:
-        CUQA AST JSON dict.
+        dict: Standardized CUQA AST JSON containing keys:
+              - 'file': filename
+              - 'language': language name
+              - 'ast': AST node hierarchy
+              - 'error': error message (if parsing failed or file type unsupported)
     """
     ext = os.path.splitext(file_path)[-1].lower()
     lang = SUPPORTED_LANGUAGES.get(ext)
 
+    # Route file to appropriate parser implementation
     if lang == "python":
         return parse_python_file(file_path)
     elif lang == "java":
@@ -53,6 +98,7 @@ def parse_file(file_path: str) -> dict:
     elif lang == "c":
         return parse_c_file(file_path)
     else:
+        # Graceful fallback error dictionary for unsupported file formats
         return {
             "file": os.path.basename(file_path),
             "language": "unknown",
@@ -63,14 +109,20 @@ def parse_file(file_path: str) -> dict:
 
 def parse_source(source: str, filename: str) -> dict:
     """
-    Parse source code provided as a string.
+    Parse raw source code strings directly without requiring disk reading.
+
+    -------------------------------------------------------------------------
+    VIVA/INTERVIEW NOTE: Why String Parsing is Needed:
+    - Useful when processing files loaded into memory, API payloads, or temporary buffers.
+    - Uses `filename` solely to detect language via extension.
+    -------------------------------------------------------------------------
 
     Args:
-        source:   Raw source code.
-        filename: Original filename (used for language detection).
+        source (str): Raw string content of the source code.
+        filename (str): Original filename used for extension detection (e.g. 'script.py').
 
     Returns:
-        CUQA AST JSON dict.
+        dict: Standardized CUQA AST JSON dictionary.
     """
     ext = os.path.splitext(filename)[-1].lower()
     lang = SUPPORTED_LANGUAGES.get(ext)
@@ -88,3 +140,4 @@ def parse_source(source: str, filename: str) -> dict:
             "error": f"Unsupported file type: '{ext}'",
             "ast": {},
         }
+

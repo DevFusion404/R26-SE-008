@@ -1,32 +1,31 @@
 """
 c_ast_parser.py
 ---------------
-Parses C source files (.c / .h) for the CUQA Agent.
+C / C++ Header AST Parser Module for the CUQA Agent.
 
-Strategy
---------
-1. Try tree-sitter (tree-sitter + tree-sitter-c) for accurate AST generation.
-2. If tree-sitter is unavailable or fails, fall back to a lightweight
-   regex-based parser that still produces the CUQA AST schema and all
-   required metrics/smell detection — no crash, no silent error.
+===============================================================================
+SPECIAL FUNCTION & ARCHITECTURAL OVERVIEW FOR CODE VIVA / PRESENTATION:
+===============================================================================
+1. PURPOSE:
+   Parses C source code (.c) and C header files (.h) into the CUQA AST JSON Schema.
+   Computes key C metrics: Function boundaries, Lines of Code (LOC), Cyclomatic Complexity,
+   Brace Nesting Depth, Unsafe C Function Calls (`gets`, `strcpy`, `sprintf`),
+   Global Variable Declarations, and Contextual Magic Number comparisons.
 
-Returned AST schema (matches existing CUQA format):
-{
-  "file": "<filename>",
-  "language": "c",
-  "ast": {
-    "type": "TranslationUnit",
-    "children": [
-      {
-        "type": "FunctionDefinition",
-        "name": "<func_name>",
-        "line": <int>,
-        "children": []
-      },
-      ...
-    ]
-  }
-}
+2. DUAL PARSING ENGINE STRATEGY (Resilience Architecture):
+   - Primary Parser: `tree-sitter` (Fast, precise concrete syntax tree generator).
+   - Fallback Parser: Regex-based pattern matching parser (`_build_ast_regex`).
+   - WHY THIS MATTERS FOR VIVA: C/C++ grammars are notoriously hard to parse without a
+     preprocessor. If C header dependencies or C runtime compilers are missing on the host,
+     Tree-sitter might fail or be uninstalled. The Regex fallback guarantees 100% server
+     uptime without crashing or throwing unhandled errors.
+
+3. SPECIAL FUNCTIONS & ALGORITHMS:
+   - `analyze_c_magic_numbers()`: AST & Regex algorithm that locates numeric constants
+     and extracts the specific variable name compared against them (e.g. `x > 100`).
+   - `_estimate_cyclomatic()`: Computes Cyclomatic Complexity (CC = 1 + decision points).
+   - `_max_nesting_depth()`: Tracks brace nesting levels to spot DeepNesting code smells.
+===============================================================================
 """
 
 import os
@@ -34,16 +33,15 @@ import re
 from typing import Optional
 
 # ---------------------------------------------------------------------------
-# Try to import tree-sitter (optional)
+# Dynamic Engine Discovery: Tree-sitter setup with multi-version API support
 # ---------------------------------------------------------------------------
 
 _TREE_SITTER_AVAILABLE = False
 _C_LANGUAGE = None
 
 try:
-    # tree-sitter >= 0.21 ships Language objects differently; support both APIs.
+    # Support tree-sitter >= 0.21 (tree_sitter_languages package API)
     try:
-        # New API: tree-sitter-language-pack or tree-sitter-c >= 0.21
         from tree_sitter_languages import get_language, get_parser  # type: ignore
         _C_LANGUAGE = get_language("c")
         _TS_PARSER = get_parser("c")
@@ -52,7 +50,7 @@ try:
         pass
 
     if not _TREE_SITTER_AVAILABLE:
-        # Old API: tree-sitter < 0.21 + tree-sitter-c grammar compiled manually
+        # Support tree-sitter < 0.21 (legacy compiled tree_sitter_c API)
         import tree_sitter  # type: ignore
         from tree_sitter import Language, Parser  # type: ignore
         try:
@@ -65,7 +63,9 @@ try:
             pass
 
 except Exception:
-    pass  # tree-sitter completely unavailable — use regex fallback
+    # Graceful fallback: If tree-sitter fails to load, flag unavailable to trigger regex parser
+    pass
+
 
 
 # ---------------------------------------------------------------------------
@@ -135,19 +135,33 @@ _CLOSE_BRACE_RE = re.compile(r"\}")
 
 
 def _strip_string_literals(source: str) -> str:
-    """Remove string literals to avoid false positives in pattern matching."""
+    """
+    Remove string literals from C source code.
+
+    VIVA NOTE: Replaces string contents with empty quotes `""` to prevent false positive
+    matches when searching for keywords, functions, or numeric literals inside string text.
+    """
     return re.sub(r'"(?:[^"\\]|\\.)*"', '""', source)
 
 
 def _strip_comments(source: str) -> str:
-    """Remove C comments from source."""
+    """
+    Strip single-line (`//`) and multi-line (`/* ... */`) comments from C source.
+
+    VIVA NOTE: Comment removal ensures that commented-out code or explanations do not trigger
+    false code smell warnings or skew cyclomatic complexity metrics.
+    """
     s = _ML_COMMENT_RE.sub("", source)
     s = _SL_COMMENT_RE.sub("", s)
     return s
 
 
 def _count_params(param_str: str) -> int:
-    """Count number of parameters in a C function parameter string."""
+    """
+    Count function parameters from a raw parameter string declaration.
+
+    VIVA NOTE: Handles `void` parameter lists (e.g. `int main(void)`) by returning 0.
+    """
     param_str = param_str.strip()
     if not param_str or param_str == "void":
         return 0
@@ -156,8 +170,19 @@ def _count_params(param_str: str) -> int:
 
 def _find_functions_regex(source: str) -> list[dict]:
     """
-    Locate function definitions using regex.
-    Returns list of dicts: {name, line, start_line, end_line, param_count}
+    SPECIAL FALLBACK ALGORITHM: Locate C function definitions using Regex pattern matching.
+
+    -------------------------------------------------------------------------
+    VIVA/INTERVIEW NOTE (Regex Function Extraction & Brace Tracking):
+    1. Pre-cleans source code by stripping comments and string literals.
+    2. Executes `_FUNC_DEF_RE` regex to find function headers (return type, name, params).
+    3. Brace-Tracking Stack Loop:
+       Once a function header `{` is located, tracks opening `{` and closing `}` braces
+       to determine the exact line where the function body terminates (`end_line`).
+    -------------------------------------------------------------------------
+
+    Returns:
+        list[dict]: List of function definitions containing name, start_line, end_line, param_count.
     """
     clean = _strip_comments(source)
     clean = _strip_string_literals(clean)
@@ -170,7 +195,7 @@ def _find_functions_regex(source: str) -> list[dict]:
         params = m.group("params")
         # Determine line number (1-indexed)
         line_no = text[: m.start()].count("\n") + 1
-        # Find matching closing brace for end_line
+        # Find matching closing brace for end_line using depth tracking
         brace_pos = m.end() - 1  # position of '{' in text
         depth = 1
         pos = brace_pos + 1
@@ -196,8 +221,15 @@ def _find_functions_regex(source: str) -> list[dict]:
 
 def _estimate_cyclomatic(source: str) -> int:
     """
-    Estimate cyclomatic complexity for the whole translation unit.
-    CC ≈ 1 + number of decision points (if, else if, for, while, case, &&, ||, ?).
+    Estimate Cyclomatic Complexity (CC) for C code file.
+
+    -------------------------------------------------------------------------
+    VIVA/INTERVIEW NOTE (McCabe Cyclomatic Complexity Metric):
+    - Formula: CC = 1 + Decision Points
+    - Scans clean C code for decision keywords/operators:
+      `if`, `else if`, `for`, `while`, `case`, `&&`, `||`, `?` (Ternary).
+    - Higher CC values indicate complex, hard-to-test control flow branches.
+    -------------------------------------------------------------------------
     """
     clean = _strip_comments(source)
     clean = _strip_string_literals(clean)
@@ -209,9 +241,15 @@ def _estimate_cyclomatic(source: str) -> int:
 
 
 def _max_nesting_depth(source: str) -> int:
-    """Return the maximum brace-nesting depth in source (heuristic for control flow)."""
+    """
+    Calculate maximum brace nesting depth in C code.
+
+    -------------------------------------------------------------------------
+    VIVA NOTE: Detects deeply nested control blocks (`if` inside `for` inside `while`).
+    Excessive nesting (> 4 or 5 levels) is flagged under the `DeepNesting` code smell.
+    -------------------------------------------------------------------------
+    """
     clean = _strip_comments(source)
-    # Remove string literals
     clean = _strip_string_literals(clean)
     depth = max_depth = 0
     for ch in clean:
@@ -225,8 +263,12 @@ def _max_nesting_depth(source: str) -> int:
 
 def _find_global_vars_regex(source: str) -> list[dict]:
     """
-    Detect global variable declarations (heuristic).
-    We track brace depth: declarations at depth 0 are global.
+    Detect global variable declarations at file scope.
+
+    -------------------------------------------------------------------------
+    VIVA NOTE: Tracks brace depth: variable declarations that occur when brace depth == 0
+    reside at global scope. Global state can cause side effects and refactoring risks.
+    -------------------------------------------------------------------------
     """
     clean = _strip_comments(source)
     clean = _strip_string_literals(clean)
@@ -241,10 +283,10 @@ def _find_global_vars_regex(source: str) -> list[dict]:
             m = _GLOBAL_VAR_DECL_RE.match(line.strip())
             if m:
                 name = m.group("name")
-                # Skip common false positives (function definitions already handled)
                 if name not in {"main", "void"}:
                     globals_found.append({"name": name, "line": lineno})
     return globals_found
+
 
 
 # ---------------------------------------------------------------------------
@@ -424,15 +466,30 @@ def _extract_c_identifier(node) -> Optional[str]:
     return None
 
 
+def _is_c_constant_line(line_str: str) -> bool:
+    if not line_str:
+        return False
+    if "#define" in line_str or "const" in line_str or "enum" in line_str:
+        return True
+    m = re.search(r'\b([A-Za-z0-9_]*[A-Z][A-Z0-9_]*)\s*=\s*', line_str)
+    if m:
+        name = m.group(1)
+        if name.isupper() or any(name.startswith(p) for p in ("MAX_", "MIN_", "DEFAULT_", "CONST_", "NUM_", "TIMEOUT_", "PORT_", "LIMIT_", "TOTAL_")):
+            return True
+    return False
+
+
 def analyze_c_magic_numbers(source: str, filename: str = "untitled.c") -> list[dict]:
     """Detect magic numbers in C code using tree-sitter AST or regex fallback,
     extracting variable context if compared in a relational expression.
+    Ignores numeric literals assigned to constants or defined in #define macros.
     """
     SAFE_NUMBERS = {"0", "1", "-1", "2", "0.0", "1.0", "0f", "1f", "0L", "1L"}
     smells: list[dict] = []
 
     clean_no_comments = _strip_comments(source)
     clean = _strip_string_literals(clean_no_comments)
+    split_lines = source.splitlines()
 
     if _TREE_SITTER_AVAILABLE:
         try:
@@ -457,6 +514,9 @@ def analyze_c_magic_numbers(source: str, filename: str = "untitled.c") -> list[d
                     continue
 
                 line_no = node.start_point[0] + 1
+                line_str = split_lines[line_no - 1] if line_no <= len(split_lines) else ""
+                if _is_c_constant_line(line_str):
+                    continue  # Constant definition -> NOT a magic number
 
                 parent = node.parent
                 while parent and parent.type in ("parenthesized_expression", "cast_expression", "argument_list"):
@@ -510,8 +570,9 @@ def analyze_c_magic_numbers(source: str, filename: str = "untitled.c") -> list[d
         val = m.group(0).strip()
         if val not in SAFE_NUMBERS:
             line_no = clean[: m.start()].count("\n") + 1
-            split_lines = clean.splitlines()
             line_str = split_lines[line_no - 1] if line_no <= len(split_lines) else ""
+            if _is_c_constant_line(line_str):
+                continue  # Constant definition -> NOT a magic number
 
             var_context = None
             m_left = COMP_LEFT_RE.search(line_str)

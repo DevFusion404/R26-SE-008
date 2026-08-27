@@ -24,21 +24,19 @@
  */
 
 import { normalizeCuqaReport, detectPrimaryLanguage } from "../utils/cuqaReport";
+import { getEnv } from "../../../config/env";
 
 // ─── Base URLs ───────────────────────────────────────────────────────────────
 
 /** Orchestration backend, already including its /api prefix. */
-export const DIWO_BASE =
-  import.meta?.env?.VITE_API_URL || "http://localhost:5001/api";
+export const DIWO_BASE = getEnv('VITE_DIWO_API_URL', getEnv('VITE_API_URL', 'http://localhost:5001/api'));
 
 /**
  * CUQA agent. Used ONLY by the read-only fallback below, for when the DIWO
  * backend itself is unreachable and the Code Smell Review stage would
  * otherwise show nothing at all. No workflow action ever runs against it.
  */
-export const CUQA_BASE = (
-  import.meta?.env?.VITE_CUQA_API_URL || "http://localhost:8080"
-).replace(/\/+$/, "");
+export const CUQA_BASE = getEnv('VITE_CUQA_AGENT_API_URL', getEnv('VITE_CUQA_API_URL', 'http://localhost:8080')).replace(/\/+$/, "");
 
 export const CUQA_QUALITY_REPORT_URL = `${CUQA_BASE}/api/quality-report`;
 

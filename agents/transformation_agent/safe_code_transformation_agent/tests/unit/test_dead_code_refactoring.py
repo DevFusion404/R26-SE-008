@@ -16,6 +16,16 @@ def _action(*, method: str = "", source_line: int | None = None) -> RefactoringA
     )
 
 
+def _options() -> dict[str, object]:
+    return {
+        "strict_mode": True,
+        "enable_behavior_tests": True,
+        "timeout_seconds": 10,
+        "require_compilation": False,
+        "enable_sctva_auto_refactoring": False,
+    }
+
+
 def test_python_removes_targeted_unreferenced_function_and_preserves_docstring():
     source = '''"""Invoice helpers."""
 
@@ -52,6 +62,111 @@ def check_number(number):
     assert "def old_number_format" not in transformed
     assert "def check_number" in transformed
     assert ast.get_docstring(ast.parse(transformed)) == "Invoice helpers."
+
+
+def test_python_dead_code_recovers_unique_method_from_stale_class_and_line_hints():
+    source = '''class LibraryManager:
+    def remove_book(self, code):
+        self.books.pop(code, None)
+
+    def active_book(self, code):
+        return self.books.get(code)
+'''
+
+    kind, fingerprint = python_transformers.resolve_dead_code_target(
+        source,
+        method_name="remove_book",
+        class_name="02_large_class_library_system",
+        source_line=99,
+    )
+    transformed, count = python_transformers.apply_remove_dead_code(
+        source,
+        "remove_book",
+        class_name="02_large_class_library_system",
+        source_line=99,
+    )
+
+    assert kind == "unused_callable"
+    assert "remove_book" in fingerprint
+    assert count == 1
+    assert "def remove_book" not in transformed
+    assert "def active_book" in transformed
+
+
+def test_python_unused_callable_anchor_survives_unrelated_generated_getattr():
+    original = '''class LibraryManager:
+    def remove_book(self, code):
+        self.books.pop(code, None)
+'''
+    kind, fingerprint = python_transformers.resolve_dead_code_target(
+        original,
+        method_name="remove_book",
+        class_name="LibraryManager",
+        source_line=2,
+    )
+    after_extract_class = '''class ForwardedMember:
+    def __get__(self, instance, owner=None):
+        return getattr(instance, self.member_name)
+
+class LibraryManager:
+    def remove_book(self, code):
+        self.books.pop(code, None)
+'''
+
+    transformed, count = python_transformers.apply_remove_dead_code(
+        after_extract_class,
+        "remove_book",
+        class_name="LibraryManager",
+        source_line=2,
+        dead_code_kind=kind,
+        target_statement_fingerprint=fingerprint,
+    )
+
+    assert kind == "unused_callable"
+    assert count == 1
+    assert "def remove_book" not in transformed
+    assert "def __get__" in transformed
+
+
+def test_python_inferred_dead_code_owner_is_metadata_not_a_warning():
+    source = '''class Catalog:
+    def obsolete_lookup(self, code):
+        return None
+
+    def active_lookup(self, code):
+        return code
+'''
+    result = SafeCodeTransformationValidationAgent().execute({
+        "request_id": "dead_code_owner_inference",
+        "language": "python",
+        "source_files": [{
+            "file_name": "catalog.py",
+            "source_code": source,
+            "language": "python",
+            "source_mode": "raw",
+        }],
+        "refactoring_plan": {
+            "plan_id": "dead_code_owner_inference",
+            "actions": [{
+                "action_type": "remove_dead_code",
+                "parameters": {
+                    "method": "obsolete_lookup",
+                    "source_line": 2,
+                    "source_file": "catalog.py",
+                },
+            }],
+            "behavior_tests": [],
+            "metadata": {},
+        },
+        "execution_options": _options(),
+    })
+
+    log = result["safety_report"]["transformation_log"][0]
+    assert log["replacements_count"] == 1
+    assert log["metadata"]["dead_code_target_resolution"] == "owner_inferred_from_ast"
+    assert not log["warnings"]
+    assert "transformation_warning" not in result["safety_report"]["risk_flags"]
+    assert "def obsolete_lookup" not in result["refactored_code"]
 
 
 def test_python_removes_unreachable_return_and_raise_statements():
@@ -228,6 +343,100 @@ def test_python_multiple_unreachable_statements_are_removed_in_order():
     )
     dead_actions = [action for action in actions if action.action_type == "remove_dead_code"]
     assert len(dead_actions) >= 2
+
+
+def test_python_plan_method_can_target_dead_statement_inside_live_method():
+    source = '''def process_value(value):
+    if False:
+        print("legacy branch")
+    return value
+'''
+    result = SafeCodeTransformationValidationAgent().execute({
+        "request_id": "dead_statement_inside_live_method",
+        "language": "python",
+        "source_files": [{
+            "file_name": "example.py",
+            "source_code": source,
+            "language": "python",
+            "source_mode": "raw",
+        }],
+        "refactoring_plan": {
+            "plan_id": "dead_statement_inside_live_method",
+            "actions": [{
+                "action_type": "remove_dead_code",
+                "parameters": {
+                    "method": "process_value",
+                    "source_line": 2,
+                    "source_file": "example.py",
+                },
+            }],
+            "behavior_tests": [],
+            "metadata": {},
+        },
+        "execution_options": _options(),
+    })
+
+    assert result["success"] is True, result
+    assert result["rollback_occurred"] is False
+    assert "legacy branch" not in result["refactored_code"]
+    assert "def process_value" in result["refactored_code"]
+    log = result["safety_report"]["transformation_log"][0]
+    assert log["replacements_count"] == 1
+    assert not any("Dead-code removal skipped" in warning for warning in log["warnings"])
+
+
+def test_python_dead_statement_anchor_survives_literal_replacement():
+    source = '''def process_value(value):
+    if value > 0:
+        return value
+        print(14)
+    return 0
+'''
+    result = SafeCodeTransformationValidationAgent().execute({
+        "request_id": "dead_statement_anchor_after_constant",
+        "language": "python",
+        "source_files": [{
+            "file_name": "example.py",
+            "source_code": source,
+            "language": "python",
+            "source_mode": "raw",
+        }],
+        "refactoring_plan": {
+            "plan_id": "dead_statement_anchor_after_constant",
+            "actions": [
+                {
+                    "action_type": "introduce_constant",
+                    "parameters": {
+                        "literal_value": 14,
+                        "constant_name": "CONSTANT_14",
+                        "source_line": 4,
+                        "source_file": "example.py",
+                    },
+                },
+                {
+                    "action_type": "remove_dead_code",
+                    "parameters": {
+                        "method": "process_value",
+                        "source_line": 4,
+                        "source_file": "example.py",
+                    },
+                },
+            ],
+            "behavior_tests": [],
+            "metadata": {},
+        },
+        "execution_options": _options(),
+    })
+
+    assert result["success"] is True, result
+    assert result["rollback_occurred"] is False
+    assert "print(14)" not in result["refactored_code"]
+    assert "print(CONSTANT_14)" not in result["refactored_code"]
+    dead_log = [
+        entry for entry in result["safety_report"]["transformation_log"]
+        if entry["action_type"] == "remove_dead_code"
+    ][0]
+    assert dead_log["replacements_count"] == 1
 
 
 def test_python_dynamic_function_reference_is_review_required_not_deleted():
@@ -408,3 +617,168 @@ int check_number(int value) { return value; }
     assert passed.passed is True
     assert passed.details["dead_code_validation"][0]["checks"]["unrelated_source_preserved"] is True
     assert failed.passed is False
+
+
+def test_python_dead_code_anchor_marks_referenced_method_as_live_callable():
+    source = '''class CustomerContact:
+    def formatted_phone(self):
+        return "Phone"
+
+class Customer:
+    def __init__(self):
+        self.contact = CustomerContact()
+
+    def display_details(self):
+        return self.contact.formatted_phone()
+'''
+
+    kind, fingerprint = python_transformers.resolve_dead_code_target(
+        source,
+        source_line=2,
+    )
+
+    assert kind == "live_callable"
+    assert "formatted_phone" in fingerprint
+
+
+def test_python_false_positive_dead_code_plan_is_not_reported_as_warning():
+    source = '''class CustomerContact:
+    def __init__(self, phone):
+        self.phone = phone
+
+    def formatted_phone(self):
+        return f"Phone: {self.phone}"
+
+class Customer:
+    def __init__(self, phone):
+        self.contact = CustomerContact(phone)
+
+    def display_details(self):
+        return self.contact.formatted_phone()
+'''
+
+    result = SafeCodeTransformationValidationAgent().execute({
+        "request_id": "live_dead_code_plan_target",
+        "language": "python",
+        "source_files": [{
+            "file_name": "example.py",
+            "source_code": source,
+            "language": "python",
+            "source_mode": "raw",
+        }],
+        "refactoring_plan": {
+            "plan_id": "live_dead_code_plan_target",
+            "actions": [{
+                "action_type": "remove_dead_code",
+                "parameters": {
+                    "source_file": "example.py",
+                    "source_line": 5,
+                },
+            }],
+            "behavior_tests": [],
+            "metadata": {},
+        },
+        "execution_options": {
+            "strict_mode": True,
+            "enable_behavior_tests": True,
+            "timeout_seconds": 10,
+            "require_compilation": False,
+            "enable_sctva_auto_refactoring": False,
+        },
+    })
+
+    log = result["safety_report"]["transformation_log"][0]
+    assert log["action_type"] == "remove_dead_code"
+    assert log["metadata"]["status"] == "not_applicable"
+    assert log["metadata"]["final_decision"] == "NOT_APPLICABLE"
+    assert log["metadata"]["dead_code_target_status"] == "live"
+    assert not any(
+        "Dead-code removal skipped" in message
+        for message in result["safety_report"]["human_messages"]
+    )
+    assert result["refactored_code"] == source
+
+
+def test_python_inline_class_plan_live_method_dead_code_steps_do_not_emit_skip_warnings():
+    source = '''class CustomerContact:
+    def __init__(self, phone):
+        self.phone = phone
+
+    def formatted_phone(self):
+        return f"Phone: {self.phone}"
+
+class Customer:
+    def __init__(self, customer_id, name, phone):
+        self.customer_id = customer_id
+        self.name = name
+        self.contact = CustomerContact(phone)
+
+    def display_details(self):
+        print(self.contact.formatted_phone())
+
+    def get_phone(self):
+        return self.contact.phone
+
+def main():
+    customer = Customer("C001", "Nimal", "077")
+    customer.display_details()
+    print(customer.get_phone())
+'''
+
+    result = SafeCodeTransformationValidationAgent().execute({
+        "request_id": "inline_with_false_dead_code_steps",
+        "language": "python",
+        "source_files": [{
+            "file_name": "example.py",
+            "source_code": source,
+            "language": "python",
+            "source_mode": "raw",
+        }],
+        "refactoring_plan": {
+            "plan_id": "inline_with_false_dead_code_steps",
+            "actions": [
+                {
+                    "action_type": "inline_python_class",
+                    "parameters": {
+                        "class_to_inline": "CustomerContact",
+                        "destination_class": "Customer",
+                        "owner_attribute": "contact",
+                        "source_file": "example.py",
+                    },
+                },
+                {
+                    "action_type": "remove_dead_code",
+                    "parameters": {"source_file": "example.py", "source_line": 5},
+                },
+                {
+                    "action_type": "remove_dead_code",
+                    "parameters": {"source_file": "example.py", "source_line": 14},
+                },
+                {
+                    "action_type": "remove_dead_code",
+                    "parameters": {"source_file": "example.py", "source_line": 17},
+                },
+            ],
+            "behavior_tests": [],
+            "metadata": {},
+        },
+        "execution_options": {
+            "strict_mode": True,
+            "enable_behavior_tests": True,
+            "timeout_seconds": 10,
+            "require_compilation": False,
+            "enable_sctva_auto_refactoring": False,
+        },
+    })
+
+    assert "class CustomerContact" not in result["refactored_code"]
+    assert not any(
+        "Dead-code removal skipped" in message
+        for message in result["safety_report"]["human_messages"]
+    )
+    dead_logs = [
+        item for item in result["safety_report"]["transformation_log"]
+        if item["action_type"] == "remove_dead_code"
+    ]
+    assert dead_logs
+    assert all(item["metadata"]["status"] == "not_applicable" for item in dead_logs)

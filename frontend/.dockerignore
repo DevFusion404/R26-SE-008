@@ -1,0 +1,48 @@
+# ============================================================
+# Frontend - .dockerignore
+# Keeps the build context lean by excluding files that are
+# not needed to build the Vite production bundle.
+# ============================================================
+
+# Node modules — always reinstalled via npm ci inside the builder
+node_modules/
+
+# Previous build output — rebuilt fresh inside Docker
+dist/
+
+# Environment files — never bake secrets into the image
+.env
+.env.*
+!.env.example
+!.env.production
+
+# IDE / editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Version control
+.git/
+.gitignore
+.gitattributes
+
+# CI / CD
+.github/
+
+# Docs / README
+README.md
+*.md
+
+# Test files
+*.test.*
+*.spec.*
+
+# Lint config (not needed at build time)
+eslint.config.js
+
+# Docker files themselves
+Dockerfile
+.dockerignore

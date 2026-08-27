@@ -115,6 +115,99 @@ def test_zero_replacement_is_not_reported_as_success():
     )
 
 
+def test_java_rename_method_runs_through_pipeline():
+    agent = SafeCodeTransformationValidationAgent()
+    source = (
+        "public class PaymentService {\n"
+        "    public int processPayment(int amount) { return amount + 1; }\n"
+        "    public int run() { return processPayment(2) + this.processPayment(3); }\n"
+        "}\n"
+    )
+    payload = {
+        "request_id": "java_rename_method_001",
+        "language": "java",
+        "source_code": source,
+        "refactoring_plan": {
+            "plan_id": "plan_java_rename_method_001",
+            "actions": [
+                {
+                    "action_type": "rename_method",
+                    "parameters": {
+                        "old_name": "processPayment",
+                        "new_name": "calculatePayment",
+                        "source_class": "PaymentService",
+                    },
+                }
+            ],
+            "behavior_tests": [],
+            "metadata": {},
+        },
+        "execution_options": {
+            "strict_mode": True,
+            "enable_behavior_tests": True,
+            "timeout_seconds": 10,
+            "require_compilation": False,
+        },
+    }
+
+    result = agent.execute(payload)
+
+    assert result["success"] is True
+    assert result["rollback_occurred"] is False
+    assert "int calculatePayment(int amount)" in result["refactored_code"]
+    assert "return calculatePayment(2) + this.calculatePayment(3);" in result["refactored_code"]
+    log = result["safety_report"]["transformation_log"][0]
+    assert log["action_type"] == "rename_method"
+    assert log["metadata"]["status"] == "success"
+    assert result["validation"]["structural"]["details"]["rename_method_validation"][0]["passed"] is True
+
+
+def test_python_rename_method_runs_through_pipeline():
+    agent = SafeCodeTransformationValidationAgent()
+    source = (
+        "def calc(x):\n"
+        "    return x + 1\n\n"
+        "def run(value):\n"
+        "    return calc(value)\n"
+    )
+    payload = {
+        "request_id": "python_rename_method_001",
+        "language": "python",
+        "source_code": source,
+        "refactoring_plan": {
+            "plan_id": "plan_python_rename_method_001",
+            "actions": [
+                {
+                    "action_type": "rename_method",
+                    "parameters": {
+                        "old_name": "calc",
+                        "new_name": "calculate",
+                    },
+                }
+            ],
+            "behavior_tests": [{"name": "value", "call": "run", "args": [2], "expected": 3}],
+            "metadata": {},
+        },
+        "execution_options": {
+            "strict_mode": True,
+            "enable_behavior_tests": True,
+            "timeout_seconds": 10,
+            "require_compilation": False,
+        },
+    }
+
+    result = agent.execute(payload)
+
+    assert result["success"] is True
+    assert result["rollback_occurred"] is False
+    assert "def calculate(x):" in result["refactored_code"]
+    assert "return calculate(value)" in result["refactored_code"]
+    log = result["safety_report"]["transformation_log"][0]
+    assert log["action_type"] == "rename_method"
+    assert log["metadata"]["status"] == "success"
+    assert result["validation"]["structural"]["details"]["rename_method_validation"][0]["passed"] is True
+
+
 def test_sctva_internal_refactoring_runs_for_raw_source_files():
     agent = SafeCodeTransformationValidationAgent()
     source = (

@@ -14,8 +14,9 @@
  */
 
 import { useState, useEffect } from 'react';
+import { getEnv } from '../config/env';
 
-const API          = 'http://localhost:8080';
+const API          = getEnv('VITE_CUQA_AGENT_API_URL', getEnv('VITE_CUQA_API_URL', 'http://localhost:8080')).replace(/\/+$/, '');
 const HISTORY_KEY  = 'cuqa_analysis_history';
 
 function loadHistory() {
