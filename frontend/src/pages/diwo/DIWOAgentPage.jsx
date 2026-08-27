@@ -18,7 +18,7 @@
  *       and fetch wrapper are defined once for the whole DIWO workflow.
  */
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import AuditSidebar from "./components/AuditSidebar";
 import CodeSmellApprovalPage from "./stages/CodeSmellApprovalPage";
 import RefactoringPlanApprovalPage from "./stages/RefactoringPlanApprovalPage";
@@ -120,6 +120,56 @@ export default function DIWOAgentPage() {
       ...prev,
       { id: `local-${Date.now()}-${Math.random()}`, time: new Date().toLocaleTimeString(), event, type },
     ]);
+
+  // The PERSISTED audit trail, as the backend recorded it: structured rows
+  // carrying which file, which smell, which refactoring, and what became of
+  // it. Kept separate from `auditLog` above, which is browser commentary that
+  // dies with the tab — merging the two would blur which of them is the record.
+  const [backendLog, setBackendLog] = useState([]);
+  const [auditRefreshing, setAuditRefreshing] = useState(false);
+
+  /** Manual re-read, from the sidebar's refresh button and the Results stage. */
+  const refreshAuditTrail = useCallback(async (id = workflowId) => {
+    if (!id) return [];
+    setAuditRefreshing(true);
+    try {
+      const logs = await api.get(`/workflows/${id}/audit-logs`);
+      const rows = Array.isArray(logs) ? logs : [];
+      setBackendLog(rows);
+      return rows;
+    } catch {
+      // A trail that cannot be read is not a workflow failure — the stage the
+      // developer is working in keeps going, and the sidebar falls back to the
+      // session notes it already has.
+      return [];
+    } finally {
+      setAuditRefreshing(false);
+    }
+  }, [workflowId]);
+
+  // Re-read after every stage transition, which is when the backend has just
+  // written the entries for the stage that closed. Polling would be the wrong
+  // shape here: the trail only changes when the workflow does.
+  //
+  // Fetched inline rather than through refreshAuditTrail() so no state is set
+  // synchronously in the effect body, and guarded by `cancelled` so a slow
+  // response for a stage the developer has already left cannot overwrite the
+  // trail for the stage they are now in.
+  useEffect(() => {
+    if (!workflowId) return undefined;
+    let cancelled = false;
+
+    (async () => {
+      try {
+        const logs = await api.get(`/workflows/${workflowId}/audit-logs`);
+        if (!cancelled) setBackendLog(Array.isArray(logs) ? logs : []);
+      } catch {
+        /* The trail is a record, not a dependency of the workflow. */
+      }
+    })();
+
+    return () => { cancelled = true; };
+  }, [workflowId, phase]);
 
   // ── On mount: create backend workflow ─────────────────────────────────────
   /**
@@ -236,7 +286,14 @@ export default function DIWOAgentPage() {
         addLog("No backend session — cannot persist smell selection.", "danger");
         return;
       }
-      if (backendBusy) return;
+      // A second submit while the first is still in flight. Stage 1 now awaits
+      // this handler and keeps its button disabled throughout, so this should
+      // be unreachable from the Approve button — but returning in silence is
+      // how it went unnoticed when it was reachable, so it says so now.
+      if (backendBusy) {
+        addLog("A smell selection is already being processed — ignoring the repeat submit.", "warn");
+        return;
+      }
 
       try {
         setBackendBusy(true);
@@ -900,7 +957,7 @@ export default function DIWOAgentPage() {
                 workflow={workflow}
                 workflowId={workflowId}
                 language={workflowLanguage}
-              auditLogs={auditLog}
+              auditLogs={backendLog.length ? backendLog : auditLog}
               onComplete={async (notes) => {
                 if (workflowId) {
                   try {
@@ -913,38 +970,30 @@ export default function DIWOAgentPage() {
                 setPhase(0);
               }}
               onLoadLogs={async () => {
-                if (!workflowId) return;
-                try {
-                  const logs = await api.get(`/workflows/${workflowId}/audit-logs`);
-                  // Merge backend logs with local logs, deduplicated by id
-                  setAuditLog((prev) => {
-                    const ids = new Set(prev.map((l) => l.id));
-                    const merged = [...prev];
-                    logs.forEach((l) => {
-                      const key = String(l.id);
-                      if (!ids.has(key)) {
-                        ids.add(key);
-                        merged.push({
-                          id: key,
-                          time: new Date(l.timestamp).toLocaleTimeString(),
-                          event: `[${l.stage}] ${l.action} (${l.actor})`,
-                          type: "info",
-                        });
-                      }
-                    });
-                    return merged;
-                  });
-                  addLog("Audit logs synced from backend.", "success");
-                } catch (e) {
-                  addLog(`Audit sync failed: ${e.message}`, "warn");
-                }
+                // Loads the structured rows as they are. The previous version
+                // flattened each one to "[stage] action (actor)" and appended
+                // it to the session log, which discarded every detail the row
+                // carried and left the printed report describing stage names.
+                const rows = await refreshAuditTrail();
+                addLog(
+                  rows.length
+                    ? `Audit trail synced — ${rows.length} recorded event(s).`
+                    : "Audit trail could not be read from the backend.",
+                  rows.length ? "success" : "warn",
+                );
               }}
               loading={false}
             />
           )}
         </div>
 
-        <AuditSidebar phase={phase} auditLog={auditLog} />
+        <AuditSidebar
+          phase={phase}
+          auditLog={auditLog}
+          backendLog={backendLog}
+          onRefresh={refreshAuditTrail}
+          refreshing={auditRefreshing}
+        />
       </div>
     </div>
   );

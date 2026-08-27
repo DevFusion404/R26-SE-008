@@ -498,6 +498,7 @@ def parse_ast(payload: dict):
     return {
         "parsed": parsed,
         "summary": summary,
+        "source_code": source,   # raw file content — used by transformation agent for zip download
     }
 
 

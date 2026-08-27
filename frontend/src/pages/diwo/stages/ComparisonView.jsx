@@ -5,6 +5,160 @@ import {
 } from "recharts";
 import { createZip, downloadBlob, normalizeZipPath } from "../utils/zipWriter";
 import { buildProjectArchive, resolveWorkflowFiles } from "../utils/projectArchive";
+// The trail on this page and the printable report are two renderings of the
+// same persisted rows, so both read them through the same narrator rather than
+// each inventing its own wording for "what happened".
+import { groupByStage, narrateAll } from "../utils/auditNarrative";
+import { buildSummaryReportHtml } from "../utils/summaryReport";
+
+/** One colour per workflow stage, so the trail reads as chapters. */
+const STAGE_COLORS = {
+  smell_review: "#8b5cf6",
+  smell_selection: "#3b82f6",
+  plan_approval: "#06b6d4",
+  transformation: "#f59e0b",
+  comparison: "#10b981",
+  completed: "#22c55e",
+  rolled_back: "#ef4444",
+};
+
+const TONE_COLORS = {
+  success: "#22c55e",
+  warn: "#f59e0b",
+  danger: "#ef4444",
+  info: "#6366f1",
+};
+
+const fmtStamp = (value) => {
+  if (!value) return "";
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? String(value) : parsed.toLocaleString();
+};
+
+/**
+ * One narrated audit event, with its evidence one click away.
+ *
+ * The headline already carries the substance ("Developer approved 6 steps for
+ * transformation"); expanding shows the itemised proof — which smell, which
+ * refactoring, which file. Collapsed by default because a repository scan can
+ * produce hundreds of rows and this page is also the print source.
+ */
+function TrailEntry({ entry, open, onToggle }) {
+  const tone = TONE_COLORS[entry.tone] || TONE_COLORS.info;
+  const clickable = entry.expandable;
+
+  return (
+    <div style={{ borderBottom: "1px solid #1f2937" }}>
+      <button
+        type="button"
+        onClick={clickable ? () => onToggle(entry.id) : undefined}
+        disabled={!clickable}
+        aria-expanded={clickable ? open : undefined}
+        style={{
+          width: "100%", textAlign: "left", background: "transparent",
+          border: "none", padding: "13px 20px",
+          cursor: clickable ? "pointer" : "default",
+          display: "flex", alignItems: "center", gap: 12,
+        }}
+      >
+        <span style={{
+          width: 6, height: 6, borderRadius: "50%", background: tone, flexShrink: 0,
+        }} />
+        <span style={{
+          flex: 1, minWidth: 0, fontSize: 13, color: "#e2e8f0",
+          fontWeight: 600, lineHeight: 1.4,
+        }}>
+          {entry.title}
+        </span>
+        <span style={{
+          display: "flex", alignItems: "center", gap: 6, fontSize: 11.5,
+          color: "#94a3b8", background: "#1e293b", padding: "4px 9px",
+          borderRadius: 6, border: "1px solid #334155", flexShrink: 0,
+        }}>
+          <span>{entry.actor === "system" ? "⚙️" : entry.actor === "developer" ? "👤" : "📌"}</span>
+          <span>{entry.actor}</span>
+        </span>
+        <span style={{
+          fontSize: 11, color: "#64748b", fontFamily: "monospace",
+          flexShrink: 0, minWidth: 140, textAlign: "right",
+        }}>
+          {fmtStamp(entry.timestamp) || "—"}
+        </span>
+        <span style={{ color: clickable ? "#64748b" : "transparent", fontWeight: 800, flexShrink: 0 }}>
+          {open ? "▾" : "▸"}
+        </span>
+      </button>
+
+      {open && (
+        <div style={{ padding: "0 20px 14px 38px", display: "flex", flexDirection: "column", gap: 10 }}>
+          {entry.facts.length > 0 && (
+            <div style={{ display: "flex", flexWrap: "wrap", gap: "4px 16px" }}>
+              {entry.facts.map((fact) => (
+                <span key={fact.label} style={{ fontSize: 11.5, color: "#94a3b8" }}>
+                  {fact.label}{" "}
+                  <b style={{ color: "#cbd5e1", fontFamily: "monospace" }}>{fact.value}</b>
+                </span>
+              ))}
+            </div>
+          )}
+
+          {entry.groups.map((group) => (
+            <div key={group.label}>
+              <div style={{
+                fontSize: 10.5, textTransform: "uppercase", letterSpacing: 0.5,
+                color: "#64748b", fontWeight: 700, marginBottom: 5,
+              }}>
+                {group.label}
+                <span style={{ fontFamily: "monospace", marginLeft: 6 }}>{group.items.length}</span>
+              </div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+                {group.items.map((item) => (
+                  <div key={item.key} style={{
+                    display: "flex", alignItems: "baseline", gap: 8, fontSize: 12,
+                    background: "#0b1020", border: "1px solid #1f2937",
+                    borderRadius: 6, padding: "5px 9px",
+                  }}>
+                    <span style={{ color: "#cbd5e1", fontWeight: 600, flex: 1, minWidth: 0 }}>
+                      {item.primary}
+                      {item.secondary && (
+                        <span style={{ color: "#64748b", fontWeight: 400 }}> · {item.secondary}</span>
+                      )}
+                    </span>
+                    {item.file && (
+                      <code
+                        title={item.file}
+                        style={{
+                          fontSize: 10.5, color: "#94a3b8", flexShrink: 0,
+                          maxWidth: 260, overflow: "hidden", textOverflow: "ellipsis",
+                          whiteSpace: "nowrap",
+                        }}
+                      >
+                        {item.file}
+                      </code>
+                    )}
+                    {item.tag && (
+                      <span style={{
+                        fontSize: 9.5, fontWeight: 700, textTransform: "uppercase",
+                        padding: "1px 6px", borderRadius: 8, flexShrink: 0,
+                        background: "#1e293b", color: "#94a3b8",
+                      }}>
+                        {item.tag}
+                      </span>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          ))}
+
+          {entry.note && (
+            <div style={{ fontSize: 11, color: "#64748b", fontStyle: "italic" }}>{entry.note}</div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
 
 function MetricBar({ label, before, after, unit = "", higherIsBetter = true, cardStyle }) {
   const improved = higherIsBetter ? after > before : after < before;
@@ -67,11 +221,17 @@ export function ComparisonView({ workflow, workflowId: propWorkflowId, language:
 
   const improvements = ma.improvements || {};
 
-  const STAGE_LABELS = {
-    smell_review: "Smell Review", smell_selection: "Smell Selection",
-    plan_approval: "Plan Approval", transformation: "Transformation",
-    comparison: "Comparison", completed: "Completed", rolled_back: "Rolled Back",
-  };
+  // The persisted rows, narrated once per render and shared by the on-page
+  // trail and the printable report.
+  const narratedTrail = narrateAll(auditLogs);
+  const [openTrailIds, setOpenTrailIds] = useState(() => new Set());
+  const toggleTrailEntry = (id) =>
+    setOpenTrailIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
 
   const KPI_CARD_BASE = {
     borderRadius: 12,
@@ -222,276 +382,38 @@ export function ComparisonView({ workflow, workflowId: propWorkflowId, language:
 
   const revertedCount = downloadableFiles.filter((f) => f.decision === "reject").length;
 
+  /**
+   * Open the printable session report.
+   *
+   * The document is built from the PERSISTED audit rows, not from the session
+   * log: the previous version tabulated stage names and actor names, so the
+   * artefact a reviewer kept recorded that a plan was approved without saying
+   * which refactorings it contained or which file each touched. Everything it
+   * needed was already in each row's `details`.
+   */
   const generateSummaryReport = () => {
-    const workflowId = propWorkflowId || workflow?.id || workflow?.workflow_id || "N/A";
-    const target = workflow?.target || "N/A";
-    const language = propLanguage || workflow?.language || "N/A";
-
-    const format = (log) => {
-      const candidates = [log.timestamp, log.time, log.time_raw, log.date, log.created_at, log.at, log.ts];
-      let val = candidates.find((x) => x !== undefined && x !== null && x !== "");
-      if (!val) return "";
-      if (typeof val === "number") {
-        const d = new Date(val);
-        if (!isNaN(d)) return d.toLocaleString();
-        return String(val);
-      }
-      if (typeof val === "string") {
-        const s = val.trim();
-        if (/invalid date/i.test(s)) return "(unknown time)";
-        const dIso = new Date(s);
-        if (!isNaN(dIso)) return dIso.toLocaleString();
-        const digits = s.match(/\d{10,}/);
-        if (digits) {
-          const maybe = parseInt(digits[0], 10);
-          const d2 = digits[0].length === 10 ? new Date(maybe * 1000) : new Date(maybe);
-          if (!isNaN(d2)) return d2.toLocaleString();
-        }
-        return s;
-      }
-      return String(val);
-    };
-
-    const smellRows = (smellBreakdownData || []).map(item => `
-      <tr>
-        <td>${item.severity}</td>
-        <td>${item.before}</td>
-        <td>${item.after}</td>
-      </tr>
-    `).join("");
-
-    const auditRows = (auditLogs || []).map(log => `
-      <tr>
-        <td>${STAGE_LABELS[log.stage] || log.stage || ""}</td>
-        <td>${(log.event || log.action || "").replace(/_/g, " ")}</td>
-        <td>${log.actor || ""}</td>
-        <td>${format(log) || ""}</td>
-      </tr>
-    `).join("");
-
-    const smellSummary = workflow?.smell_selection_summary || (workflow?.updated_report?.summary && {
-      total_smells: workflow.updated_report.summary.total_code_smells || 0,
-      selected_count: workflow.updated_report.summary.selected_count || 0,
-      excluded_count: 0,
-    }) || { total_smells: 0, selected_count: 0, excluded_count: 0 };
-
-    const planSummary = workflow?.plan_approval_summary || { total_steps: 0, approved_count: 0, rejected_count: 0 };
-
-    const acceptedFilesList = (workflow?.accepted_files || []).map(p => `<li>${p}</li>`).join("") || "<li>None</li>";
-    const rejectedFilesList = (workflow?.rejected_files || []).map(p => `<li>${p}</li>`).join("") || "<li>None</li>";
-
-    const reportHtml = `
-      <html>
-        <head>
-          <title>DIWO Refactoring Summary Report</title>
-          <style>
-            body {
-              font-family: Arial, sans-serif;
-              padding: 30px;
-              color: #111827;
-              line-height: 1.6;
-            }
-            h1 {
-              color: #0f172a;
-              border-bottom: 3px solid #2563eb;
-              padding-bottom: 10px;
-            }
-            h2 {
-              color: #1e293b;
-              margin-top: 28px;
-            }
-            table {
-              width: 100%;
-              border-collapse: collapse;
-              margin-top: 12px;
-            }
-            th, td {
-              border: 1px solid #cbd5e1;
-              padding: 10px;
-              text-align: left;
-            }
-            th {
-              background: #f1f5f9;
-            }
-            .summary-box {
-              background: #f8fafc;
-              border: 1px solid #cbd5e1;
-              border-radius: 8px;
-              padding: 16px;
-              margin-top: 16px;
-            }
-            .success {
-              color: #15803d;
-              font-weight: bold;
-            }
-            .warning {
-              color: #b45309;
-              font-weight: bold;
-            }
-            .footer {
-              margin-top: 40px;
-              font-size: 12px;
-              color: #64748b;
-            }
-          </style>
-        </head>
-        <body>
-          <h1>DIWO Refactoring Summary Report</h1>
-
-          <div class="summary-box">
-            <p><strong>Workflow ID:</strong> ${workflowId}</p>
-            <p><strong>Target:</strong> ${target}</p>
-            <p><strong>Language:</strong> ${language}</p>
-            <p><strong>Generated At:</strong> ${new Date().toLocaleString()}</p>
-          </div>
-
-          <h2>Before vs After Quality Metrics</h2>
-          <table>
-            <thead>
-              <tr>
-                <th>Metric</th>
-                <th>Before</th>
-                <th>After</th>
-                <th>Change</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr>
-                <td>Cyclomatic Complexity</td>
-                <td>${mb.cyclomatic_complexity || 0}</td>
-                <td>${ma.cyclomatic_complexity || 0}</td>
-                <td>${improvements.complexity_reduced_by || 0} reduced</td>
-              </tr>
-              <tr>
-                <td>Code Duplication</td>
-                <td>${mb.code_duplication_pct || 0}%</td>
-                <td>${ma.code_duplication_pct || 0}%</td>
-                <td>${improvements.duplication_reduced_by || 0}% reduced</td>
-              </tr>
-              <tr>
-                <td>Maintainability Index</td>
-                <td>${mb.maintainability_index || 0}</td>
-                <td>${ma.maintainability_index || 0}</td>
-                <td>${improvements.maintainability_gained || 0} gained</td>
-              </tr>
-              <tr>
-                <td>Total Code Smells</td>
-                <td>${mb.total_smells || 0}</td>
-                <td>${ma.total_smells || 0}</td>
-                <td>${(mb.total_smells || 0) - (ma.total_smells || 0)} resolved</td>
-              </tr>
-            </tbody>
-          </table>
-
-          <h2>Smell Severity Breakdown</h2>
-          <table>
-            <thead>
-              <tr>
-                <th>Severity</th>
-                <th>Before</th>
-                <th>After</th>
-              </tr>
-            </thead>
-            <tbody>
-              ${smellRows}
-            </tbody>
-          </table>
-
-          <h2>Selection & Approval Summary</h2>
-          <div class="summary-box">
-            <p><strong>Smells forwarded:</strong> ${smellSummary.selected_count} of ${smellSummary.total_smells} (excluded: ${smellSummary.excluded_count})</p>
-            <p><strong>Plan steps approved:</strong> ${planSummary.approved_count || 0} of ${planSummary.total_steps || 0} (rejected: ${planSummary.rejected_count || 0})</p>
-            <p><strong>Files accepted for commit:</strong> ${(workflow?.accepted_files || []).length || 0}</p>
-          </div>
-
-          <h2>Accepted / Rejected Files</h2>
-          <div class="summary-box">
-            <div style="display:flex;gap:24px">
-              <div style="flex:1"><h3>Accepted</h3><ul>${acceptedFilesList}</ul></div>
-              <div style="flex:1"><h3>Rejected</h3><ul>${rejectedFilesList}</ul></div>
-            </div>
-          </div>
-
-          <h2>Audit Trail Summary</h2>
-          <table>
-            <thead>
-              <tr>
-                <th>Stage</th>
-                <th>Action</th>
-                <th>Actor</th>
-                <th>Time</th>
-              </tr>
-            </thead>
-            <tbody>
-              ${auditRows}
-            </tbody>
-          </table>
-
-          <h2>Developer Final Notes</h2>
-          <div class="summary-box">
-            ${notes ? notes : "No final notes provided."}
-          </div>
-
-          <h2>Final Summary</h2>
-          <div class="summary-box">
-            <p class="success">The DIWO Agent completed the comparison stage successfully.</p>
-            <p>The report shows the before and after quality metrics, smell reduction, maintainability improvement, and full audit trail of developer decisions.</p>
-          </div>
-
-          <div class="footer">
-            Generated by Developer Interaction & Workflow Orchestration Agent.
-          </div>
-
-          <script>
-            window.onload = function() {
-              window.print();
-            }
-          </script>
-        </body>
-      </html>
-    `;
+    const html = buildSummaryReportHtml({
+      workflowId: propWorkflowId || workflow?.id || workflow?.workflow_id || "N/A",
+      target: workflow?.target,
+      language: propLanguage || workflow?.language,
+      rows: auditLogs,
+      metricsBefore: mb,
+      metricsAfter: ma,
+      severityBreakdown: smellBreakdownData,
+      acceptedFiles: workflow?.accepted_files || [],
+      rejectedFiles: workflow?.rejected_files || [],
+      notes,
+      sctva: workflow?.sctva || null,
+      archive: archiveSummary,
+    });
 
     const reportWindow = window.open("", "_blank");
-    reportWindow.document.write(reportHtml);
+    if (!reportWindow) {
+      alert("The report window was blocked. Allow pop-ups for this site and try again.");
+      return;
+    }
+    reportWindow.document.write(html);
     reportWindow.document.close();
-  };
-
-  const formatAuditDate = (log) => {
-    const candidates = [log.timestamp, log.time, log.time_raw, log.date, log.created_at, log.at, log.ts];
-    let val = candidates.find((x) => x !== undefined && x !== null && x !== "");
-    if (!val) return "";
-
-    // If it's already a number (ms since epoch)
-    if (typeof val === "number") {
-      const d = new Date(val);
-      if (!isNaN(d)) return d.toLocaleString();
-      return String(val);
-    }
-
-    // If it's a string, try parsing common formats and fallbacks
-    if (typeof val === "string") {
-      // trim
-      const s = val.trim();
-      // quick guard against literally 'Invalid Date'
-      if (/invalid date/i.test(s)) return "(unknown time)";
-
-      // ISO / RFC parse
-      const dIso = new Date(s);
-      if (!isNaN(dIso)) return dIso.toLocaleString();
-
-      // try extracting a numeric timestamp from the string
-      const digits = s.match(/\d{10,}/);
-      if (digits) {
-        const maybe = parseInt(digits[0], 10);
-        const d2 = digits[0].length === 10 ? new Date(maybe * 1000) : new Date(maybe);
-        if (!isNaN(d2)) return d2.toLocaleString();
-      }
-
-      // fallback to returning the original text (but not the literal 'Invalid Date')
-      return s;
-    }
-
-    return String(val);
   };
 
   return (
@@ -653,112 +575,66 @@ export function ComparisonView({ workflow, workflowId: propWorkflowId, language:
       </div> */}
 
       <div className="audit-section" style={{ marginBottom: 28 }}>
-        <h2 style={{ marginBottom: 20, display: "flex", alignItems: "center", gap: 8 }}>
+        <h2 style={{ marginBottom: 6, display: "flex", alignItems: "center", gap: 8 }}>
           <span style={{ fontSize: 24 }}>📋</span> Audit Trail
         </h2>
+        <p style={{ margin: "0 0 16px", fontSize: 12.5, color: "#94a3b8" }}>
+          Every recorded step of this session — which files had smells, which were
+          selected, what each was refactored into, and what the developer decided.
+          {narratedTrail.length > 0 && (
+            <> {narratedTrail.length} recorded event(s).</>
+          )}
+        </p>
+
         <div className="audit-log" style={{
           background: "#0f172a",
           border: "1px solid #1f2937",
           borderRadius: 12,
           overflow: "hidden",
-          boxShadow: "0 6px 20px rgba(2,6,23,0.45)"
+          boxShadow: "0 6px 20px rgba(2,6,23,0.45)",
         }}>
-          {auditLogs.length === 0 && (
-            <p className="empty-state" style={{ 
-              padding: 32, 
-              textAlign: "center", 
-              color: "#64748b",
-              margin: 0
-            }}>No audit log entries yet.</p>
+          {narratedTrail.length === 0 && (
+            <p className="empty-state" style={{
+              padding: 32, textAlign: "center", color: "#64748b", margin: 0,
+            }}>
+              No audit log entries yet.
+            </p>
           )}
-          {auditLogs.map((log, idx) => {
-            const stageColors = {
-              "Smell Review": "#8b5cf6",
-              "Smell Selection": "#3b82f6",
-              "Plan Approval": "#06b6d4",
-              "Transformation": "#f59e0b",
-              "Comparison": "#10b981",
-              "Completed": "#22c55e",
-              "Rolled Back": "#ef4444"
-            };
-            const stageBg = stageColors[STAGE_LABELS[log.stage] || log.stage] || "#6366f1";
-            
-            return (
-              <div 
-                key={log.id ?? log.timestamp ?? `${log.time || 'log'}-${idx}`} 
-                style={{
-                  display: "grid",
-                  gridTemplateColumns: "140px 1fr 160px 180px",
-                  gap: 16,
-                  padding: "16px 20px",
-                  borderBottom: idx !== auditLogs.length - 1 ? "1px solid #1f2937" : "none",
-                  alignItems: "center",
-                  transition: "background 0.2s ease",
-                  "&:hover": { background: "rgba(15, 23, 42, 0.8)" }
-                }}
-                onMouseEnter={(e) => e.currentTarget.style.background = "rgba(30, 41, 59, 0.5)"}
-                onMouseLeave={(e) => e.currentTarget.style.background = "transparent"}
-              >
-                <div style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 8
+
+          {groupByStage(narratedTrail).map((stage) => (
+            <div key={stage.stage}>
+              <div style={{
+                padding: "10px 20px", background: "#111c31",
+                borderBottom: "1px solid #1f2937",
+                display: "flex", alignItems: "center", gap: 10,
+              }}>
+                <span style={{
+                  width: 8, height: 8, borderRadius: "50%",
+                  background: STAGE_COLORS[stage.stage] || "#6366f1",
+                  boxShadow: `0 0 12px ${STAGE_COLORS[stage.stage] || "#6366f1"}40`,
+                }} />
+                <span style={{
+                  fontSize: 12, fontWeight: 800, letterSpacing: 0.4,
+                  textTransform: "uppercase",
+                  color: STAGE_COLORS[stage.stage] || "#6366f1",
                 }}>
-                  <div style={{
-                    width: 8,
-                    height: 8,
-                    borderRadius: "50%",
-                    background: stageBg,
-                    boxShadow: `0 0 12px ${stageBg}40`
-                  }} />
-                  <span style={{
-                    fontSize: 12,
-                    fontWeight: 700,
-                    color: stageBg,
-                    letterSpacing: 0.3,
-                    textTransform: "uppercase"
-                  }}>
-                    {STAGE_LABELS[log.stage] || log.stage || "Unknown"}
-                  </span>
-                </div>
-                
-                <div style={{
-                  fontSize: 13,
-                  color: "#e2e8f0",
-                  fontWeight: 500,
-                  lineHeight: 1.4
-                }}>
-                  {(log.event || log.action || '').replace(/_/g, " ")}
-                </div>
-                
-                <div style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 6,
-                  fontSize: 12,
-                  color: "#94a3b8",
-                  backgroundColor: "#1e293b",
-                  padding: "6px 10px",
-                  borderRadius: 6,
-                  border: "1px solid #334155"
-                }}>
-                  <span style={{ fontSize: 14 }}>
-                    {log.actor === "system" ? "⚙️" : log.actor === "developer" ? "👤" : "📌"}
-                  </span>
-                  <span>{log.actor ? log.actor.charAt(0).toUpperCase() + log.actor.slice(1) : "—"}</span>
-                </div>
-                
-                <div style={{
-                  fontSize: 12,
-                  color: "#64748b",
-                  textAlign: "right",
-                  fontFamily: "Fira Code, monospace"
-                }}>
-                  {formatAuditDate(log) || "—"}
-                </div>
+                  {stage.label}
+                </span>
+                <span style={{ fontSize: 11, color: "#64748b", fontFamily: "monospace" }}>
+                  {stage.entries.length}
+                </span>
               </div>
-            );
-          })}
+
+              {stage.entries.map((entry) => (
+                <TrailEntry
+                  key={entry.id}
+                  entry={entry}
+                  open={openTrailIds.has(entry.id)}
+                  onToggle={toggleTrailEntry}
+                />
+              ))}
+            </div>
+          ))}
         </div>
       </div>
 

@@ -60,6 +60,65 @@ class DependencyAnalyzer:
             severity_order if severity_order is not None else SEVERITY_ORDER
         )
 
+    def resolve_plan_conflicts(
+        self,
+        selections: List[Tuple[CodeSmell, Dict[str, Any]]],
+    ) -> List[Tuple[CodeSmell, Dict[str, Any]]]:
+        """Prune refactoring steps that conflict with Dead Code removal.
+
+        If an entity (function, class, or variable) is scheduled for 'Remove Dead Code'
+        or addresses a 'Dead Code' smell, any secondary refactoring ('Extract Method',
+        'Introduce Constant', 'Inline Class') targeting that same entity is pruned.
+
+        Args:
+            selections: List of (smell, candidate) tuples.
+
+        Returns:
+            Filtered list of (smell, candidate) tuples with conflicts resolved.
+        """
+        if not selections:
+            return []
+
+        # 1. Collect entities marked for dead code removal
+        dead_entities: set = set()
+        for smell, candidate in selections:
+            if candidate.get("name") == "Remove Dead Code" or smell.type in ("Dead Code", "DeadCode"):
+                ent = (
+                    smell.location.get("method")
+                    or smell.location.get("class")
+                    or smell.location.get("entity")
+                )
+                if ent and ent != "unknown":
+                    dead_entities.add(ent)
+
+        if not dead_entities:
+            return selections
+
+        CONFLICTING_REFACTORINGS = {"Extract Method", "Introduce Constant", "Inline Class"}
+        filtered: List[Tuple[CodeSmell, Dict[str, Any]]] = []
+
+        for smell, candidate in selections:
+            c_name = candidate.get("name", "")
+            ent = (
+                smell.location.get("method")
+                or smell.location.get("class")
+                or smell.location.get("entity")
+            )
+
+            # Check if this refactoring conflicts with a Dead Code removal on the same entity
+            if c_name in CONFLICTING_REFACTORINGS and ent in dead_entities:
+                logger.warning(
+                    "Pruned conflicting step '%s' for entity '%s' because the entity "
+                    "is scheduled for Remove Dead Code.",
+                    c_name,
+                    ent,
+                )
+                continue
+
+            filtered.append((smell, candidate))
+
+        return filtered
+
     def sequence_steps(
         self,
         selections: List[Tuple[CodeSmell, Dict[str, Any]]],

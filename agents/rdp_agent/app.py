@@ -88,6 +88,8 @@ def _translate_cuqa_to_rdp(data: dict) -> dict:
         "MagicNumbers":        "Magic Numbers",
         "BareExcept":          "Bare Except",        # exception handling anti-pattern → correct KB entry
         "DeadCode":            "Dead Code",
+        "UnreachableCode":     "Dead Code",
+        "UnusedVariable":      "Dead Code",
         "DuplicateCode":       "Duplicate Code",
         "DataClumps":          "Data Clumps",
         "FeatureEnvy":         "Feature Envy",

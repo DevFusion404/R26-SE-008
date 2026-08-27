@@ -12,41 +12,72 @@ import ResultsViewer from '../components/RDP_Agent/ResultsViewer';
 import ErrorAlert from '../components/RDP_Agent/ErrorAlert';
 import ErrorBoundary from '../components/common/ErrorBoundary';
 
-// ── localStorage key constants ─────────────────────────────────────────────
-const RDP_SESSION_KEY = 'rdp_last_session';   // stores last plan + trace
+// ── localStorage & sessionStorage key constants ─────────────────────────────
+const RDP_SESSION_KEY = 'rdp_last_session';   // stores last plan
+const RDP_TRACE_KEY   = 'rdp_last_trace';     // stores last trace in sessionStorage across tab navigation
 const RDP_HISTORY_KEY = 'rdp_plan_history';   // stores list of all past plans
 const MAX_HISTORY     = 20;
 
-// ── Session helpers (save/restore last plan+trace across page refreshes) ────
+// ── Session helpers (save/restore plan + trace across tab navigation and refresh) ────
 function loadSession() {
   try {
-    const raw = localStorage.getItem(RDP_SESSION_KEY);
-    return raw ? JSON.parse(raw) : null;
-  } catch { return null; }
+    const rawPlan  = sessionStorage.getItem(RDP_SESSION_KEY) || localStorage.getItem(RDP_SESSION_KEY);
+    const rawTrace = sessionStorage.getItem(RDP_TRACE_KEY);
+    const parsedPlan  = rawPlan ? JSON.parse(rawPlan) : null;
+    const parsedTrace = rawTrace ? JSON.parse(rawTrace) : null;
+    return {
+      plan: parsedPlan?.plan || null,
+      sourceFileName: parsedPlan?.sourceFileName || null,
+      trace: parsedTrace || null,
+    };
+  } catch {
+    return { plan: null, trace: null, sourceFileName: null };
+  }
 }
 
-function saveSession(plan, sourceFileName) {
+function saveSession(plan, trace, sourceFileName) {
+  const payload = JSON.stringify({
+    plan,
+    sourceFileName,
+    savedAt: new Date().toISOString(),
+  });
+
   try {
-    // Store ONLY the plan — NOT the trace.
-    // The trace can be several MB (ML scores, MCDA data for every smell candidate).
-    // Storing it causes storage quota errors after 2-3 plans.
-    const payload = JSON.stringify({
-      plan,
-      sourceFileName,
-      savedAt: new Date().toISOString(),
-    });
+    sessionStorage.setItem(RDP_SESSION_KEY, payload);
     localStorage.setItem(RDP_SESSION_KEY, payload);
-  } catch (e) {
-    // QuotaExceededError — clear old session and try once more with just the plan
+  } catch {
     try {
       localStorage.removeItem(RDP_SESSION_KEY);
-      localStorage.setItem(RDP_SESSION_KEY, JSON.stringify({ plan, sourceFileName, savedAt: new Date().toISOString() }));
-    } catch { /* give up silently */ }
+      sessionStorage.setItem(RDP_SESSION_KEY, payload);
+    } catch { /* ignore */ }
+  }
+
+  if (trace) {
+    try {
+      sessionStorage.setItem(RDP_TRACE_KEY, JSON.stringify(trace));
+    } catch {
+      // Fallback: store clean essential trace if sessionStorage quota is tight
+      try {
+        const compactTrace = {
+          input_summary: trace.input_summary,
+          problem_interpretation: trace.problem_interpretation,
+          candidate_generation: trace.candidate_generation,
+          impact_prediction: trace.impact_prediction,
+          ml_prediction: trace.ml_prediction,
+          mcda_selection: trace.mcda_selection,
+          dependency_analysis: trace.dependency_analysis,
+          plan_generation: trace.plan_generation,
+        };
+        sessionStorage.setItem(RDP_TRACE_KEY, JSON.stringify(compactTrace));
+      } catch { /* ignore */ }
+    }
   }
 }
 
 function clearRdpSession() {
   localStorage.removeItem(RDP_SESSION_KEY);
+  sessionStorage.removeItem(RDP_SESSION_KEY);
+  sessionStorage.removeItem(RDP_TRACE_KEY);
 }
 
 // ── Plan history helpers (mirrors CUQA cuqa_analysis_history pattern) ────────
@@ -69,9 +100,6 @@ function appendRdpHistory(plan, sourceFileName) {
     refactorings: [...new Set((plan.steps || []).map(s => s.refactoring))].slice(0, 3),
     source_file:  sourceFileName || 'unknown',
     summary:      plan.summary || '',
-    // Do NOT store the full plan object in history — it bloats localStorage.
-    // The current active plan is always in rdp_last_session (single key, always overwritten).
-    // History is metadata-only for the Reports page display.
   };
   const updated = [entry, ...loadRdpHistory()].slice(0, MAX_HISTORY);
   saveRdpHistory(updated);
@@ -79,15 +107,15 @@ function appendRdpHistory(plan, sourceFileName) {
 }
 
 export default function RDPAgentPage({ repoLoaded, repoMeta, preloadedReport, onClearPreloaded, onPlanGenerated }) {
-  // Restore last session from localStorage so a page refresh doesn't lose the plan
+  // Restore session (plan + trace) so tab switching or page refresh doesn't lose the results
+  const session = loadSession();
   const [loading,           setLoading]           = useState(false);
   const [error,             setError]             = useState(null);
-  const [plan,              setPlan]              = useState(() => loadSession()?.plan  ?? null);
-  const [trace,             setTrace]             = useState(null); // trace is never persisted (too large)
+  const [plan,              setPlan]              = useState(() => session.plan);
+  const [trace,             setTrace]             = useState(() => session.trace);
   const [selectedFile,      setSelectedFile]      = useState(null);
-  const [cuqaBannerVisible, setCuqaBannerVisible] = useState(false);
-  // true when the shown plan came from localStorage (not freshly generated this session)
-  const [sessionRestored,   setSessionRestored]   = useState(() => !!loadSession()?.plan);
+  const [cuqaBannerVisible, setCuqaBannerVisible] = useState(() => !!session.plan);
+  const [sessionRestored,   setSessionRestored]   = useState(() => !!session.plan);
   const fileInputRef = useRef(null);
 
   /**
@@ -148,7 +176,7 @@ export default function RDPAgentPage({ repoLoaded, repoMeta, preloadedReport, on
       // Persist to localStorage: session only (plan without trace — trace is too large)
       // History stores metadata only (no full plan) to avoid quota errors.
       const sourceFileName = file?.name || (result.plan?.target) || 'piped-from-cuqa';
-      saveSession(result.plan, sourceFileName);
+      saveSession(result.plan, result.trace, sourceFileName);
       appendRdpHistory(result.plan, sourceFileName);
       setSessionRestored(false); // this is a fresh generation
 

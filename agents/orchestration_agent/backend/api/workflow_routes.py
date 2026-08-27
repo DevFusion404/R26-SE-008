@@ -25,6 +25,7 @@ from flask import Blueprint, jsonify, request, send_file
 from api import cuqa_error_response, err
 from clients.cuqa_client import CUQAError, cuqa_base_url, fetch_quality_report
 from db.workflow_repository import log_event, parse_json_field, update_workflow
+from domain.audit_detail import severity_totals, smell_type_totals, smells_by_file
 from domain.cuqa_normalizer import (
     cuqa_report_to_smells, derive_target_name, detect_primary_language,
     normalize_cuqa_report,
@@ -140,12 +141,19 @@ def start_workflow_from_cuqa():
     wf_id, metrics_before = persist_new_workflow(
         target, language, smells, source="cuqa", cuqa_report=report
     )
+    # What CUQA actually found, per file and per smell type — the trail is
+    # supposed to answer "which files had smells detected, and which", and a
+    # bare count answered neither.
     log_event(wf_id, "smell_review", "cuqa_report_ingested", {
         "cuqa_url":       cuqa_base_url(),
         "report_type":    report.get("report_type"),
         "repo_name":      report.get("repo_name"),
         "files_analyzed": report.get("summary", {}).get("files_analyzed", 0),
         "smell_count":    len(smells),
+        "files_affected": len(smells_by_file(smells)),
+        "by_file":        smells_by_file(smells),
+        "smell_types":    smell_type_totals(smells),
+        "severities":     severity_totals(smells),
     }, actor="system")
 
     return jsonify({
