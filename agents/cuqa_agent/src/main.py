@@ -459,6 +459,7 @@ def parse_ast(payload: dict):
     return {
         "parsed": parsed,
         "summary": summary,
+        "source_code": source,   # raw file content — used by transformation agent for zip download
     }
 
 
@@ -517,6 +518,95 @@ def list_files():
         "files": _workspace["files"],
         "total": len(_workspace["files"]),
     }
+
+
+def _read_workspace_source_file(rel_path: str, max_file_bytes: int = 5 * 1024 * 1024) -> dict:
+    """Return raw source for one workspace file after containment checks."""
+    if not _workspace["root"]:
+        raise HTTPException(400, "No repository loaded.")
+
+    if not rel_path:
+        raise HTTPException(400, "file_path is required.")
+
+    full_path = _safe_resolve_path(_workspace["root"], rel_path)
+    if not os.path.isfile(full_path):
+        raise HTTPException(404, f"File not found: {rel_path}")
+
+    if os.path.getsize(full_path) > max_file_bytes:
+        raise HTTPException(413, f"File is too large to return: {rel_path}")
+
+    with open(full_path, "r", encoding="utf-8", errors="replace") as f:
+        source = f.read()
+
+    normalized_path = rel_path.replace("\\", "/")
+    return {
+        "file_name": normalized_path,
+        "file_path": normalized_path,
+        "source_code": source,
+        "language": detect_language(normalized_path),
+        "source_mode": "raw",
+        "origin": "cuqa_workspace",
+    }
+
+
+@app.post("/api/source-files")
+def source_files(payload: dict):
+    """
+    Return raw source for multiple files in the current CUQA workspace.
+
+    Body: { "file_paths": ["relative/path/File.java", ...] }
+    """
+    if not isinstance(payload, dict):
+        raise HTTPException(400, "Invalid JSON payload.")
+
+    if not _workspace["root"]:
+        raise HTTPException(400, "No repository loaded.")
+
+    raw_paths = payload.get("file_paths") or payload.get("files") or []
+    if not isinstance(raw_paths, list):
+        raise HTTPException(400, "Field 'file_paths' must be a list.")
+
+    files = []
+    missing = []
+    for raw_path in raw_paths[:1000]:
+        rel_path = str(raw_path or "")
+        try:
+            files.append(_read_workspace_source_file(rel_path))
+        except HTTPException as exc:
+            if exc.status_code in {400, 404, 413}:
+                missing.append(rel_path)
+                continue
+            raise
+
+    return {
+        "files": files,
+        "missing": missing,
+        "imported": len(files),
+        "total": len(raw_paths),
+        "source": "cuqa_workspace",
+    }
+
+
+@app.post("/api/source-file")
+@app.post("/api/file-content")
+@app.post("/api/raw-source")
+@app.post("/api/source")
+@app.post("/api/file")
+def source_file(payload: dict):
+    """Return raw source for one file in the current CUQA workspace."""
+    if not isinstance(payload, dict):
+        raise HTTPException(400, "Invalid JSON payload.")
+    return _read_workspace_source_file(payload.get("file_path", ""))
+
+
+@app.get("/api/source-file")
+@app.get("/api/file-content")
+@app.get("/api/raw-source")
+@app.get("/api/source")
+@app.get("/api/file")
+def source_file_get(file_path: str = ""):
+    """Return raw source for one file in the current CUQA workspace."""
+    return _read_workspace_source_file(file_path)
 
 
 # ---------------------------------------------------------------------------
