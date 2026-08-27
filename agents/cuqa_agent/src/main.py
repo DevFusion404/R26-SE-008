@@ -608,11 +608,122 @@ def update_workspace(payload: WorkspaceUpdateRequest):
     }
 
 
+# ── 8. Fetch Raw Source Files ────────────────────────────────────────────────
+
+class SourceFilesRequest(BaseModel):
+    file_paths: list[str]
+
+class SingleSourceFileRequest(BaseModel):
+    file_path: str
+
+@app.post("/api/source-files")
+@app.post("/api/cuqa/source-files")
+def fetch_source_files(payload: SourceFilesRequest):
+    """
+    Return raw source code content for a list of workspace file paths.
+    Used by downstream Transformation (SCTVA) and Orchestration (DIWO) Agents.
+    """
+    if not _workspace["root"]:
+        raise HTTPException(400, "No repository loaded.")
+
+    if not isinstance(payload.file_paths, list):
+        raise HTTPException(400, "file_paths must be a list of string paths.")
+
+    found_files = []
+    missing_files = []
+
+    for rel_path in payload.file_paths:
+        clean_path = str(rel_path).strip()
+        if not clean_path:
+            continue
+        try:
+            full_path = _safe_resolve_path(_workspace["root"], clean_path)
+            if os.path.isfile(full_path):
+                with open(full_path, "r", encoding="utf-8", errors="replace") as f:
+                    content = f.read()
+                found_files.append({
+                    "file_name": clean_path,
+                    "file_path": clean_path,
+                    "language": detect_language(clean_path),
+                    "source_code": content,
+                    "source_mode": "raw",
+                })
+            else:
+                missing_files.append(clean_path)
+        except Exception:
+            missing_files.append(clean_path)
+
+    return {
+        "files": found_files,
+        "imported": len(found_files),
+        "total": len(payload.file_paths),
+        "missing": missing_files,
+        "source": "cuqa_workspace",
+    }
+
+
+@app.post("/api/source-file")
+@app.post("/api/cuqa/source-file")
+def fetch_single_source_file_post(payload: SingleSourceFileRequest):
+    """Return raw source code content for a single workspace file path (POST)."""
+    if not _workspace["root"]:
+        raise HTTPException(400, "No repository loaded.")
+
+    clean_path = payload.file_path.strip()
+    if not clean_path:
+        raise HTTPException(400, "file_path is required.")
+
+    full_path = _safe_resolve_path(_workspace["root"], clean_path)
+    if not os.path.isfile(full_path):
+        raise HTTPException(404, f"File not found in workspace: {clean_path}")
+
+    with open(full_path, "r", encoding="utf-8", errors="replace") as f:
+        content = f.read()
+
+    return {
+        "file_name": clean_path,
+        "file_path": clean_path,
+        "language": detect_language(clean_path),
+        "source_code": content,
+        "source_mode": "raw",
+    }
+
+
+@app.get("/api/raw-source")
+@app.get("/api/source-file")
+@app.get("/api/cuqa/raw-source")
+@app.get("/api/cuqa/source-file")
+def fetch_single_source_file_get(file_path: str = ""):
+    """Return raw source code content for a single workspace file path (GET query param)."""
+    if not _workspace["root"]:
+        raise HTTPException(400, "No repository loaded.")
+
+    clean_path = file_path.strip()
+    if not clean_path:
+        raise HTTPException(400, "file_path parameter is required.")
+
+    full_path = _safe_resolve_path(_workspace["root"], clean_path)
+    if not os.path.isfile(full_path):
+        raise HTTPException(404, f"File not found in workspace: {clean_path}")
+
+    with open(full_path, "r", encoding="utf-8", errors="replace") as f:
+        content = f.read()
+
+    return {
+        "file_name": clean_path,
+        "file_path": clean_path,
+        "language": detect_language(clean_path),
+        "source_code": content,
+        "source_mode": "raw",
+    }
+
+
 # ---------------------------------------------------------------------------
 # Run directly
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=8080, reload=True, reload_dirs=[str(SRC_DIR)])
+
 
 
