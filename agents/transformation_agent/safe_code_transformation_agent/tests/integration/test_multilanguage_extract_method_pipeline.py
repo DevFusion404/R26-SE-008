@@ -119,6 +119,61 @@ def test_java_extract_method_runs_through_transactional_pipeline():
     _assert_extract_method_passed(result, "java")
 
 
+def test_unsafe_java_extract_method_keeps_prior_successful_transformation():
+    source = '''public class Example {
+    int process(int value) {
+        int first = value + 1;
+        int second = value + 2;
+        return first + second;
+    }
+}
+'''
+    result = SafeCodeTransformationValidationAgent().execute({
+        "request_id": "java_extract_method_preserves_prior_action",
+        "language": "java",
+        "source_files": [{
+            "file_name": "Example.java",
+            "source_code": source,
+            "language": "java",
+            "source_mode": "raw",
+        }],
+        "refactoring_plan": {
+            "plan_id": "java_extract_method_preserves_prior_action_plan",
+            "actions": [{
+                "action_type": "introduce_constant",
+                "parameters": {
+                    "source_file": "Example.java",
+                    "literal_value": 1,
+                    "constant_name": "INCREMENT",
+                },
+            }, {
+                "action_type": "extract_method",
+                "parameters": {
+                    "source_file": "Example.java",
+                    "source_class": "Example",
+                    "method": "process",
+                    "new_method_name": "calculateValues",
+                    "start_line": 3,
+                    "end_line": 4,
+                },
+            }],
+            "behavior_tests": [],
+            "metadata": {},
+        },
+        "execution_options": _options(),
+    })
+
+    logs = result["safety_report"]["transformation_log"]
+    assert result["rollback_occurred"] is False
+    assert result["transformation_applied"] is True
+    assert "INCREMENT" in result["refactored_code"]
+    assert "calculateValues(" not in result["refactored_code"]
+    assert logs[0]["replacements_count"] > 0
+    assert logs[1]["replacements_count"] == 0
+    assert logs[1]["metadata"]["reason"] == "MULTIPLE_LIVE_OUT_VALUES"
+    assert logs[1]["metadata"]["final_decision"] == "REVIEW_REQUIRED"
+
+
 def test_c_extract_function_runs_through_transactional_pipeline():
     result = SafeCodeTransformationValidationAgent().execute({
         "request_id": "c_extract_method_pipeline",

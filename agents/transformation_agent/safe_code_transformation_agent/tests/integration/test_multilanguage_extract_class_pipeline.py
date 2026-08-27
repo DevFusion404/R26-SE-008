@@ -375,6 +375,20 @@ def test_nested_java_large_class_extracts_fines_and_notices_with_constants():
     assert metadata["responsibilities_moved"] == 2
     assert metadata["after_metrics"]["implementation_method_count"] == 16
     assert metadata["validation"]["large_class_reduction"] == "PASS"
+    assert [item["action_type"] for item in metadata["prior_transformations"]] == [
+        "introduce_constant",
+        "introduce_constant",
+    ]
+    assert metadata["source_states"]["repository_original_code"] == "immutable"
+    assert metadata["source_states"]["action_input_code"] == "current_working_source"
+    assert metadata["source_states"]["candidate_output_code"] == (
+        "temporary_until_accepted"
+    )
+    assert metadata["source_states"]["action_input_length"] != metadata[
+        "source_states"
+    ]["repository_original_length"]
+    assert len(metadata["candidate_evaluations"]) > 1
+    assert sum(item["selected"] is True for item in metadata["candidate_evaluations"]) == 1
     assert "final Map<String, Double> fines" not in _source_class_text(
         transformed, "LibraryManager"
     )
