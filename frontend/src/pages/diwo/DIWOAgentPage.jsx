@@ -286,7 +286,14 @@ export default function DIWOAgentPage() {
         addLog("No backend session — cannot persist smell selection.", "danger");
         return;
       }
-      if (backendBusy) return;
+      // A second submit while the first is still in flight. Stage 1 now awaits
+      // this handler and keeps its button disabled throughout, so this should
+      // be unreachable from the Approve button — but returning in silence is
+      // how it went unnoticed when it was reachable, so it says so now.
+      if (backendBusy) {
+        addLog("A smell selection is already being processed — ignoring the repeat submit.", "warn");
+        return;
+      }
 
       try {
         setBackendBusy(true);
