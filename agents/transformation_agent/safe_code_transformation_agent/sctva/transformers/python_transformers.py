@@ -3410,10 +3410,11 @@ def _apply_inline_class_into_owner(
             "reason": "OWNER_CLASS_BODY_NOT_FOUND",
             "class_to_inline": class_to_inline,
         }
+    rendered_methods_block = "\n\n".join(rendered_methods)
     edits.append((
         _move_method_line_content_end_offset(source_code, line_offsets, owner_last_body.end_lineno),
         _move_method_line_content_end_offset(source_code, line_offsets, owner_last_body.end_lineno),
-        f"\n\n{'\n\n'.join(rendered_methods)}\n",
+        f"\n\n{rendered_methods_block}\n",
     ))
     for usage in usages:
         node = usage["node"]
