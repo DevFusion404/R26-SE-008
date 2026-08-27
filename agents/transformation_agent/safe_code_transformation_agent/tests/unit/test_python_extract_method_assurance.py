@@ -18,6 +18,32 @@ def _action(method: str, helper: str) -> RefactoringAction:
     )
 
 
+def _applied_action(method: str, helper: str, metadata: dict) -> RefactoringAction:
+    return RefactoringAction(
+        action_type="extract_method",
+        parameters={
+            "method": method,
+            "new_method_name": helper,
+            "applied_transformation_metadata": metadata,
+        },
+    )
+
+
+def _validate_applied_extract(
+    original: str,
+    transformed: str,
+    method: str,
+    helper: str,
+    metadata: dict,
+):
+    return StructuralValidator().validate(
+        language="python",
+        original_code=original,
+        transformed_code=transformed,
+        actions=[_applied_action(method, helper, metadata)],
+    )
+
+
 def test_normal_long_function_moves_real_logic_into_requested_helper():
     source = '''def calculate(a, b):
     prefix = a + 1
@@ -399,3 +425,247 @@ def extracted_process(first):
 
     assert result.passed is False
     assert result.details["extract_method_validation"][0]["checks"]["original_method_loc_reduced"] is False
+
+
+def test_duplication_validator_accepts_complete_if_block_extraction():
+    source = '''def classify(value):
+    label = "none"
+    if value > 0:
+        label = "positive"
+        print(label)
+    summary = f"Result: {label}"
+    return summary
+'''
+    transformed, count, metadata = apply_extract_method(
+        source,
+        method_name="classify",
+        new_method_name="classify_positive",
+        start_line=3,
+        end_line=5,
+    )
+    result = _validate_applied_extract(
+        source, transformed, "classify", "classify_positive", metadata
+    )
+    details = result.details["extract_method_validation"][0]
+
+    assert count == 1
+    assert result.passed is True
+    assert details["moved_top_level_statement_count"] == 1
+    assert details["duplicated_statements"] == []
+    assert details["checks"]["no_logic_duplicated"] is True
+
+
+def test_duplication_validator_accepts_nested_if_else_as_one_statement():
+    source = '''def grade(mark):
+    label = "F"
+    if mark >= 50:
+        if mark >= 75:
+            label = "A"
+        else:
+            label = "C"
+    message = f"Grade: {label}"
+    return message
+'''
+    transformed, count, metadata = apply_extract_method(
+        source,
+        method_name="grade",
+        new_method_name="resolve_grade",
+        start_line=3,
+        end_line=7,
+    )
+    result = _validate_applied_extract(
+        source, transformed, "grade", "resolve_grade", metadata
+    )
+    details = result.details["extract_method_validation"][0]
+
+    assert count == 1
+    assert result.passed is True
+    assert details["moved_top_level_statement_count"] == 1
+    assert details["duplicated_top_level_statement_count"] == 0
+
+
+def test_repeated_call_occurrence_remaining_in_caller_is_not_false_duplicate():
+    source = '''def process(value):
+    print("checkpoint")
+    total = value + 1
+    print("checkpoint")
+    adjusted = total + 2
+    result = adjusted * 2
+    return result
+'''
+    transformed, count, metadata = apply_extract_method(
+        source,
+        method_name="process",
+        new_method_name="prepare_total",
+        start_line=3,
+        end_line=5,
+    )
+    result = _validate_applied_extract(
+        source, transformed, "process", "prepare_total", metadata
+    )
+    details = result.details["extract_method_validation"][0]
+
+    assert count == 1
+    assert result.passed is True
+    assert transformed.count('print("checkpoint")') == 2
+    assert details["checks"]["no_logic_duplicated"] is True
+    assert details["duplicated_statements"] == []
+
+
+def test_identical_child_call_in_different_scope_is_not_double_counted():
+    source = '''def notify_status(first, second):
+    status = "idle"
+    if first:
+        status = "first"
+        print(status)
+    if second:
+        status = "second"
+        print(status)
+    return status
+'''
+    transformed, count, metadata = apply_extract_method(
+        source,
+        method_name="notify_status",
+        new_method_name="handle_first",
+        start_line=3,
+        end_line=5,
+    )
+    result = _validate_applied_extract(
+        source, transformed, "notify_status", "handle_first", metadata
+    )
+    details = result.details["extract_method_validation"][0]
+
+    assert count == 1
+    assert result.passed is True
+    assert details["moved_top_level_statement_count"] == 1
+    assert details["duplicated_top_level_statement_count"] == 0
+
+
+def test_helper_call_and_return_value_unpacking_are_interface_not_duplication():
+    source = '''def calculate(base):
+    first = base * 2
+    second = base * 3
+    trace = first + second
+    result = first - second
+    return result
+'''
+    transformed, count, metadata = apply_extract_method(
+        source,
+        method_name="calculate",
+        new_method_name="calculate_parts",
+        start_line=2,
+        end_line=4,
+    )
+    result = _validate_applied_extract(
+        source, transformed, "calculate", "calculate_parts", metadata
+    )
+    details = result.details["extract_method_validation"][0]
+
+    assert count == 1
+    assert "first, second = calculate_parts(base)" in transformed
+    assert result.passed is True
+    assert details["checks"]["no_logic_duplicated"] is True
+    assert all(
+        "calculate_parts" not in item["normalized_fingerprint"]
+        for item in details["duplicated_statements"]
+    )
+
+
+def test_ast_fingerprint_preserves_literal_and_operator_semantics():
+    source = '''def calculate(value):
+    first = value + 1
+    second = value + 2
+    total = first + second
+    result = total * 2
+    return result
+'''
+    transformed, count, metadata = apply_extract_method(
+        source,
+        method_name="calculate",
+        new_method_name="calculate_first",
+        start_line=2,
+        end_line=4,
+    )
+    result = _validate_applied_extract(
+        source, transformed, "calculate", "calculate_first", metadata
+    )
+
+    assert count == 1
+    assert result.passed is True
+    selected = metadata["selected_ast_statements"]
+    assert selected[0]["normalized_fingerprint"] != selected[1][
+        "normalized_fingerprint"
+    ]
+
+
+def test_formatting_only_helper_difference_keeps_same_ast_identity():
+    source = '''def calculate(value):
+    first = value + 1
+    second = first * 2
+    result = second + 3
+    final = result * 4
+    return final
+'''
+    transformed, count, metadata = apply_extract_method(
+        source,
+        method_name="calculate",
+        new_method_name="calculate_result",
+        start_line=3,
+        end_line=5,
+    )
+    reformatted = transformed.replace(
+        "second = first * 2",
+        "second=(first*2)",
+    ).replace(
+        "result = second + 3",
+        "result=(second+3)",
+    )
+    result = _validate_applied_extract(
+        source, reformatted, "calculate", "calculate_result", metadata
+    )
+
+    assert count == 1
+    assert result.passed is True
+    assert result.details["extract_method_validation"][0][
+        "duplicated_statements"
+    ] == []
+
+
+def test_real_duplicate_reports_ast_type_lines_fingerprint_and_reason():
+    source = '''def process(value):
+    first = value + 1
+    second = first * 2
+    result = second + 3
+    final = result * 4
+    return final
+'''
+    transformed, count, metadata = apply_extract_method(
+        source,
+        method_name="process",
+        new_method_name="extracted_process",
+        start_line=3,
+        end_line=5,
+    )
+    duplicated = transformed.replace(
+        "    final = extracted_process(first)\n",
+        "    second = first * 2\n"
+        "    final = extracted_process(first)\n",
+        1,
+    )
+    result = _validate_applied_extract(
+        source, duplicated, "process", "extracted_process", metadata
+    )
+    details = result.details["extract_method_validation"][0]
+
+    assert count == 1
+    assert result.passed is False
+    assert details["checks"]["no_logic_duplicated"] is False
+    assert details["duplicated_top_level_statement_count"] == 1
+    diagnostic = details["duplicated_statements"][0]
+    assert diagnostic["original_ast_type"] == "Assign"
+    assert diagnostic["caller_line"] > 0
+    assert diagnostic["helper_line"] > 0
+    assert diagnostic["normalized_fingerprint"].startswith("Assign(")
+    assert diagnostic["reason"] == (
+        "selected_extracted_statement_still_remains_in_caller"
+    )
