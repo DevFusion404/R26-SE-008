@@ -128,9 +128,9 @@ CLONE_ROOT = Path(os.environ.get("DIWO_CLONE_ROOT") or (Path.home() / "DIWO" / "
 # Specialized agent endpoints
 # ─────────────────────────────────────────────────────────────────────────────
 
-DEFAULT_CUQA_URL = "http://localhost:8080"
-DEFAULT_RDP_URL = "http://localhost:5000"
-DEFAULT_SCTVA_URL = "http://localhost:8002"
+DEFAULT_CUQA_URL = os.environ.get("CUQA_AGENT_URL") or os.environ.get("CUQA_URL") or "https://cuqaagent.gentleglacier-0204e61b.southeastasia.azurecontainerapps.io"
+DEFAULT_RDP_URL = os.environ.get("RDP_AGENT_URL") or os.environ.get("RDP_URL") or "https://rdpagent.gentleglacier-0204e61b.southeastasia.azurecontainerapps.io"
+DEFAULT_SCTVA_URL = os.environ.get("SCTVA_AGENT_URL") or os.environ.get("SCTVA_URL") or "https://sctvaagent.gentleglacier-0204e61b.southeastasia.azurecontainerapps.io"
 
 
 def cuqa_base_url() -> str:

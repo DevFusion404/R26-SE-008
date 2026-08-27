@@ -377,6 +377,9 @@ class RDPAgent:
             len(report.smells),
         )
 
+        # Resolve conflicts (e.g. prune Extract Method / Introduce Constant if entity is to be removed as Dead Code)
+        selections = self.dependency_analyzer.resolve_plan_conflicts(selections)
+
         try:
             ordered = self.dependency_analyzer.sequence_steps(selections)
         except ValueError as exc:
