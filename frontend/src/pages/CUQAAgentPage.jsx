@@ -13,6 +13,7 @@
 import { useState, useEffect, useRef } from 'react';
 import QualityReportView from '../components/QualityReportView';
 import CUQAAgentService from '../services/cuqaAgentService';
+import RepositoryUnderstandingSection from '../components/cuqa/RepositoryUnderstandingSection';
 
 
 // ── Node colours by type ───────────────────────────────────────────────────
@@ -850,6 +851,12 @@ export default function CUQAAgentPage({ repoLoaded, repoMeta, onSendToRdp, analy
           </button>
         </div>
       </div>
+
+      {/* ── Repository Understanding & Newcomer Guide ─────────── */}
+      <RepositoryUnderstandingSection
+        repoLoaded={repoLoaded}
+        onFileSelect={setSelFile}
+      />
 
       {/* ── Explorer + AST ──────────────────────────────────── */}
       <div style={{ display: 'grid', gridTemplateColumns: '220px 1fr', gap: 16, height: 380 }}>
