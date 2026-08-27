@@ -1,15 +1,28 @@
 """
-main.py — CUQA Agent FastAPI Server
--------------------------------------
-Exposes REST endpoints for:
-  - ZIP upload + extraction
-  - Public GitHub repo cloning
-  - File-level AST parsing
-  - Repository structure discovery
-  - Quality report generation
+main.py — CUQA Agent FastAPI Server & API Gateway
+-------------------------------------------------
+REST API backend for the CUQA (Code Understanding & Quality Assessment) Agent.
 
-This is the FIRST agent in the agentic pipeline.
-Its JSON output feeds directly into the RDP Agent.
+===============================================================================
+SPECIAL FUNCTION & ARCHITECTURAL OVERVIEW FOR CODE VIVA / PRESENTATION:
+===============================================================================
+1. POSITION IN REFACTORING PIPELINE:
+   CUQA is Stage 1 of the multi-agent refactoring platform:
+   [User Code Upload / GitHub] -> [CUQA Agent] -> [RDP Agent] -> [Transformation Agent]
+   Output from CUQA is passed directly into the RDP (Refactoring & Design Pattern) Agent.
+
+2. KEY SECURITY FUNCTIONS & HARDENING:
+   - `_safe_extract_zip()`: Mitigates Zip Slip vulnerabilities by verifying that no member
+     path inside uploaded ZIP archives escapes the designated extraction directory.
+   - `_safe_resolve_path()`: Prevents Directory Traversal attacks (e.g. `../../etc/passwd`)
+     by validating relative paths against workspace boundaries using `Path.relative_to()`.
+   - Hostname Validation: Validates GitHub URLs strictly against `parsed.hostname == "github.com"`
+     to block SSRF and domain spoofing attacks (e.g., `github.com.evil.com`).
+   - Resource Quotas: Imforces a strict 500 MB upload / download memory ceiling (`MAX_ZIP_SIZE_MB`).
+
+3. WORKSPACE MANAGEMENT:
+   - Maintains single active workspace state in `_workspace` dictionary per server process.
+===============================================================================
 """
 
 import os
@@ -30,12 +43,12 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, HttpUrl
 
 class GitHubRepoRequest(BaseModel):
-    url: HttpUrl  # Built-in validation for URLs
+    url: HttpUrl  # Built-in Pydantic URL syntax validation
 
 # ---------------------------------------------------------------------------
-# Make sibling modules importable regardless of CWD
-# main.py lives inside agents/cuqa_agent/src/ — add that dir to sys.path
-# so we can import ast_parser, ast_visualizer, report_generator directly.
+# Dynamic Python Path Configuration
+# Ensures sibling imports (ast_parser, ast_visualizer, report_generator) resolve
+# regardless of current working directory when starting uvicorn.
 # ---------------------------------------------------------------------------
 SRC_DIR = Path(__file__).resolve().parent
 if str(SRC_DIR) not in sys.path:
@@ -43,10 +56,10 @@ if str(SRC_DIR) not in sys.path:
 
 from ast_parser import parse_source, detect_language
 from ast_visualizer import enrich_ast, build_summary
-from report_generator import generate_file_report, generate_repo_report
+from report_generator import generate_file_report, generate_repo_report, build_repo_name_index
 
 # ---------------------------------------------------------------------------
-# App setup
+# FastAPI Application Initialization & CORS Configuration
 # ---------------------------------------------------------------------------
 
 app = FastAPI(
@@ -78,26 +91,35 @@ app.add_middleware(
 )
 
 # ---------------------------------------------------------------------------
-# Session state — single active workspace per server instance
+# Active Workspace Session State
+# Holds global session context for extracted repo root, source type, and file paths.
 # ---------------------------------------------------------------------------
 _workspace: dict = {
-    "root": None,          # Path to extracted/cloned directory
-    "source": None,        # "zip" | "github"
-    "repo_name": None,
-    "files": [],           # List of relative paths to supported source files
+    "root": None,          # Absolute path to extracted/cloned project folder
+    "source": None,        # Source origin: "zip" | "github"
+    "repo_name": None,     # Repository display name
+    "files": [],           # List of relative paths to discovered source code files
 }
 
 SUPPORTED_EXTENSIONS = {".py", ".java", ".c", ".h"}
 
 
+# ---------------------------------------------------------------------------
+# SPECIAL SECURITY HELPER FUNCTIONS
+# ---------------------------------------------------------------------------
+
 def _safe_extract_zip(zip_file: zipfile.ZipFile, extract_dir: str) -> None:
-    """Extract ZIP members after validating each member path.
+    """
+    SPECIAL SECURITY FUNCTION: Mitigate Zip Slip Path Traversal Vulnerabilities.
 
-    Prevents Zip Slip / path traversal attacks by ensuring no member
-    extracts to a path outside *extract_dir*.
-
-    Raises:
-        HTTPException(400): if any member attempts to escape the directory.
+    -------------------------------------------------------------------------
+    VIVA/SECURITY EXAM NOTE (Zip Slip Explanation):
+    - Zip Slip is a critical arbitrary file write vulnerability. Malicious ZIP archives
+      can contain filenames with relative directory traversal characters (e.g. `../../bin/sh`).
+    - Standard `zipfile.extractall()` trusts these paths and writes files outside `extract_dir`.
+    - This protection resolves the target file path and uses `Path.relative_to(extract_path)`
+      to confirm that every extracted file stays strictly inside `extract_dir`.
+    -------------------------------------------------------------------------
     """
     extract_path = Path(extract_dir).resolve()
     for member in zip_file.namelist():
@@ -113,15 +135,16 @@ def _safe_extract_zip(zip_file: zipfile.ZipFile, extract_dir: str) -> None:
 
 
 def _safe_resolve_path(workspace_root: str, rel_path: str) -> str:
-    """Resolve *rel_path* relative to *workspace_root* and verify containment.
+    """
+    SPECIAL SECURITY FUNCTION: Prevent Arbitrary File Access / Directory Traversal.
 
-    Prevents path traversal attacks (e.g. ../../etc/passwd).
-
-    Returns:
-        The resolved absolute path string.
-
-    Raises:
-        HTTPException(400): if the resolved path escapes the workspace.
+    -------------------------------------------------------------------------
+    VIVA/SECURITY EXAM NOTE (Path Traversal Explanation):
+    - When users query an API endpoint with a filename string like `file_path="../../etc/passwd"`,
+      naive string concatenation allows reading arbitrary host system files.
+    - `_safe_resolve_path` canonicalizes `(root / rel_path).resolve()` and checks that it
+      is contained within `workspace_root` using `candidate.relative_to(root)`.
+    -------------------------------------------------------------------------
     """
     root = Path(workspace_root).resolve()
     candidate = (root / rel_path).resolve()
@@ -136,10 +159,14 @@ def _safe_resolve_path(workspace_root: str, rel_path: str) -> str:
 
 
 def _find_source_files(root: str) -> list[str]:
-    """Return relative paths of all supported source files under root."""
+    """
+    Recursively discover all supported source files in the active workspace.
+
+    VIVA NOTE: Filters out irrelevant directories like `.git`, `node_modules`, `__pycache__`,
+    `venv`, and build targets to speed up analysis.
+    """
     result = []
     for dirpath, _, filenames in os.walk(root):
-        # Skip common non-source dirs
         rel_dir = os.path.relpath(dirpath, root)
         skip_prefixes = (".git", "node_modules", "__pycache__", ".venv", "venv", "target", "build")
         if any(rel_dir.startswith(p) for p in skip_prefixes):
@@ -158,15 +185,19 @@ _EXT_TO_LANG = {".py": "Python", ".java": "Java", ".c": "C", ".h": "C"}
 
 def _get_language_breakdown(file_list: list[str]) -> dict:
     """
-    Count source files per language and return a breakdown dict.
+    SPECIAL FUNCTION: Analyze repository language distribution and Polyglot status.
+
+    -------------------------------------------------------------------------
+    VIVA/INTERVIEW NOTE (Polyglot Repository Analysis):
+    - Scans discovered files and counts file occurrences per language.
+    - Determines:
+      1. `primary_language`: The language with the highest file count.
+      2. `is_polyglot`: True if files from multiple distinct languages (e.g. Python & C) exist.
+      3. `detected_languages`: Sorted array of language names by frequency.
+    -------------------------------------------------------------------------
 
     Returns:
-        {
-            "breakdown": {"Python": 12, "Java": 3, "C": 7},
-            "detected_languages": ["Python", "C"],   # sorted by count desc, deduplicated
-            "primary_language": "Python",             # most common language
-            "is_polyglot": True                       # True if >1 language
-        }
+        dict: Language distribution and polyglot diagnostic summary.
     """
     counts: dict[str, int] = {}
     for path in file_list:
@@ -183,7 +214,6 @@ def _get_language_breakdown(file_list: list[str]) -> dict:
             "is_polyglot": False,
         }
 
-    # Sort by count descending
     sorted_langs = sorted(counts.items(), key=lambda x: x[1], reverse=True)
     detected = [lang for lang, _ in sorted_langs]
     return {
@@ -195,7 +225,16 @@ def _get_language_breakdown(file_list: list[str]) -> dict:
 
 
 def _build_tree(root: str) -> dict:
-    """Build a recursive directory tree dict for the frontend."""
+    """
+    SPECIAL RECURSIVE ALGORITHM: Build a hierarchical directory tree for UI visualizer.
+
+    -------------------------------------------------------------------------
+    VIVA/INTERVIEW NOTE (Directory Tree Traversal):
+    - Uses Depth-First Search (DFS) recursion (`_recurse`) over file system directories.
+    - Replaces Windows backslashes `\\` with POSIX forward slashes `/` for cross-platform UI consistency.
+    - Skips build folders, virtual environments (`venv`), and version control directories (`.git`).
+    -------------------------------------------------------------------------
+    """
 
     def _recurse(path: str, rel: str) -> dict:
         name = os.path.basename(path)
@@ -207,7 +246,6 @@ def _build_tree(root: str) -> dict:
                 "path": rel,
                 "language": detect_language(name) if ext in SUPPORTED_EXTENSIONS else None,
             }
-        # Directory
         children = []
         try:
             entries = sorted(os.listdir(path))
@@ -228,7 +266,7 @@ def _build_tree(root: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Endpoints
+# API Endpoints Definition
 # ---------------------------------------------------------------------------
 
 @app.get("/")
@@ -488,7 +526,11 @@ def quality_report(payload: dict = None): # type: ignore
         return {"type": "file", "report": report}
 
     # All files — cap at 50 to avoid timeout
+    # Collect (relative_filename, source_text) for every file so that
+    # generate_repo_report can build a cross-file name index for accurate
+    # dead-code detection.  We read each file once and reuse the text.
     file_reports = []
+    all_sources: list[tuple[str, str]] = []   # (basename, source) for repo index
     for rel in _workspace["files"][:50]:
         full_path = os.path.join(_workspace["root"], rel)
         try:
@@ -496,11 +538,16 @@ def quality_report(payload: dict = None): # type: ignore
                 source = f.read()
             report = generate_file_report(source, os.path.basename(full_path))
             report["relative_path"] = rel.replace("\\", "/")
+            # Collect Python sources for repo-wide dead-code index
+            if os.path.splitext(full_path)[-1].lower() == ".py":
+                all_sources.append((os.path.basename(full_path), source))
         except Exception as exc:
             report = {"file": rel, "error": str(exc)}
         file_reports.append(report)
 
-    repo_report = generate_repo_report(file_reports)
+    # Pass source texts so generate_repo_report can apply cross-file dead-code
+    # detection: functions imported by other files are NOT flagged as dead.
+    repo_report = generate_repo_report(file_reports, sources=all_sources)
     repo_report["repo_name"] = _workspace["repo_name"]
     return {"type": "repository", "report": repo_report}
 
@@ -519,9 +566,52 @@ def list_files():
     }
 
 
+# ── 7. Update Workspace Files ────────────────────────────────────────────────
+
+class WorkspaceFileUpdate(BaseModel):
+    file_path: str
+    content: str
+
+class WorkspaceUpdateRequest(BaseModel):
+    files: list[WorkspaceFileUpdate]
+
+@app.post("/api/update-workspace")
+def update_workspace(payload: WorkspaceUpdateRequest):
+    """
+    Update/overwrite workspace source files with refactored code.
+    Allows CUQA to re-analyze refactored code and accurately report updated metrics/smells.
+    """
+    if not _workspace["root"]:
+        raise HTTPException(400, "No repository loaded.")
+
+    updated_count = 0
+    errors = []
+
+    for item in payload.files:
+        rel_path = item.file_path.strip()
+        if not rel_path:
+            continue
+        try:
+            full_path = _safe_resolve_path(_workspace["root"], rel_path)
+            os.makedirs(os.path.dirname(full_path), exist_ok=True)
+            with open(full_path, "w", encoding="utf-8") as f:
+                f.write(item.content)
+            updated_count += 1
+        except Exception as exc:
+            errors.append({"file_path": rel_path, "error": str(exc)})
+
+    return {
+        "status": "success",
+        "updated_files": updated_count,
+        "errors": errors,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Run directly
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=8080, reload=True, reload_dirs=[str(SRC_DIR)])
+
+
