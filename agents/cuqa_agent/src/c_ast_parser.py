@@ -466,15 +466,30 @@ def _extract_c_identifier(node) -> Optional[str]:
     return None
 
 
+def _is_c_constant_line(line_str: str) -> bool:
+    if not line_str:
+        return False
+    if "#define" in line_str or "const" in line_str or "enum" in line_str:
+        return True
+    m = re.search(r'\b([A-Za-z0-9_]*[A-Z][A-Z0-9_]*)\s*=\s*', line_str)
+    if m:
+        name = m.group(1)
+        if name.isupper() or any(name.startswith(p) for p in ("MAX_", "MIN_", "DEFAULT_", "CONST_", "NUM_", "TIMEOUT_", "PORT_", "LIMIT_", "TOTAL_")):
+            return True
+    return False
+
+
 def analyze_c_magic_numbers(source: str, filename: str = "untitled.c") -> list[dict]:
     """Detect magic numbers in C code using tree-sitter AST or regex fallback,
     extracting variable context if compared in a relational expression.
+    Ignores numeric literals assigned to constants or defined in #define macros.
     """
     SAFE_NUMBERS = {"0", "1", "-1", "2", "0.0", "1.0", "0f", "1f", "0L", "1L"}
     smells: list[dict] = []
 
     clean_no_comments = _strip_comments(source)
     clean = _strip_string_literals(clean_no_comments)
+    split_lines = source.splitlines()
 
     if _TREE_SITTER_AVAILABLE:
         try:
@@ -499,6 +514,9 @@ def analyze_c_magic_numbers(source: str, filename: str = "untitled.c") -> list[d
                     continue
 
                 line_no = node.start_point[0] + 1
+                line_str = split_lines[line_no - 1] if line_no <= len(split_lines) else ""
+                if _is_c_constant_line(line_str):
+                    continue  # Constant definition -> NOT a magic number
 
                 parent = node.parent
                 while parent and parent.type in ("parenthesized_expression", "cast_expression", "argument_list"):
@@ -552,8 +570,9 @@ def analyze_c_magic_numbers(source: str, filename: str = "untitled.c") -> list[d
         val = m.group(0).strip()
         if val not in SAFE_NUMBERS:
             line_no = clean[: m.start()].count("\n") + 1
-            split_lines = clean.splitlines()
             line_str = split_lines[line_no - 1] if line_no <= len(split_lines) else ""
+            if _is_c_constant_line(line_str):
+                continue  # Constant definition -> NOT a magic number
 
             var_context = None
             m_left = COMP_LEFT_RE.search(line_str)

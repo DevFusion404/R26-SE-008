@@ -56,7 +56,7 @@ if str(SRC_DIR) not in sys.path:
 
 from ast_parser import parse_source, detect_language
 from ast_visualizer import enrich_ast, build_summary
-from report_generator import generate_file_report, generate_repo_report
+from report_generator import generate_file_report, generate_repo_report, build_repo_name_index
 
 # ---------------------------------------------------------------------------
 # FastAPI Application Initialization & CORS Configuration
@@ -526,7 +526,11 @@ def quality_report(payload: dict = None): # type: ignore
         return {"type": "file", "report": report}
 
     # All files — cap at 50 to avoid timeout
+    # Collect (relative_filename, source_text) for every file so that
+    # generate_repo_report can build a cross-file name index for accurate
+    # dead-code detection.  We read each file once and reuse the text.
     file_reports = []
+    all_sources: list[tuple[str, str]] = []   # (basename, source) for repo index
     for rel in _workspace["files"][:50]:
         full_path = os.path.join(_workspace["root"], rel)
         try:
@@ -534,11 +538,16 @@ def quality_report(payload: dict = None): # type: ignore
                 source = f.read()
             report = generate_file_report(source, os.path.basename(full_path))
             report["relative_path"] = rel.replace("\\", "/")
+            # Collect Python sources for repo-wide dead-code index
+            if os.path.splitext(full_path)[-1].lower() == ".py":
+                all_sources.append((os.path.basename(full_path), source))
         except Exception as exc:
             report = {"file": rel, "error": str(exc)}
         file_reports.append(report)
 
-    repo_report = generate_repo_report(file_reports)
+    # Pass source texts so generate_repo_report can apply cross-file dead-code
+    # detection: functions imported by other files are NOT flagged as dead.
+    repo_report = generate_repo_report(file_reports, sources=all_sources)
     repo_report["repo_name"] = _workspace["repo_name"]
     return {"type": "repository", "report": repo_report}
 
@@ -557,9 +566,52 @@ def list_files():
     }
 
 
+# ── 7. Update Workspace Files ────────────────────────────────────────────────
+
+class WorkspaceFileUpdate(BaseModel):
+    file_path: str
+    content: str
+
+class WorkspaceUpdateRequest(BaseModel):
+    files: list[WorkspaceFileUpdate]
+
+@app.post("/api/update-workspace")
+def update_workspace(payload: WorkspaceUpdateRequest):
+    """
+    Update/overwrite workspace source files with refactored code.
+    Allows CUQA to re-analyze refactored code and accurately report updated metrics/smells.
+    """
+    if not _workspace["root"]:
+        raise HTTPException(400, "No repository loaded.")
+
+    updated_count = 0
+    errors = []
+
+    for item in payload.files:
+        rel_path = item.file_path.strip()
+        if not rel_path:
+            continue
+        try:
+            full_path = _safe_resolve_path(_workspace["root"], rel_path)
+            os.makedirs(os.path.dirname(full_path), exist_ok=True)
+            with open(full_path, "w", encoding="utf-8") as f:
+                f.write(item.content)
+            updated_count += 1
+        except Exception as exc:
+            errors.append({"file_path": rel_path, "error": str(exc)})
+
+    return {
+        "status": "success",
+        "updated_files": updated_count,
+        "errors": errors,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Run directly
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=8080, reload=True, reload_dirs=[str(SRC_DIR)])
+
+
