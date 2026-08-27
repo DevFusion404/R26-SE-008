@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
@@ -27,7 +28,15 @@ class RefactoringAction:
     warnings: List[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
-        self.action_type = str(self.action_type).strip().lower()
+        # Accept planner display names at the agent boundary while keeping one
+        # canonical action vocabulary internally.  In particular, an RDP
+        # action named ``Remove Dead Code`` must not be rejected before it can
+        # reach the language transformer.
+        self.action_type = re.sub(
+            r"[\s-]+",
+            "_",
+            str(self.action_type).strip().lower(),
+        )
         if self.action_type not in SUPPORTED_ACTIONS:
             raise ContractValidationError(
                 f"Unsupported action_type '{self.action_type}'. Supported: {sorted(SUPPORTED_ACTIONS)}"
@@ -45,6 +54,49 @@ class RefactoringAction:
             parameters = {}
         if not isinstance(parameters, dict):
             raise ContractValidationError("Action field 'parameters' must be an object.")
+        parameters = dict(parameters)
+
+        normalized_action_type = re.sub(
+            r"[\s-]+", "_", str(data.get("action_type") or "").strip().lower()
+        )
+        source_refactoring = str(data.get("source_refactoring") or "").strip().lower()
+        if normalized_action_type in {"inline_class", "inline_python_class"} or (
+            normalized_action_type == "noop" and source_refactoring == "inline class"
+        ):
+            raw_target = data.get("target")
+            target = raw_target if isinstance(raw_target, dict) else {}
+            requested_target = parameters.get("requested_target")
+            requested_target = (
+                requested_target if isinstance(requested_target, dict) else {}
+            )
+            target_class = str(
+                parameters.get("class_to_inline")
+                or parameters.get("target_class")
+                or parameters.get("source_class")
+                or parameters.get("class_name")
+                or requested_target.get("class_to_inline")
+                or target.get("class")
+                or data.get("class_to_inline")
+                or data.get("target_class")
+                or ""
+            ).strip()
+            source_file = str(
+                parameters.get("source_file")
+                or requested_target.get("source_file")
+                or target.get("source_file")
+                or data.get("source_file")
+                or ""
+            ).strip()
+            parameters["class_to_inline"] = target_class
+            parameters["target_class"] = target_class
+            if source_file:
+                parameters["source_file"] = source_file
+            parameters["requested_target"] = {
+                "class_to_inline": target_class,
+                "source_file": source_file,
+            }
+            if not target_class:
+                parameters["target_resolution_error"] = "INLINE_CLASS_TARGET_MISSING"
 
         warnings = data.get("warnings", [])
         if not isinstance(warnings, list):

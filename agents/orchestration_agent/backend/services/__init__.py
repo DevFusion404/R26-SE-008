@@ -2,6 +2,7 @@
 
     workflow_service        coordinates the whole workflow and its decisions
     planning_service        filtered CUQA report -> RDP -> normalized plan
+    planning_recommendation_service  evidence gathering for Stage 2 recommendations
     transformation_service  transformation results, validation, metrics
     archive_service         the whole-project ZIP
     git_service             clone, branch, apply, commit, push

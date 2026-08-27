@@ -1,4 +1,6 @@
 import ast
+import contextlib
+import io
 
 from sctva.analysis.local_refactor_detector import LocalRefactorDetector
 from sctva.agent import SafeCodeTransformationValidationAgent
@@ -6,6 +8,7 @@ from sctva.contracts import RefactoringAction
 from sctva.integration.planner_adapter import PlannerAdapter
 from sctva.transformers.engine import TransformationEngine
 from sctva.transformers import java_transformers, python_transformers
+from sctva.validators.structural_validator import StructuralValidator
 
 
 def _exception_actions(language: str, source: str):
@@ -78,6 +81,295 @@ def test_python_exception_overreach_without_direct_evidence_is_not_auto_refactor
 '''
 
     assert _exception_actions("python", source) == []
+
+
+def test_python_exception_overreach_splits_numeric_conversion_near_operation():
+    source = '''def checkout(raw_quantity, raw_price):
+    label = "order"
+    try:
+        quantity = int(raw_quantity)
+        price = float(raw_price)
+        total = quantity * price
+    except Exception as error:
+        print("Invalid numeric input.")
+        return None
+    return label, total
+'''
+
+    action = _exception_actions("python", source)[0]
+    transformed, count = python_transformers.apply_narrow_exception_handler(
+        source,
+        source_line=action.parameters["source_line"],
+        original_exception_type=action.parameters["original_exception_type"],
+        target_exception_type=action.parameters["target_exception_type"],
+        handler_name=action.parameters["handler_name"],
+    )
+
+    assert count == 2
+    assert "except Exception" not in transformed
+    assert transformed.count("except ValueError as error:") == 2
+    assert "total = quantity * price" in transformed
+    assert ast.parse(transformed)
+
+
+def test_python_exception_overreach_splits_dictionary_lookup_to_key_error():
+    source = '''def price_for(product_code):
+    product_prices = {"A": 10}
+    try:
+        catalog_price = product_prices[product_code]
+        tax = catalog_price * 0.1
+    except Exception:
+        return None
+    return catalog_price + tax
+'''
+
+    action = _exception_actions("python", source)[0]
+    transformed, count = python_transformers.apply_narrow_exception_handler(
+        source,
+        source_line=action.parameters["source_line"],
+        original_exception_type="Exception",
+        target_exception_type=action.parameters["target_exception_type"],
+    )
+
+    assert count == 1
+    assert "except KeyError:" in transformed
+    assert "except Exception" not in transformed
+    assert "tax = catalog_price * 0.1" in transformed
+
+
+def test_python_exception_overreach_splits_list_access_to_index_error():
+    source = '''def first_item(index):
+    items = ["a", "b"]
+    try:
+        selected = items[index]
+        return selected.upper()
+    except Exception:
+        return ""
+'''
+
+    action = _exception_actions("python", source)[0]
+    transformed, count = python_transformers.apply_narrow_exception_handler(
+        source,
+        source_line=action.parameters["source_line"],
+        original_exception_type="Exception",
+        target_exception_type=action.parameters["target_exception_type"],
+    )
+
+    assert count == 1
+    assert "except IndexError:" in transformed
+    assert "except Exception" not in transformed
+
+
+def test_python_exception_overreach_splits_zero_division():
+    source = '''def ratio(total, count):
+    try:
+        average = total / count
+        return round(average, 2)
+    except Exception as error:
+        return str(error)
+'''
+
+    action = _exception_actions("python", source)[0]
+    transformed, count = python_transformers.apply_narrow_exception_handler(
+        source,
+        source_line=action.parameters["source_line"],
+        original_exception_type="Exception",
+        target_exception_type=action.parameters["target_exception_type"],
+        handler_name="error",
+    )
+
+    assert count == 1
+    assert "except ZeroDivisionError as error:" in transformed
+    assert "except Exception" not in transformed
+
+
+def test_python_exception_overreach_splits_file_access_to_os_error():
+    source = '''def write_audit(data):
+    try:
+        with open("order_audit.txt", "a", encoding="utf-8") as file:
+            file.write(data)
+        return True
+    except Exception as error:
+        print("Unable to write audit file.")
+        return False
+'''
+
+    action = _exception_actions("python", source)[0]
+    transformed, count = python_transformers.apply_narrow_exception_handler(
+        source,
+        source_line=action.parameters["source_line"],
+        original_exception_type="Exception",
+        target_exception_type=action.parameters["target_exception_type"],
+        handler_name="error",
+    )
+
+    assert count == 1
+    assert "except OSError as error:" in transformed
+    assert "except Exception" not in transformed
+
+
+def test_python_exception_overreach_multiple_risky_operations_get_specific_handlers():
+    source = '''def checkout(raw_quantity, product_code, divisor):
+    product_prices = {"A": 10}
+    try:
+        quantity = int(raw_quantity)
+        catalog_price = product_prices[product_code]
+        unit = catalog_price / divisor
+        print("done")
+    except Exception as error:
+        print(error)
+        return None
+    return quantity * unit
+'''
+
+    action = _exception_actions("python", source)[0]
+    transformed, count = python_transformers.apply_narrow_exception_handler(
+        source,
+        source_line=action.parameters["source_line"],
+        original_exception_type="Exception",
+        target_exception_type=action.parameters["target_exception_type"],
+        handler_name="error",
+    )
+
+    assert count == 3
+    assert "except ValueError as error:" in transformed
+    assert "except KeyError as error:" in transformed
+    assert "except ZeroDivisionError as error:" in transformed
+    assert "except Exception" not in transformed
+    assert "print(\"done\")" in transformed
+
+
+def _run_checkout(source: str, raw_quantity: str, product_code: str, divisor: int):
+    namespace: dict[str, object] = {}
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output):
+        exec(compile(source, "<exception-overreach-test>", "exec"), namespace)
+        result = namespace["checkout"](raw_quantity, product_code, divisor)
+    return result, output.getvalue()
+
+
+def test_python_exception_overreach_preserves_valid_input_behavior():
+    source = '''def checkout(raw_quantity, product_code, divisor):
+    product_prices = {"A": 10}
+    try:
+        quantity = int(raw_quantity)
+        catalog_price = product_prices[product_code]
+        unit = catalog_price / divisor
+        print("done")
+    except Exception as error:
+        print(f"failed: {error}")
+        return None
+    return quantity * unit
+'''
+
+    action = _exception_actions("python", source)[0]
+    transformed, count = python_transformers.apply_narrow_exception_handler(
+        source,
+        source_line=action.parameters["source_line"],
+        original_exception_type="Exception",
+        target_exception_type=action.parameters["target_exception_type"],
+        handler_name="error",
+    )
+
+    assert count == 3
+    assert _run_checkout(source, "4", "A", 2) == _run_checkout(transformed, "4", "A", 2)
+
+
+def test_python_exception_overreach_preserves_expected_error_behavior():
+    source = '''def checkout(raw_quantity, product_code, divisor):
+    product_prices = {"A": 10}
+    try:
+        quantity = int(raw_quantity)
+        catalog_price = product_prices[product_code]
+        unit = catalog_price / divisor
+        print("done")
+    except Exception as error:
+        print(f"failed: {error}")
+        return None
+    return quantity * unit
+'''
+
+    action = _exception_actions("python", source)[0]
+    transformed, count = python_transformers.apply_narrow_exception_handler(
+        source,
+        source_line=action.parameters["source_line"],
+        original_exception_type="Exception",
+        target_exception_type=action.parameters["target_exception_type"],
+        handler_name="error",
+    )
+
+    assert count == 3
+    for args in (("invalid", "A", 2), ("4", "missing", 2), ("4", "A", 0)):
+        assert _run_checkout(source, *args) == _run_checkout(transformed, *args)
+
+
+def test_python_exception_overreach_uncertain_call_is_review_required_no_action():
+    source = '''def load(value):
+    try:
+        return dependency(value)
+    except Exception as error:
+        return str(error)
+'''
+
+    transformed, count = python_transformers.apply_narrow_exception_handler(
+        source,
+        source_line=4,
+        original_exception_type="Exception",
+        target_exception_type="",
+        handler_name="error",
+    )
+
+    assert count == 0
+    assert transformed == source
+
+
+def test_exception_overreach_planner_maps_to_dedicated_exception_action():
+    normalized = PlannerAdapter().normalize_plan({
+        "plan_id": "exception_overreach",
+        "steps": [{
+            "step_id": 1,
+            "smell": "Exception Overreach",
+            "refactoring": "Exception Overreach",
+            "target": {"file": "checkout.py", "lines": [5]},
+            "parameters": {"source_file": "checkout.py"},
+        }],
+    })
+
+    action = normalized["actions"][0]
+    assert action["action_type"] == "narrow_exception_handler"
+    assert action["parameters"]["original_exception_type"] == "Exception"
+
+
+def test_exception_overreach_structural_validation_fails_when_broad_handler_remains():
+    source = '''def checkout(raw_quantity):
+    try:
+        quantity = int(raw_quantity)
+        print("done")
+    except Exception as error:
+        return None
+    return quantity
+'''
+    transformed = source
+    action = RefactoringAction(
+        action_type="narrow_exception_handler",
+        parameters={
+            "source_line": 5,
+            "original_exception_type": "Exception",
+            "target_exception_type": "ValueError",
+            "handler_name": "error",
+        },
+    )
+
+    result = StructuralValidator().validate(
+        language="python",
+        original_code=source,
+        transformed_code=transformed,
+        actions=[action],
+    )
+
+    assert result.passed is False
+    checks = result.details["exception_handler_validation"][0]["checks"]
+    assert checks["broad_exception_removed_or_meaningfully_narrowed"] is False
 
 
 def test_java_exception_overreach_is_narrowed_for_direct_throw():

@@ -23,13 +23,17 @@ Main fix in this version:
 from __future__ import annotations
 
 import ast
+import copy
 import re
+import textwrap
+from collections import Counter
 from typing import Any, Optional, Sequence, Tuple
 
 import libcst as cst
 from libcst.metadata import MetadataWrapper, ParentNodeProvider, PositionProvider
 
 from .python_extract_class import apply_extract_class as _apply_extract_class
+from .python_move_method_validation import create_python_move_method_evidence
 
 
 def _parse_module(source_code: str) -> cst.Module:
@@ -389,6 +393,97 @@ class _RenameSymbolTransformer(cst.CSTTransformer):
         return updated_node
 
 
+class _RenamePythonMethodTransformer(cst.CSTTransformer):
+    METADATA_DEPENDENCIES = (ParentNodeProvider,)
+
+    def __init__(
+        self,
+        old_name: str,
+        new_name: str,
+        *,
+        target_kind: str,
+        source_class: str = "",
+    ) -> None:
+        self.old_name = old_name
+        self.new_name = new_name
+        self.target_kind = target_kind
+        self.source_class = source_class
+        self.replacements = 0
+        self._class_stack: list[str] = []
+
+    def visit_ClassDef(self, node: cst.ClassDef) -> Optional[bool]:
+        self._class_stack.append(node.name.value)
+        return True
+
+    def leave_ClassDef(
+        self,
+        original_node: cst.ClassDef,
+        updated_node: cst.ClassDef,
+    ) -> cst.CSTNode:
+        if self._class_stack:
+            self._class_stack.pop()
+        return updated_node
+
+    def leave_FunctionDef(
+        self,
+        original_node: cst.FunctionDef,
+        updated_node: cst.FunctionDef,
+    ) -> cst.CSTNode:
+        current_class = self._class_stack[-1] if self._class_stack else ""
+        if self.target_kind == "module_function":
+            should_rename = not current_class and original_node.name.value == self.old_name
+        else:
+            should_rename = (
+                current_class == self.source_class
+                and original_node.name.value == self.old_name
+            )
+        if not should_rename:
+            return updated_node
+        self.replacements += 1
+        return updated_node.with_changes(name=cst.Name(self.new_name))
+
+    def leave_Name(
+        self,
+        original_node: cst.Name,
+        updated_node: cst.Name,
+    ) -> cst.CSTNode:
+        if self.target_kind != "module_function" or original_node.value != self.old_name:
+            return updated_node
+        if self._is_definition_name(original_node):
+            return updated_node
+        self.replacements += 1
+        return updated_node.with_changes(value=self.new_name)
+
+    def leave_Attribute(
+        self,
+        original_node: cst.Attribute,
+        updated_node: cst.Attribute,
+    ) -> cst.CSTNode:
+        if self.target_kind != "class_method":
+            return updated_node
+        if not isinstance(original_node.attr, cst.Name) or original_node.attr.value != self.old_name:
+            return updated_node
+        self.replacements += 1
+        return updated_node.with_changes(attr=cst.Name(self.new_name))
+
+    def _is_definition_name(self, node: cst.Name) -> bool:
+        try:
+            parent = self.get_metadata(ParentNodeProvider, node)
+        except Exception:
+            return False
+        return isinstance(
+            parent,
+            (
+                cst.FunctionDef,
+                cst.ClassDef,
+                cst.Param,
+                cst.AssignTarget,
+                cst.AnnAssign,
+                cst.ImportAlias,
+            ),
+        )
+
+
 class _ReplaceLiteralTransformer(cst.CSTTransformer):
     def __init__(self, old_literal: Any, new_literal: Any) -> None:
         self.old_literal = old_literal
@@ -659,6 +754,347 @@ def apply_rename_symbol(
     )
 
 
+def apply_rename_method(
+    source_code: str,
+    old_name: str,
+    new_name: str,
+    *,
+    source_class: str = "",
+) -> Tuple[str, int, dict[str, Any]]:
+    metadata: dict[str, Any] = {
+        "refactoring": "Rename Method",
+        "language": "python",
+        "old_name": old_name,
+        "new_name": new_name,
+        "source_class": source_class,
+        "plan_compliance": "UNKNOWN",
+    }
+    if not _is_python_identifier(old_name) or not _is_python_identifier(new_name):
+        return source_code, 0, {**metadata, "status": "review_required", "reason": "INVALID_METHOD_NAME"}
+    if old_name == new_name:
+        return source_code, 0, {**metadata, "status": "already_applied", "reason": "METHOD_NAME_UNCHANGED"}
+
+    try:
+        tree = ast.parse(source_code)
+    except SyntaxError as exc:
+        return source_code, 0, {
+            **metadata,
+            "status": "review_required",
+            "reason": "PYTHON_PARSE_FAILED",
+            "error": str(exc),
+        }
+
+    resolution = _resolve_python_rename_method_target(
+        tree,
+        old_name=old_name,
+        new_name=new_name,
+        source_class=source_class,
+    )
+    if resolution["status"] != "success":
+        return source_code, 0, {**metadata, **resolution}
+
+    transformed, replacements = _apply_transformer(
+        source_code,
+        _RenamePythonMethodTransformer(
+            old_name,
+            new_name,
+            target_kind=resolution["target_kind"],
+            source_class=resolution.get("source_class", ""),
+        ),
+    )
+    if replacements <= 0:
+        return source_code, 0, {**metadata, "status": "review_required", "reason": "NO_METHOD_REFERENCES_RENAMED"}
+
+    verification = validate_python_rename_method(
+        source_code,
+        transformed,
+        old_name=old_name,
+        new_name=new_name,
+        source_class=resolution.get("source_class", ""),
+    )
+    status = "success" if verification.get("passed") else "review_required"
+    reason = "RENAMED_METHOD_AND_CALL_SITES" if verification.get("passed") else verification.get("reason", "VALIDATION_FAILED")
+    return transformed, replacements, {
+        **metadata,
+        **resolution,
+        "status": status,
+        "reason": reason,
+        "declaration_renamed": verification.get("declaration_renamed", False),
+        "old_declaration_removed": verification.get("old_declaration_removed", False),
+        "new_declaration_present": verification.get("new_declaration_present", False),
+        "call_sites_updated": verification.get("call_sites_updated", False),
+        "signature_preserved": verification.get("signature_preserved", False),
+        "replacements": replacements,
+        "plan_compliance": "PASS" if verification.get("passed") else "REVIEW_REQUIRED",
+    }
+
+
+def validate_python_rename_method(
+    original_code: str,
+    transformed_code: str,
+    *,
+    old_name: str,
+    new_name: str,
+    source_class: str = "",
+) -> dict[str, Any]:
+    try:
+        original_tree = ast.parse(original_code)
+        transformed_tree = ast.parse(transformed_code)
+    except SyntaxError as exc:
+        return {"passed": False, "reason": "parse_failed", "error": str(exc)}
+
+    original_resolution = _resolve_python_rename_method_target(
+        original_tree,
+        old_name=old_name,
+        new_name=new_name,
+        source_class=source_class,
+        validate_new_collision=False,
+    )
+    target_kind = str(original_resolution.get("target_kind") or "")
+    resolved_class = str(original_resolution.get("source_class") or "")
+    if original_resolution.get("status") != "success":
+        return {"passed": False, "reason": original_resolution.get("reason", "target_not_found")}
+
+    before_node = _find_python_callable(
+        original_tree,
+        old_name,
+        source_class=resolved_class if target_kind == "class_method" else "",
+    )
+    after_new = _find_python_callable(
+        transformed_tree,
+        new_name,
+        source_class=resolved_class if target_kind == "class_method" else "",
+    )
+    after_old = _find_python_callable(
+        transformed_tree,
+        old_name,
+        source_class=resolved_class if target_kind == "class_method" else "",
+    )
+    old_refs = _count_python_rename_references(
+        transformed_tree,
+        old_name,
+        target_kind=target_kind,
+    )
+    new_refs = _count_python_rename_references(
+        transformed_tree,
+        new_name,
+        target_kind=target_kind,
+    )
+    signature_preserved = (
+        before_node is not None
+        and after_new is not None
+        and _python_callable_signature(before_node) == _python_callable_signature(after_new)
+    )
+    declaration_renamed = before_node is not None and after_new is not None
+    old_declaration_removed = after_old is None
+    new_declaration_present = after_new is not None
+    call_sites_updated = old_refs == 0 and new_refs > 0
+    passed = (
+        declaration_renamed
+        and old_declaration_removed
+        and new_declaration_present
+        and signature_preserved
+        and call_sites_updated
+    )
+    return {
+        "passed": passed,
+        "reason": "python_rename_method_passed" if passed else "python_rename_method_failed",
+        "target_kind": target_kind,
+        "source_class": resolved_class,
+        "old_name": old_name,
+        "new_name": new_name,
+        "declaration_renamed": declaration_renamed,
+        "old_declaration_removed": old_declaration_removed,
+        "new_declaration_present": new_declaration_present,
+        "signature_preserved": signature_preserved,
+        "call_sites_updated": call_sites_updated,
+        "remaining_old_references": old_refs,
+        "new_references": new_refs,
+    }
+
+
+def _resolve_python_rename_method_target(
+    tree: ast.Module,
+    *,
+    old_name: str,
+    new_name: str,
+    source_class: str = "",
+    validate_new_collision: bool = True,
+) -> dict[str, Any]:
+    if source_class:
+        owner = next(
+            (node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == source_class),
+            None,
+        )
+        if owner is None:
+            return {"status": "not_applicable", "reason": "SOURCE_CLASS_NOT_FOUND"}
+        old_methods = [
+            node for node in owner.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == old_name
+        ]
+        if not old_methods:
+            return {"status": "not_applicable", "reason": "METHOD_TARGET_NOT_FOUND"}
+        if len(old_methods) > 1:
+            return {"status": "review_required", "reason": "AMBIGUOUS_METHOD_TARGET"}
+        if validate_new_collision and any(
+            isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == new_name
+            for node in owner.body
+        ):
+            return {"status": "review_required", "reason": "METHOD_NAME_COLLISION"}
+        duplicate_owners = [
+            node.name for node in tree.body
+            if isinstance(node, ast.ClassDef)
+            and node.name != source_class
+            and any(
+                isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)) and child.name == old_name
+                for child in node.body
+            )
+        ]
+        if duplicate_owners:
+            return {
+                "status": "review_required",
+                "reason": "AMBIGUOUS_CLASS_METHOD_CALL_TARGET",
+                "other_owner_classes": sorted(duplicate_owners),
+            }
+        return {
+            "status": "success",
+            "target_kind": "class_method",
+            "source_class": source_class,
+            "target_resolution": "explicit_class_method",
+        }
+
+    top_level_matches = [
+        node for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == old_name
+    ]
+    class_method_matches = [
+        (owner.name, child)
+        for owner in tree.body
+        if isinstance(owner, ast.ClassDef)
+        for child in owner.body
+        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)) and child.name == old_name
+    ]
+    if len(top_level_matches) == 1 and not class_method_matches:
+        if validate_new_collision and any(
+            isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and node.name == new_name
+            for node in tree.body
+        ):
+            return {"status": "review_required", "reason": "METHOD_NAME_COLLISION"}
+        binding_reason = _unsafe_python_module_rename_binding(tree, old_name, target=top_level_matches[0])
+        if binding_reason:
+            return {"status": "review_required", "reason": binding_reason}
+        return {
+            "status": "success",
+            "target_kind": "module_function",
+            "source_class": "",
+            "target_resolution": "module_function",
+        }
+    if len(top_level_matches) == 0 and len(class_method_matches) == 1:
+        owner_name, _method = class_method_matches[0]
+        if validate_new_collision:
+            owner = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == owner_name)
+            if any(
+                isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == new_name
+                for node in owner.body
+            ):
+                return {"status": "review_required", "reason": "METHOD_NAME_COLLISION"}
+        return {
+            "status": "success",
+            "target_kind": "class_method",
+            "source_class": owner_name,
+            "target_resolution": "unique_class_method",
+        }
+    if not top_level_matches and not class_method_matches:
+        return {"status": "not_applicable", "reason": "METHOD_TARGET_NOT_FOUND"}
+    return {
+        "status": "review_required",
+        "reason": "AMBIGUOUS_METHOD_TARGET",
+        "top_level_matches": len(top_level_matches),
+        "class_method_matches": [owner for owner, _method in class_method_matches],
+    }
+
+
+def _is_python_identifier(value: str) -> bool:
+    return bool(re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", str(value or "")))
+
+
+def _find_python_callable(
+    tree: ast.Module,
+    name: str,
+    *,
+    source_class: str = "",
+) -> ast.FunctionDef | ast.AsyncFunctionDef | None:
+    candidates: list[ast.FunctionDef | ast.AsyncFunctionDef] = []
+    if source_class:
+        owner = next(
+            (node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == source_class),
+            None,
+        )
+        if owner is None:
+            return None
+        candidates = [
+            node for node in owner.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name
+        ]
+    else:
+        candidates = [
+            node for node in tree.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name
+        ]
+    return candidates[0] if len(candidates) == 1 else None
+
+
+def _python_callable_signature(node: ast.FunctionDef | ast.AsyncFunctionDef) -> dict[str, Any]:
+    args = node.args
+    return {
+        "posonly": [arg.arg for arg in args.posonlyargs],
+        "args": [arg.arg for arg in args.args],
+        "kwonly": [arg.arg for arg in args.kwonlyargs],
+        "defaults": len(args.defaults),
+        "kw_defaults": len([item for item in args.kw_defaults if item is not None]),
+        "vararg": args.vararg.arg if args.vararg else "",
+        "kwarg": args.kwarg.arg if args.kwarg else "",
+        "returns": ast.unparse(node.returns) if node.returns else "",
+        "async": isinstance(node, ast.AsyncFunctionDef),
+    }
+
+
+def _count_python_rename_references(
+    tree: ast.Module,
+    method_name: str,
+    *,
+    target_kind: str,
+) -> int:
+    count = 0
+    for node in ast.walk(tree):
+        if target_kind == "module_function":
+            if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load) and node.id == method_name:
+                count += 1
+        elif isinstance(node, ast.Attribute) and node.attr == method_name:
+            count += 1
+    return count
+
+
+def _unsafe_python_module_rename_binding(
+    tree: ast.Module,
+    old_name: str,
+    *,
+    target: ast.FunctionDef | ast.AsyncFunctionDef,
+) -> str:
+    for node in ast.walk(tree):
+        if node is target:
+            continue
+        if isinstance(node, ast.arg) and node.arg == old_name:
+            return "NAME_SHADOWED_BY_PARAMETER"
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store) and node.id == old_name:
+            return "NAME_SHADOWED_BY_ASSIGNMENT"
+        if isinstance(node, ast.alias) and (node.asname or node.name.split(".")[-1]) == old_name:
+            return "NAME_SHADOWED_BY_IMPORT"
+        if isinstance(node, ast.ClassDef) and node.name == old_name:
+            return "NAME_SHADOWED_BY_CLASS"
+    return ""
+
+
 def apply_replace_literal(
     source_code: str,
     old_literal: Any,
@@ -792,11 +1228,50 @@ def apply_remove_dead_code(
     if not method_name and source_line is None:
         raise ValueError("remove_dead_code requires 'method_name' or 'source_line'.")
 
+    # RDP can provide the owning method together with the line of a dead
+    # statement inside it. Resolve that statement before considering removal
+    # of the callable itself; a live method must never block safe statement
+    # removal.
+    if method_name and source_line is not None:
+        if dead_code_kind in {
+            "constant_false_branch",
+            "unreachable_after_terminator",
+            "unused_literal_assignment",
+        } or target_statement_fingerprint:
+            return _remove_proven_dead_python_statement(
+                source_code,
+                source_line,
+                class_name=class_name,
+                method_name=method_name,
+                dead_code_kind=dead_code_kind,
+                target_statement_fingerprint=target_statement_fingerprint,
+            )
+        resolved_kind, resolved_fingerprint = resolve_dead_code_target(
+            source_code,
+            method_name=method_name,
+            class_name=class_name,
+            source_line=source_line,
+        )
+        if resolved_kind in {
+            "constant_false_branch",
+            "unreachable_after_terminator",
+            "unused_literal_assignment",
+        }:
+            return _remove_proven_dead_python_statement(
+                source_code,
+                source_line,
+                class_name=class_name,
+                method_name=method_name,
+                dead_code_kind=resolved_kind,
+                target_statement_fingerprint=resolved_fingerprint,
+            )
+
     if not method_name and source_line is not None:
         return _remove_proven_dead_python_statement(
             source_code,
             source_line,
             class_name=class_name,
+            method_name=method_name,
             dead_code_kind=dead_code_kind,
             target_statement_fingerprint=target_statement_fingerprint,
         )
@@ -806,7 +1281,7 @@ def apply_remove_dead_code(
     except SyntaxError:
         return source_code, 0
 
-    target = _find_python_dead_callable(
+    target = _resolve_python_dead_callable_identity(
         tree,
         method_name=method_name,
         class_name=class_name,
@@ -815,15 +1290,22 @@ def apply_remove_dead_code(
     if target is None or not _is_proven_unused_python_callable(
         tree,
         target=target,
-        method_name=method_name,
+        method_name=target.name,
     ):
         return source_code, 0
+
+    parents = {
+        child: parent
+        for parent in ast.walk(tree)
+        for child in ast.iter_child_nodes(parent)
+    }
+    resolved_class = _python_callable_class_name(target, parents)
 
     return _apply_transformer(
         source_code,
         _RemoveDeadCodeTransformer(
-            method_name,
-            class_name,
+            target.name,
+            resolved_class,
             target_line=target.lineno,
         ),
     )
@@ -837,21 +1319,25 @@ def apply_narrow_exception_handler(
     target_exception_type: str = "",
     handler_name: str = "",
 ) -> Tuple[str, int]:
-    """Narrow one Python ``except`` header without touching its body.
+    """Narrow broad Python exception handling.
 
-    The caller must supply a concrete target type.  This transformer never
-    guesses from arbitrary function calls, and it refuses ambiguous handlers.
+    For a small, already-local try block this rewrites only the ``except``
+    header.  For a broad overreaching try block, SCTVA splits the protected
+    body and wraps only statements whose likely exceptions can be proven from
+    local syntax such as numeric conversion, dictionary/list indexing, file I/O,
+    division, or explicit ``raise``.
     """
 
-    if not _valid_python_exception_type(target_exception_type):
-        return source_code, 0
     try:
         tree = ast.parse(source_code)
     except SyntaxError:
         return source_code, 0
 
-    candidates: list[ast.ExceptHandler] = []
-    for handler in (node for node in ast.walk(tree) if isinstance(node, ast.ExceptHandler)):
+    candidates: list[tuple[ast.Try, ast.ExceptHandler]] = []
+    for try_node in (node for node in ast.walk(tree) if isinstance(node, ast.Try)):
+        if try_node.orelse or try_node.finalbody or len(try_node.handlers) != 1:
+            continue
+        handler = try_node.handlers[0]
         handler_type = _python_exception_expression_name(handler.type)
         if original_exception_type:
             if handler_type != original_exception_type:
@@ -860,19 +1346,55 @@ def apply_narrow_exception_handler(
             continue
         if handler_name and str(handler.name or "") != handler_name:
             continue
-        candidates.append(handler)
+        candidates.append((try_node, handler))
 
     if source_line is not None:
         line_matches = [
-            handler for handler in candidates
-            if int(getattr(handler, "lineno", 0) or 0) == source_line
+            candidate for candidate in candidates
+            if int(getattr(candidate[1], "lineno", 0) or 0) == source_line
         ]
         if line_matches:
             candidates = line_matches
     if len(candidates) != 1:
         return source_code, 0
 
-    handler = candidates[0]
+    try_node, handler = candidates[0]
+    risky_statements = _python_try_risky_statement_exceptions(
+        tree,
+        try_node,
+    )
+    inferred_types = sorted({
+        exception_type
+        for _, exception_types in risky_statements
+        for exception_type in exception_types
+    })
+    if not target_exception_type and inferred_types:
+        target_exception_type = ", ".join(inferred_types)
+
+    can_split = (
+        original_exception_type == "Exception"
+        and target_exception_type != "Exception"
+        and len(try_node.body) > 1
+        and bool(risky_statements)
+        and _python_try_body_is_safe_to_split(try_node)
+    )
+    if can_split:
+        transformed = _split_python_overreaching_try(
+            source_code=source_code,
+            try_node=try_node,
+            handler=handler,
+            risky_statements=dict(risky_statements),
+        )
+        if transformed != source_code:
+            try:
+                ast.parse(transformed)
+            except SyntaxError:
+                return source_code, 0
+            return transformed, len(risky_statements)
+
+    if not _valid_python_exception_type(target_exception_type):
+        return source_code, 0
+
     lines = source_code.splitlines(keepends=True)
     header_line = int(getattr(handler, "lineno", 0) or 0)
     if header_line <= 0 or header_line > len(lines):
@@ -906,6 +1428,248 @@ def apply_narrow_exception_handler(
     return transformed, 1
 
 
+def _python_try_body_is_safe_to_split(try_node: ast.Try) -> bool:
+    unsafe_nodes = (
+        ast.Try,
+        ast.AsyncWith,
+        ast.AsyncFor,
+        ast.Yield,
+        ast.YieldFrom,
+        ast.Await,
+    )
+    for statement in try_node.body:
+        for node in ast.walk(statement):
+            if isinstance(node, unsafe_nodes):
+                return False
+    return True
+
+
+def _split_python_overreaching_try(
+    *,
+    source_code: str,
+    try_node: ast.Try,
+    handler: ast.ExceptHandler,
+    risky_statements: dict[ast.stmt, tuple[str, ...]],
+) -> str:
+    lines = source_code.splitlines(keepends=True)
+    if not try_node.body or not handler.body:
+        return source_code
+
+    try_line = int(getattr(try_node, "lineno", 0) or 0)
+    end_line = int(getattr(try_node, "end_lineno", 0) or 0)
+    if try_line <= 0 or end_line <= try_line or end_line > len(lines):
+        return source_code
+
+    try_indent = _line_indent(lines[try_line - 1])
+    body_indent = _line_indent(lines[int(getattr(try_node.body[0], "lineno", try_line + 1)) - 1])
+    if len(body_indent) <= len(try_indent):
+        body_indent = f"{try_indent}    "
+
+    handler_body_start = int(getattr(handler.body[0], "lineno", 0) or 0)
+    handler_body_end = int(getattr(handler, "end_lineno", 0) or 0)
+    if handler_body_start <= 0 or handler_body_end < handler_body_start:
+        return source_code
+    handler_body_lines = lines[handler_body_start - 1:handler_body_end]
+
+    replacement: list[str] = []
+    cursor = try_line + 1
+    for statement in try_node.body:
+        stmt_start = int(getattr(statement, "lineno", cursor) or cursor)
+        stmt_end = int(getattr(statement, "end_lineno", stmt_start) or stmt_start)
+        segment = lines[cursor - 1:stmt_end]
+        cursor = stmt_end + 1
+        exception_types = risky_statements.get(statement)
+        if exception_types:
+            replacement.append(f"{try_indent}try:\n")
+            replacement.extend(segment)
+            alias = f" as {handler.name}" if handler.name else ""
+            type_text = _python_exception_tuple_text(exception_types)
+            replacement.append(f"{try_indent}except {type_text}{alias}:\n")
+            replacement.extend(handler_body_lines)
+        else:
+            replacement.extend(
+                _dedent_python_try_body_segment(
+                    segment,
+                    body_indent=body_indent,
+                    try_indent=try_indent,
+                )
+            )
+
+    trailer_end = int(getattr(handler, "lineno", cursor) or cursor) - 1
+    if cursor <= trailer_end:
+        replacement.extend(
+            _dedent_python_try_body_segment(
+                lines[cursor - 1:trailer_end],
+                body_indent=body_indent,
+                try_indent=try_indent,
+            )
+        )
+
+    return "".join([
+        *lines[:try_line - 1],
+        *replacement,
+        *lines[end_line:],
+    ])
+
+
+def _line_indent(line: str) -> str:
+    return line[: len(line) - len(line.lstrip(" \t"))]
+
+
+def _dedent_python_try_body_segment(
+    segment: Sequence[str],
+    *,
+    body_indent: str,
+    try_indent: str,
+) -> list[str]:
+    dedented: list[str] = []
+    for line in segment:
+        if line.strip() and line.startswith(body_indent):
+            dedented.append(f"{try_indent}{line[len(body_indent):]}")
+        else:
+            dedented.append(line)
+    return dedented
+
+
+def _python_exception_tuple_text(exception_types: Sequence[str]) -> str:
+    unique = tuple(dict.fromkeys(exception_types))
+    if len(unique) == 1:
+        return unique[0]
+    return f"({', '.join(unique)})"
+
+
+def _python_try_risky_statement_exceptions(
+    tree: ast.Module,
+    try_node: ast.Try,
+) -> list[tuple[ast.stmt, tuple[str, ...]]]:
+    known_containers = _python_known_container_types_before(tree, try_node)
+    risky: list[tuple[ast.stmt, tuple[str, ...]]] = []
+    for statement in try_node.body:
+        exception_types = tuple(
+            sorted(_python_statement_exception_types(statement, known_containers))
+        )
+        if exception_types:
+            risky.append((statement, exception_types))
+        _update_python_known_container_types(statement, known_containers)
+    return risky
+
+
+def _python_known_container_types_before(
+    tree: ast.Module,
+    target: ast.Try,
+) -> dict[str, str]:
+    parents = {
+        child: parent
+        for parent in ast.walk(tree)
+        for child in ast.iter_child_nodes(parent)
+    }
+    owner = parents.get(target)
+    while owner is not None and not hasattr(owner, "body"):
+        owner = parents.get(owner)
+    known: dict[str, str] = {}
+    for statement in getattr(owner, "body", []):
+        if statement is target:
+            break
+        _update_python_known_container_types(statement, known)
+    return known
+
+
+def _update_python_known_container_types(
+    statement: ast.AST,
+    known: dict[str, str],
+) -> None:
+    targets: list[ast.expr] = []
+    value: ast.AST | None = None
+    if isinstance(statement, ast.Assign):
+        targets = list(statement.targets)
+        value = statement.value
+    elif isinstance(statement, ast.AnnAssign):
+        targets = [statement.target]
+        value = statement.value
+    if value is None:
+        return
+    container_type = ""
+    if isinstance(value, ast.Dict):
+        container_type = "dict"
+    elif isinstance(value, (ast.List, ast.Tuple, ast.Set)):
+        container_type = "sequence"
+    if not container_type:
+        return
+    for target in targets:
+        if isinstance(target, ast.Name):
+            known[target.id] = container_type
+
+
+def _python_statement_exception_types(
+    statement: ast.AST,
+    known_containers: dict[str, str],
+) -> set[str]:
+    visitor = _PythonRiskyExceptionVisitor(known_containers)
+    visitor.visit(statement)
+    return visitor.exception_types
+
+
+class _PythonRiskyExceptionVisitor(ast.NodeVisitor):
+    def __init__(self, known_containers: dict[str, str]) -> None:
+        self.known_containers = known_containers
+        self.exception_types: set[str] = set()
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        return
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        return
+
+    def visit_Lambda(self, node: ast.Lambda) -> None:
+        return
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        return
+
+    def visit_Raise(self, node: ast.Raise) -> None:
+        if node.exc is not None:
+            expression = node.exc.func if isinstance(node.exc, ast.Call) else node.exc
+            name = _python_exception_expression_name(expression)
+            if name and name not in {"Exception", "BaseException"}:
+                self.exception_types.add(name)
+        self.generic_visit(node)
+
+    def visit_Call(self, node: ast.Call) -> None:
+        call_name = _python_call_name(node.func)
+        if call_name in {"int", "float", "complex"}:
+            self.exception_types.add("ValueError")
+        elif call_name == "open" or call_name.endswith(".open"):
+            self.exception_types.add("OSError")
+        self.generic_visit(node)
+
+    def visit_Subscript(self, node: ast.Subscript) -> None:
+        container_name = node.value.id if isinstance(node.value, ast.Name) else ""
+        container_type = self.known_containers.get(container_name)
+        if container_type == "dict":
+            self.exception_types.add("KeyError")
+        elif container_type == "sequence":
+            self.exception_types.add("IndexError")
+        elif re.search(r"(dict|map|catalog|price|prices|student|students|lookup|table)$", container_name):
+            self.exception_types.add("KeyError")
+        elif re.search(r"(list|items|records|rows|values|array|sequence)$", container_name):
+            self.exception_types.add("IndexError")
+        self.generic_visit(node)
+
+    def visit_BinOp(self, node: ast.BinOp) -> None:
+        if isinstance(node.op, (ast.Div, ast.FloorDiv, ast.Mod)):
+            self.exception_types.add("ZeroDivisionError")
+        self.generic_visit(node)
+
+
+def _python_call_name(function: ast.AST) -> str:
+    if isinstance(function, ast.Name):
+        return function.id
+    if isinstance(function, ast.Attribute):
+        base = _python_call_name(function.value)
+        return f"{base}.{function.attr}" if base else function.attr
+    return ""
+
+
 def _python_exception_expression_name(expression: ast.AST | None) -> str:
     if isinstance(expression, ast.Name):
         return expression.id
@@ -919,6 +1683,2172 @@ def _valid_python_exception_type(value: str) -> bool:
     if not names:
         return False
     return all(re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.]*", name) for name in names)
+
+
+class _MoveMethodFeatureEnvyVisitor(ast.NodeVisitor):
+    """Collect only dependencies that are safe to carry to another class."""
+
+    def __init__(self, candidate_parameters: set[str]) -> None:
+        self.candidate_parameters = candidate_parameters
+        self.destination_attribute_counts: dict[str, int] = {
+            name: 0 for name in candidate_parameters
+        }
+        self.source_self_attribute_count = 0
+        self.reassigned_destination_parameter = False
+        self.has_nested_scope = False
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        self.has_nested_scope = True
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        self.has_nested_scope = True
+
+    def visit_Lambda(self, node: ast.Lambda) -> None:
+        self.has_nested_scope = True
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        self.has_nested_scope = True
+
+    def visit_Attribute(self, node: ast.Attribute) -> None:
+        if isinstance(node.value, ast.Name):
+            if node.value.id in self.destination_attribute_counts:
+                self.destination_attribute_counts[node.value.id] += 1
+            elif node.value.id == "self":
+                self.source_self_attribute_count += 1
+        self.generic_visit(node)
+
+    def visit_Name(self, node: ast.Name) -> None:
+        if (
+            node.id in self.candidate_parameters
+            and isinstance(node.ctx, (ast.Store, ast.Del))
+        ):
+            self.reassigned_destination_parameter = True
+
+
+class _MoveMethodNameRewriter(cst.CSTTransformer):
+    def __init__(self, old_name: str) -> None:
+        self.old_name = old_name
+
+    def leave_Name(
+        self,
+        original_node: cst.Name,
+        updated_node: cst.Name,
+    ) -> cst.Name:
+        if original_node.value == self.old_name:
+            return updated_node.with_changes(value="self")
+        return updated_node
+
+
+def resolve_move_method_target(
+    source_code: str,
+    *,
+    method_name: str = "",
+    source_class: str = "",
+    destination_class: str = "",
+    destination_parameter: str = "",
+    source_line: int | None = None,
+) -> dict[str, Any]:
+    """Resolve a Feature-Envy Move Method target from real Python AST evidence.
+
+    RDP sometimes supplies filename-derived placeholders rather than symbols.
+    This resolver deliberately does *not* guess when multiple candidates exist.
+    It succeeds only when the source proves one unambiguous method, source class,
+    destination class and envied parameter.
+    """
+
+    requested_method = str(method_name or "").strip()
+    requested_source = str(source_class or "").strip()
+    requested_destination = str(destination_class or "").strip()
+    requested_parameter = str(destination_parameter or "").strip()
+
+    try:
+        tree = ast.parse(source_code)
+    except SyntaxError:
+        return {"status": "review_required", "reason": "SOURCE_PARSE_FAILED"}
+
+    classes = {
+        node.name: node
+        for node in tree.body
+        if isinstance(node, ast.ClassDef)
+    }
+    module_function_nodes = {
+        node.name: node
+        for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+
+    # A module-level function is not a Move Method target, even when the RDP
+    # plan invents filename-derived classes such as ``jarvis`` /
+    # ``jarvisTarget``.  Check this *before* class-count analysis so SCTVA does
+    # not accidentally recover an unrelated class method in a large module.
+    if requested_method and requested_method in module_function_nodes:
+        function = module_function_nodes[requested_method]
+        return {
+            "status": "satisfied",
+            "reason": "MODULE_LEVEL_FUNCTION_IS_NOT_MOVE_METHOD_TARGET",
+            "method": requested_method,
+            "lineno": int(getattr(function, "lineno", 0) or 0),
+            "end_lineno": int(
+                getattr(function, "end_lineno", getattr(function, "lineno", 0)) or 0
+            ),
+            "requested_source_class": requested_source,
+            "requested_destination_class": requested_destination,
+        }
+
+    # When the method name is stale/missing, a CUQA/RDP source line can still
+    # prove that the smell points at a module function.  In that case Move
+    # Method is structurally inapplicable and must not be redirected to a
+    # different class method.
+    if isinstance(source_line, int) and source_line > 0:
+        line_function_matches = [
+            node
+            for node in module_function_nodes.values()
+            if int(getattr(node, "lineno", 0) or 0)
+            <= source_line
+            <= int(getattr(node, "end_lineno", getattr(node, "lineno", 0)) or 0)
+        ]
+        if len(line_function_matches) == 1:
+            function = line_function_matches[0]
+            return {
+                "status": "not_applicable",
+                "reason": "MODULE_LEVEL_FUNCTION_IS_NOT_MOVE_METHOD_TARGET",
+                "method": function.name,
+                "lineno": int(getattr(function, "lineno", 0) or 0),
+                "end_lineno": int(
+                    getattr(function, "end_lineno", getattr(function, "lineno", 0)) or 0
+                ),
+                "requested_method": requested_method,
+                "requested_source_class": requested_source,
+                "requested_destination_class": requested_destination,
+                "strategy": "source_line_module_function_guard",
+            }
+
+    if len(classes) < 2:
+        if not classes:
+            return {
+                "status": "not_applicable",
+                "reason": "MOVE_METHOD_REQUIRES_SOURCE_AND_DESTINATION_CLASSES",
+            }
+        return {"status": "review_required", "reason": "INSUFFICIENT_CLASS_CONTEXT"}
+
+    # Track simple assignments such as ``student = Student(...)`` so call-site
+    # arguments can be tied back to their concrete class.
+    instance_types: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign) and isinstance(node.value, ast.Call):
+            if isinstance(node.value.func, ast.Name) and node.value.func.id in classes:
+                for target in node.targets:
+                    if isinstance(target, ast.Name):
+                        instance_types[target.id] = node.value.func.id
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            value = node.value
+            if (
+                isinstance(value, ast.Call)
+                and isinstance(value.func, ast.Name)
+                and value.func.id in classes
+            ):
+                instance_types[node.target.id] = value.func.id
+            elif isinstance(node.annotation, ast.Name) and node.annotation.id in classes:
+                instance_types[node.target.id] = node.annotation.id
+
+    def normalize_name(value: str) -> str:
+        return re.sub(r"[^a-z0-9]", "", value.lower())
+
+    def annotated_class(argument: ast.arg) -> str:
+        annotation = argument.annotation
+        if isinstance(annotation, ast.Name) and annotation.id in classes:
+            return annotation.id
+        if (
+            isinstance(annotation, ast.Constant)
+            and isinstance(annotation.value, str)
+            and annotation.value in classes
+        ):
+            return annotation.value
+        return ""
+
+    def call_destination_classes(method: str, parameter: str) -> set[str]:
+        inferred: set[str] = set()
+        for node in ast.walk(tree):
+            if not (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == method
+            ):
+                continue
+
+            expression: ast.AST | None = None
+            if node.args:
+                expression = node.args[0]
+            else:
+                keyword = next(
+                    (item for item in node.keywords if item.arg == parameter),
+                    None,
+                )
+                if keyword is not None:
+                    expression = keyword.value
+
+            if (
+                isinstance(expression, ast.Call)
+                and isinstance(expression.func, ast.Name)
+                and expression.func.id in classes
+            ):
+                inferred.add(expression.func.id)
+            elif isinstance(expression, ast.Name):
+                known = instance_types.get(expression.id)
+                if known:
+                    inferred.add(known)
+        return inferred
+
+    candidates: list[dict[str, Any]] = []
+
+    for owner_name, owner_node in classes.items():
+        for method in owner_node.body:
+            if not isinstance(method, ast.FunctionDef) or method.name == "__init__":
+                continue
+            if method.decorator_list or method.args.posonlyargs or method.args.vararg:
+                continue
+            if len(method.args.args) < 2 or method.args.args[0].arg != "self":
+                continue
+
+            parameter_nodes = method.args.args[1:]
+            parameter_names = [argument.arg for argument in parameter_nodes]
+            attribute_counts = {name: 0 for name in parameter_names}
+            source_self_accesses = 0
+            reassigned_parameters: set[str] = set()
+            nested_scope = False
+
+            for node in ast.walk(method):
+                if node is not method and isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+                    nested_scope = True
+                if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
+                    if node.value.id in attribute_counts:
+                        attribute_counts[node.value.id] += 1
+                    elif node.value.id == "self":
+                        source_self_accesses += 1
+                if isinstance(node, ast.Name) and node.id in attribute_counts:
+                    if isinstance(node.ctx, (ast.Store, ast.Del)):
+                        reassigned_parameters.add(node.id)
+
+            if nested_scope:
+                continue
+
+            highest = max(attribute_counts.values(), default=0)
+            envied = [
+                name
+                for name, count in attribute_counts.items()
+                if count == highest and count > 0
+            ]
+            if len(envied) != 1 or highest < 2 or highest <= source_self_accesses:
+                continue
+
+            parameter = envied[0]
+            if parameter in reassigned_parameters:
+                continue
+            if requested_parameter and requested_parameter != parameter:
+                # Keep searching; a malformed explicit parameter should not force
+                # an unsafe rewrite.
+                continue
+
+            argument = next(item for item in parameter_nodes if item.arg == parameter)
+            destination_candidates: set[str] = set()
+
+            annotation_target = annotated_class(argument)
+            if annotation_target:
+                destination_candidates.add(annotation_target)
+
+            parameter_key = normalize_name(parameter)
+            for class_name in classes:
+                if class_name == owner_name:
+                    continue
+                class_key = normalize_name(class_name)
+                if (
+                    parameter_key == class_key
+                    or parameter_key.rstrip("s") == class_key.rstrip("s")
+                ):
+                    destination_candidates.add(class_name)
+
+            destination_candidates.update(
+                call_destination_classes(method.name, parameter)
+            )
+
+            if requested_destination in classes and requested_destination != owner_name:
+                destination_candidates.add(requested_destination)
+
+            destination_candidates.discard(owner_name)
+            if len(destination_candidates) != 1:
+                continue
+
+            candidates.append({
+                "method": method.name,
+                "source_class": owner_name,
+                "destination_class": next(iter(destination_candidates)),
+                "destination_parameter": parameter,
+                "feature_envy_accesses": highest,
+                "source_self_accesses": source_self_accesses,
+                "lineno": int(getattr(method, "lineno", 0) or 0),
+                "end_lineno": int(getattr(method, "end_lineno", getattr(method, "lineno", 0)) or 0),
+            })
+
+    if not candidates:
+        return {"status": "review_required", "reason": "MOVE_METHOD_TARGET_NOT_FOUND"}
+
+    # Prefer a fully correct explicit plan.
+    exact = [
+        item
+        for item in candidates
+        if item["method"] == requested_method
+        and item["source_class"] == requested_source
+        and item["destination_class"] == requested_destination
+    ]
+    if len(exact) == 1:
+        selected = exact[0]
+    else:
+        selected = None
+
+    # Next prefer the RDP source line when it lies inside exactly one candidate.
+    if selected is None and isinstance(source_line, int) and source_line > 0:
+        line_matches = [
+            item
+            for item in candidates
+            if item["lineno"] <= source_line <= item["end_lineno"]
+        ]
+        if len(line_matches) == 1:
+            selected = line_matches[0]
+
+    # Common malformed RDP shape: destination_class actually contains the method.
+    if selected is None and requested_destination and requested_destination not in classes:
+        method_hint = [item for item in candidates if item["method"] == requested_destination]
+        if len(method_hint) == 1:
+            selected = method_hint[0]
+
+    if selected is None and requested_method:
+        method_matches = [item for item in candidates if item["method"] == requested_method]
+        if len(method_matches) == 1:
+            selected = method_matches[0]
+
+    if selected is None and requested_source:
+        source_matches = [item for item in candidates if item["source_class"] == requested_source]
+        if len(source_matches) == 1:
+            selected = source_matches[0]
+
+    if selected is None and len(candidates) == 1:
+        selected = candidates[0]
+
+    if selected is None:
+        return {
+            "status": "review_required",
+            "reason": "AMBIGUOUS_MOVE_METHOD_TARGET",
+            "candidate_count": len(candidates),
+        }
+
+    return {
+        "status": "success",
+        **selected,
+        "requested_method": requested_method,
+        "requested_source_class": requested_source,
+        "requested_destination_class": requested_destination,
+        "requested_destination_parameter": requested_parameter,
+    }
+
+
+def apply_move_method(
+    source_code: str,
+    *,
+    method_name: str = "",
+    source_class: str = "",
+    destination_class: str = "",
+    destination_parameter: str = "",
+    source_line: int | None = None,
+) -> Tuple[str, int, dict[str, Any]]:
+    """Move one Feature-Envy Python instance method to its data owner.
+
+    The implementation is intentionally conservative.  Before transforming it
+    resolves the real target from AST evidence.  This makes the transformer
+    tolerant of stale/filename-derived RDP metadata while still refusing
+    ambiguous moves.
+    """
+
+    requested_target = {
+        "method": str(method_name or "").strip(),
+        "source_class": str(source_class or "").strip(),
+        "destination_class": str(destination_class or "").strip(),
+        "destination_parameter": str(destination_parameter or "").strip(),
+    }
+
+    resolution = resolve_move_method_target(
+        source_code,
+        method_name=requested_target["method"],
+        source_class=requested_target["source_class"],
+        destination_class=requested_target["destination_class"],
+        destination_parameter=requested_target["destination_parameter"],
+        source_line=source_line,
+    )
+
+    if resolution.get("status") != "success":
+        already_applied = _detect_already_applied_move_method(
+            source_code,
+            method_name=requested_target["method"],
+            source_class=requested_target["source_class"],
+            destination_class=requested_target["destination_class"],
+        )
+        if already_applied.get("status") == "already_applied":
+            return source_code, 0, {
+                **already_applied,
+                **requested_target,
+                "target_resolution": {
+                    "status": "already_applied",
+                    "reason": "MOVE_METHOD_ALREADY_APPLIED",
+                },
+                "logic_equivalence": "PASS",
+                "receiver_normalization": "PASS",
+                "structural_validation": "PASS",
+                "plan_compliance": "PASS",
+            }
+        resolution_status = str(resolution.get("status") or "review_required").strip().lower()
+        if resolution_status not in {"not_applicable", "review_required"}:
+            resolution_status = "review_required"
+        return source_code, 0, {
+            "status": resolution_status,
+            "reason": str(resolution.get("reason") or "MOVE_METHOD_TARGET_NOT_FOUND"),
+            **requested_target,
+            "target_resolution": resolution,
+        }
+
+    method_name = str(resolution["method"])
+    source_class = str(resolution["source_class"])
+    destination_class = str(resolution["destination_class"])
+    destination_parameter = str(resolution["destination_parameter"])
+
+    def review(reason: str) -> Tuple[str, int, dict[str, Any]]:
+        return source_code, 0, {
+            "status": "review_required",
+            "reason": reason,
+            "method": method_name,
+            "source_class": source_class,
+            "destination_class": destination_class,
+            "destination_parameter": destination_parameter,
+            "requested_target": requested_target,
+            "target_resolution": resolution,
+        }
+
+    if not all(
+        re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", value or "")
+        for value in (method_name, source_class, destination_class)
+    ):
+        return review("INVALID_MOVE_METHOD_TARGET")
+    if source_class == destination_class:
+        return review("SOURCE_AND_DESTINATION_CLASS_MATCH")
+
+    try:
+        tree = ast.parse(source_code)
+    except SyntaxError:
+        return review("SOURCE_PARSE_FAILED")
+
+    source_nodes = [
+        node for node in tree.body
+        if isinstance(node, ast.ClassDef) and node.name == source_class
+    ]
+    destination_nodes = [
+        node for node in tree.body
+        if isinstance(node, ast.ClassDef) and node.name == destination_class
+    ]
+    if len(source_nodes) != 1:
+        return review("SOURCE_CLASS_NOT_FOUND")
+    if len(destination_nodes) != 1:
+        return review("DESTINATION_CLASS_NOT_FOUND")
+    source_node = source_nodes[0]
+    destination_node = destination_nodes[0]
+
+    source_methods = [
+        node for node in source_node.body
+        if isinstance(node, ast.FunctionDef) and node.name == method_name
+    ]
+    if len(source_methods) != 1:
+        return review("SOURCE_METHOD_NOT_FOUND")
+    source_method = source_methods[0]
+    if any(
+        isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == method_name
+        for node in destination_node.body
+    ):
+        return review("DESTINATION_METHOD_ALREADY_EXISTS")
+    if source_method.decorator_list or source_method.args.posonlyargs or source_method.args.vararg:
+        return review("UNSUPPORTED_METHOD_SIGNATURE")
+    if len(source_method.args.args) < 2 or source_method.args.args[0].arg != "self":
+        return review("SOURCE_METHOD_MUST_BE_INSTANCE_METHOD")
+
+    positional_parameters = source_method.args.args[1:]
+    parameter_names = {argument.arg for argument in positional_parameters}
+    visitor = _MoveMethodFeatureEnvyVisitor(parameter_names)
+    for statement in source_method.body:
+        visitor.visit(statement)
+    if visitor.has_nested_scope:
+        return review("NESTED_SCOPE_DEPENDENCY")
+    if visitor.reassigned_destination_parameter:
+        return review("DESTINATION_PARAMETER_REASSIGNED")
+    if visitor.source_self_attribute_count:
+        return review("SOURCE_CLASS_STATE_DEPENDENCY")
+
+    explicit_destination_parameter = destination_parameter.strip()
+    if explicit_destination_parameter:
+        if explicit_destination_parameter not in parameter_names:
+            return review("DESTINATION_PARAMETER_NOT_FOUND")
+        selected_parameter = explicit_destination_parameter
+    else:
+        highest_count = max(visitor.destination_attribute_counts.values(), default=0)
+        candidates = [
+            name for name, count in visitor.destination_attribute_counts.items()
+            if count == highest_count and count > 0
+        ]
+        class_hint = re.sub(r"(?<!^)(?=[A-Z])", "_", destination_class).lower()
+        if class_hint in candidates:
+            selected_parameter = class_hint
+        elif len(candidates) == 1:
+            selected_parameter = candidates[0]
+        else:
+            return review("DESTINATION_OBJECT_AMBIGUOUS")
+
+    selected_count = visitor.destination_attribute_counts.get(selected_parameter, 0)
+    other_counts = [
+        count for name, count in visitor.destination_attribute_counts.items()
+        if name != selected_parameter
+    ]
+    if selected_count <= max(other_counts, default=0):
+        return review("DESTINATION_OBJECT_AMBIGUOUS")
+    if selected_count < 2:
+        return review("INSUFFICIENT_FEATURE_ENVY_EVIDENCE")
+
+    if _move_method_parameter_has_default(source_method, selected_parameter):
+        return review("DESTINATION_PARAMETER_DEFAULT_UNSUPPORTED")
+
+    parents = {
+        child: parent
+        for parent in ast.walk(tree)
+        for child in ast.iter_child_nodes(parent)
+    }
+    call_rewrites, call_error = _move_method_call_rewrites(
+        tree=tree,
+        source_code=source_code,
+        parents=parents,
+        source_method=source_method,
+        source_class=source_class,
+        method_name=method_name,
+        destination_parameter=selected_parameter,
+    )
+    if call_error:
+        return review(call_error)
+
+    moved_method_text = _render_moved_python_method(
+        source_code=source_code,
+        method=source_method,
+        destination_parameter=selected_parameter,
+        destination_indent=" " * (destination_node.col_offset + 4),
+    )
+    if not moved_method_text:
+        return review("METHOD_BODY_REWRITE_FAILED")
+
+    line_offsets = _move_method_line_offsets(source_code)
+    method_start = line_offsets[source_method.lineno - 1]
+    method_end = _move_method_line_end_offset(source_code, line_offsets, source_method.end_lineno)
+    destination_last_body = destination_node.body[-1] if destination_node.body else None
+    if destination_last_body is None:
+        return review("DESTINATION_CLASS_BODY_NOT_FOUND")
+    insertion_offset = _move_method_line_content_end_offset(
+        source_code,
+        line_offsets,
+        destination_last_body.end_lineno,
+    )
+
+    source_replacement = ""
+    if len(source_node.body) == 1:
+        source_replacement = f"{' ' * (source_node.col_offset + 4)}pass\n"
+    edits: list[tuple[int, int, str]] = [
+        (method_start, method_end, source_replacement),
+        (insertion_offset, insertion_offset, f"\n\n{moved_method_text}\n"),
+        *call_rewrites,
+    ]
+    if not _move_method_edits_do_not_overlap(edits):
+        return review("OVERLAPPING_MOVE_EDITS")
+    transformed = _apply_move_method_edits(source_code, edits)
+    try:
+        ast.parse(transformed)
+    except SyntaxError:
+        return review("TRANSFORMED_SOURCE_PARSE_FAILED")
+
+    # Validate the actual semantic move before recording it as successful.
+    # The resulting proof is carried through the transformation log so the
+    # final structural stage does not incorrectly compare this action against
+    # a method later altered by another valid plan step.
+    validation_evidence = create_python_move_method_evidence(
+        original_code=source_code,
+        transformed_code=transformed,
+        method_name=method_name,
+        source_class=source_class,
+        destination_class=destination_class,
+        destination_parameter=selected_parameter,
+    )
+    if validation_evidence.get("status") != "PASS":
+        return review(str(validation_evidence.get("reason") or "MOVE_METHOD_SEMANTIC_VALIDATION_FAILED"))
+
+    return transformed, 1 + len(call_rewrites), {
+        "status": "success",
+        "method": method_name,
+        "source_class": source_class,
+        "destination_class": destination_class,
+        "destination_parameter": selected_parameter,
+        "logic_equivalence": "PASS",
+        "receiver_normalization": "PASS",
+        "source_method_removed": True,
+        "destination_method_exists": True,
+        "call_sites_updated": True,
+        "already_applied": False,
+        "structural_validation": "PASS",
+        "plan_compliance": "PASS",
+        "destination_field_accesses": selected_count,
+        "updated_direct_call_sites": len(call_rewrites),
+        "move_method_validation_evidence": validation_evidence,
+        "requested_target": requested_target,
+        "target_resolution": resolution,
+    }
+
+
+def _detect_already_applied_move_method(
+    source_code: str,
+    *,
+    method_name: str,
+    source_class: str,
+    destination_class: str,
+) -> dict[str, Any]:
+    if not all(
+        re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", value or "")
+        for value in (method_name, source_class, destination_class)
+    ):
+        return {"status": "review_required", "reason": "INVALID_MOVE_METHOD_TARGET"}
+    try:
+        tree = ast.parse(source_code)
+    except SyntaxError:
+        return {"status": "review_required", "reason": "SOURCE_PARSE_FAILED"}
+    source_node = next(
+        (node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == source_class),
+        None,
+    )
+    destination_node = next(
+        (node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == destination_class),
+        None,
+    )
+    if source_node is None or destination_node is None:
+        return {"status": "review_required", "reason": "SOURCE_OR_DESTINATION_CLASS_NOT_FOUND"}
+    source_method_exists = any(
+        isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == method_name
+        for node in source_node.body
+    )
+    destination_methods = [
+        node for node in destination_node.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == method_name
+    ]
+    if source_method_exists or len(destination_methods) != 1:
+        return {"status": "review_required", "reason": "MOVE_METHOD_TARGET_NOT_FOUND"}
+
+    parents = {
+        child: parent
+        for parent in ast.walk(tree)
+        for child in ast.iter_child_nodes(parent)
+    }
+    known_source_instances = _move_method_known_source_instances(tree, source_class)
+    stale_source_calls = any(
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == method_name
+        and _move_method_receiver_is_source_instance(
+            node.func.value,
+            known_instances=known_source_instances,
+            source_class=source_class,
+            parents=parents,
+        )
+        for node in ast.walk(tree)
+    )
+    if stale_source_calls:
+        return {"status": "review_required", "reason": "STALE_SOURCE_CALL_SITES_REMAIN"}
+    return {
+        "status": "already_applied",
+        "reason": "MOVE_METHOD_ALREADY_APPLIED",
+        "method": method_name,
+        "source_class": source_class,
+        "destination_class": destination_class,
+        "source_method_removed": True,
+        "destination_method_exists": True,
+        "call_sites_updated": True,
+        "already_applied": True,
+        "updated_direct_call_sites": 0,
+    }
+
+
+def _move_method_parameter_has_default(method: ast.FunctionDef, parameter: str) -> bool:
+    positional = method.args.args
+    default_start = len(positional) - len(method.args.defaults)
+    return any(
+        argument.arg == parameter and index >= default_start
+        for index, argument in enumerate(positional)
+    )
+
+
+def _move_method_call_rewrites(
+    *,
+    tree: ast.Module,
+    source_code: str,
+    parents: dict[ast.AST, ast.AST],
+    source_method: ast.FunctionDef,
+    source_class: str,
+    method_name: str,
+    destination_parameter: str,
+) -> tuple[list[tuple[int, int, str]], str]:
+    known_instances = _move_method_known_source_instances(tree, source_class)
+    line_offsets = _move_method_line_offsets(source_code)
+    for attribute in ast.walk(tree):
+        if not isinstance(attribute, ast.Attribute) or attribute.attr != method_name:
+            continue
+        if _move_method_is_descendant(attribute, source_method, parents):
+            continue
+        parent = parents.get(attribute)
+        if not isinstance(parent, ast.Call) or parent.func is not attribute:
+            return [], "METHOD_REFERENCE_UNSUPPORTED"
+    rewrites: list[tuple[int, int, str]] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+            continue
+        if node.func.attr != method_name or _move_method_is_descendant(node, source_method, parents):
+            continue
+        receiver_is_source = _move_method_receiver_is_source_instance(
+            node.func.value,
+            known_instances=known_instances,
+            source_class=source_class,
+            parents=parents,
+        )
+        if not receiver_is_source:
+            return [], "UNRESOLVED_DIRECT_CALL_SITE"
+        destination_expression, remaining_args, remaining_keywords = _move_method_call_destination_argument(
+            node,
+            destination_parameter,
+        )
+        if destination_expression is None:
+            return [], "DIRECT_CALL_SITE_CANNOT_BE_REWRITTEN"
+        rewritten_call = ast.Call(
+            func=ast.Attribute(
+                value=copy.deepcopy(destination_expression),
+                attr=method_name,
+                ctx=ast.Load(),
+            ),
+            args=[copy.deepcopy(argument) for argument in remaining_args],
+            keywords=[copy.deepcopy(keyword) for keyword in remaining_keywords],
+        )
+        rewrites.append((
+            _move_method_position_offset(line_offsets, node.lineno, node.col_offset),
+            _move_method_position_offset(line_offsets, node.end_lineno, node.end_col_offset),
+            ast.unparse(ast.fix_missing_locations(rewritten_call)),
+        ))
+    return rewrites, ""
+
+
+def _move_method_known_source_instances(tree: ast.Module, source_class: str) -> set[str]:
+    known: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign) and isinstance(node.value, ast.Call):
+            if isinstance(node.value.func, ast.Name) and node.value.func.id == source_class:
+                known.update(target.id for target in node.targets if isinstance(target, ast.Name))
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            if isinstance(node.annotation, ast.Name) and node.annotation.id == source_class:
+                known.add(node.target.id)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            for argument in node.args.args:
+                if isinstance(argument.annotation, ast.Name) and argument.annotation.id == source_class:
+                    known.add(argument.arg)
+    return known
+
+
+def _move_method_receiver_is_source_instance(
+    receiver: ast.AST,
+    *,
+    known_instances: set[str],
+    source_class: str,
+    parents: dict[ast.AST, ast.AST],
+) -> bool:
+    if isinstance(receiver, ast.Name):
+        if receiver.id in known_instances:
+            return True
+        if receiver.id != "self":
+            return False
+        owner = parents.get(receiver)
+        while owner is not None and not isinstance(owner, ast.ClassDef):
+            owner = parents.get(owner)
+        return isinstance(owner, ast.ClassDef) and owner.name == source_class
+    return (
+        isinstance(receiver, ast.Call)
+        and isinstance(receiver.func, ast.Name)
+        and receiver.func.id == source_class
+    )
+
+
+def _move_method_call_destination_argument(
+    call: ast.Call,
+    destination_parameter: str,
+) -> tuple[ast.AST | None, Sequence[ast.AST], Sequence[ast.keyword]]:
+    if call.args:
+        if isinstance(call.args[0], ast.Starred):
+            return None, (), ()
+        return call.args[0], call.args[1:], call.keywords
+    destination_keywords = [
+        keyword for keyword in call.keywords
+        if keyword.arg == destination_parameter
+    ]
+    if len(destination_keywords) != 1:
+        return None, (), ()
+    return (
+        destination_keywords[0].value,
+        (),
+        [keyword for keyword in call.keywords if keyword is not destination_keywords[0]],
+    )
+
+
+def _render_moved_python_method(
+    *,
+    source_code: str,
+    method: ast.FunctionDef,
+    destination_parameter: str,
+    destination_indent: str,
+) -> str:
+    lines = source_code.splitlines(keepends=True)
+    method_lines = lines[method.lineno - 1:method.end_lineno]
+    if len(method_lines) < 2:
+        return ""
+    copied_method = copy.deepcopy(method)
+    copied_method.args.args = [
+        argument for argument in copied_method.args.args
+        if argument.arg != destination_parameter
+    ]
+    copied_method.body = [ast.Pass()]
+    copied_method.decorator_list = []
+    try:
+        header = ast.unparse(ast.fix_missing_locations(copied_method)).splitlines()[0]
+    except Exception:
+        return ""
+
+    source_indent = " " * method.col_offset
+    body_indent = f"{source_indent}    "
+    body = "".join(method_lines[1:])
+    dedented_body_lines = [
+        line[len(body_indent):] if line.strip() and line.startswith(body_indent) else line
+        for line in body.splitlines(keepends=True)
+    ]
+    try:
+        rewritten_body = cst.parse_module("".join(dedented_body_lines)).visit(
+            _MoveMethodNameRewriter(destination_parameter)
+        ).code
+    except Exception:
+        return ""
+    indented_body = textwrap.indent(rewritten_body.rstrip("\r\n"), f"{destination_indent}    ")
+    return f"{destination_indent}{header}\n{indented_body}"
+
+
+def _move_method_is_descendant(
+    node: ast.AST,
+    ancestor: ast.AST,
+    parents: dict[ast.AST, ast.AST],
+) -> bool:
+    current: ast.AST | None = node
+    while current is not None:
+        if current is ancestor:
+            return True
+        current = parents.get(current)
+    return False
+
+
+def _move_method_line_offsets(source_code: str) -> list[int]:
+    offsets = [0]
+    for match in re.finditer(r"\n", source_code):
+        offsets.append(match.end())
+    return offsets
+
+
+def _move_method_position_offset(
+    line_offsets: Sequence[int],
+    line: int | None,
+    column: int | None,
+) -> int:
+    if not isinstance(line, int) or not isinstance(column, int) or line <= 0:
+        return -1
+    if line > len(line_offsets):
+        return -1
+    return line_offsets[line - 1] + column
+
+
+def _move_method_line_end_offset(
+    source_code: str,
+    line_offsets: Sequence[int],
+    line: int | None,
+) -> int:
+    if not isinstance(line, int) or line <= 0:
+        return -1
+    return line_offsets[line] if line < len(line_offsets) else len(source_code)
+
+
+def _move_method_line_content_end_offset(
+    source_code: str,
+    line_offsets: Sequence[int],
+    line: int | None,
+) -> int:
+    line_start = _move_method_position_offset(line_offsets, line, 0)
+    line_end = _move_method_line_end_offset(source_code, line_offsets, line)
+    if line_start < 0 or line_end < line_start:
+        return -1
+    while line_end > line_start and source_code[line_end - 1] in "\r\n":
+        line_end -= 1
+    return line_end
+
+
+def _move_method_edits_do_not_overlap(edits: Sequence[tuple[int, int, str]]) -> bool:
+    ordered = sorted(edits, key=lambda edit: (edit[0], edit[1]))
+    previous_end = -1
+    for start, end, _ in ordered:
+        if start < 0 or end < start or start < previous_end:
+            return False
+        previous_end = max(previous_end, end)
+    return True
+
+
+def _apply_move_method_edits(
+    source_code: str,
+    edits: Sequence[tuple[int, int, str]],
+) -> str:
+    transformed = source_code
+    for start, end, replacement in sorted(edits, key=lambda edit: edit[0], reverse=True):
+        transformed = f"{transformed[:start]}{replacement}{transformed[end:]}"
+    return transformed
+
+
+class _InlineClassFieldRewriter(cst.CSTTransformer):
+    def __init__(self, field_names: set[str]) -> None:
+        self.field_names = field_names
+
+    def leave_Attribute(
+        self,
+        original_node: cst.Attribute,
+        updated_node: cst.Attribute,
+    ) -> cst.BaseExpression:
+        if (
+            isinstance(original_node.value, cst.Name)
+            and original_node.value.value == "self"
+            and original_node.attr.value in self.field_names
+        ):
+            return cst.Name(original_node.attr.value)
+        return updated_node
+
+
+class _InlineClassOwnerFieldRewriter(cst.CSTTransformer):
+    def __init__(self, field_mapping: dict[str, str]) -> None:
+        self.field_mapping = field_mapping
+
+    def leave_Attribute(
+        self,
+        original_node: cst.Attribute,
+        updated_node: cst.Attribute,
+    ) -> cst.BaseExpression:
+        if (
+            isinstance(original_node.value, cst.Name)
+            and original_node.value.value == "self"
+            and original_node.attr.value in self.field_mapping
+        ):
+            return cst.Attribute(
+                value=cst.Name("self"),
+                attr=cst.Name(self.field_mapping[original_node.attr.value]),
+            )
+        return updated_node
+
+
+def resolve_inline_class_target(
+    source_code: str,
+    *,
+    class_to_inline: str = "",
+) -> dict[str, Any]:
+    """Resolve an Inline Class target from explicit data or owner usage."""
+
+    try:
+        tree = ast.parse(source_code)
+    except SyntaxError:
+        return {"status": "review_required", "reason": "SOURCE_PARSE_FAILED"}
+    classes = [node for node in tree.body if isinstance(node, ast.ClassDef)]
+    class_names = {node.name for node in classes}
+    requested = str(class_to_inline or "").strip()
+    exact_matches = [node for node in classes if node.name == requested]
+    if requested and len(exact_matches) == 1:
+        return {
+            "status": "success",
+            "class_to_inline": requested,
+            "strategy": "explicit_plan_target",
+            "target_resolution": "explicit_plan_target",
+        }
+    if len(exact_matches) > 1:
+        return {
+            "status": "review_required",
+            "reason": "DUPLICATE_EXPLICIT_CLASS_TARGET",
+            "target_resolution": "explicit_plan_target_ambiguous",
+        }
+
+    candidates: set[str] = set()
+    for owner in classes:
+        for node in ast.walk(owner):
+            if not (
+                isinstance(node, ast.Assign)
+                and len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Attribute)
+                and isinstance(node.targets[0].value, ast.Name)
+                and node.targets[0].value.id == "self"
+                and isinstance(node.value, ast.Call)
+                and isinstance(node.value.func, ast.Name)
+                and node.value.func.id in class_names
+                and node.value.func.id != owner.name
+            ):
+                continue
+            candidates.add(node.value.func.id)
+    if len(candidates) != 1:
+        return {
+            "status": "not_applicable" if not candidates else "review_required",
+            "reason": (
+                "TARGET_CLASS_NOT_FOUND"
+                if requested and not candidates
+                else (
+                    "INLINE_CLASS_TARGET_NOT_FOUND"
+                    if not candidates
+                    else "AMBIGUOUS_INLINE_CLASS_TARGET"
+                )
+            ),
+            "requested_class_to_inline": requested,
+            "target_resolution": "semantic_recovery_failed",
+        }
+    return {
+        "status": "success",
+        "class_to_inline": next(iter(candidates)),
+        "strategy": "owner_usage_semantic_recovery",
+        "target_resolution": "owner_usage_semantic_recovery",
+        "requested_class_to_inline": requested,
+    }
+
+
+def apply_inline_class(
+    source_code: str,
+    *,
+    class_to_inline: str,
+    prior_transformations: Sequence[dict[str, Any]] | None = None,
+    project_source_files: Sequence[dict[str, Any]] | None = None,
+    current_file_name: str = "",
+) -> Tuple[str, int, dict[str, Any]]:
+    """Inline a small, statically-contained Python helper class.
+
+    Only module-local helper classes are accepted.  The class is converted to
+    module functions and every proven construction/call/field reference is
+    updated atomically.  Any dynamic, inherited, or unresolved usage returns
+    ``review_required`` before the source is changed.
+    """
+
+    def review(reason: str) -> Tuple[str, int, dict[str, Any]]:
+        return source_code, 0, {
+            "status": "review_required",
+            "reason": reason,
+            "class_to_inline": class_to_inline,
+        }
+
+    resolution = resolve_inline_class_target(
+        source_code,
+        class_to_inline=class_to_inline,
+    )
+    if resolution.get("status") != "success":
+        return review(str(resolution.get("reason") or "INLINE_CLASS_TARGET_NOT_FOUND"))
+    class_to_inline = str(resolution["class_to_inline"])
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", class_to_inline):
+        return review("INVALID_CLASS_TARGET")
+    try:
+        tree = ast.parse(source_code)
+    except SyntaxError:
+        return review("SOURCE_PARSE_FAILED")
+
+    classes = [
+        node for node in tree.body
+        if isinstance(node, ast.ClassDef) and node.name == class_to_inline
+    ]
+    if len(classes) != 1:
+        return review("TARGET_CLASS_NOT_FOUND")
+    class_node = classes[0]
+    if class_node.bases or class_node.keywords or class_node.decorator_list:
+        return review("INHERITANCE_OR_METACLASS_UNSUPPORTED")
+
+    # A preceding Move Method can leave its old source class as only a
+    # docstring/pass statement.  Resolve that current symbol state before the
+    # normal Inline Class strategies: an empty class is not a missing target.
+    # It can be removed only when every remaining construction is a dead,
+    # side-effect-free local assignment and no other reference remains.
+    empty_cleanup = _apply_empty_inline_class_cleanup(
+        source_code=source_code,
+        tree=tree,
+        class_node=class_node,
+        class_to_inline=class_to_inline,
+        project_source_files=project_source_files or [],
+        current_file_name=current_file_name,
+    )
+    if empty_cleanup is not None:
+        return empty_cleanup
+
+    owner_result = _apply_inline_class_into_owner(
+        source_code=source_code,
+        tree=tree,
+        class_node=class_node,
+        class_to_inline=class_to_inline,
+    )
+    if owner_result is not None:
+        return owner_result
+
+    # Do not inline a class merely because an old RDP plan labelled it Lazy.
+    # For example, after ReportPrinter.print_student_report moves to Student,
+    # Student owns both meaningful state and behaviour.  The smell has already
+    # been resolved by the earlier transformation, so preserving Student is
+    # the safe and correct result.
+    if (
+        _inline_class_has_meaningful_current_responsibility(class_node)
+        and _inline_class_was_enriched_by_prior_move(
+            class_to_inline,
+            prior_transformations or [],
+        )
+    ):
+        return source_code, 0, {
+            "status": "satisfied",
+            "reason": "SMELL_RESOLVED_BY_PRIOR_REFACTORING",
+            "class_to_inline": class_to_inline,
+            "plan_compliance": "SATISFIED_BY_PRIOR_REFACTORING",
+            "current_symbol_state": "meaningful_state_and_behavior",
+            "prior_transformations": list(prior_transformations or []),
+        }
+
+    methods = [node for node in class_node.body if isinstance(node, ast.FunctionDef)]
+    constructors = [node for node in methods if node.name == "__init__"]
+    business_methods = [node for node in methods if node.name != "__init__"]
+    if len(constructors) > 1 or not business_methods or len(business_methods) > 2:
+        return review("CLASS_RESPONSIBILITY_NOT_SMALL")
+    allowed_members = set(methods)
+    for member in class_node.body:
+        if member in allowed_members:
+            continue
+        if (
+            isinstance(member, ast.Expr)
+            and isinstance(member.value, ast.Constant)
+            and isinstance(member.value.value, str)
+        ):
+            continue
+        return review("CLASS_STATE_OR_MEMBER_UNSUPPORTED")
+
+    field_values, init_error = _inline_class_constructor_fields(
+        constructors[0] if constructors else None
+    )
+    if init_error:
+        return review(init_error)
+    field_names = set(field_values)
+    for method in business_methods:
+        error = _inline_class_method_safety_error(method, field_names)
+        if error:
+            return review(error)
+        method_argument_names = {argument.arg for argument in method.args.args[1:]}
+        if method_argument_names & field_names:
+            return review("FIELD_AND_METHOD_PARAMETER_NAME_COLLISION")
+
+    top_level_function_names = {
+        node.name for node in tree.body if isinstance(node, ast.FunctionDef)
+    }
+    method_names = {method.name for method in business_methods}
+    if top_level_function_names & method_names:
+        return review("MODULE_FUNCTION_NAME_COLLISION")
+
+    parents = {
+        child: parent
+        for parent in ast.walk(tree)
+        for child in ast.iter_child_nodes(parent)
+    }
+    constructions, direct_calls, usage_error = _inline_class_collect_usages(
+        tree=tree,
+        parents=parents,
+        class_node=class_node,
+        class_name=class_to_inline,
+        method_names=method_names,
+        field_names=field_names,
+    )
+    if usage_error:
+        return review(usage_error)
+
+    rendered_functions = [
+        _render_inlined_python_function(
+            source_code=source_code,
+            method=method,
+            field_names=field_names,
+        )
+        for method in business_methods
+    ]
+    if not all(rendered_functions):
+        return review("METHOD_RENDER_FAILED")
+
+    line_offsets = _move_method_line_offsets(source_code)
+    edits: list[tuple[int, int, str]] = []
+    class_start = line_offsets[class_node.lineno - 1]
+    class_end = _move_method_line_end_offset(source_code, line_offsets, class_node.end_lineno)
+    edits.append((class_start, class_end, "\n\n".join(rendered_functions).rstrip() + "\n\n"))
+
+    for construction in constructions:
+        statement = construction["statement"]
+        instance_name = construction["instance_name"]
+        replacement = _inline_class_constructor_replacement(
+            indent=" " * statement.col_offset,
+            instance_name=instance_name,
+            field_values=field_values,
+        )
+        edits.append((
+            line_offsets[statement.lineno - 1],
+            _move_method_line_end_offset(source_code, line_offsets, statement.end_lineno),
+            replacement,
+        ))
+
+    for call in direct_calls:
+        replacement = _inline_class_render_call(
+            call=call["call"],
+            method_name=call["method_name"],
+            field_arguments=call["field_arguments"],
+        )
+        if not replacement:
+            return review("CALL_SITE_REWRITE_FAILED")
+        node = call["call"]
+        edits.append((
+            _move_method_position_offset(line_offsets, node.lineno, node.col_offset),
+            _move_method_position_offset(line_offsets, node.end_lineno, node.end_col_offset),
+            replacement,
+        ))
+
+    for field_access in _inline_class_field_accesses(
+        tree=tree,
+        parents=parents,
+        class_node=class_node,
+        constructions=constructions,
+        field_names=field_names,
+    ):
+        attribute = field_access["attribute"]
+        edits.append((
+            _move_method_position_offset(line_offsets, attribute.lineno, attribute.col_offset),
+            _move_method_position_offset(line_offsets, attribute.end_lineno, attribute.end_col_offset),
+            field_access["replacement"],
+        ))
+
+    if not _move_method_edits_do_not_overlap(edits):
+        return review("OVERLAPPING_INLINE_EDITS")
+    transformed = _apply_move_method_edits(source_code, edits)
+    try:
+        ast.parse(transformed)
+        compile(transformed, "<sctva-inline-class>", "exec")
+    except (SyntaxError, ValueError, TypeError):
+        return review("TRANSFORMED_SOURCE_PARSE_FAILED")
+
+    return transformed, len(edits), {
+        "status": "success",
+        "class_to_inline": class_to_inline,
+        "inlined_methods": [method.name for method in business_methods],
+        "inlined_fields": sorted(field_names),
+        "removed_instantiations": len(constructions),
+        "updated_call_sites": len(direct_calls),
+    }
+
+
+def _apply_empty_inline_class_cleanup(
+    *,
+    source_code: str,
+    tree: ast.Module,
+    class_node: ast.ClassDef,
+    class_to_inline: str,
+    project_source_files: Sequence[dict[str, Any]],
+    current_file_name: str,
+) -> Tuple[str, int, dict[str, Any]] | None:
+    """Remove an empty class only after proving it has no live dependency.
+
+    Returning ``None`` means this is not an empty-class cleanup candidate and
+    allows the regular Inline Class strategies to continue.  Any live or
+    dynamic reference returns ``review_required`` rather than removing a
+    class that callers could still rely on.
+    """
+
+    meaningful_body = _inline_class_non_docstring_body(class_node)
+    if any(not isinstance(statement, ast.Pass) for statement in meaningful_body):
+        return None
+
+    repository_reference = _inline_class_repository_reference(
+        project_source_files=project_source_files,
+        current_file_name=current_file_name,
+        class_name=class_to_inline,
+    )
+    if repository_reference:
+        return source_code, 0, {
+            "status": "review_required",
+            "reason": "EXTERNAL_REPOSITORY_REFERENCE",
+            "class_to_inline": class_to_inline,
+            "reference_file": repository_reference,
+            "current_symbol_state": "empty_with_external_reference",
+        }
+
+    parents = {
+        child: parent
+        for parent in ast.walk(tree)
+        for child in ast.iter_child_nodes(parent)
+    }
+    constructions: list[ast.Assign] = []
+    construction_targets: set[ast.Name] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Name) or node.id != class_to_inline:
+            continue
+        if _move_method_is_descendant(node, class_node, parents):
+            continue
+        parent = parents.get(node)
+        grandparent = parents.get(parent) if parent is not None else None
+        if (
+            isinstance(parent, ast.Call)
+            and parent.func is node
+            and not parent.args
+            and not parent.keywords
+            and isinstance(grandparent, ast.Assign)
+            and grandparent.value is parent
+            and len(grandparent.targets) == 1
+            and isinstance(grandparent.targets[0], ast.Name)
+        ):
+            constructions.append(grandparent)
+            construction_targets.add(grandparent.targets[0])
+            continue
+        return source_code, 0, {
+            "status": "review_required",
+            "reason": "EMPTY_CLASS_HAS_LIVE_OR_DYNAMIC_REFERENCE",
+            "class_to_inline": class_to_inline,
+            "current_symbol_state": "empty_with_live_reference",
+        }
+
+    # Each permitted construction must itself be dead.  This protects normal
+    # uses such as ``printer = ReportPrinter(); printer.configure()`` and also
+    # catches reflection, annotations, imports, isinstance and subclassing as
+    # class references in the loop above.
+    for target in construction_targets:
+        if any(
+            isinstance(node, ast.Name)
+            and node.id == target.id
+            and node is not target
+            and not _move_method_is_descendant(node, class_node, parents)
+            for node in ast.walk(tree)
+        ):
+            return source_code, 0, {
+                "status": "review_required",
+                "reason": "EMPTY_CLASS_INSTANCE_STILL_LIVE",
+                "class_to_inline": class_to_inline,
+                "current_symbol_state": "empty_with_live_instance",
+            }
+
+    line_offsets = _move_method_line_offsets(source_code)
+    edits: list[tuple[int, int, str]] = [(
+        line_offsets[class_node.lineno - 1],
+        _move_method_line_end_offset(source_code, line_offsets, class_node.end_lineno),
+        "",
+    )]
+    for construction in constructions:
+        edits.append((
+            line_offsets[construction.lineno - 1],
+            _move_method_line_end_offset(source_code, line_offsets, construction.end_lineno),
+            "",
+        ))
+    if not _move_method_edits_do_not_overlap(edits):
+        return source_code, 0, {
+            "status": "review_required",
+            "reason": "OVERLAPPING_EMPTY_CLASS_CLEANUP_EDITS",
+            "class_to_inline": class_to_inline,
+        }
+    transformed = _apply_move_method_edits(source_code, edits)
+    try:
+        ast.parse(transformed)
+        compile(transformed, "<sctva-empty-inline-class>", "exec")
+    except (SyntaxError, ValueError, TypeError):
+        return source_code, 0, {
+            "status": "review_required",
+            "reason": "TRANSFORMED_SOURCE_PARSE_FAILED",
+            "class_to_inline": class_to_inline,
+        }
+    return transformed, len(edits), {
+        "status": "success",
+        "reason": "SAFE_EMPTY_CLASS_REMOVAL",
+        "class_to_inline": class_to_inline,
+        "strategy": "empty_class_cleanup_after_prior_refactoring",
+        "inline_mode": "empty_class_cleanup",
+        "class_was_empty": True,
+        "class_removed": True,
+        "references_updated": True,
+        "removed_instantiations": len(constructions),
+        "updated_call_sites": 0,
+        "current_symbol_state": "empty_unused_removed",
+        "plan_compliance": "PASS",
+        "plan_compliance_reason": "SAFE_EMPTY_CLASS_REMOVAL",
+    }
+
+
+def _inline_class_repository_reference(
+    *,
+    project_source_files: Sequence[dict[str, Any]],
+    current_file_name: str,
+    class_name: str,
+) -> str:
+    """Return the first other Python file that may depend on the class."""
+
+    current_path = str(current_file_name or "").replace("\\", "/").lower()
+    for item in project_source_files:
+        if not isinstance(item, dict):
+            continue
+        file_name = str(item.get("file_name") or item.get("name") or "")
+        normalized = file_name.replace("\\", "/").lower()
+        if current_path and normalized == current_path:
+            continue
+        language = str(item.get("language") or "").strip().lower()
+        if language and language != "python" and not normalized.endswith(".py"):
+            continue
+        source = item.get("source_code")
+        if not isinstance(source, str) or not source.strip():
+            continue
+        try:
+            tree = ast.parse(source)
+        except SyntaxError:
+            # An unparsable repository peer cannot provide a safe absence
+            # proof, so preserve the class for review.
+            return file_name or "<unparsed-python-source>"
+
+        local_definition = any(
+            isinstance(node, ast.ClassDef) and node.name == class_name
+            for node in tree.body
+        )
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and any(
+                alias.name == class_name for alias in node.names
+            ):
+                return file_name
+            if isinstance(node, ast.Attribute) and node.attr == class_name:
+                return file_name
+            if (
+                isinstance(node, ast.Name)
+                and node.id == class_name
+                and not local_definition
+            ):
+                return file_name
+    return ""
+
+
+def build_python_symbol_table(source_code: str) -> dict[str, Any]:
+    """Build a compact symbol table from the current Python AST."""
+
+    try:
+        tree = ast.parse(source_code)
+    except SyntaxError:
+        return {"status": "parse_failed", "classes": {}}
+
+    instantiations = Counter(
+        node.func.id
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    )
+    method_calls = Counter(
+        node.func.attr
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+    )
+    classes: dict[str, Any] = {}
+    for class_node in (
+        node for node in tree.body if isinstance(node, ast.ClassDef)
+    ):
+        methods = [
+            node.name
+            for node in class_node.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        ]
+        instance_fields = sorted({
+            node.attr
+            for node in ast.walk(class_node)
+            if isinstance(node, ast.Attribute)
+            and isinstance(node.value, ast.Name)
+            and node.value.id in {"self", "cls"}
+            and isinstance(node.ctx, ast.Store)
+        })
+        class_fields = sorted({
+            target.id
+            for statement in class_node.body
+            if isinstance(statement, (ast.Assign, ast.AnnAssign))
+            for target in (
+                statement.targets if isinstance(statement, ast.Assign) else [statement.target]
+            )
+            if isinstance(target, ast.Name)
+        })
+        meaningful_body = _inline_class_non_docstring_body(class_node)
+        classes[class_node.name] = {
+            "methods": methods,
+            "instance_fields": instance_fields,
+            "class_fields": class_fields,
+            "empty": not meaningful_body or all(
+                isinstance(statement, ast.Pass) for statement in meaningful_body
+            ),
+            "instantiations": int(instantiations.get(class_node.name, 0)),
+            "bases": [ast.unparse(base) for base in class_node.bases],
+        }
+    return {
+        "status": "success",
+        "classes": classes,
+        "method_call_counts": dict(method_calls),
+    }
+
+
+def _inline_class_non_docstring_body(class_node: ast.ClassDef) -> list[ast.stmt]:
+    body = list(class_node.body)
+    if (
+        body
+        and isinstance(body[0], ast.Expr)
+        and isinstance(body[0].value, ast.Constant)
+        and isinstance(body[0].value.value, str)
+    ):
+        return body[1:]
+    return body
+
+
+def _inline_class_has_meaningful_current_responsibility(
+    class_node: ast.ClassDef,
+) -> bool:
+    constructor = next(
+        (
+            node for node in class_node.body
+            if isinstance(node, ast.FunctionDef) and node.name == "__init__"
+        ),
+        None,
+    )
+    business_methods = [
+        node for node in class_node.body
+        if isinstance(node, ast.FunctionDef) and node.name != "__init__"
+    ]
+    owns_state = bool(constructor) and any(
+        isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "self"
+        and isinstance(node.ctx, ast.Store)
+        for node in ast.walk(constructor)
+    )
+    has_real_behavior = any(
+        _inline_class_method_has_real_logic(method)
+        for method in business_methods
+    )
+    return owns_state and has_real_behavior
+
+
+def _inline_class_was_enriched_by_prior_move(
+    class_to_inline: str,
+    prior_transformations: Sequence[dict[str, Any]],
+) -> bool:
+    """Return true only when this class gained behaviour in this run."""
+
+    for item in prior_transformations:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("action_type") or "") != "move_python_method":
+            continue
+        if str(item.get("status") or "").lower() not in {"success", "already_applied"}:
+            continue
+        if str(item.get("destination_class") or "") == class_to_inline:
+            return True
+    return False
+
+
+def _inline_class_method_has_real_logic(method: ast.FunctionDef) -> bool:
+    body = _inline_class_non_docstring_body(method)
+    return bool(body) and not all(
+        isinstance(statement, ast.Pass)
+        or (
+            isinstance(statement, ast.Expr)
+            and isinstance(statement.value, ast.Constant)
+            and statement.value.value is Ellipsis
+        )
+        for statement in body
+    )
+
+
+def _apply_inline_class_into_owner(
+    *,
+    source_code: str,
+    tree: ast.Module,
+    class_node: ast.ClassDef,
+    class_to_inline: str,
+) -> Tuple[str, int, dict[str, Any]] | None:
+    """Inline a tiny helper stored as ``self.attribute`` of one owner class."""
+
+    methods = [node for node in class_node.body if isinstance(node, ast.FunctionDef)]
+    constructors = [node for node in methods if node.name == "__init__"]
+    business_methods = [node for node in methods if node.name != "__init__"]
+    if len(constructors) != 1 or not business_methods or len(business_methods) > 2:
+        return None
+    field_parameters, field_error = _inline_owner_constructor_field_parameters(constructors[0])
+    if field_error:
+        return None
+    field_names = set(field_parameters)
+    for method in business_methods:
+        if _inline_class_method_safety_error(method, field_names):
+            return None
+
+    parents = {
+        child: parent
+        for parent in ast.walk(tree)
+        for child in ast.iter_child_nodes(parent)
+    }
+    ownerships: list[dict[str, Any]] = []
+    for owner in (node for node in tree.body if isinstance(node, ast.ClassDef) and node is not class_node):
+        if owner.bases or owner.keywords or owner.decorator_list:
+            continue
+        owner_constructor = next(
+            (node for node in owner.body if isinstance(node, ast.FunctionDef) and node.name == "__init__"),
+            None,
+        )
+        if owner_constructor is None:
+            continue
+        for statement in owner_constructor.body:
+            if not (
+                isinstance(statement, ast.Assign)
+                and len(statement.targets) == 1
+                and isinstance(statement.targets[0], ast.Attribute)
+                and isinstance(statement.targets[0].value, ast.Name)
+                and statement.targets[0].value.id == "self"
+                and isinstance(statement.value, ast.Call)
+                and isinstance(statement.value.func, ast.Name)
+                and statement.value.func.id == class_to_inline
+            ):
+                continue
+            if statement.value.keywords or len(statement.value.args) != len(field_parameters):
+                return None
+            field_values = {
+                field: ast.unparse(statement.value.args[index])
+                for index, field in enumerate(field_parameters)
+            }
+            ownerships.append({
+                "owner": owner,
+                "constructor_assignment": statement,
+                "owner_attribute": statement.targets[0].attr,
+                "field_values": field_values,
+            })
+    if len(ownerships) != 1:
+        return None
+    ownership = ownerships[0]
+    owner = ownership["owner"]
+    owner_attribute = str(ownership["owner_attribute"])
+    field_mapping = {field: field for field in field_parameters}
+    owner_method_names = {
+        node.name for node in owner.body if isinstance(node, ast.FunctionDef)
+    }
+    moved_method_names = {method.name for method in business_methods}
+    if owner_method_names & moved_method_names:
+        return None
+    if _inline_owner_has_field_collisions(
+        owner=owner,
+        owner_attribute=owner_attribute,
+        field_names=field_names,
+    ):
+        return None
+
+    usages, usage_error = _inline_owner_usages(
+        tree=tree,
+        parents=parents,
+        class_node=class_node,
+        owner=owner,
+        class_name=class_to_inline,
+        owner_attribute=owner_attribute,
+        method_names=moved_method_names,
+        field_names=field_names,
+    )
+    if usage_error:
+        return source_code, 0, {
+            "status": "review_required",
+            "reason": usage_error,
+            "class_to_inline": class_to_inline,
+        }
+
+    rendered_methods = [
+        _render_inlined_owner_method(
+            source_code=source_code,
+            method=method,
+            field_mapping=field_mapping,
+            destination_indent=" " * (owner.col_offset + 4),
+        )
+        for method in business_methods
+    ]
+    if not all(rendered_methods):
+        return source_code, 0, {
+            "status": "review_required",
+            "reason": "OWNER_METHOD_RENDER_FAILED",
+            "class_to_inline": class_to_inline,
+        }
+
+    line_offsets = _move_method_line_offsets(source_code)
+    edits: list[tuple[int, int, str]] = [(
+        line_offsets[class_node.lineno - 1],
+        _move_method_line_end_offset(source_code, line_offsets, class_node.end_lineno),
+        "",
+    )]
+    assignment = ownership["constructor_assignment"]
+    assignment_indent = " " * assignment.col_offset
+    constructor_replacement = "".join(
+        f"{assignment_indent}self.{field} = {value}\n"
+        for field, value in ownership["field_values"].items()
+    )
+    edits.append((
+        line_offsets[assignment.lineno - 1],
+        _move_method_line_end_offset(source_code, line_offsets, assignment.end_lineno),
+        constructor_replacement,
+    ))
+    owner_last_body = owner.body[-1] if owner.body else None
+    if owner_last_body is None:
+        return source_code, 0, {
+            "status": "review_required",
+            "reason": "OWNER_CLASS_BODY_NOT_FOUND",
+            "class_to_inline": class_to_inline,
+        }
+    edits.append((
+        _move_method_line_content_end_offset(source_code, line_offsets, owner_last_body.end_lineno),
+        _move_method_line_content_end_offset(source_code, line_offsets, owner_last_body.end_lineno),
+        f"\n\n{'\n\n'.join(rendered_methods)}\n",
+    ))
+    for usage in usages:
+        node = usage["node"]
+        edits.append((
+            _move_method_position_offset(line_offsets, node.lineno, node.col_offset),
+            _move_method_position_offset(line_offsets, node.end_lineno, node.end_col_offset),
+            usage["replacement"],
+        ))
+    if not _move_method_edits_do_not_overlap(edits):
+        return source_code, 0, {
+            "status": "review_required",
+            "reason": "OVERLAPPING_OWNER_INLINE_EDITS",
+            "class_to_inline": class_to_inline,
+        }
+    transformed = _apply_move_method_edits(source_code, edits)
+    try:
+        ast.parse(transformed)
+        compile(transformed, "<sctva-inline-owner-class>", "exec")
+    except (SyntaxError, ValueError, TypeError):
+        return source_code, 0, {
+            "status": "review_required",
+            "reason": "TRANSFORMED_SOURCE_PARSE_FAILED",
+            "class_to_inline": class_to_inline,
+        }
+    return transformed, len(edits), {
+        "status": "success",
+        "class_to_inline": class_to_inline,
+        "strategy": "inline_into_owner_class",
+        "destination_class": owner.name,
+        "destination_attribute": owner_attribute,
+        "inlined_methods": sorted(moved_method_names),
+        "inlined_fields": sorted(field_names),
+        "updated_call_sites": len(usages),
+    }
+
+
+def _inline_owner_constructor_field_parameters(
+    constructor: ast.FunctionDef,
+) -> tuple[list[str], str]:
+    if (
+        constructor.decorator_list
+        or constructor.args.posonlyargs
+        or constructor.args.vararg
+        or constructor.args.kwonlyargs
+        or len(constructor.args.args) < 2
+        or constructor.args.args[0].arg != "self"
+    ):
+        return [], "CONSTRUCTOR_SIGNATURE_UNSUPPORTED"
+    parameters = [argument.arg for argument in constructor.args.args[1:]]
+    fields: list[str] = []
+    body = list(constructor.body)
+    if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant) and isinstance(body[0].value.value, str):
+        body = body[1:]
+    for statement in body:
+        if not (
+            isinstance(statement, ast.Assign)
+            and len(statement.targets) == 1
+            and isinstance(statement.targets[0], ast.Attribute)
+            and isinstance(statement.targets[0].value, ast.Name)
+            and statement.targets[0].value.id == "self"
+            and isinstance(statement.value, ast.Name)
+            and statement.value.id in parameters
+        ):
+            return [], "CONSTRUCTOR_STATE_UNSUPPORTED"
+        fields.append(statement.targets[0].attr)
+    if len(fields) != len(parameters) or len(set(fields)) != len(fields):
+        return [], "CONSTRUCTOR_FIELD_MAPPING_UNSUPPORTED"
+    return fields, ""
+
+
+def _inline_owner_has_field_collisions(
+    *,
+    owner: ast.ClassDef,
+    owner_attribute: str,
+    field_names: set[str],
+) -> bool:
+    for node in ast.walk(owner):
+        if not (
+            isinstance(node, ast.Attribute)
+            and isinstance(node.value, ast.Name)
+            and node.value.id == "self"
+            and node.attr in field_names
+        ):
+            continue
+        if node.attr != owner_attribute:
+            return True
+    return False
+
+
+def _inline_owner_usages(
+    *,
+    tree: ast.Module,
+    parents: dict[ast.AST, ast.AST],
+    class_node: ast.ClassDef,
+    owner: ast.ClassDef,
+    class_name: str,
+    owner_attribute: str,
+    method_names: set[str],
+    field_names: set[str],
+) -> tuple[list[dict[str, Any]], str]:
+    usages: list[dict[str, Any]] = []
+    for node in ast.walk(tree):
+        if _move_method_is_descendant(node, class_node, parents):
+            continue
+        if isinstance(node, ast.Name) and node.id == class_name:
+            parent = parents.get(node)
+            if isinstance(parent, ast.Call) and parent.func is node:
+                grandparent = parents.get(parent)
+                if isinstance(grandparent, ast.Assign) and grandparent.value is parent:
+                    continue
+            return [], "DYNAMIC_OR_EXTERNAL_CLASS_REFERENCE"
+        if not (
+            isinstance(node, ast.Attribute)
+            and isinstance(node.value, ast.Attribute)
+            and isinstance(node.value.value, ast.Name)
+            and node.value.value.id == "self"
+            and node.value.attr == owner_attribute
+        ):
+            continue
+        current: ast.AST | None = node
+        inside_owner = False
+        while current is not None:
+            if current is owner:
+                inside_owner = True
+                break
+            current = parents.get(current)
+        if not inside_owner:
+            return [], "EXTERNAL_OWNER_REFERENCE_UNSUPPORTED"
+        parent = parents.get(node)
+        if node.attr in method_names and isinstance(parent, ast.Call) and parent.func is node:
+            rewritten = ast.Call(
+                func=ast.Attribute(value=ast.Name(id="self", ctx=ast.Load()), attr=node.attr, ctx=ast.Load()),
+                args=[copy.deepcopy(argument) for argument in parent.args],
+                keywords=[copy.deepcopy(keyword) for keyword in parent.keywords],
+            )
+            usages.append({"node": parent, "replacement": ast.unparse(ast.fix_missing_locations(rewritten))})
+        elif node.attr in field_names and isinstance(node.ctx, ast.Load):
+            usages.append({"node": node, "replacement": f"self.{node.attr}"})
+        else:
+            return [], "UNRESOLVED_OWNER_ATTRIBUTE_REFERENCE"
+    return usages, ""
+
+
+def _render_inlined_owner_method(
+    *,
+    source_code: str,
+    method: ast.FunctionDef,
+    field_mapping: dict[str, str],
+    destination_indent: str,
+) -> str:
+    lines = source_code.splitlines(keepends=True)
+    method_lines = lines[method.lineno - 1:method.end_lineno]
+    if len(method_lines) < 2:
+        return ""
+    copied = copy.deepcopy(method)
+    copied.body = [ast.Pass()]
+    copied.decorator_list = []
+    try:
+        header = ast.unparse(ast.fix_missing_locations(copied)).splitlines()[0]
+    except Exception:
+        return ""
+    source_indent = " " * method.col_offset
+    body_indent = f"{source_indent}    "
+    body = "".join(method_lines[1:])
+    dedented = "".join(
+        line[len(body_indent):] if line.strip() and line.startswith(body_indent) else line
+        for line in body.splitlines(keepends=True)
+    )
+    try:
+        rewritten = cst.parse_module(dedented).visit(
+            _InlineClassOwnerFieldRewriter(field_mapping)
+        ).code
+    except Exception:
+        return ""
+    return f"{destination_indent}{header}\n{textwrap.indent(rewritten.rstrip(), f'{destination_indent}    ')}"
+
+
+def _inline_class_constructor_fields(
+    constructor: ast.FunctionDef | None,
+) -> tuple[dict[str, str], str]:
+    if constructor is None:
+        return {}, ""
+    if (
+        constructor.decorator_list
+        or constructor.args.posonlyargs
+        or constructor.args.vararg
+        or constructor.args.kwonlyargs
+        or len(constructor.args.args) != 1
+        or constructor.args.args[0].arg != "self"
+    ):
+        return {}, "CONSTRUCTOR_SIGNATURE_UNSUPPORTED"
+    fields: dict[str, str] = {}
+    body = list(constructor.body)
+    if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant) and isinstance(body[0].value.value, str):
+        body = body[1:]
+    for statement in body:
+        if not (
+            isinstance(statement, ast.Assign)
+            and len(statement.targets) == 1
+            and isinstance(statement.targets[0], ast.Attribute)
+            and isinstance(statement.targets[0].value, ast.Name)
+            and statement.targets[0].value.id == "self"
+        ):
+            return {}, "CONSTRUCTOR_STATE_UNSUPPORTED"
+        try:
+            ast.literal_eval(statement.value)
+        except (ValueError, TypeError, SyntaxError, MemoryError, RecursionError):
+            return {}, "CONSTRUCTOR_FIELD_VALUE_UNSUPPORTED"
+        field_name = statement.targets[0].attr
+        if field_name in fields:
+            return {}, "DUPLICATE_CONSTRUCTOR_FIELD"
+        fields[field_name] = ast.unparse(statement.value)
+    return fields, ""
+
+
+def _inline_class_method_safety_error(
+    method: ast.FunctionDef,
+    field_names: set[str],
+) -> str:
+    if (
+        method.decorator_list
+        or method.args.posonlyargs
+        or method.args.vararg
+        or not method.args.args
+        or method.args.args[0].arg != "self"
+    ):
+        return "METHOD_SIGNATURE_UNSUPPORTED"
+    parents = {
+        child: parent
+        for parent in ast.walk(method)
+        for child in ast.iter_child_nodes(parent)
+    }
+    for node in ast.walk(method):
+        if node is not method and isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
+            return "NESTED_SCOPE_UNSUPPORTED"
+        if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id == "self":
+            if node.attr not in field_names or not isinstance(node.ctx, ast.Load):
+                return "SOURCE_INSTANCE_DEPENDENCY"
+        if isinstance(node, ast.Name) and node.id == "self":
+            parent = parents.get(node)
+            if not (
+                isinstance(parent, ast.Attribute)
+                and parent.value is node
+                and parent.attr in field_names
+                and isinstance(parent.ctx, ast.Load)
+            ):
+                return "SOURCE_INSTANCE_DEPENDENCY"
+    return ""
+
+
+def _inline_class_collect_usages(
+    *,
+    tree: ast.Module,
+    parents: dict[ast.AST, ast.AST],
+    class_node: ast.ClassDef,
+    class_name: str,
+    method_names: set[str],
+    field_names: set[str],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], str]:
+    constructions: list[dict[str, Any]] = []
+    direct_calls: list[dict[str, Any]] = []
+    instances: dict[str, dict[str, str]] = {}
+
+    for node in ast.walk(tree):
+        if not (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == class_name
+        ):
+            continue
+        if node.args or node.keywords:
+            return [], [], "CONSTRUCTOR_CALL_ARGUMENTS_UNSUPPORTED"
+        parent = parents.get(node)
+        if isinstance(parent, ast.Assign) and parent.value is node and len(parent.targets) == 1 and isinstance(parent.targets[0], ast.Name):
+            instance_name = parent.targets[0].id
+            instances[instance_name] = {
+                field: f"{instance_name}_{field}" for field in field_names
+            }
+            constructions.append({"statement": parent, "instance_name": instance_name})
+            continue
+        if isinstance(parent, ast.Attribute) and parent.value is node:
+            call_parent = parents.get(parent)
+            if (
+                not field_names
+                and parent.attr in method_names
+                and isinstance(call_parent, ast.Call)
+                and call_parent.func is parent
+            ):
+                direct_calls.append({
+                    "call": call_parent,
+                    "method_name": parent.attr,
+                    "field_arguments": [],
+                })
+                continue
+        return [], [], "UNRESOLVED_CLASS_CONSTRUCTION"
+
+    for node in ast.walk(tree):
+        if _move_method_is_descendant(node, class_node, parents):
+            continue
+        if isinstance(node, ast.Name) and node.id == class_name:
+            parent = parents.get(node)
+            if isinstance(parent, ast.Call) and parent.func is node:
+                continue
+            return [], [], "DYNAMIC_OR_EXTERNAL_CLASS_REFERENCE"
+        if not isinstance(node, ast.Attribute) or not isinstance(node.value, ast.Name):
+            continue
+        instance_name = node.value.id
+        if instance_name not in instances:
+            continue
+        parent = parents.get(node)
+        if node.attr in method_names and isinstance(parent, ast.Call) and parent.func is node:
+            direct_calls.append({
+                "call": parent,
+                "method_name": node.attr,
+                "field_arguments": list(instances[instance_name].values()),
+            })
+        elif node.attr in field_names and isinstance(node.ctx, ast.Load):
+            continue
+        else:
+            return [], [], "UNRESOLVED_INSTANCE_REFERENCE"
+
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Name) or node.id not in instances:
+            continue
+        parent = parents.get(node)
+        if isinstance(parent, ast.Assign) and node in parent.targets:
+            continue
+        if isinstance(parent, ast.Attribute) and parent.value is node:
+            continue
+        return [], [], "UNRESOLVED_INSTANCE_REFERENCE"
+    return constructions, direct_calls, ""
+
+
+def _render_inlined_python_function(
+    *,
+    source_code: str,
+    method: ast.FunctionDef,
+    field_names: set[str],
+) -> str:
+    lines = source_code.splitlines(keepends=True)
+    method_lines = lines[method.lineno - 1:method.end_lineno]
+    if len(method_lines) < 2:
+        return ""
+    copied = copy.deepcopy(method)
+    copied.args.args = [
+        *(ast.arg(arg=name) for name in sorted(field_names)),
+        *copied.args.args[1:],
+    ]
+    copied.body = [ast.Pass()]
+    copied.decorator_list = []
+    try:
+        header = ast.unparse(ast.fix_missing_locations(copied)).splitlines()[0]
+    except Exception:
+        return ""
+    source_indent = " " * method.col_offset
+    body_indent = f"{source_indent}    "
+    body = "".join(method_lines[1:])
+    dedented = "".join(
+        line[len(body_indent):] if line.strip() and line.startswith(body_indent) else line
+        for line in body.splitlines(keepends=True)
+    )
+    try:
+        rewritten = cst.parse_module(dedented).visit(
+            _InlineClassFieldRewriter(field_names)
+        ).code
+    except Exception:
+        return ""
+    return f"{header}\n{textwrap.indent(rewritten.rstrip(), '    ')}"
+
+
+def _inline_class_constructor_replacement(
+    *,
+    indent: str,
+    instance_name: str,
+    field_values: dict[str, str],
+) -> str:
+    if not field_values:
+        return ""
+    return "".join(
+        f"{indent}{instance_name}_{field} = {value}\n"
+        for field, value in sorted(field_values.items())
+    )
+
+
+def _inline_class_render_call(
+    *,
+    call: ast.Call,
+    method_name: str,
+    field_arguments: Sequence[str],
+) -> str:
+    rewritten = ast.Call(
+        func=ast.Name(id=method_name, ctx=ast.Load()),
+        args=[
+            *(ast.Name(id=name, ctx=ast.Load()) for name in field_arguments),
+            *(copy.deepcopy(argument) for argument in call.args),
+        ],
+        keywords=[copy.deepcopy(keyword) for keyword in call.keywords],
+    )
+    try:
+        return ast.unparse(ast.fix_missing_locations(rewritten))
+    except Exception:
+        return ""
+
+
+def _inline_class_field_accesses(
+    *,
+    tree: ast.Module,
+    parents: dict[ast.AST, ast.AST],
+    class_node: ast.ClassDef,
+    constructions: Sequence[dict[str, Any]],
+    field_names: set[str],
+) -> list[dict[str, Any]]:
+    instance_fields = {
+        item["instance_name"]: {
+            field: f"{item['instance_name']}_{field}" for field in field_names
+        }
+        for item in constructions
+    }
+    accesses: list[dict[str, Any]] = []
+    for node in ast.walk(tree):
+        if _move_method_is_descendant(node, class_node, parents):
+            continue
+        if not (
+            isinstance(node, ast.Attribute)
+            and isinstance(node.value, ast.Name)
+            and node.value.id in instance_fields
+            and node.attr in field_names
+            and isinstance(node.ctx, ast.Load)
+        ):
+            continue
+        accesses.append({
+            "attribute": node,
+            "replacement": instance_fields[node.value.id][node.attr],
+        })
+    return accesses
 
 
 def resolve_dead_code_target(
@@ -941,14 +3871,47 @@ def resolve_dead_code_target(
         return "", ""
 
     if method_name:
-        target = _find_python_dead_callable(
+        # RDP may identify the containing method while its line points to a
+        # dead statement inside that method. Resolve that statement first;
+        # otherwise a live method is incorrectly treated as the dead target.
+        if source_line is not None:
+            statement_target = _find_python_dead_statement_target(
+                tree,
+                source_line=source_line,
+                method_name=method_name,
+                class_name=class_name,
+            )
+            if statement_target is not None:
+                dead_code_kind, target = statement_target
+                return dead_code_kind, ast.dump(target, include_attributes=False)
+
+        target = _resolve_python_dead_callable_identity(
             tree,
             method_name=method_name,
             class_name=class_name,
             source_line=source_line,
         )
         if target is not None:
-            return "unused_callable", ast.dump(target, include_attributes=False)
+            fingerprint = ast.dump(target, include_attributes=False)
+            if _is_proven_unused_python_callable(
+                tree,
+                target=target,
+                method_name=target.name,
+            ):
+                return "unused_callable", fingerprint
+            if _has_dynamic_python_callable_reference(tree, target.name):
+                return "dynamic_callable", fingerprint
+            # The planner can occasionally label a live method as dead code.
+            # Preserve that fact as a semantic anchor so the engine can mark
+            # the step NOT_APPLICABLE instead of repeatedly warning that the
+            # remover could not prove the target was dead.
+            return "live_callable", fingerprint
+        recovered = _recover_unique_unused_python_callable(
+            tree,
+            source_line=source_line,
+        )
+        if recovered is not None:
+            return "unused_callable", ast.dump(recovered, include_attributes=False)
         return "", ""
 
     if source_line is None:
@@ -962,7 +3925,16 @@ def resolve_dead_code_target(
     ]
     if callable_candidates:
         target = callable_candidates[0]
-        return "unused_callable", ast.dump(target, include_attributes=False)
+        fingerprint = ast.dump(target, include_attributes=False)
+        if _is_proven_unused_python_callable(
+            tree,
+            target=target,
+            method_name=target.name,
+        ):
+            return "unused_callable", fingerprint
+        if _has_dynamic_python_callable_reference(tree, target.name):
+            return "dynamic_callable", fingerprint
+        return "live_callable", fingerprint
 
     false_branches = [
         node
@@ -997,6 +3969,178 @@ def resolve_dead_code_target(
                 include_attributes=False,
             )
     return "", ""
+
+
+def resolve_dead_code_callable_name(
+    source_code: str,
+    target_statement_fingerprint: str,
+) -> str:
+    """Return the unique callable name represented by a dead-code anchor."""
+
+    name, _owner = resolve_dead_code_callable_target(
+        source_code,
+        target_statement_fingerprint,
+    )
+    return name
+
+
+def resolve_dead_code_callable_target(
+    source_code: str,
+    target_statement_fingerprint: str,
+) -> tuple[str, str]:
+    """Return the unique anchored callable and its owning class, if any."""
+
+    try:
+        tree = ast.parse(source_code)
+    except SyntaxError:
+        return "", ""
+    parents = {
+        child: parent
+        for parent in ast.walk(tree)
+        for child in ast.iter_child_nodes(parent)
+    }
+    candidates = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and ast.dump(node, include_attributes=False) == target_statement_fingerprint
+    ]
+    if len(candidates) != 1:
+        return "", ""
+    target = candidates[0]
+    return target.name, _python_callable_class_name(target, parents) or ""
+
+
+def _recover_unique_unused_python_callable(
+    tree: ast.Module,
+    *,
+    source_line: Optional[int],
+) -> Optional[ast.FunctionDef | ast.AsyncFunctionDef]:
+    """Recover a stale RDP callable target without guessing among APIs.
+
+    Recovery is limited to top-level, statically unreferenced callables. A
+    source-line match is authoritative when unique. Otherwise, only one
+    clearly legacy-named helper may be selected. Framework entry points and
+    test hooks are deliberately excluded because they can be invoked without
+    a normal AST reference in this module.
+    """
+
+    entrypoint_names = {
+        "main", "app", "application", "cli", "setup", "teardown",
+        "setUp", "tearDown", "setUpClass", "tearDownClass",
+    }
+    candidates = [
+        node
+        for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name not in entrypoint_names
+        and not node.name.startswith(("test_", "pytest_"))
+        and _is_proven_unused_python_callable(
+            tree,
+            target=node,
+            method_name=node.name,
+        )
+    ]
+    if source_line is not None:
+        line_matches = [
+            node for node in candidates
+            if _python_statement_span(node)[0] <= source_line <= _python_statement_span(node)[1]
+        ]
+        if len(line_matches) == 1:
+            return line_matches[0]
+
+    legacy_name = re.compile(
+        r"(?:^|_)(?:old|legacy|unused|dead|obsolete|deprecated)(?:_|$)",
+        re.IGNORECASE,
+    )
+    legacy_candidates = [node for node in candidates if legacy_name.search(node.name)]
+    return legacy_candidates[0] if len(legacy_candidates) == 1 else None
+
+
+def _find_python_dead_statement_target(
+    tree: ast.Module,
+    *,
+    source_line: int,
+    method_name: str = "",
+    class_name: Optional[str] = None,
+) -> Optional[tuple[str, ast.stmt]]:
+    """Find one proven dead statement at a plan line.
+
+    A plan can use ``method`` as the owning context rather than as the item
+    to delete.  This helper limits the search to that method and only returns
+    AST-proven dead statements, so it cannot turn a live statement into a
+    deletion merely because the line was supplied by RDP.
+    """
+
+    parents = {
+        child: parent
+        for parent in ast.walk(tree)
+        for child in ast.iter_child_nodes(parent)
+    }
+    scope: ast.AST = tree
+    if method_name:
+        callable_target = _find_python_dead_callable(
+            tree,
+            method_name=method_name,
+            class_name=class_name,
+        )
+        if callable_target is None:
+            return None
+        # The definition line identifies the callable itself, not a statement
+        # inside it.  Let the normal callable proof handle that case.
+        if int(getattr(callable_target, "lineno", 0) or 0) == source_line:
+            return None
+        scope = callable_target
+
+    false_branches = [
+        node
+        for node in ast.walk(scope)
+        if isinstance(node, ast.If)
+        and not node.orelse
+        and _static_python_boolean(node.test) is False
+        and _python_statement_span(node)[0] <= source_line <= _python_statement_span(node)[1]
+    ]
+    if false_branches:
+        target = min(
+            false_branches,
+            key=lambda node: _python_statement_span(node)[1] - _python_statement_span(node)[0],
+        )
+        return "constant_false_branch", target
+
+    unreachable = [
+        statement
+        for statement in _unreachable_python_statements(scope)
+        if _python_statement_span(statement)[0] <= source_line <= _python_statement_span(statement)[1]
+    ]
+    if unreachable:
+        target = min(
+            unreachable,
+            key=lambda node: _python_statement_span(node)[1] - _python_statement_span(node)[0],
+        )
+        return "unreachable_after_terminator", target
+
+    assignments = [
+        statement
+        for statement in ast.walk(scope)
+        if isinstance(statement, (ast.Assign, ast.AnnAssign))
+        and _python_statement_span(statement)[0] <= source_line <= _python_statement_span(statement)[1]
+    ]
+    for statement in sorted(
+        assignments,
+        key=lambda node: _python_statement_span(node)[1] - _python_statement_span(node)[0],
+    ):
+        names = _assigned_local_names(statement)
+        function = _enclosing_python_function(statement, parents)
+        if not names or function is None:
+            continue
+        loaded_names = {
+            node.id
+            for node in ast.walk(function)
+            if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)
+        }
+        if not any(name in loaded_names for name in names):
+            return "unused_literal_assignment", statement
+    return None
 
 
 def _find_python_dead_callable(
@@ -1034,6 +4178,49 @@ def _find_python_dead_callable(
         candidates.sort(key=lambda node: _python_statement_span(node)[1] - _python_statement_span(node)[0])
         return candidates[0] if candidates else None
     return candidates[0] if len(candidates) == 1 else None
+
+
+def _resolve_python_dead_callable_identity(
+    tree: ast.Module,
+    *,
+    method_name: str,
+    class_name: Optional[str],
+    source_line: Optional[int] = None,
+) -> Optional[ast.FunctionDef | ast.AsyncFunctionDef]:
+    """Resolve an RDP callable while treating class and line as fallible hints.
+
+    The method name is semantic identity. RDP line numbers can become stale
+    when its analyzed snapshot differs from the submitted source, and legacy
+    plans can put a module/file stem in ``source_class``. Each relaxed lookup
+    still requires a unique callable, so ambiguity is never guessed through.
+    """
+
+    attempts: list[tuple[Optional[str], Optional[int]]] = [
+        (class_name, source_line),
+    ]
+    if source_line is not None:
+        attempts.append((class_name, None))
+    if class_name:
+        attempts.append((None, source_line))
+        attempts.append((None, None))
+    elif source_line is not None:
+        attempts.append((None, None))
+
+    seen: set[tuple[Optional[str], Optional[int]]] = set()
+    for owner_hint, line_hint in attempts:
+        key = (owner_hint, line_hint)
+        if key in seen:
+            continue
+        seen.add(key)
+        target = _find_python_dead_callable(
+            tree,
+            method_name=method_name,
+            class_name=owner_hint,
+            source_line=line_hint,
+        )
+        if target is not None:
+            return target
+    return None
 
 
 def _is_proven_unused_python_callable(
@@ -1076,6 +4263,76 @@ def _is_proven_unused_python_callable(
         if isinstance(node, ast.Attribute) and node.attr == method_name:
             return False
     return True
+
+
+def _anchored_python_callable_remains_unreferenced(
+    tree: ast.Module,
+    *,
+    target: ast.FunctionDef | ast.AsyncFunctionDef,
+) -> bool:
+    """Revalidate an original-source unused-callable proof after safe actions.
+
+    The original anchor is created only after the strict dynamic-reference
+    check passes. Earlier SCTVA actions may introduce generic ``getattr``
+    helpers for unrelated members, so the later check focuses on references to
+    this exact callable instead of invalidating every original proof globally.
+    """
+
+    method_name = target.name
+    if target.decorator_list or (
+        method_name.startswith("__") and method_name.endswith("__")
+    ):
+        return False
+
+    for node in ast.walk(tree):
+        if node is target:
+            continue
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
+            if node.id == method_name:
+                return False
+        if isinstance(node, ast.Attribute) and node.attr == method_name:
+            return False
+        if (
+            isinstance(node, ast.Constant)
+            and isinstance(node.value, str)
+            and node.value == method_name
+        ):
+            return False
+    return True
+
+
+def _has_dynamic_python_callable_reference(
+    tree: ast.Module,
+    method_name: str,
+) -> bool:
+    """Return whether reflection/import machinery may resolve the callable."""
+
+    dynamic_lookup_names = {
+        "getattr",
+        "setattr",
+        "hasattr",
+        "delattr",
+        "globals",
+        "locals",
+        "vars",
+        "eval",
+        "exec",
+        "__import__",
+        "import_module",
+    }
+    has_dynamic_lookup = any(
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id in dynamic_lookup_names
+        for node in ast.walk(tree)
+    )
+    has_string_reference = any(
+        isinstance(node, ast.Constant)
+        and isinstance(node.value, str)
+        and node.value == method_name
+        for node in ast.walk(tree)
+    )
+    return has_dynamic_lookup and has_string_reference
 
 
 def _iter_python_statement_suites(node: ast.AST):
@@ -1209,6 +4466,7 @@ def _remove_proven_dead_python_statement(
     source_line: int,
     *,
     class_name: Optional[str] = None,
+    method_name: str = "",
     dead_code_kind: str = "",
     target_statement_fingerprint: str = "",
 ) -> Tuple[str, int]:
@@ -1232,6 +4490,9 @@ def _remove_proven_dead_python_statement(
             source_code,
             tree=tree,
             parents=parents,
+            class_name=class_name,
+            method_name=method_name,
+            source_line=source_line,
             dead_code_kind=dead_code_kind,
             target_statement_fingerprint=target_statement_fingerprint,
         )
@@ -1332,21 +4593,53 @@ def _remove_anchored_python_dead_target(
     *,
     tree: ast.Module,
     parents: dict[ast.AST, ast.AST],
+    class_name: Optional[str],
+    method_name: str,
+    source_line: int,
     dead_code_kind: str,
     target_statement_fingerprint: str,
 ) -> Tuple[str, int]:
     """Relocate and remove exactly one previously resolved dead-code target."""
 
+    scope: ast.AST = tree
+    if method_name:
+        method_scope = _find_python_dead_callable(
+            tree,
+            method_name=method_name,
+            class_name=class_name,
+        )
+        if method_scope is None:
+            return source_code, 0
+        scope = method_scope
+    elif class_name:
+        class_candidates = [
+            node for node in tree.body
+            if isinstance(node, ast.ClassDef) and node.name == class_name
+        ]
+        if len(class_candidates) != 1:
+            return source_code, 0
+        scope = class_candidates[0]
+
     if dead_code_kind == "unused_callable":
         candidates = [
             node
-            for node in ast.walk(tree)
+            for node in ast.walk(scope)
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
             and ast.dump(node, include_attributes=False) == target_statement_fingerprint
         ]
+        # Earlier safe actions may replace literals inside the unused
+        # callable, making the complete AST fingerprint stale. The callable
+        # name and reference proof remain stable and are a safer fallback.
+        if not candidates and method_name:
+            candidates = [
+                node
+                for node in ast.walk(scope)
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and node.name == method_name
+            ]
         if len(candidates) == 1:
             target = candidates[0]
-            if _is_proven_unused_python_callable(tree, target=target, method_name=target.name):
+            if _anchored_python_callable_remains_unreferenced(tree, target=target):
                 return _apply_transformer(
                     source_code,
                     _RemoveDeadCodeTransformer(
@@ -1360,7 +4653,7 @@ def _remove_anchored_python_dead_target(
     if dead_code_kind == "constant_false_branch":
         candidates = [
             node
-            for node in ast.walk(tree)
+            for node in ast.walk(scope)
             if isinstance(node, ast.If)
             and not node.orelse
             and _static_python_boolean(node.test) is False
@@ -1369,13 +4662,13 @@ def _remove_anchored_python_dead_target(
     elif dead_code_kind == "unreachable_after_terminator":
         candidates = [
             node
-            for node in _unreachable_python_statements(tree)
+            for node in _unreachable_python_statements(scope)
             if ast.dump(node, include_attributes=False) == target_statement_fingerprint
         ]
     elif dead_code_kind == "unused_literal_assignment":
         candidates = [
             node
-            for node in ast.walk(tree)
+            for node in ast.walk(scope)
             if isinstance(node, ast.stmt)
             and ast.dump(node, include_attributes=False) == target_statement_fingerprint
         ]
@@ -1383,7 +4676,46 @@ def _remove_anchored_python_dead_target(
         return source_code, 0
 
     if len(candidates) != 1:
-        return source_code, 0
+        # Literal introduction and formatting actions can legitimately change
+        # an anchored statement's exact AST dump. Match its semantic shape,
+        # then require a unique candidate. Never guess among equally shaped
+        # live/dead statements.
+        candidate_pool = []
+        if dead_code_kind == "constant_false_branch":
+            candidate_pool = [
+                node for node in ast.walk(scope)
+                if isinstance(node, ast.If)
+                and not node.orelse
+                and _static_python_boolean(node.test) is False
+            ]
+        elif dead_code_kind == "unreachable_after_terminator":
+            candidate_pool = list(_unreachable_python_statements(scope))
+        elif dead_code_kind == "unused_literal_assignment":
+            candidate_pool = [
+                node for node in ast.walk(scope)
+                if isinstance(node, (ast.Assign, ast.AnnAssign))
+            ]
+        shape_matches = [
+            node for node in candidate_pool
+            if _python_dead_anchor_shape(node) == _python_dead_anchor_shape_from_dump(
+                target_statement_fingerprint
+            )
+        ]
+        if len(shape_matches) == 1:
+            candidates = shape_matches
+        elif len(shape_matches) > 1:
+            nearest = min(
+                shape_matches,
+                key=lambda node: abs(_python_statement_span(node)[0] - source_line),
+            )
+            if sum(
+                abs(_python_statement_span(node)[0] - source_line) ==
+                abs(_python_statement_span(nearest)[0] - source_line)
+                for node in shape_matches
+            ) == 1:
+                candidates = [nearest]
+        if len(candidates) != 1:
+            return source_code, 0
 
     target = candidates[0]
     if dead_code_kind == "unused_literal_assignment":
@@ -1413,6 +4745,45 @@ def _python_callable_class_name(
             return owner.name
         owner = parents.get(owner)
     return None
+
+
+def _python_dead_anchor_shape(node: ast.AST) -> str:
+    """Return a stable dead-code shape that ignores safe literal rewrites."""
+
+    class _AnchorNormalizer(ast.NodeTransformer):
+        def visit_Constant(self, current: ast.Constant) -> ast.AST:
+            return ast.copy_location(
+                ast.Constant(value="<literal:normalized>"),
+                current,
+            )
+
+        def visit_Name(self, current: ast.Name) -> ast.AST:
+            if current.id.startswith(("CONSTANT_", "MAGIC_", "EXTRACTED_CONSTANT")):
+                return ast.copy_location(
+                    ast.Constant(value="<literal:normalized>"),
+                    current,
+                )
+            return current
+
+    normalized = _AnchorNormalizer().visit(copy.deepcopy(node))
+    return ast.dump(normalized, include_attributes=False)
+
+
+def _python_dead_anchor_shape_from_dump(value: str) -> str:
+    """Normalize the original AST dump used by an execution anchor."""
+
+    normalized = str(value or "")
+    normalized = re.sub(
+        r"Constant\(value=(?:[^()]|\([^)]*\))*?(?:, kind=[^)]*)?\)",
+        "Constant(value='<literal:normalized>')",
+        normalized,
+    )
+    normalized = re.sub(
+        r"Name\(id='(?:CONSTANT_|MAGIC_|EXTRACTED_CONSTANT)[^']*', ctx=[A-Za-z]+\(\)\)",
+        "Constant(value='<literal:normalized>')",
+        normalized,
+    )
+    return normalized
 
 
 def _line_indent(line: str) -> str:

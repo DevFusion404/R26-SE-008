@@ -120,6 +120,23 @@ def init_db(app):
         if "plan_full_json" not in existing_cols:
             conn.execute("ALTER TABLE workflows ADD COLUMN plan_full_json TEXT")
 
+        # Stage 2 writes one feedback row per plan step the developer decided
+        # on. The frontend can send `modify` and then `approve` for the same
+        # review, so the same rejection would otherwise be counted twice and
+        # skew the acceptance statistics the recommendation engine reads back.
+        # step_key is the step's identity (smell_id|refactoring|file), which
+        # makes "have we already recorded this decision?" one indexed lookup.
+        feedback_cols = {
+            row[1]
+            for row in conn.execute("PRAGMA table_info(feedback_entries)").fetchall()
+        }
+        if "step_key" not in feedback_cols:
+            conn.execute("ALTER TABLE feedback_entries ADD COLUMN step_key TEXT")
+        conn.execute(
+            """CREATE INDEX IF NOT EXISTS idx_feedback_step
+               ON feedback_entries (workflow_id, action, step_key)"""
+        )
+
     print("[DIWO] Database initialized.")
 
 

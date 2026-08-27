@@ -16,14 +16,34 @@ PURPOSE:
     - Warn before presenting steps likely to be rejected
     - Personalize refactoring recommendations over time
 
-FEATURES USED (from feedback_entries table):
+FEATURES USED (from feedback_entries table) — pre-decision only:
   - stage            : which workflow stage the feedback came from
-  - action           : developer action taken
   - smell_type       : code smell type
   - refactoring_type : refactoring suggested
   - severity         : smell severity (critical/high/medium/low)
-  - rating           : developer rating (1-5)
+
+TARGETS:
   - accepted         : binary outcome label (0/1)
+  - rating           : developer rating (1-5)
+
+DELIBERATELY EXCLUDED FROM THE INPUTS:
+  - action           : for step-level rows this IS the label
+                       ('plan_step_accepted' => accepted=1), so a model given
+                       it learns the identity function and scores ~1.00 while
+                       knowing nothing.
+  - rating           : supplied AFTER the developer decides. A pre-decision
+                       recommendation is scored before it exists, so a model
+                       trained on it cannot be run when it is needed.
+  Both are still recorded in the table; they are just not inputs. See
+  ACCEPTANCE_FEATURE_COLS below.
+
+RELATIONSHIP TO THE STAGE 2 RECOMMENDATION ENGINE:
+  This model is NOT what domain/planning_recommendation.py consults. That
+  engine reads real acceptance COUNTS out of feedback_entries directly
+  (db.workflow_repository.plan_step_acceptance_stats) and only once a minimum
+  sample exists. The synthetic records generated below exist to exercise this
+  training pipeline when the table is sparse; they must never be presented to
+  a developer as their own history.
 
 USAGE:
   python feedback_model/train_feedback_model.py \
@@ -171,30 +191,59 @@ def generate_synthetic_data(n: int = 800) -> pd.DataFrame:
 
 CATEGORICAL_COLS = ["stage", "action", "smell_type", "refactoring_type", "severity"]
 
-def encode_features(df: pd.DataFrame, encoders: Optional[dict] = None, fit: bool = True):
+#: Features available BEFORE the developer has decided anything.
+#:
+#: `action` and `rating` are both excluded, and both exclusions are about
+#: leakage rather than tidiness:
+#:
+#:   * `action` IS the label for step-level rows. A row whose action is
+#:     "plan_step_accepted" has accepted=1 by construction, so a model given
+#:     `action` learns the identity function and reports ~1.00 accuracy while
+#:     knowing nothing. It cannot be supplied at inference time either — the
+#:     action is what we are trying to predict.
+#:   * `rating` is given AFTER the decision. Asking "will this be accepted?"
+#:     before showing the step means the rating does not exist yet, so training
+#:     on it produces a model that cannot be run when it is needed.
+#:
+#: Both stay available to the rating regressor's inputs where they are legal
+#: (see RATING_FEATURE_COLS), which is why the split is by purpose rather than
+#: by dropping the columns outright.
+PRE_DECISION_CATEGORICAL_COLS = ["stage", "smell_type", "refactoring_type", "severity"]
+
+ACCEPTANCE_FEATURE_COLS = PRE_DECISION_CATEGORICAL_COLS + ["severity_ord"]
+
+#: The rating regressor predicts `rating`, so `rating` cannot be an input here
+#: either. `action` is left out for the same reason as above: for step-level
+#: rows it encodes the outcome the rating accompanies.
+RATING_FEATURE_COLS = PRE_DECISION_CATEGORICAL_COLS + ["severity_ord"]
+
+SEVERITY_ORDINAL = {"critical": 3, "high": 2, "medium": 1, "low": 0, "unknown": -1}
+
+
+def encode_features(df: pd.DataFrame, encoders: Optional[dict] = None,
+                    fit: bool = True, purpose: str = "acceptance"):
     """
-    Encode categorical columns and build feature matrix.
-    Returns: (X, encoders_dict)
+    Encode categorical columns and build the feature matrix for one purpose.
+
+    `purpose` is "acceptance" or "rating"; it selects the leakage-free column
+    set for that target. Returns: (X, encoders_dict)
     """
+    feature_cols = RATING_FEATURE_COLS if purpose == "rating" else ACCEPTANCE_FEATURE_COLS
+    categorical = [col for col in feature_cols if col in PRE_DECISION_CATEGORICAL_COLS]
+
     df = df.copy()
 
     # Fill missing categoricals
-    for col in CATEGORICAL_COLS:
+    for col in categorical:
         if col not in df.columns:
             df[col] = "unknown"
         df[col] = df[col].fillna("unknown").astype(str)
-
-    # Fill missing rating with median
-    if "rating" in df.columns:
-        df["rating"] = df["rating"].fillna(df["rating"].median())
-    else:
-        df["rating"] = 3.0
 
     if encoders is None:
         encoders = {}
 
     encoded = {}
-    for col in CATEGORICAL_COLS:
+    for col in categorical:
         if fit:
             le = LabelEncoder()
             encoded[col] = le.fit_transform(df[col])
@@ -205,19 +254,10 @@ def encode_features(df: pd.DataFrame, encoders: Optional[dict] = None, fit: bool
             df[col] = df[col].apply(lambda x: x if x in known else le.classes_[0])
             encoded[col] = le.transform(df[col])
 
-    # Severity ordinal
-    sev_map = {"critical": 3, "high": 2, "medium": 1, "low": 0, "unknown": -1}
-    encoded["severity_ord"] = df["severity"].map(lambda x: sev_map.get(x, -1))
+    # Severity ordinal — the one numeric feature that is known pre-decision.
+    encoded["severity_ord"] = df["severity"].map(lambda x: SEVERITY_ORDINAL.get(x, -1))
 
-    # Rating as numeric feature (for predicting acceptance)
-    encoded["rating_num"] = df["rating"].astype(float)
-
-    feature_cols = CATEGORICAL_COLS + ["severity_ord", "rating_num"]
-    X = pd.DataFrame({
-        col: encoded.get(col, encoded.get(col.replace("_ord", "").replace("_num", "")))
-        for col in feature_cols
-    })
-
+    X = pd.DataFrame({col: encoded[col] for col in feature_cols})
     return X, encoders
 
 
@@ -340,20 +380,29 @@ class FeedbackPredictor:
         self.regressor  = regressor
         self.encoders   = encoders
 
-    def predict(self, stage, action, smell_type, refactoring_type, severity, rating=None):
+    def predict(self, stage, action=None, smell_type=None, refactoring_type=None,
+                severity=None, rating=None):
+        """Score a recommendation the developer has NOT yet decided on.
+
+        `action` and `rating` are accepted so existing callers keep working,
+        and deliberately ignored: both describe the decision being predicted,
+        so neither exists at the moment this is called. See the note on
+        PRE_DECISION_CATEGORICAL_COLS.
+        """
         row = pd.DataFrame([{
             "stage": stage or "plan_approval",
-            "action": action or "plan_approved",
             "smell_type": smell_type or "Unknown",
             "refactoring_type": refactoring_type or "Unknown",
             "severity": severity or "medium",
-            "rating": rating if rating is not None else 3,
         }])
 
-        X, _ = encode_features(row, encoders=self.encoders, fit=False)
+        X_accept, _ = encode_features(row, encoders=self.encoders, fit=False,
+                                      purpose="acceptance")
+        X_rating, _ = encode_features(row, encoders=self.encoders, fit=False,
+                                      purpose="rating")
 
-        p_accept = float(self.classifier.predict_proba(X)[0][1])
-        pred_rating = float(np.clip(self.regressor.predict(X)[0], 1, 5))
+        p_accept = float(self.classifier.predict_proba(X_accept)[0][1])
+        pred_rating = float(np.clip(self.regressor.predict(X_rating)[0], 1, 5))
 
         if p_accept >= 0.75:
             recommendation = "high_confidence"
@@ -428,24 +477,34 @@ def main():
     print(f"\n[Data] Class distribution: accepted={df['accepted'].sum()} / rejected={len(df)-df['accepted'].sum()}")
     print(f"[Data] Rating distribution: {df['rating'].value_counts().sort_index().to_dict()}")
 
-    X, encoders = encode_features(df, fit=True)
+    # Two matrices, one per target, each holding only the features that are
+    # legally available when that target is predicted. Encoders are shared, so
+    # a smell type maps to the same code in both.
+    X_accept, encoders = encode_features(df, fit=True, purpose="acceptance")
+    X_rating, encoders = encode_features(df, encoders=encoders, fit=True,
+                                         purpose="rating")
     y_accept = df["accepted"]
     y_rating = df["rating"].astype(float)
 
-    feature_names = list(X.columns)
+    accept_features = list(X_accept.columns)
+    rating_features = list(X_rating.columns)
+    print(f"[Features] acceptance: {accept_features}")
+    print(f"[Features] rating:     {rating_features}")
 
-    X_tr, X_te, ya_tr, ya_te, yr_tr, yr_te = train_test_split(
-        X, y_accept, y_rating, test_size=0.2, random_state=42, stratify=y_accept
+    (Xa_tr, Xa_te, Xr_tr, Xr_te,
+     ya_tr, ya_te, yr_tr, yr_te) = train_test_split(
+        X_accept, X_rating, y_accept, y_rating,
+        test_size=0.2, random_state=42, stratify=y_accept
     )
 
-    print(f"\n[Split] Train={len(X_tr)}  Test={len(X_te)}")
+    print(f"\n[Split] Train={len(Xa_tr)}  Test={len(Xa_te)}")
 
     # ── Train models ──────────────────────────────────────────────────────
-    clf, clf_results = train_acceptance_classifier(X_tr, ya_tr, X_te, ya_te)
-    print_feature_importance(clf, feature_names)
+    clf, clf_results = train_acceptance_classifier(Xa_tr, ya_tr, Xa_te, ya_te)
+    print_feature_importance(clf, accept_features)
 
-    reg, reg_results = train_rating_regressor(X_tr, yr_tr, X_te, yr_te)
-    print_feature_importance(reg, feature_names)
+    reg, reg_results = train_rating_regressor(Xr_tr, yr_tr, Xr_te, yr_te)
+    print_feature_importance(reg, rating_features)
 
     # ── Save ──────────────────────────────────────────────────────────────
     predictor = FeedbackPredictor(clf, reg, encoders)
@@ -456,7 +515,17 @@ def main():
         "trained_at": datetime.now(timezone.utc).isoformat(),
         "records_used": len(df),
         "data_source": "real_db" if (args.db and os.path.isfile(args.db or "")) else "synthetic",
-        "features": feature_names,
+        "features": accept_features,
+        "rating_features": rating_features,
+        # Stated in the artefact so a later reader can tell at a glance that
+        # this model was trained without the developer's own rating or the
+        # action that records their verdict.
+        "excluded_features": ["action", "rating"],
+        "excluded_because": (
+            "post-decision fields: 'action' encodes the acceptance label for "
+            "step-level rows and 'rating' is given after the decision, so "
+            "neither is available when a pre-decision recommendation is scored."
+        ),
         "acceptance_classifier": {
             "best_model": type(clf).__name__,
             "results": clf_results,

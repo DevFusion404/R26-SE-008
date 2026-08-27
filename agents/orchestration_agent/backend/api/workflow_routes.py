@@ -25,14 +25,19 @@ from flask import Blueprint, jsonify, request, send_file
 from api import cuqa_error_response, err
 from clients.cuqa_client import CUQAError, cuqa_base_url, fetch_quality_report
 from db.workflow_repository import log_event, parse_json_field, update_workflow
+from domain.audit_detail import severity_totals, smell_type_totals, smells_by_file
 from domain.cuqa_normalizer import (
     cuqa_report_to_smells, derive_target_name, detect_primary_language,
     normalize_cuqa_report,
 )
 from domain.impact_model import MODEL_VERSION as IMPACT_MODEL_VERSION
 from domain.plan_normalizer import build_rdp_plan_input
+from domain.planning_recommendation import (
+    preferences_for_strategy, strategy_from_preferences,
+)
 from domain.selection_optimizer import DEFAULT_BUDGET_MINUTES, PRESETS
 from services.archive_service import archive_path
+from services.planning_recommendation_service import enrich_plan_with_recommendations
 from services.planning_service import generate_updated_plan_report
 from services.impact_service import (
     analyse_selection, compute_workflow_impacts, optimise_selection,
@@ -136,12 +141,19 @@ def start_workflow_from_cuqa():
     wf_id, metrics_before = persist_new_workflow(
         target, language, smells, source="cuqa", cuqa_report=report
     )
+    # What CUQA actually found, per file and per smell type — the trail is
+    # supposed to answer "which files had smells detected, and which", and a
+    # bare count answered neither.
     log_event(wf_id, "smell_review", "cuqa_report_ingested", {
         "cuqa_url":       cuqa_base_url(),
         "report_type":    report.get("report_type"),
         "repo_name":      report.get("repo_name"),
         "files_analyzed": report.get("summary", {}).get("files_analyzed", 0),
         "smell_count":    len(smells),
+        "files_affected": len(smells_by_file(smells)),
+        "by_file":        smells_by_file(smells),
+        "smell_types":    smell_type_totals(smells),
+        "severities":     severity_totals(smells),
     }, actor="system")
 
     return jsonify({
@@ -454,11 +466,22 @@ def plan_preference_update(wf_id):
     Body: {
       decisions: {"1": "approve", "2": "reject", ...},
       preferences?: {
+        developer_strategy?: "safety_first"|"balanced"|"max_improvement",
         risk_tolerance?: "conservative"|"balanced"|"aggressive",
         impact_focus?: "low"|"medium"|"high",
         preferred_refactorings?: [str]
       }
     }
+
+    A developer strategy is the Stage 2 control the developer actually sees;
+    it expands to the risk_tolerance / impact_focus pair the re-ranker has
+    always taken, so both vocabularies keep working and an older client that
+    sends only risk_tolerance is unaffected.
+
+    This is the ONE endpoint allowed to replace the plan mid-review. Individual
+    Approve / Reject clicks never reach it: it sorts the plan, drops rejected
+    steps and renumbers step_id, which would disconnect a decision from the
+    step it was made on.
     """
     wf = get_workflow(wf_id)
     if not wf:
@@ -479,18 +502,37 @@ def plan_preference_update(wf_id):
     if not current_plan or not isinstance(current_plan.get("steps"), list):
         return err("No plan found for this workflow.", 400)
 
+    strategy = strategy_from_preferences(preferences)
+    # The strategy fills in whichever half of the pair the caller left out,
+    # rather than overriding an explicit choice.
+    preferences = {**preferences_for_strategy(strategy), **preferences,
+                   "developer_strategy": strategy}
+
     updated_plan = generate_updated_plan_report(current_plan, decisions, preferences)
+    # Re-rank first, then re-score: the strategy is an input to the
+    # recommendation, so carrying the previous plan's decision_support across
+    # would leave every card explaining itself against the old goal.
+    updated_plan = enrich_plan_with_recommendations(
+        wf, updated_plan, preferences=preferences,
+        plan_source=current_plan.get("source") or current_plan.get("plan_source"),
+    )
 
     update_workflow(wf_id, plan_json=json.dumps(updated_plan))
+    support_summary = updated_plan.get("decision_support_summary") or {}
     log_event(
         wf_id,
         "plan_approval",
         "plan_regenerated_by_preferences",
         {
             "decisions_count": len(decisions),
+            "developer_strategy": strategy,
             "risk_tolerance": preferences.get("risk_tolerance", "balanced"),
             "impact_focus": preferences.get("impact_focus", "high"),
             "steps_after": len(updated_plan.get("steps", [])),
+            "recommended": support_summary.get("recommended"),
+            "review": support_summary.get("review"),
+            "not_recommended": support_summary.get("not_recommended"),
+            "manual_only": support_summary.get("manual_only"),
         },
     )
 
@@ -498,6 +540,8 @@ def plan_preference_update(wf_id):
         "status": "plan_approval",
         "message": "Updated planning report generated using developer preferences.",
         "updated_planning_report": updated_plan,
+        "developer_strategy": strategy,
+        "decision_support_summary": support_summary,
     })
 
 @workflow_bp.route("/workflows/<wf_id>/reset-to-plan-approval", methods=["POST"])
@@ -527,6 +571,17 @@ def reset_to_plan_approval(wf_id):
 
     data = request.get_json(force=True, silent=True) or {}
     reason = (data.get("feedback") or {}).get("reason") or data.get("reason") or "Developer rolled back to plan approval"
+
+    # Recompute rather than reuse the stored assessment: the restored plan may
+    # be months old, and SCTVA's action set, the impact records and the
+    # developer's own feedback history have all moved on since. A stale green
+    # badge on a step SCTVA can no longer execute is the failure mode this
+    # feature exists to prevent.
+    plan = enrich_plan_with_recommendations(
+        wf, plan,
+        preferences=plan.get("user_preferences") or {},
+        plan_source=plan.get("source") or plan.get("plan_source"),
+    )
 
     update_workflow(
         wf_id,

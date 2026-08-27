@@ -76,27 +76,46 @@ export function enrichPlanWithTrace(plan, trace) {
     );
     const score = selection?.selected_score ?? mcdaScore?.final_score ?? null;
 
+    // A value already on the step wins over anything derived here.
+    //
+    // The DIWO backend now performs this same fold before it scores the plan
+    // (domain/plan_normalizer.fold_trace_into_plan), because the decision
+    // support on each step is computed FROM these ratings — a fold that only
+    // happened in the browser would leave the backend scoring a step as
+    // medium-risk and unscored while this row rendered "Risk: high · RDP 0.84"
+    // beside the badge that claim produced.
+    //
+    // Both folds read the same trace, so they agree; `keep()` is what
+    // guarantees it, by making this pass unable to overwrite the backend's
+    // answer with its own `rating()` fallback when the trace is thin.
+    const keep = (existing, derived) =>
+      existing === undefined || existing === null ? derived : existing;
+
     return {
       ...step,
-      impact: rating(chosen.impact),
-      risk: rating(chosen.risk),
-      complexity: rating(chosen.complexity),
-      score: round(score),
-      scoring_method: selection?.scoring_method || null,
-      smell_type: selection?.smell_type || source?.type || null,
-      severity: selection?.severity || source?.severity || null,
-      location: source?.location || null,
-      smell_metrics: source?.metrics || null,
-      prediction:
+      impact: keep(step.impact, rating(chosen.impact)),
+      risk: keep(step.risk, rating(chosen.risk)),
+      complexity: keep(step.complexity, rating(chosen.complexity)),
+      score: keep(step.score, round(score)),
+      scoring_method: keep(step.scoring_method, selection?.scoring_method || null),
+      smell_type: keep(step.smell_type, selection?.smell_type || source?.type || null),
+      severity: keep(step.severity, selection?.severity || source?.severity || null),
+      location: keep(step.location, source?.location || null),
+      smell_metrics: keep(step.smell_metrics, source?.metrics || null),
+      prediction: keep(
+        step.prediction,
         (impacts.get(step.smell_id) || []).find((p) => p.refactoring === step.refactoring) || null,
-      alternatives: candidates
-        .filter((c) => c.name !== step.refactoring && c.preconditions_met)
-        .map((c) => ({
-          name: c.name,
-          score: round(c.score),
-          impact: rating(c.impact),
-          risk: rating(c.risk),
-        })),
+      ),
+      alternatives: step.alternatives?.length
+        ? step.alternatives
+        : candidates
+            .filter((c) => c.name !== step.refactoring && c.preconditions_met)
+            .map((c) => ({
+              name: c.name,
+              score: round(c.score),
+              impact: rating(c.impact),
+              risk: rating(c.risk),
+            })),
     };
   });
 

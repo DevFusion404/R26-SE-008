@@ -18,6 +18,7 @@ __all__ = [
     "create_workflow", "get_workflow", "update_workflow", "list_workflows",
     "log_event", "get_audit_logs", "save_feedback", "export_feedback_dataset",
     "get_impact_records", "save_impact_records", "delete_impact_records",
+    "recorded_plan_step_keys", "plan_step_acceptance_stats", "PLAN_STEP_ACTIONS",
     "parse_json_field", "now_iso",
 ]
 
@@ -93,14 +94,15 @@ def get_audit_logs(workflow_id):
 # ---------- Feedback ----------
 
 def save_feedback(workflow_id, stage, action, smell_type=None, refactoring_type=None,
-                  severity=None, reason=None, rating=None, accepted=False):
+                  severity=None, reason=None, rating=None, accepted=False,
+                  step_key=None):
     db = get_db()
     db.execute(
         """INSERT INTO feedback_entries
-           (workflow_id, stage, action, smell_type, refactoring_type, severity, reason, rating, accepted, timestamp)
-           VALUES (?,?,?,?,?,?,?,?,?,?)""",
+           (workflow_id, stage, action, smell_type, refactoring_type, severity, reason, rating, accepted, step_key, timestamp)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
         (workflow_id, stage, action, smell_type, refactoring_type, severity,
-         reason, rating, 1 if accepted else 0, now_iso())
+         reason, rating, 1 if accepted else 0, step_key, now_iso())
     )
     db.commit()
 
@@ -109,6 +111,79 @@ def export_feedback_dataset():
     db = get_db()
     rows = db.execute("SELECT * FROM feedback_entries ORDER BY timestamp ASC").fetchall()
     return [dict(r) for r in rows]
+
+
+# ---------- Step-level plan feedback ----------
+
+#: The two step-level Stage 2 actions. Session-level rows (plan_approved,
+#: plan_modified) are deliberately excluded everywhere below: one session-level
+#: approval is not evidence about each of its twelve steps, and counting it as
+#: such is what would make the acceptance statistics meaningless.
+PLAN_STEP_ACTIONS = ("plan_step_accepted", "plan_step_rejected")
+
+
+def recorded_plan_step_keys(workflow_id) -> set:
+    """Step identities this workflow has already written a step-level row for.
+
+    The frontend sends `modify` and then `approve` for the same review, so
+    without this the rejections recorded during modify would be written again
+    during approval and every rejected step would count twice.
+    """
+    db = get_db()
+    placeholders = ",".join("?" for _ in PLAN_STEP_ACTIONS)
+    rows = db.execute(
+        f"""SELECT DISTINCT step_key FROM feedback_entries
+            WHERE workflow_id=? AND action IN ({placeholders}) AND step_key IS NOT NULL""",
+        (workflow_id, *PLAN_STEP_ACTIONS),
+    ).fetchall()
+    return {row["step_key"] for row in rows}
+
+
+def plan_step_acceptance_stats():
+    """Real acceptance counts per (smell_type, refactoring_type), all workflows.
+
+    Only genuine step-level decisions are counted. Synthetic rows produced by
+    feedback_model/train_feedback_model.py never enter this table, and the
+    session-level actions are filtered out above, so what comes back is
+    developer behaviour and nothing else.
+
+    Returns {"pairs": {(smell_type, refactoring): {...}}, "prior": float|None,
+             "observations": int, "accepted": int}.
+    """
+    db = get_db()
+    placeholders = ",".join("?" for _ in PLAN_STEP_ACTIONS)
+    rows = db.execute(
+        f"""SELECT smell_type, refactoring_type,
+                   COUNT(*) AS observations,
+                   SUM(accepted) AS accepted
+            FROM feedback_entries
+            WHERE action IN ({placeholders})
+            GROUP BY smell_type, refactoring_type""",
+        PLAN_STEP_ACTIONS,
+    ).fetchall()
+
+    pairs = {}
+    total_observations = 0
+    total_accepted = 0
+    for row in rows:
+        observations = int(row["observations"] or 0)
+        accepted = int(row["accepted"] or 0)
+        total_observations += observations
+        total_accepted += accepted
+        pairs[(row["smell_type"], row["refactoring_type"])] = {
+            "observations": observations,
+            "accepted": accepted,
+        }
+
+    return {
+        "pairs": pairs,
+        # The global rate is the prior each pair is smoothed toward, so a
+        # sparse pair leans on this developer's overall behaviour rather than
+        # on a hard-coded 50%.
+        "prior": (total_accepted / total_observations) if total_observations else None,
+        "observations": total_observations,
+        "accepted": total_accepted,
+    }
 
 
 # ---------- Selection Impact Records ----------

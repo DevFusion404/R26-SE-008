@@ -9,7 +9,10 @@
     "lint": "eslint .",
     "test:diwo": "node src/pages/diwo/utils/smellLines.test.mjs",
     "test:impact": "node src/pages/diwo/utils/impactSummary.test.mjs",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test:planning": "node src/pages/diwo/utils/planningSelection.test.mjs",
+    "test:audit": "node src/pages/diwo/utils/auditNarrative.test.mjs",
+    "test:report": "node src/pages/diwo/utils/summaryReport.test.mjs"
   },
   "dependencies": {
     "@tailwindcss/vite": "^4.2.4",
