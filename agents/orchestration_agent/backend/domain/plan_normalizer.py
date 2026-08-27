@@ -208,6 +208,126 @@ def normalize_rdp_plan(plan: dict, plan_input: Optional[dict] = None) -> dict:
     return normalized
 
 
+#: Ratings RDP can emit. Anything else is coerced to the fallback.
+_RATINGS = ("low", "medium", "high")
+
+
+def _rating(value, fallback="medium"):
+    text = str(value or "").strip().lower()
+    return text if text in _RATINGS else fallback
+
+
+def _round(value, digits=3):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return round(float(value), digits)
+
+
+def fold_trace_into_plan(plan: dict, trace: Optional[dict] = None) -> dict:
+    """Fold RDP's decision trace back onto the plan's steps.
+
+    RDP's steps carry only the transformation-facing fields —
+    ``{step_id, smell_id, refactoring, target, parameters, explanation}`` —
+    while the impact / risk ratings, the MCDA score, the impact prediction and
+    the rejected-but-viable candidates live in the trace, keyed by smell_id.
+
+    The browser has always done this fold (utils/planTrace.js) so Stage 2 could
+    render those fields. It now has to happen here as well, and BEFORE the
+    decision-support pass: the recommendation is scored from `risk`, `score`,
+    `expected_impact` and `prediction`, so a fold that happened only in the
+    browser would leave the backend scoring a step as medium-risk and unscored
+    while the card beside the badge displayed "Risk: high · RDP 0.84". The two
+    read the same trace and produce the same values, which is what keeps the
+    badge and the row telling the same story.
+
+    Nothing RDP sent is discarded, and a value already on the step wins over
+    the trace's fallback — this only fills the fields RDP left off the step.
+    """
+    steps = plan.get("steps")
+    if not isinstance(steps, list) or not isinstance(trace, dict):
+        return plan
+
+    def _by_smell(entries, key="predictions"):
+        return {
+            entry.get("smell_id"): entry.get(key) or []
+            for entry in (entries or []) if isinstance(entry, dict)
+        }
+
+    selections = {
+        entry.get("smell_id"): entry
+        for entry in (trace.get("candidate_generation") or []) if isinstance(entry, dict)
+    }
+    impacts = _by_smell(trace.get("impact_prediction"))
+    mcda = _by_smell(trace.get("mcda_selection"))
+    inputs = {
+        smell.get("id"): smell
+        for smell in ((trace.get("input_summary") or {}).get("smells") or [])
+        if isinstance(smell, dict)
+    }
+
+    folded = []
+    for step in steps:
+        if not isinstance(step, dict):
+            folded.append(step)
+            continue
+
+        smell_id = step.get("smell_id")
+        selection = selections.get(smell_id) or {}
+        candidates = [c for c in (selection.get("candidates") or []) if isinstance(c, dict)]
+        chosen = next((c for c in candidates if c.get("name") == step.get("refactoring")), {})
+        source = inputs.get(smell_id) or {}
+
+        mcda_entry = next(
+            (m for m in mcda.get(smell_id, [])
+             if isinstance(m, dict) and m.get("refactoring") == step.get("refactoring")),
+            None,
+        )
+        score = selection.get("selected_score")
+        if score is None and mcda_entry:
+            score = mcda_entry.get("final_score")
+
+        prediction = next(
+            (p for p in impacts.get(smell_id, [])
+             if isinstance(p, dict) and p.get("refactoring") == step.get("refactoring")),
+            None,
+        )
+
+        folded.append({
+            **step,
+            "impact": step.get("impact") or _rating(chosen.get("impact")),
+            "expected_impact": step.get("expected_impact") or _rating(chosen.get("impact")),
+            "risk": step.get("risk") or _rating(chosen.get("risk")),
+            "complexity": step.get("complexity") or _rating(chosen.get("complexity")),
+            "score": step.get("score") if step.get("score") is not None else _round(score),
+            "scoring_method": step.get("scoring_method") or selection.get("scoring_method"),
+            "smell_type": step.get("smell_type") or selection.get("smell_type") or source.get("type"),
+            "severity": step.get("severity") or selection.get("severity") or source.get("severity"),
+            "location": step.get("location") or source.get("location"),
+            "smell_metrics": step.get("smell_metrics") or source.get("metrics"),
+            "prediction": step.get("prediction") or prediction,
+            "alternatives": step.get("alternatives") or [
+                {
+                    "name": c.get("name"),
+                    "score": _round(c.get("score")),
+                    "impact": _rating(c.get("impact")),
+                    "risk": _rating(c.get("risk")),
+                }
+                for c in candidates
+                if c.get("name") != step.get("refactoring") and c.get("preconditions_met")
+            ],
+        })
+
+    generation = trace.get("plan_generation") or {}
+    dependency = trace.get("dependency_analysis") or {}
+    return {
+        **plan,
+        "steps": folded,
+        "skipped_smells": plan.get("skipped_smells") or generation.get("skipped_smells") or [],
+        "smells_skipped": plan.get("smells_skipped", generation.get("smells_skipped", 0)),
+        "reordered": bool(plan.get("reordered") or dependency.get("reordered")),
+    }
+
+
 def build_approved_plan(plan: dict, decisions: dict) -> dict:
     """Reduce an RDP plan to the steps the developer approved.
 
@@ -281,6 +401,24 @@ def build_approved_plan(plan: dict, decisions: dict) -> dict:
     if isinstance(raw_summary, str) and raw_summary:
         updated["summary_text"] = raw_summary
 
+    # Same reasoning as the summary above: a decision-support summary counting
+    # twelve steps on a plan that now holds four is the kind of stale figure
+    # that hides a filtering bug. The per-step `decision_support` blocks travel
+    # with their steps untouched — they describe the step, not the selection.
+    #
+    # Imported here rather than at module scope because capability_map reads
+    # REFACTORING_MAP from this module, so a top-level import would close the
+    # cycle plan_normalizer -> planning_recommendation -> capability_map.
+    if isinstance(plan.get("decision_support_summary"), dict):
+        from domain.planning_recommendation import summarize_recommendations
+
+        prior_summary = plan["decision_support_summary"]
+        updated["decision_support_summary"] = summarize_recommendations(
+            approved,
+            developer_strategy=prior_summary.get("developer_strategy", "balanced"),
+            plan_source=prior_summary.get("plan_source"),
+        )
+
     return updated
 
 
@@ -301,10 +439,18 @@ def generate_refactoring_plan(selected_smells: list, target: str) -> dict:
             "step_id": i,
             "smell_id": smell.get("id", f"smell_{i:03d}"),
             "smell_type": smell_type,
+            # Severity and the file come straight off the smell. They were
+            # dropped before, which left the fallback plan's steps unable to
+            # say which file they touched — so Stage 2 grouped every one of
+            # them under "(module level)" — and left the step-level feedback
+            # rows with a null severity.
+            "severity": smell.get("severity"),
             "refactoring": refactoring,
             "risk": risk,
             "expected_impact": impact,
-            "target": {"class": cls, "method": method},
+            "target": {"class": cls, "method": method,
+                       "file": loc.get("file") or smell.get("relative_path"),
+                       "lines": lines},
             "parameters": _build_parameters(refactoring, cls, method, lines, metrics),
             "explanation": (
                 f"Apply {refactoring} on {cls}.{method} to resolve '{smell_type}' smell. "

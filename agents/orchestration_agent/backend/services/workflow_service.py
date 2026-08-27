@@ -22,11 +22,13 @@ from typing import Optional
 from config import reports_dir
 from db.workflow_repository import (
     create_workflow, get_workflow, list_workflows, update_workflow,
-    log_event, save_feedback, parse_json_field, now_iso,
+    log_event, save_feedback, parse_json_field, recorded_plan_step_keys, now_iso,
 )
 from domain.cuqa_normalizer import build_report_from_smells, filter_cuqa_report
 from domain.metrics import compute_metrics_before
+from domain.planning_recommendation import step_identity
 from services.archive_service import store_refactored_archive
+from services.planning_recommendation_service import enrich_plan_with_recommendations
 from services.planning_service import build_approved_plan, plan_from_rdp
 from services.transformation_service import simulate_transformation
 from clients.rdp_client import rdp_base_url
@@ -273,16 +275,30 @@ def commit_smell_selection(wf, selected_ids, selected_files, selection_mode,
         payload["updated_report"], selected, wf["target"], wf_id=wf["id"]
     )
 
+    # Stage 2 gets an explainable recommendation per step rather than a bare
+    # Approve/Reject pair. This adds `decision_support` alongside RDP's own
+    # fields — it never replaces them — and is done here so the stored plan,
+    # the response and the rollback copy all carry the same assessment.
+    plan = enrich_plan_with_recommendations(wf, plan, plan_source=plan_source)
+
     # plan_full_json keeps the agent's plan before approval trims it down to the
     # approved steps, so a rollback from transformation can offer every step for
     # re-selection instead of only the ones approved last time.
     plan_serialized = json.dumps(plan)
     update_workflow(wf["id"], status="plan_approval",
                     plan_json=plan_serialized, plan_full_json=plan_serialized)
+    support_summary = plan.get("decision_support_summary") or {}
     log_event(wf["id"], "plan_approval", "plan_generated",
               {"plan_id": plan.get("plan_id"),
                "steps": plan["summary"]["total_steps"],
-               "source": plan_source},
+               "source": plan_source,
+               # What DIWO recommended, before the developer touched anything.
+               # Recorded so the audit trail can later be read against what
+               # they actually approved.
+               "recommended": support_summary.get("recommended"),
+               "review": support_summary.get("review"),
+               "not_recommended": support_summary.get("not_recommended"),
+               "manual_only": support_summary.get("manual_only")},
               actor="system")
 
     return {
@@ -309,6 +325,141 @@ def commit_smell_selection(wf, selected_ids, selected_files, selection_mode,
     }
 
 
+def _save_step_feedback(wf_id, steps, accepted, reason=None, rating=None,
+                        step_reasons=None):
+    """Write one step-level feedback row per plan step, with its real metadata.
+
+    Every row carries the smell type, the refactoring and the severity of the
+    step it describes, because those are the features the Stage 2
+    recommendation engine groups on. A row that only says "plan step 3" is
+    unusable the moment the plan is renumbered — which the preference re-ranker
+    does routinely.
+
+    `step_reasons` is {step_id: reason} from the Stage 2 override chips. A
+    reason the developer gave about ONE step is stored on that step's row; the
+    session-level `reason` is the fallback for the rest. Flattening the two
+    together is what would make the override evidence useless later — "Too
+    risky" against a whole twelve-step plan says nothing about which
+    refactoring they distrusted.
+
+    Idempotent by step identity: the frontend sends `modify` and then `approve`
+    for the same review, so the rejections written during modify would
+    otherwise be written a second time during approval and count twice.
+    """
+    steps = [s for s in (steps or []) if isinstance(s, dict)]
+    if not steps:
+        return 0
+
+    already = recorded_plan_step_keys(wf_id)
+    action = "plan_step_accepted" if accepted else "plan_step_rejected"
+    verb = "approved" if accepted else "rejected"
+    written = 0
+
+    for step in steps:
+        key = step_identity(step)
+        if key in already:
+            continue
+        already.add(key)
+
+        support = step.get("decision_support") if isinstance(
+            step.get("decision_support"), dict) else {}
+        recommendation = support.get("category")
+        # An override — approving a red step or rejecting a green one — is the
+        # most informative row in the table, so it is stated in the reason
+        # rather than left to be re-derived later.
+        override = bool(recommendation) and (
+            (accepted and recommendation in ("not_recommended", "manual_only"))
+            or (not accepted and recommendation == "recommended")
+        )
+
+        # This step's own override reason wins over the session-level note.
+        step_reason = None
+        if isinstance(step_reasons, dict):
+            step_id = step.get("step_id")
+            step_reason = step_reasons.get(str(step_id)) or step_reasons.get(step_id)
+
+        note = (step_reason or reason
+                or f"Developer {verb} the planned {step.get('refactoring')}.")
+        if recommendation:
+            note = f"{note} [DIWO: {recommendation}{'; developer override' if override else ''}]"
+
+        save_feedback(
+            wf_id, "plan_approval", action,
+            smell_type=step.get("smell_type"),
+            refactoring_type=step.get("refactoring"),
+            severity=step.get("severity"),
+            reason=note,
+            rating=rating if accepted else None,
+            accepted=accepted,
+            step_key=key,
+        )
+        written += 1
+
+    return written
+
+
+def _manual_only_decisions(steps, decisions):
+    """Steps the developer marked for manual work, for the audit trail.
+
+    Stage 2 has a third verdict beyond approve/reject: a manual-only step —
+    one SCTVA has no safe automatic form for — can be kept by the developer
+    without being forwarded. build_approved_plan() already excludes it from the
+    plan the Transformation Agent receives, because it only ever forwards an
+    explicit 'approve'; this records WHY it was excluded so the audit trail does
+    not read as if the developer simply never finished reviewing the plan.
+    """
+    decisions = decisions if isinstance(decisions, dict) else {}
+    if not decisions:
+        return []
+
+    manual = []
+    for step in steps or []:
+        step_id = step.get("step_id")
+        verdict = decisions.get(str(step_id)) or decisions.get(step_id)
+        if verdict != "manual":
+            continue
+        support = step.get("decision_support") if isinstance(
+            step.get("decision_support"), dict) else {}
+        manual.append({
+            "step_id": step_id,
+            "refactoring": step.get("refactoring"),
+            "smell_type": step.get("smell_type"),
+            "file": (step.get("target") or {}).get("file"),
+            "recommendation": support.get("category"),
+        })
+    return manual
+
+
+def _recommendation_overrides(steps, decisions):
+    """How often the developer disagreed with DIWO, for the audit trail.
+
+    The research claim is that DIWO advises and the developer decides. The
+    override count is the evidence for the second half of that sentence, and it
+    costs one pass over steps the caller already holds.
+    """
+    decisions = decisions if isinstance(decisions, dict) else {}
+    if not decisions:
+        return None
+
+    approved_against, rejected_despite = 0, 0
+    for step in steps or []:
+        verdict = decisions.get(str(step.get("step_id"))) or decisions.get(step.get("step_id"))
+        support = step.get("decision_support") if isinstance(
+            step.get("decision_support"), dict) else {}
+        category = support.get("category")
+        if not category:
+            continue
+        if verdict == "approve" and category in ("not_recommended", "manual_only"):
+            approved_against += 1
+        elif verdict == "reject" and category == "recommended":
+            rejected_despite += 1
+
+    return {
+        "approved_not_recommended": approved_against,
+        "rejected_recommended": rejected_despite,
+    }
+
+
 def apply_plan_decision(wf, decision, data):
     """Record the developer's verdict on the refactoring plan.
 
@@ -319,6 +470,12 @@ def apply_plan_decision(wf, decision, data):
     feedback = data.get("feedback", {})
     plan     = parse_json_field(wf, "plan_json") or {}
 
+    # Snapshot the steps BEFORE build_approved_plan reduces the plan. Once it
+    # has run, `plan["steps"]` holds only the survivors, so a rejected step's
+    # smell type, refactoring and severity are gone — which is why the old
+    # step-level rows could say no more than "Developer rejected plan step 3".
+    original_steps = [s for s in (plan.get("steps") or []) if isinstance(s, dict)]
+    steps_by_id = {str(s.get("step_id")): s for s in original_steps}
 
     # ── Reject ───────────────────────────────────────────────────────────────
     if decision == "reject":
@@ -361,11 +518,16 @@ def apply_plan_decision(wf, decision, data):
                       accepted=True)
 
         # One feedback row per rejected step — a step-level rejection is a
-        # stronger training signal than the session-level approval.
-        for step in (plan.get("approval") or {}).get("rejected_step_ids") or []:
-            save_feedback(wf["id"], "plan_approval", "plan_step_rejected",
-                          reason=f"Developer rejected plan step {step}.",
-                          accepted=False)
+        # stronger training signal than the session-level approval, and the
+        # only one the Stage 2 recommendation engine reads back.
+        _save_step_feedback(
+            wf["id"],
+            [steps_by_id.get(str(sid)) for sid in
+             (plan.get("approval") or {}).get("rejected_step_ids") or []],
+            accepted=False,
+            reason=feedback.get("reason"),
+            step_reasons=feedback.get("step_reasons"),
+        )
 
         return {
             "status":  "plan_approval",
@@ -381,13 +543,47 @@ def apply_plan_decision(wf, decision, data):
         plan = build_approved_plan(plan, approve_decisions)
         update_workflow(wf["id"], plan_json=json.dumps(plan))
 
+    approval = plan.get("approval") or {}
+
+    # Steps the developer took on themselves. They are neither approved nor
+    # rejected, so build_approved_plan() leaves them out of the plan SCTVA
+    # receives — which is the point — but "the developer decided to do this by
+    # hand" and "the developer never got to this step" are different facts, and
+    # pending_step_ids alone cannot tell them apart.
+    manual_steps = _manual_only_decisions(original_steps, approve_decisions)
+    if manual_steps:
+        log_event(wf["id"], "plan_approval", "plan_steps_manual", {
+            "count": len(manual_steps),
+            "steps": manual_steps,
+            "note": "Kept by the developer for manual refactoring; not forwarded to SCTVA.",
+        })
+
     log_event(wf["id"], "plan_approval", "plan_approved",
               {"plan_id": plan.get("plan_id"),
                "steps": len(plan.get("steps") or []),
-               "approved_ids": (plan.get("approval") or {}).get("approved_step_ids")})
+               "approved_ids": approval.get("approved_step_ids"),
+               "manual_step_ids": [m["step_id"] for m in manual_steps],
+               "overrides": _recommendation_overrides(original_steps, approve_decisions)})
     save_feedback(wf["id"], "plan_approval", "plan_approved",
                   reason=feedback.get("reason"), rating=feedback.get("rating"),
                   accepted=True)
+
+    # Step-level rows for what was actually approved. The session-level
+    # plan_approved row above says the developer finished Stage 2; it says
+    # nothing about any individual step, and counting it as if it did is what
+    # would make the acceptance statistics meaningless. Rejected steps recorded
+    # during a preceding 'modify' are not written again — _save_step_feedback
+    # skips identities this workflow has already logged.
+    _save_step_feedback(wf["id"], plan.get("steps") or [], accepted=True,
+                        reason=feedback.get("reason"), rating=feedback.get("rating"),
+                        step_reasons=feedback.get("step_reasons"))
+    _save_step_feedback(
+        wf["id"],
+        [steps_by_id.get(str(sid)) for sid in approval.get("rejected_step_ids") or []],
+        accepted=False,
+        reason=feedback.get("reason"),
+        step_reasons=feedback.get("step_reasons"),
+    )
 
     tr             = simulate_transformation(plan, wf["language"])
     metrics_before = parse_json_field(wf, "metrics_before_json") or {}
