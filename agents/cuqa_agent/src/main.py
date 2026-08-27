@@ -57,6 +57,7 @@ if str(SRC_DIR) not in sys.path:
 from ast_parser import parse_source, detect_language
 from ast_visualizer import enrich_ast, build_summary
 from report_generator import generate_file_report, generate_repo_report, build_repo_name_index
+from repository_understanding import analyze_repository_overview
 
 # ---------------------------------------------------------------------------
 # FastAPI Application Initialization & CORS Configuration
@@ -565,6 +566,44 @@ def list_files():
         "files": _workspace["files"],
         "total": len(_workspace["files"]),
     }
+
+
+# ── 7. Repository Understanding Overview ──────────────────────────────────────
+
+@app.get("/api/repository-overview")
+def repository_overview():
+    """
+    Generate a beginner-friendly structural understanding of the loaded repository.
+
+    Derives a complete, evidence-based overview using only static analysis
+    (no external LLM or API calls required).  Returns:
+      - Repository statistics (files, LOC, directories, languages)
+      - Language distribution with percentages
+      - Detected build tools, dependency managers, CI/CD, deployment tools
+      - Likely application entry points with confidence and evidence
+      - Important directories with role classification
+      - Structurally important files
+      - Recommended newcomer reading path
+      - Static module dependency graph (nodes + edges, capped at 50 nodes)
+      - Architectural pattern clues with evidence
+      - Subproject / monorepo detection
+
+    Part of CUQA's Code Understanding responsibility (distinct from Quality
+    Assessment which is handled by /api/quality-report).
+    """
+    if not _workspace["root"]:
+        raise HTTPException(400, "No repository loaded. Upload a ZIP or provide a GitHub URL first.")
+
+    try:
+        overview = analyze_repository_overview(
+            root=_workspace["root"],
+            repo_name=_workspace["repo_name"] or "unknown",
+            source_files=_workspace["files"],
+        )
+    except Exception as exc:
+        raise HTTPException(500, f"Repository analysis failed: {exc}")
+
+    return overview
 
 
 # ── 7. Update Workspace Files ────────────────────────────────────────────────
