@@ -12,7 +12,6 @@ const RDP_AGENT_HISTORY_KEY = 'rdp_plan_history';
 const SCTVA_AGENT_SESSION_KEY = 'sctva-agent-page-state';
 const SCTVA_ARTIFACT_STORAGE_KEY = 'sctva-agent-final-artifacts';
 const SCTVA_ARTIFACT_STORAGE_THRESHOLD_BYTES = 3500000;
-let cuqaRawSourceEndpointProbe;
 const ZIP_CRC32_TABLE = Array.from({ length: 256 }, (_, index) => {
   let value = index;
   for (let bit = 0; bit < 8; bit += 1) {
@@ -1479,55 +1478,6 @@ async function fetchCuqaJson(path, options = {}) {
   return data;
 }
 
-async function fetchCuqaRawSource(filePath) {
-  if (cuqaRawSourceEndpointProbe === null) return '';
-
-  const encoded = encodeURIComponent(filePath);
-  const probes = [
-    { path: '/api/source-file', method: 'POST' },
-    { path: '/api/file-content', method: 'POST' },
-    { path: '/api/raw-source', method: 'POST' },
-    { path: '/api/source', method: 'POST' },
-    { path: '/api/file', method: 'POST' },
-    { path: '/api/source-file', method: 'GET' },
-    { path: '/api/file-content', method: 'GET' },
-    { path: '/api/raw-source', method: 'GET' },
-    { path: '/api/source', method: 'GET' },
-    { path: '/api/file', method: 'GET' },
-  ];
-  const candidateProbes = cuqaRawSourceEndpointProbe ? [cuqaRawSourceEndpointProbe] : probes;
-
-  for (const probe of candidateProbes) {
-    try {
-      const requestPath = probe.method === 'GET'
-        ? `${probe.path}?file_path=${encoded}`
-        : probe.path;
-      const data = await fetchCuqaJson(requestPath, {
-        method: probe.method,
-        ...(probe.method === 'POST'
-          ? {
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ file_path: filePath }),
-          }
-          : {}),
-      });
-      const source = extractSourceFromCuqaPayload(data);
-      if (source) {
-        cuqaRawSourceEndpointProbe = probe;
-        return source;
-      }
-    } catch {
-      // CUQA versions differ; silently try the next known source endpoint.
-    }
-  }
-
-  if (!cuqaRawSourceEndpointProbe) {
-    cuqaRawSourceEndpointProbe = null;
-  }
-
-  return '';
-}
-
 async function fetchSctvaCuqaWorkspaceSources(filePaths) {
   try {
     const response = await fetch(`${getSctvaApiBaseUrl()}/sctva/cuqa-sources`, {
@@ -1596,7 +1546,9 @@ async function fetchCuqaParsedFile(filePath, rawSourceOverride = '') {
     throw error;
   }
   const rawSource = extractSourceFromCuqaPayload(data);
-  const sourceFromEndpoint = rawSourceOverride || rawSource || await fetchCuqaRawSource(filePath);
+  // CUQA exposes AST parsing but no raw-source route. Raw files are recovered
+  // through SCTVA's CUQA workspace endpoint before transformation.
+  const sourceFromEndpoint = rawSourceOverride || rawSource;
   const reconstructedSource = sourceFromEndpoint ? '' : buildSourceFromCuqaAst(data, filePath);
 
   return {
@@ -3338,7 +3290,9 @@ export default function SCTVAAgentPage() {
             </details>
 
             {errorMessage ? <div className="sctva-alert sctva-alert-error">{errorMessage}</div> : null}
-            {statusMessage ? <div className={`sctva-alert sctva-alert-${statusTone}`}>{statusMessage}</div> : null}
+            {statusMessage && statusMessage !== errorMessage
+              ? <div className={`sctva-alert sctva-alert-${statusTone}`}>{statusMessage}</div>
+              : null}
           </div>
 
           <div className="sctva-hero-actions" style={{ marginTop: 16 }}>
