@@ -15,13 +15,85 @@ from typing import Any, Iterable, Sequence
 from ..constants import (
     ACTION_EXTRACT_CONSTANT,
     ACTION_EXTRACT_METHOD,
+    ACTION_ENCAPSULATE_C_VARIABLE,
     ACTION_INTRODUCE_CONSTANT,
+    ACTION_INLINE_PYTHON_CLASS,
     ACTION_NORMALIZE_MULTILINE_STATEMENT,
     ACTION_NARROW_EXCEPTION_HANDLER,
     ACTION_REMOVE_DEAD_CODE,
     ACTION_REPLACE_UNSAFE_FUNCTION,
+    ACTION_REPLACE_CONDITIONAL_WITH_POLYMORPHISM,
 )
 from ..contracts import RefactoringAction
+
+
+class _PythonRiskyExceptionVisitor(ast.NodeVisitor):
+    def __init__(self, known_containers: dict[str, str]) -> None:
+        self.known_containers = known_containers
+        self.exception_types: set[str] = set()
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        return
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        return
+
+    def visit_Lambda(self, node: ast.Lambda) -> None:
+        return
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        return
+
+    def visit_Raise(self, node: ast.Raise) -> None:
+        if node.exc is not None:
+            expression = node.exc.func if isinstance(node.exc, ast.Call) else node.exc
+            name = self._python_exception_name(expression)
+            if name and name not in {"Exception", "BaseException"}:
+                self.exception_types.add(name)
+        self.generic_visit(node)
+
+    def visit_Call(self, node: ast.Call) -> None:
+        call_name = self._python_call_name(node.func)
+        if call_name in {"int", "float", "complex"}:
+            self.exception_types.add("ValueError")
+        elif call_name == "open" or call_name.endswith(".open"):
+            self.exception_types.add("OSError")
+        self.generic_visit(node)
+
+    def visit_Subscript(self, node: ast.Subscript) -> None:
+        container_name = node.value.id if isinstance(node.value, ast.Name) else ""
+        container_type = self.known_containers.get(container_name)
+        if container_type == "dict":
+            self.exception_types.add("KeyError")
+        elif container_type == "sequence":
+            self.exception_types.add("IndexError")
+        elif re.search(r"(dict|map|catalog|price|prices|student|students|lookup|table)$", container_name):
+            self.exception_types.add("KeyError")
+        elif re.search(r"(list|items|records|rows|values|array|sequence)$", container_name):
+            self.exception_types.add("IndexError")
+        self.generic_visit(node)
+
+    def visit_BinOp(self, node: ast.BinOp) -> None:
+        if isinstance(node.op, (ast.Div, ast.FloorDiv, ast.Mod)):
+            self.exception_types.add("ZeroDivisionError")
+        self.generic_visit(node)
+
+    @classmethod
+    def _python_exception_name(cls, expression: ast.AST | None) -> str:
+        if isinstance(expression, ast.Name):
+            return expression.id
+        if isinstance(expression, ast.Attribute):
+            return expression.attr
+        return ""
+
+    @classmethod
+    def _python_call_name(cls, function: ast.AST) -> str:
+        if isinstance(function, ast.Name):
+            return function.id
+        if isinstance(function, ast.Attribute):
+            base = cls._python_call_name(function.value)
+            return f"{base}.{function.attr}" if base else function.attr
+        return ""
 
 
 class LocalRefactorDetector:
@@ -95,6 +167,8 @@ class LocalRefactorDetector:
         if language == "c":
             for action in self._detect_c_unsafe_function_calls(file_name, source_code):
                 add(action)
+            for action in self._detect_c_global_variables(file_name, source_code):
+                add(action)
 
         # Broad exception handlers are an exception-handling smell, not dead
         # code.  Only emit an action when SCTVA can select a concrete narrow
@@ -110,11 +184,22 @@ class LocalRefactorDetector:
         for action in self._detect_long_methods(language, file_name, source_code):
             add(action)
 
+        if language == "python":
+            for action in self._detect_python_polymorphic_conditionals(file_name, source_code):
+                add(action)
+
         for action in self._detect_string_constants(language, file_name, source_code, skip_lines=skip_string_lines):
             add(action)
 
         for action in self._detect_magic_numbers(language, file_name, source_code):
             add(action)
+
+        # Lazy Class detection is Python-only and intentionally conservative.
+        # Run it after line-targeted literal refactorings so those actions keep
+        # the original source positions they were detected from.
+        if language == "python":
+            for action in self._detect_python_lazy_classes(file_name, source_code):
+                add(action)
 
         return actions
 
@@ -140,7 +225,7 @@ class LocalRefactorDetector:
             return
 
         for try_node in (node for node in ast.walk(tree) if isinstance(node, ast.Try)):
-            raised_types = self._explicit_python_raised_types(try_node)
+            raised_types = self._python_risky_exception_types(tree, try_node)
             for handler in try_node.handlers:
                 original_type = self._python_exception_name(handler.type)
                 if handler.type is None:
@@ -161,22 +246,23 @@ class LocalRefactorDetector:
                 # ``BaseException`` deliberately remains review-only: changing
                 # it may alter KeyboardInterrupt/SystemExit handling.  A plain
                 # Exception handler is narrowed only when the guarded body has
-                # one explicit exception type, which makes the edit auditable.
-                if original_type != "Exception" or len(raised_types) != 1:
+                # locally-provable exception types from syntax such as numeric
+                # conversion, indexing, file I/O, division, or explicit raise.
+                if original_type != "Exception" or not raised_types:
                     continue
-                target_type = next(iter(raised_types))
-                if target_type == "Exception":
+                if raised_types == {"Exception"}:
                     continue
                 yield self._internal_action(
                     ACTION_NARROW_EXCEPTION_HANDLER,
                     file_name=file_name,
-                    reason="overly broad Python Exception handler with explicit raised type",
+                    reason="overly broad Python Exception handler with provable risky operations",
                     parameters={
                         "source_line": int(getattr(handler, "lineno", 0) or 0),
                         "original_exception_type": original_type,
-                        "target_exception_type": target_type,
+                        "target_exception_type": ", ".join(sorted(raised_types)),
                         "handler_name": str(handler.name or ""),
                         "exception_smell": "exception_overreach",
+                        "requires_try_split": len(try_node.body) > 1,
                     },
                 )
 
@@ -189,25 +275,85 @@ class LocalRefactorDetector:
         return ""
 
     @classmethod
-    def _explicit_python_raised_types(cls, try_node: ast.Try) -> set[str]:
-        raised_types: set[str] = set()
-
-        def visit(node: ast.AST) -> None:
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
-                # A nested definition is not executed by entering the outer
-                # try block, so its raises must not influence this handler.
-                return
-            if isinstance(node, ast.Raise) and node.exc is not None:
-                expression = node.exc.func if isinstance(node.exc, ast.Call) else node.exc
-                name = cls._python_exception_name(expression)
-                if name and name not in {"Exception", "BaseException"}:
-                    raised_types.add(name)
-            for child in ast.iter_child_nodes(node):
-                visit(child)
-
+    def _python_risky_exception_types(cls, tree: ast.Module, try_node: ast.Try) -> set[str]:
+        known_containers = cls._python_known_container_types_before(tree, try_node)
+        exception_types: set[str] = set()
         for statement in try_node.body:
-            visit(statement)
-        return raised_types
+            exception_types.update(
+                cls._python_statement_exception_types(statement, known_containers)
+            )
+            cls._update_python_known_container_types(statement, known_containers)
+        return exception_types
+
+    @classmethod
+    def _python_known_container_types_before(
+        cls,
+        tree: ast.Module,
+        target: ast.Try,
+    ) -> dict[str, str]:
+        parents = {
+            child: parent
+            for parent in ast.walk(tree)
+            for child in ast.iter_child_nodes(parent)
+        }
+        owner = parents.get(target)
+        while owner is not None and not hasattr(owner, "body"):
+            owner = parents.get(owner)
+        known: dict[str, str] = {}
+        for statement in getattr(owner, "body", []):
+            if statement is target:
+                break
+            cls._update_python_known_container_types(statement, known)
+        return known
+
+    @staticmethod
+    def _update_python_known_container_types(
+        statement: ast.AST,
+        known: dict[str, str],
+    ) -> None:
+        targets: list[ast.expr] = []
+        value: ast.AST | None = None
+        if isinstance(statement, ast.Assign):
+            targets = list(statement.targets)
+            value = statement.value
+        elif isinstance(statement, ast.AnnAssign):
+            targets = [statement.target]
+            value = statement.value
+        if value is None:
+            return
+        container_type = ""
+        if isinstance(value, ast.Dict):
+            container_type = "dict"
+        elif isinstance(value, (ast.List, ast.Tuple, ast.Set)):
+            container_type = "sequence"
+        if not container_type:
+            return
+        for target in targets:
+            if isinstance(target, ast.Name):
+                known[target.id] = container_type
+
+    @classmethod
+    def _python_statement_exception_types(
+        cls,
+        statement: ast.AST,
+        known_containers: dict[str, str],
+    ) -> set[str]:
+        visitor = _PythonRiskyExceptionVisitor(known_containers)
+        visitor.visit(statement)
+        return visitor.exception_types
+
+    @classmethod
+    def _explicit_python_raised_types(cls, try_node: ast.Try) -> set[str]:
+        return cls._python_statement_exception_types(try_node, {})
+
+    @classmethod
+    def _python_call_name(cls, function: ast.AST) -> str:
+        if isinstance(function, ast.Name):
+            return function.id
+        if isinstance(function, ast.Attribute):
+            base = cls._python_call_name(function.value)
+            return f"{base}.{function.attr}" if base else function.attr
+        return ""
 
     def _detect_java_broad_exception_handlers(
         self,
@@ -300,6 +446,12 @@ class LocalRefactorDetector:
                 params.get("method") or params.get("method_name"),
                 params.get("start_line"),
                 params.get("end_line"),
+            )
+        if action.action_type == ACTION_INLINE_PYTHON_CLASS:
+            return (
+                action.action_type,
+                source_file,
+                params.get("class_to_inline") or params.get("source_class"),
             )
         if action.action_type == ACTION_NORMALIZE_MULTILINE_STATEMENT and source_line:
             return (action.action_type, source_file, source_line, params.get("normalization"))
@@ -400,6 +552,59 @@ class LocalRefactorDetector:
                         "source_line": self._line_of(masked, match.start()),
                     },
                 )
+
+    def _detect_c_global_variables(
+        self,
+        file_name: str,
+        source_code: str,
+    ) -> Iterable[RefactoringAction]:
+        """Detect only clear mutable scalar C globals with local usage."""
+
+        masked = self._mask_c_family_comments_and_strings(source_code)
+        brace_depth = [0] * (len(masked) + 1)
+        depth = 0
+        for index, character in enumerate(masked):
+            brace_depth[index] = depth
+            if character == "{":
+                depth += 1
+            elif character == "}" and depth:
+                depth -= 1
+        brace_depth[len(masked)] = depth
+        declaration_re = re.compile(
+            r"(?m)^(?P<indent>[ \t]*)(?P<storage>static\s+)?"
+            r"(?P<type>(?:(?:unsigned|signed|short|long)\s+)*(?:char|int|float|double|_Bool|size_t)"
+            r"(?:\s*\*+\s*)?)\s+"
+            r"(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*(?P<array>\[[^\]\n]*\])?"
+            r"\s*(?:=\s*[^;\n{}]+)?\s*;"
+        )
+        for match in declaration_re.finditer(masked):
+            if brace_depth[match.start()] != 0:
+                continue
+            variable_name = match.group("name")
+            if match.group("array"):
+                continue
+            declaration_text = source_code[match.start():match.end()]
+            if "const" in declaration_text.split() or "volatile" in declaration_text.split():
+                continue
+            if re.search(rf"\b{re.escape(variable_name)}\b", masked[:match.start()]):
+                # The identifier already appeared in a preprocessor directive,
+                # typedef, or earlier declaration; the file scope is unclear.
+                continue
+            references = list(re.finditer(rf"\b{re.escape(variable_name)}\b", masked))
+            if len(references) < 3:  # declaration plus mutable shared usage
+                continue
+            yield self._internal_action(
+                ACTION_ENCAPSULATE_C_VARIABLE,
+                file_name=file_name,
+                reason=f"mutable C global variable '{variable_name}' shared across functions",
+                parameters={
+                    "variable_name": variable_name,
+                    "getter_name": f"get_{variable_name}",
+                    "setter_name": f"set_{variable_name}",
+                    "source_line": self._line_of(source_code, match.start()),
+                    "smell": "Global Variable",
+                },
+            )
 
     def _detect_dead_code(
         self,
@@ -706,6 +911,91 @@ class LocalRefactorDetector:
                 },
             )
 
+    def _detect_python_polymorphic_conditionals(
+        self,
+        file_name: str,
+        source_code: str,
+    ) -> Iterable[RefactoringAction]:
+        """Detect safe terminal or assignment-producing dispatch chains."""
+
+        try:
+            tree = ast.parse(source_code)
+        except SyntaxError:
+            return
+        for node in tree.body:
+            if isinstance(node, ast.FunctionDef):
+                routines = [(node, "")]
+            elif isinstance(node, ast.ClassDef):
+                routines = [
+                    (item, node.name)
+                    for item in node.body
+                    if isinstance(item, ast.FunctionDef)
+                ]
+            else:
+                continue
+            for routine, owner in routines:
+                for statement in routine.body:
+                    if not isinstance(statement, ast.If):
+                        continue
+                    branch_count = 1
+                    current = statement
+                    while len(current.orelse) == 1 and isinstance(current.orelse[0], ast.If):
+                        branch_count += 1
+                        current = current.orelse[0]
+                    if branch_count < 2 or not current.orelse:
+                        continue
+                    bodies = []
+                    current = statement
+                    while True:
+                        bodies.append(current.body)
+                        if len(current.orelse) == 1 and isinstance(current.orelse[0], ast.If):
+                            current = current.orelse[0]
+                            continue
+                        bodies.append(current.orelse)
+                        break
+                    terminal = all(
+                        body and isinstance(body[-1], (ast.Return, ast.Raise))
+                        for body in bodies
+                    )
+
+                    def assigned_names(body: list[ast.stmt]) -> tuple[str, ...] | None:
+                        names: list[str] = []
+                        for item in body:
+                            if not isinstance(item, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+                                return None
+                            targets = (
+                                item.targets
+                                if isinstance(item, ast.Assign)
+                                else [item.target]
+                            )
+                            for target in targets:
+                                if not isinstance(target, ast.Name):
+                                    return None
+                                if target.id not in names:
+                                    names.append(target.id)
+                        return tuple(names) if names else None
+
+                    branch_outputs = [assigned_names(body) for body in bodies]
+                    assignment_outputs = (
+                        all(output is not None for output in branch_outputs)
+                        and len(set(branch_outputs)) == 1
+                    )
+                    if not terminal and not assignment_outputs:
+                        continue
+                    yield self._internal_action(
+                        ACTION_REPLACE_CONDITIONAL_WITH_POLYMORPHISM,
+                        file_name=file_name,
+                        reason=f"polymorphic Python conditional dispatch in '{routine.name}'",
+                        parameters={
+                            "method": routine.name,
+                            "source_class": owner,
+                            "source_line": int(statement.lineno),
+                            "start_line": int(routine.lineno),
+                            "end_line": int(routine.end_lineno),
+                            "smell": "Switch Statements",
+                        },
+                    )
+
     def _detect_java_long_methods(
         self,
         file_name: str,
@@ -814,10 +1104,33 @@ class LocalRefactorDetector:
             tree = ast.parse(source_code)
         except SyntaxError:
             return
+        # Module/class/function docstrings are metadata, not ordinary string
+        # literals.  Turning them into constants changes ``__doc__`` and is not
+        # a safe automatic refactoring.
+        docstring_nodes: set[ast.Constant] = set()
+        for owner in ast.walk(tree):
+            if not isinstance(
+                owner,
+                (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef),
+            ):
+                continue
+            body = getattr(owner, "body", None)
+            if not body:
+                continue
+            first = body[0]
+            if (
+                isinstance(first, ast.Expr)
+                and isinstance(first.value, ast.Constant)
+                and isinstance(first.value.value, str)
+            ):
+                docstring_nodes.add(first.value)
+
         string_nodes = [
             node
             for node in ast.walk(tree)
-            if isinstance(node, ast.Constant) and isinstance(node.value, str)
+            if isinstance(node, ast.Constant)
+            and isinstance(node.value, str)
+            and node not in docstring_nodes
         ]
         counts = Counter(node.value for node in string_nodes if node.value)
         for node in string_nodes:
@@ -895,6 +1208,265 @@ class LocalRefactorDetector:
                     "literal_value": value,
                     "constant_name": "EXTRACTED_CONSTANT",
                     "source_line": getattr(node, "lineno", None),
+                },
+            )
+
+    def _detect_python_lazy_classes(
+        self,
+        file_name: str,
+        source_code: str,
+    ) -> Iterable[RefactoringAction]:
+        """Detect only high-confidence owned Lazy Class candidates.
+
+        SCTVA does not classify every small class as lazy.  The detector emits
+        Inline Class only when a tiny helper is constructed exactly once as a
+        ``self.<attribute>`` owned by another class and all visible use stays
+        behind that owner attribute.  This is the pattern used by the Inline
+        Class regression fixture (``Customer -> CustomerContact``).
+        """
+
+        try:
+            tree = ast.parse(source_code)
+        except SyntaxError:
+            return
+
+        top_level_classes = [
+            node for node in tree.body if isinstance(node, ast.ClassDef)
+        ]
+        parents = {
+            child: parent
+            for parent in ast.walk(tree)
+            for child in ast.iter_child_nodes(parent)
+        }
+
+        def class_method(owner: ast.ClassDef, name: str) -> ast.FunctionDef | None:
+            matches = [
+                node
+                for node in owner.body
+                if isinstance(node, ast.FunctionDef) and node.name == name
+            ]
+            return matches[0] if len(matches) == 1 else None
+
+        def constructor_fields(
+            constructor: ast.FunctionDef | None,
+        ) -> tuple[set[str], bool]:
+            if constructor is None:
+                return set(), False
+            args = constructor.args
+            if (
+                constructor.decorator_list
+                or args.posonlyargs
+                or args.vararg
+                or args.kwarg
+                or args.kwonlyargs
+                or not args.args
+                or args.args[0].arg != "self"
+            ):
+                return set(), False
+            parameter_names = {argument.arg for argument in args.args[1:]}
+            body = list(constructor.body)
+            if (
+                body
+                and isinstance(body[0], ast.Expr)
+                and isinstance(body[0].value, ast.Constant)
+                and isinstance(body[0].value.value, str)
+            ):
+                body = body[1:]
+            fields: set[str] = set()
+            for statement in body:
+                if not (
+                    isinstance(statement, ast.Assign)
+                    and len(statement.targets) == 1
+                    and isinstance(statement.targets[0], ast.Attribute)
+                    and isinstance(statement.targets[0].value, ast.Name)
+                    and statement.targets[0].value.id == "self"
+                ):
+                    return set(), False
+                # High-confidence detector: constructor state may come only
+                # from its own arguments or literals/simple expressions.
+                for node in ast.walk(statement.value):
+                    if isinstance(
+                        node,
+                        (
+                            ast.Call,
+                            ast.Attribute,
+                            ast.Subscript,
+                            ast.Lambda,
+                            ast.ListComp,
+                            ast.SetComp,
+                            ast.DictComp,
+                            ast.GeneratorExp,
+                            ast.Await,
+                            ast.Yield,
+                            ast.YieldFrom,
+                        ),
+                    ):
+                        return set(), False
+                    if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
+                        if node.id not in parameter_names:
+                            return set(), False
+                fields.add(statement.targets[0].attr)
+            return fields, bool(fields)
+
+        def is_descendant(node: ast.AST, ancestor: ast.AST) -> bool:
+            current: ast.AST | None = node
+            while current is not None:
+                if current is ancestor:
+                    return True
+                current = parents.get(current)
+            return False
+
+        for candidate in top_level_classes:
+            # A Lazy Class is not inferred merely from low LOC.  Require the
+            # complete strong pattern: tiny responsibility + unique owner.
+            if candidate.bases or candidate.keywords or candidate.decorator_list:
+                continue
+            class_lines = int(candidate.end_lineno or candidate.lineno) - int(candidate.lineno) + 1
+            if class_lines > 30:
+                continue
+
+            methods = [
+                node for node in candidate.body if isinstance(node, ast.FunctionDef)
+            ]
+            constructor = next((node for node in methods if node.name == "__init__"), None)
+            business_methods = [node for node in methods if node.name != "__init__"]
+            if not (1 <= len(business_methods) <= 3):
+                continue
+
+            allowed_members = set(methods)
+            member_shape_safe = True
+            for member in candidate.body:
+                if member in allowed_members:
+                    continue
+                if (
+                    isinstance(member, ast.Expr)
+                    and isinstance(member.value, ast.Constant)
+                    and isinstance(member.value.value, str)
+                ):
+                    continue
+                member_shape_safe = False
+                break
+            if not member_shape_safe:
+                continue
+
+            fields, constructor_safe = constructor_fields(constructor)
+            if not constructor_safe or len(fields) > 3:
+                continue
+
+            method_names = {method.name for method in business_methods}
+            unsafe_method = False
+            for method in business_methods:
+                args = method.args
+                if (
+                    method.decorator_list
+                    or args.posonlyargs
+                    or args.vararg
+                    or args.kwarg
+                    or args.kwonlyargs
+                    or not args.args
+                    or args.args[0].arg != "self"
+                ):
+                    unsafe_method = True
+                    break
+                for node in ast.walk(method):
+                    if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
+                        if node.value.id == "self" and node.attr not in fields | method_names:
+                            unsafe_method = True
+                            break
+                if unsafe_method:
+                    break
+            if unsafe_method:
+                continue
+
+            ownerships: list[tuple[ast.ClassDef, str, ast.AST, ast.Call]] = []
+            for owner in top_level_classes:
+                if owner is candidate:
+                    continue
+                owner_constructor = class_method(owner, "__init__")
+                if owner_constructor is None:
+                    continue
+                for statement in ast.walk(owner_constructor):
+                    if not isinstance(statement, (ast.Assign, ast.AnnAssign)):
+                        continue
+                    value = getattr(statement, "value", None)
+                    if not (
+                        isinstance(value, ast.Call)
+                        and isinstance(value.func, ast.Name)
+                        and value.func.id == candidate.name
+                    ):
+                        continue
+                    target: ast.AST | None = None
+                    if isinstance(statement, ast.Assign) and len(statement.targets) == 1:
+                        target = statement.targets[0]
+                    elif isinstance(statement, ast.AnnAssign):
+                        target = statement.target
+                    if (
+                        isinstance(target, ast.Attribute)
+                        and isinstance(target.value, ast.Name)
+                        and target.value.id == "self"
+                    ):
+                        ownerships.append((owner, target.attr, statement, value))
+
+            if len(ownerships) != 1:
+                continue
+            owner, owner_attribute, construction_statement, construction_call = ownerships[0]
+
+            # Reject a helper whose class name appears anywhere other than its
+            # own definition and the single owned construction.
+            external_class_reference = False
+            for node in ast.walk(tree):
+                if not (
+                    isinstance(node, ast.Name)
+                    and node.id == candidate.name
+                    and isinstance(node.ctx, ast.Load)
+                ):
+                    continue
+                if is_descendant(node, candidate):
+                    continue
+                parent = parents.get(node)
+                if parent is construction_call and construction_call.func is node:
+                    continue
+                external_class_reference = True
+                break
+            if external_class_reference:
+                continue
+
+            # The owned helper may only be used as
+            # ``<owner>.contact.<known field/method>``.  Passing or returning
+            # ``contact`` itself would make Inline Class unsafe.
+            allowed_members = fields | method_names
+            owner_usage_safe = True
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Attribute) or node.attr != owner_attribute:
+                    continue
+                if is_descendant(node, candidate) or is_descendant(node, construction_statement):
+                    continue
+                outer = parents.get(node)
+                if not (
+                    isinstance(outer, ast.Attribute)
+                    and outer.value is node
+                    and outer.attr in allowed_members
+                ):
+                    owner_usage_safe = False
+                    break
+            if not owner_usage_safe:
+                continue
+
+            yield self._internal_action(
+                ACTION_INLINE_PYTHON_CLASS,
+                file_name=file_name,
+                reason=(
+                    f"Lazy Class {candidate.name} has {len(fields)} small field(s), "
+                    f"{len(business_methods)} small method(s), and is uniquely owned by "
+                    f"{owner.name}.{owner_attribute}"
+                ),
+                parameters={
+                    "class_to_inline": candidate.name,
+                    "destination_class": owner.name,
+                    "owner_attribute": owner_attribute,
+                    "source_line": int(candidate.lineno),
+                    "smell": "Lazy Class",
+                    "detection_confidence": "high",
                 },
             )
 
