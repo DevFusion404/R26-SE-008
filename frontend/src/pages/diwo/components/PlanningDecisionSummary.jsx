@@ -33,7 +33,8 @@ import { useState } from "react";
 import DeveloperStrategySelector from "./DeveloperStrategySelector";
 import { CategoryCount } from "./PlanningRecommendationBadge";
 import {
-  CATEGORY_ORDER, formatMinutes, formatPoints,
+  CATEGORY_ORDER, MANUAL_ONLY, RISK_COLOR,
+  categoryStyle, formatMinutes, formatPoints, strategyLabel,
 } from "../utils/planningDecisionSupport";
 import { C, Card } from "../diwoTheme.jsx";
 
@@ -53,18 +54,79 @@ function Metric({ label, value, color = C.text, title }) {
   );
 }
 
-const RISK_COLOR = { low: C.low, medium: C.warn, high: C.danger };
+/**
+ * What a goal change did to the recommendation distribution.
+ *
+ * The developer goal is a control the developer has no reason to touch unless
+ * they can see it working. "Safety First moved 2 steps out of Recommended and
+ * into Review" is that evidence; the same three buttons with no visible
+ * consequence are decoration.
+ *
+ * Rendered only when there is a real before-and-after to compare — the parent
+ * passes null when no previous distribution exists, and a comparison against
+ * an absent baseline would be an invented one.
+ */
+function StrategyDelta({ delta }) {
+  if (!delta) return null;
+
+  return (
+    <div style={{
+      marginTop: 12, padding: "9px 13px", borderRadius: 8,
+      background: C.bg, border: `1px solid ${C.borderAcc}`,
+      fontSize: 11, color: C.textSub,
+      display: "flex", gap: 12, flexWrap: "wrap", alignItems: "center",
+    }}>
+      <span style={{ color: C.textMuted }}>
+        <b style={{ color: C.textSub }}>{strategyLabel(delta.from)}</b>
+        {" → "}
+        <b style={{ color: C.accent }}>{strategyLabel(delta.to)}</b>
+      </span>
+
+      {!delta.moved ? (
+        <span style={{ color: C.textMuted }}>
+          — the recommendation for every step stayed the same.
+        </span>
+      ) : (
+        delta.changes.map((change) => {
+          const style = categoryStyle(change.category);
+          const shifted = change.delta !== 0;
+          return (
+            <span key={change.category} style={{
+              display: "inline-flex", alignItems: "center", gap: 5,
+              color: shifted ? style.color : C.textMuted,
+              fontWeight: shifted ? 700 : 500,
+            }}>
+              <span aria-hidden="true">{style.icon}</span>
+              {style.short}
+              <span style={{ fontFamily: "monospace" }}>
+                {change.from} → {change.to}
+              </span>
+              {shifted && (
+                <span style={{ fontFamily: "monospace" }}>
+                  ({change.delta > 0 ? "+" : ""}{change.delta})
+                </span>
+              )}
+            </span>
+          );
+        })
+      )}
+    </div>
+  );
+}
 
 export default function PlanningDecisionSummary({
   summary,
   totalSteps,
   approved,
   rejected,
+  manual = 0,
   pending,
   strategy,
   onStrategyChange,
+  strategyDelta,
   onSelectRecommended,
   onSelectAll,
+  onRejectAll,
   onClearSelection,
   activeFilter,
   onFilterCategory,
@@ -72,9 +134,11 @@ export default function PlanningDecisionSummary({
   planSource,
 }) {
   const [confirmSelectAll, setConfirmSelectAll] = useState(false);
+  const [confirmRejectAll, setConfirmRejectAll] = useState(false);
 
   const autoSelectable = summary?.auto_selectable ?? 0;
   const unclassified = summary?.unclassified ?? 0;
+  const manualOnly = summary?.[MANUAL_ONLY] ?? 0;
   const nonGreen = Math.max(0, (totalSteps ?? 0) - autoSelectable);
   const maxRisk = summary?.max_risk || null;
 
@@ -94,7 +158,8 @@ export default function PlanningDecisionSummary({
           <div style={{ fontSize: 15, fontWeight: 700, color: C.text, marginTop: 5 }}>
             {totalSteps} RDP step{totalSteps === 1 ? "" : "s"} to review
             <span style={{ fontSize: 12, fontWeight: 500, color: C.textMuted, marginLeft: 10 }}>
-              {approved} approved · {rejected} rejected · {pending} pending
+              {approved} approved · {manual > 0 ? `${manual} manual · ` : ""}
+              {rejected} rejected · {pending} pending
             </span>
           </div>
         </div>
@@ -105,6 +170,8 @@ export default function PlanningDecisionSummary({
           disabled={strategyBusy}
         />
       </div>
+
+      <StrategyDelta delta={strategyDelta} />
 
       {/* ── What DIWO makes of the plan ─────────────────────────────────── */}
       <div style={{ marginTop: 18 }}>
@@ -192,7 +259,8 @@ export default function PlanningDecisionSummary({
           title={
             autoSelectable === 0
               ? "DIWO found no step it can recommend without review in this plan."
-              : `Mark the ${autoSelectable} recommended step(s) as approved. Nothing is submitted — you still press Forward afterwards.`
+              : `Mark the ${autoSelectable} recommended step(s) as approved, leaving every other step for you to read. `
+                + "Steps you have already decided are untouched. Nothing is submitted — you still press Forward afterwards."
           }
           style={{
             padding: "10px 20px", borderRadius: 8, fontWeight: 700, fontSize: 13,
@@ -213,6 +281,7 @@ export default function PlanningDecisionSummary({
           onClick={() => {
             if (nonGreen > 0 && !confirmSelectAll) {
               setConfirmSelectAll(true);
+              setConfirmRejectAll(false);
               return;
             }
             setConfirmSelectAll(false);
@@ -229,9 +298,36 @@ export default function PlanningDecisionSummary({
           {confirmSelectAll ? "Confirm — select all anyway" : `Select all ${totalSteps}`}
         </button>
 
-        {(approved > 0 || rejected > 0) && (
+        {/* The counterpart to Select All. Two clicks, because it overwrites
+            every decision already made — including approvals. */}
+        <button
+          type="button"
+          onClick={() => {
+            if (!confirmRejectAll) {
+              setConfirmRejectAll(true);
+              setConfirmSelectAll(false);
+              return;
+            }
+            setConfirmRejectAll(false);
+            onRejectAll?.();
+          }}
+          onBlur={() => setConfirmRejectAll(false)}
+          title={`Reject all ${totalSteps} step(s). Nothing is submitted — a fully rejected plan simply cannot be forwarded.`}
+          style={{
+            padding: "9px 16px", borderRadius: 8, fontWeight: 600, fontSize: 12,
+            cursor: "pointer",
+            background: confirmRejectAll ? `${C.danger}20` : C.panel,
+            color: confirmRejectAll ? C.danger : C.textSub,
+            border: `1px solid ${confirmRejectAll ? C.danger : C.border}`,
+          }}
+        >
+          {confirmRejectAll ? "Confirm — reject all" : `✕ Reject all ${totalSteps}`}
+        </button>
+
+        {(approved > 0 || rejected > 0 || manual > 0) && (
           <button
             type="button"
+            title="Reset every step to pending. The only action that clears a decision you made deliberately."
             onClick={onClearSelection}
             style={{
               padding: "9px 14px", borderRadius: 8, fontWeight: 600, fontSize: 12,
@@ -244,6 +340,24 @@ export default function PlanningDecisionSummary({
         )}
       </div>
 
+      {confirmRejectAll && (
+        <div style={{
+          marginTop: 10, padding: "10px 14px", borderRadius: 8,
+          background: `${C.danger}0d`, border: `1px solid ${C.danger}40`,
+          fontSize: 12, color: C.textSub, lineHeight: 1.55,
+        }}>
+          <b style={{ color: C.danger }}>✕ This rejects all {totalSteps} step(s)</b>
+          {approved > 0 || manual > 0
+            ? `, including the ${[
+                approved > 0 ? `${approved} you approved` : null,
+                manual > 0 ? `${manual} marked for manual work` : null,
+              ].filter(Boolean).join(" and ")}`
+            : ""}
+          . Nothing is sent anywhere — a plan with no approved step cannot be
+          forwarded at all. Click again to confirm.
+        </div>
+      )}
+
       {confirmSelectAll && nonGreen > 0 && (
         <div style={{
           marginTop: 10, padding: "10px 14px", borderRadius: 8,
@@ -255,10 +369,20 @@ export default function PlanningDecisionSummary({
           {[
             summary?.review ? `${summary.review} to review carefully` : null,
             summary?.not_recommended ? `${summary.not_recommended} not recommended` : null,
-            summary?.manual_only ? `${summary.manual_only} that SCTVA cannot automate` : null,
             unclassified ? `${unclassified} not assessed` : null,
           ].filter(Boolean).join(", ")}
           . Click again to confirm, or select the recommended set and review the rest one by one.
+          {/* The one category this button cannot simply approve: approving a
+              manual-only step would forward one SCTVA has no automatic form
+              for, so it takes the decision that actually fits it. */}
+          {manualOnly > 0 && (
+            <div style={{ marginTop: 6, color: C.textMuted }}>
+              The {manualOnly} manual-only step{manualOnly > 1 ? "s are" : " is"} marked for
+              manual work instead of approved — SCTVA cannot execute{" "}
+              {manualOnly > 1 ? "them" : "it"}, so {manualOnly > 1 ? "they" : "it"} will not
+              be forwarded.
+            </div>
+          )}
         </div>
       )}
 
@@ -266,7 +390,8 @@ export default function PlanningDecisionSummary({
         DIWO recommends; you decide. Selecting steps only marks them locally —
         nothing is transformed until you press{" "}
         <b style={{ color: C.textSub }}>Forward Approved Steps</b>, and only the
-        steps you approved are sent.
+        steps you approved for automatic transformation are sent. Steps marked
+        for manual work are recorded with the plan and stay with you.
       </div>
     </Card>
   );

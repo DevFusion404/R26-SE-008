@@ -27,13 +27,20 @@
 import { useEffect } from "react";
 import PlanningRecommendationBadge from "./PlanningRecommendationBadge";
 import PlanningScoreBreakdown from "./PlanningScoreBreakdown";
-import { categoryStyle, formatMinutes, formatPoints } from "../utils/planningDecisionSupport";
+import PlanConsequencePreview from "./PlanConsequencePreview";
+import { MANUAL_ONLY, categoryStyle } from "../utils/planningDecisionSupport";
 import { C, Badge, Pill, impactColor, riskColor, severityColor } from "../diwoTheme.jsx";
 
 const ghostButton = {
   padding: "6px 13px", borderRadius: 8, fontSize: 12, fontWeight: 700,
   background: C.panel, color: C.textSub, border: `1px solid ${C.border}`,
   cursor: "pointer", flexShrink: 0,
+};
+
+const DECISION_WORD = {
+  approve: "approved for automatic transformation",
+  reject: "rejected",
+  manual: "marked for manual work",
 };
 
 export default function PlanStepDrawer({ step, decision, onDecide, onClose }) {
@@ -53,6 +60,7 @@ export default function PlanStepDrawer({ step, decision, onDecide, onClose }) {
   const category = support?.category || null;
   const style = categoryStyle(category);
   const capability = support?.capability;
+  const isManualOnly = category === MANUAL_ONLY;
 
   const targetLabel =
     [step.target?.class, step.target?.method].filter(Boolean).join(".") ||
@@ -165,12 +173,16 @@ export default function PlanStepDrawer({ step, decision, onDecide, onClose }) {
         )}
 
         <div style={{ padding: "16px 20px", display: "flex", flexDirection: "column", gap: 18 }}>
-          {support && <RecommendationEvidence support={support} />}
+          {support && <RecommendationEvidence step={step} support={support} />}
           {support && <PlanningScoreBreakdown support={support} />}
           <StepDetails step={step} support={support} />
         </div>
 
-        {/* ── Decide without going back to hunt for the row ──────────────── */}
+        {/* ── Decide without going back to hunt for the row ────────────────
+               The same three verdicts the card offers, and the same routing:
+               `onDecide` is the page's requestDecision, so approving a step
+               DIWO advised against still opens the confirmation rather than
+               slipping through because it was clicked from a dialog. */}
         {onDecide && (
           <div style={{
             display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap",
@@ -186,8 +198,25 @@ export default function PlanStepDrawer({ step, decision, onDecide, onClose }) {
                 color: decision === "approve" ? "#000" : C.accent,
               }}
             >
-              ✓ Approve this step
+              {isManualOnly ? "Force automatic transformation" : "✓ Approve this step"}
             </button>
+
+            {/* Offered only where it means something: a step SCTVA cannot
+                automate is not rejected by being taken on by hand. */}
+            {isManualOnly && (
+              <button
+                onClick={() => { onDecide(step.step_id, "manual"); onClose?.(); }}
+                style={{
+                  padding: "9px 18px", borderRadius: 8, fontSize: 12, fontWeight: 700,
+                  cursor: "pointer", border: "none",
+                  background: decision === "manual" ? C.info : `${C.info}18`,
+                  color: decision === "manual" ? "#fff" : C.info,
+                }}
+              >
+                🔧 Add to manual work
+              </button>
+            )}
+
             <button
               onClick={() => { onDecide(step.step_id, "reject"); onClose?.(); }}
               style={{
@@ -197,13 +226,11 @@ export default function PlanStepDrawer({ step, decision, onDecide, onClose }) {
                 color: decision === "reject" ? "#fff" : C.danger,
               }}
             >
-              ✕ Reject this step
+              {isManualOnly ? "Skip this step" : "✕ Reject this step"}
             </button>
 
             <span style={{ fontSize: 11, color: C.textMuted, marginLeft: "auto" }}>
-              {decision
-                ? `Currently ${decision === "approve" ? "approved" : "rejected"}.`
-                : "No decision yet."}
+              {decision ? `Currently ${DECISION_WORD[decision] || decision}.` : "No decision yet."}
               {" "}Nothing is transformed until you forward the plan.
             </span>
           </div>
@@ -215,28 +242,14 @@ export default function PlanStepDrawer({ step, decision, onDecide, onClose }) {
 
 // ─── Pieces ──────────────────────────────────────────────────────────────────
 
-/** A labelled figure in the "expected effect" strip. */
-function Fact({ label, value, color = C.text, title }) {
-  return (
-    <span title={title} style={{ display: "inline-flex", flexDirection: "column", gap: 1 }}>
-      <span style={{ fontSize: 9, color: C.textMuted, textTransform: "uppercase", letterSpacing: 0.6 }}>
-        {label}
-      </span>
-      <span style={{ fontSize: 12, fontWeight: 700, color, fontFamily: "monospace" }}>{value}</span>
-    </span>
-  );
-}
-
 /**
- * The evidence behind one recommendation: why DIWO said it, what the step is
- * expected to buy, and what skipping it costs. Every line comes from the
- * backend's own factors, so a reason can never contradict the score it sits
- * beside.
+ * The evidence behind one recommendation: why DIWO said it, what approving the
+ * step buys, and what skipping it costs. Every line comes from the backend's
+ * own factors and impact record, so a reason can never contradict the score it
+ * sits beside.
  */
-function RecommendationEvidence({ support }) {
+function RecommendationEvidence({ step, support }) {
   const category = support.category;
-  const impact = support.impact;
-  const deferral = support.deferral;
   const reasons = support.reasons || [];
   const warnings = support.warnings || [];
 
@@ -267,69 +280,28 @@ function RecommendationEvidence({ support }) {
         </div>
       )}
 
-      {impact && (
-        <div>
-          <div style={{
-            fontSize: 10, color: C.textMuted, textTransform: "uppercase",
-            letterSpacing: 1, marginBottom: 8,
-          }}>
-            Expected effect
-          </div>
-          <div style={{ display: "flex", gap: 24, flexWrap: "wrap" }}>
-            <Fact
-              label="Quality gain"
-              value={formatPoints(
-                category === "manual_only"
-                  ? impact.potential_gain_points
-                  : impact.quality_gain_points
-              )}
-              color={category === "manual_only" ? C.info : C.accent}
-              title={
-                category === "manual_only"
-                  ? "Potential gain if this is done by hand. The automatic gain this run is 0."
-                  : "Estimated quality points recovered. Approximate — the band is shown with the score breakdown."
-              }
-            />
-            <Fact
-              label="Blast radius"
-              value={impact.blast_radius_files
-                ? `${impact.blast_radius_files} file${impact.blast_radius_files > 1 ? "s" : ""}`
-                : "—"}
-            />
-            <Fact label="Review effort" value={formatMinutes(impact.effort_minutes)} />
-            <Fact
-              label="Validation"
-              value={(impact.validation || []).length ? impact.validation.join(" · ") : "—"}
-              color={(impact.validation || []).includes("behavioural") ? C.accent : C.textSub}
-              title="Checks SCTVA can run against the result."
-            />
-            {category === "manual_only" && (
-              <Fact
-                label="Automatic gain this run" value="0" color={C.warn}
-                title="Selecting this will not produce an automatic code change in the current SCTVA build."
-              />
-            )}
-          </div>
-        </div>
-      )}
+      {/* The two consequences, side by side.
 
-      {deferral?.carried_points ? (
-        <div>
-          <div style={{
-            fontSize: 10, color: C.textMuted, textTransform: "uppercase",
-            letterSpacing: 1, marginBottom: 6,
-          }}>
-            If deferred
-          </div>
-          <div style={{ fontSize: 12, color: C.textSub, lineHeight: 1.6 }}>
-            {deferral.carried_points} quality point
-            {deferral.carried_points === 1 ? "" : "s"} remain unresolved.
-            {deferral.churn_known && deferral.change_pressure
-              ? ` This file has ${deferral.change_pressure} recent change pressure.`
-              : ""}
-          </div>
+          This is the half of the decision the old "Expected effect" strip left
+          out. It listed what approving would buy and stopped there, which
+          framed skipping as the free option — the developer could read the
+          gain but never the cost of leaving the smell in place. Both columns
+          are real, and a strip that shows one of them is an argument rather
+          than a decision aid.
+
+          It replaces that strip rather than sitting beside it: quality gain,
+          blast radius, review effort and validation are all inside the "if you
+          approve" column now, and printing them twice in one dialog would
+          invite the reader to look for a difference that is not there. */}
+      <div>
+        <div style={{
+          fontSize: 10, color: C.textMuted, textTransform: "uppercase",
+          letterSpacing: 1, marginBottom: 8,
+        }}>
+          What happens either way
         </div>
-      ) : null}
+        <PlanConsequencePreview step={step} support={support} />
+      </div>
     </div>
   );
 }
@@ -453,12 +425,44 @@ function StepDetails({ step, support }) {
         </div>
       )}
 
+      {/* Only ever the real record. An acceptance percentage invented from
+          three decisions — or from the synthetic rows that exist to exercise
+          the ML pipeline — would be the one number on this screen a developer
+          has no way to check, so below the sample threshold the drawer says so
+          instead of showing a rate. */}
       {support?.factors?.historical_feedback && (
-        <div style={{ fontSize: 11, color: C.textMuted }}>
-          <b style={{ color: C.textSub }}>Historical feedback:</b>{" "}
-          {support.factors.historical_feedback.status === "observed"
-            ? `${support.factors.historical_feedback.accepted} of ${support.factors.historical_feedback.sample_size} similar steps accepted previously.`
-            : support.factors.historical_feedback.message || "Not enough historical feedback yet."}
+        <div>
+          <div style={{ fontSize: 10, color: C.textMuted, textTransform: "uppercase", letterSpacing: 1, marginBottom: 6 }}>
+            Your history with this refactoring
+          </div>
+          {support.factors.historical_feedback.status === "observed" ? (
+            <div style={{ fontSize: 11.5, color: C.textSub, lineHeight: 1.6 }}>
+              You previously accepted{" "}
+              <b style={{ color: C.text }}>
+                {support.factors.historical_feedback.accepted} of{" "}
+                {support.factors.historical_feedback.sample_size}
+              </b>{" "}
+              similar refactorings.
+              {typeof support.factors.historical_feedback.acceptance_rate === "number" && (
+                <span style={{ color: C.textMuted }}>
+                  {" "}({Math.round(support.factors.historical_feedback.acceptance_rate * 100)}% observed
+                  {typeof support.factors.historical_feedback.smoothed_rate === "number"
+                    ? `, ${Math.round(support.factors.historical_feedback.smoothed_rate * 100)}% after smoothing`
+                    : ""})
+                </span>
+              )}
+            </div>
+          ) : (
+            <div style={{ fontSize: 11.5, color: C.textMuted, lineHeight: 1.6 }}>
+              Not enough previous decisions yet for personalized history
+              {typeof support.factors.historical_feedback.sample_size === "number" &&
+               typeof support.factors.historical_feedback.minimum_sample === "number"
+                ? ` (${support.factors.historical_feedback.sample_size} of ${support.factors.historical_feedback.minimum_sample} matching decisions)`
+                : ""}
+              . This factor is scored at the average of the others, so it neither
+              helps nor hurts the recommendation.
+            </div>
+          )}
         </div>
       )}
     </div>

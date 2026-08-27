@@ -4,20 +4,14 @@
  * R26-SE-008 | Bandara S M Y M | IT22277886
  *
  * Stage 2 of the DIWO workflow: render the plan produced by the Refactoring
- * Decision & Planning (RDP) agent and let the developer approve or reject each
- * step before it reaches the Safe Transformation Agent.
+ * Decision & Planning (RDP) agent and let the developer decide each step before
+ * it reaches the Safe Transformation Agent.
  *
  * This page does NOT call the RDP agent. Planning is owned by the DIWO
  * backend: POST /workflows/<id>/select-smells forwards the *updated* smell
  * report — the developer's selection, with deselected smells and now-empty
  * files removed — to POST http://localhost:5000/generate, and returns the
  * plan, the decision trace and which agent produced it.
- *
- * The page used to POST /generate a second time from the browser, built from
- * `workflow.updated_report || cuqaReport`. Whenever `updated_report` was
- * missing that fell back to the FULL report, so every deselected smell came
- * back and the plan on screen disagreed with the one the backend had stored.
- * One request, one plan, one source of truth — hence `planData` only.
  *
  * Data source, in priority order:
  *   1. `planData` — the plan the backend returned with the smell selection.
@@ -26,19 +20,7 @@
  *
  * The displayed plan travels back up on approve (`onApprove({ plan })`) so the
  * parent forwards the exact steps the developer saw, not whichever copy its own
- * state happens to hold. Only the steps marked "approve" are transformed —
- * DIWOAgentPage filters on `decisions[step.step_id] === "approve"` before
- * handing the plan to the Safe Transformation Agent.
- *
- * Approving a step is a LOCAL decision and never regenerates the plan.
- * It used to: every click called onDecisionChange, which POSTed
- * /plan-preference-update, and that endpoint drops rejected steps, re-sorts
- * the rest, renumbers step_id from 1 and returns a new plan_id. The new
- * plan_id tripped the reset below, so the approval the developer had just made
- * was wiped a moment after it appeared — and the renumbering meant a decision
- * key no longer pointed at the step it was made on. Only a developer-goal
- * change asks the backend to re-rank, and decisions are carried across that by
- * step identity rather than by position.
+ * state happens to hold.
  *
  * DECISION SUPPORT
  * ----------------
@@ -49,10 +31,45 @@
  * RENDERS that assessment; it never computes one. Two implementations of one
  * scoring formula would be two answers to the same question.
  *
- * The recommendation is advice. `Select Recommended` sets local state on the
- * green steps and nothing else: it calls no agent, submits no plan and starts
- * no transformation. The developer still presses Forward, and a step they did
- * not approve never leaves this page.
+ * What the page is arranged to answer, in this order:
+ *
+ *     What does DIWO recommend?      the category band and the badge
+ *     Why?                           one sentence, always visible
+ *     Can SCTVA execute it?          the Automation fact
+ *     What do I want to do?          category-specific actions
+ *
+ * Everything BEHIND that verdict — the full reason list, what approving buys,
+ * what skipping costs, the five-factor score breakdown, RDP's alternatives and
+ * the transformation parameters — is one click away in PlanStepDrawer, under
+ * "Why this recommendation?". None of it is on the card.
+ *
+ * That split is the whole layout decision. A card carrying its own approve/skip
+ * consequence columns is a readable card and an unreadable page: twelve of them
+ * is a wall of parallel figures, and the developer has to scroll past the
+ * evidence for eleven steps to reach the twelfth. The card answers "what is
+ * this and what does DIWO say"; the drawer answers "why, and what happens
+ * either way" — and it answers it for the one step the developer stopped at.
+ *
+ * THREE THINGS THIS PAGE WILL NOT DO
+ * ----------------------------------
+ * 1. Approving a step is LOCAL and never regenerates the plan. It used to:
+ *    every click called onDecisionChange, which POSTed /plan-preference-update,
+ *    and that endpoint drops rejected steps, re-sorts the rest, renumbers
+ *    step_id from 1 and returns a new plan_id. The new plan_id tripped the
+ *    reset below, so the approval the developer had just made was wiped a
+ *    moment after it appeared. Only a developer-goal change asks the backend to
+ *    re-rank, and decisions are carried across that by step identity.
+ *
+ * 2. Nothing here submits a plan. `Select Recommended` sets local state on the
+ *    green steps and stops: no agent call, no plan submission, no
+ *    transformation. The developer still presses Forward, and a step they did
+ *    not approve never leaves this page.
+ *
+ * 3. A manual-only step is never forwarded as an automatic transformation by
+ *    any default or bulk path. It takes a third decision state — `manual` —
+ *    which counts as decided and is recorded, but which build_approved_plan()
+ *    on the backend leaves out of the approved plan. Forcing one through is
+ *    possible, deliberately, but only through the override dialog.
  */
 
 import { useState } from "react";
@@ -61,9 +78,14 @@ import { C, Card, Badge, Pill, impactColor, riskColor, severityColor } from "../
 import PlanningDecisionSummary from "../components/PlanningDecisionSummary";
 import PlanningRecommendationBadge from "../components/PlanningRecommendationBadge";
 import PlanStepDrawer from "../components/PlanStepDrawer";
+import { StepFacts } from "../components/PlanConsequencePreview";
+import OverrideConfirmDialog from "../components/OverrideConfirmDialog";
 import {
-  CATEGORY_ORDER, categoryOf, categoryStyle,
-  groupBreakdown, isAutoSelectable, planSummary, supportOf,
+  APPROVE, REJECT, MANUAL,
+  CATEGORY_ORDER, MANUAL_ONLY, NOT_RECOMMENDED, OVERRIDE_REASONS,
+  actionModel, approveRecommendedIn, carryDecisions, categoryOf, categoryStyle,
+  countDecisions, decideGroup, distributionDelta, groupBreakdown, isOverride,
+  planSummary, rejectAll, selectAll, selectRecommended, supportOf,
 } from "../utils/planningDecisionSupport";
 
 /**
@@ -78,17 +100,12 @@ import {
  */
 const FILE_ACCENT = C.info;
 
-const STATUS_FILTERS = ["all", "approved", "rejected", "pending"];
-
-/**
- * Structured reasons offered when the developer overrides a recommendation.
- * Optional — the workflow is never blocked on one. They exist because a
- * disagreement with DIWO is the most informative feedback the system can
- * collect, and a free-text box collects it least often.
- */
-const OVERRIDE_REASONS = [
-  "Too risky", "Not useful", "Wrong refactoring", "Too much scope",
-  "Prefer manual change", "Insufficient explanation", "Other",
+const STATUS_FILTERS = [
+  { value: "all", label: "All" },
+  { value: "pending", label: "Pending" },
+  { value: "approved", label: "Approved" },
+  { value: "manual", label: "Manual work" },
+  { value: "rejected", label: "Rejected" },
 ];
 
 export default function RefactoringPlanApprovalPage({
@@ -102,15 +119,26 @@ export default function RefactoringPlanApprovalPage({
   const [decisions, setDecisions] = useState({});
   const [opinion, setOpinion] = useState("");
   const [showOpinion, setShowOpinion] = useState(false);
+  // Two independent filter axes. They were one field, which meant picking
+  // "Review Carefully" silently dropped "Pending" — and "which steps still
+  // need me, of the ones DIWO flagged?" is the question this stage is for.
+  // Status and recommendation now intersect instead of overwriting.
   const [filter, setFilter] = useState("all");
+  const [categoryFilter, setCategoryFilter] = useState("any");
   const [impactFilter, setImpactFilter] = useState("any");
+  const [groupMode, setGroupMode] = useState("recommendation");
   const [strategy, setStrategy] = useState("balanced");
   // The step whose explanation dialog is open, by step_id. One at a time — the
   // same shape Stage 1 uses for its impact drawer.
   const [explaining, setExplaining] = useState(null);
+  // The step whose override confirmation is open, by step_id.
+  const [confirming, setConfirming] = useState(null);
   const [useSample, setUseSample] = useState(false);
   // step_id -> short reason, for decisions that went against the recommendation.
   const [overrideReasons, setOverrideReasons] = useState({});
+  // The recommendation distribution before the last goal change, so the effect
+  // of changing goal can be shown instead of merely asserted.
+  const [baselineSummary, setBaselineSummary] = useState(null);
 
   // ── Resolve the plan actually being rendered ───────────────────────────────
   const currentPlan = planData || (useSample ? PLAN_DATA : null);
@@ -121,13 +149,6 @@ export default function RefactoringPlanApprovalPage({
       : null;
   const steps = currentPlan?.steps || [];
 
-  // A step's identity across plan revisions. step_id cannot be used: the
-  // preference re-ranker renumbers steps from 1, so step 1 of a new plan is
-  // usually a different refactoring than step 1 of the old one. The backend
-  // uses the same triple for its feedback rows (domain step_identity).
-  const identityOf = (step) =>
-    `${step.smell_id ?? ""}|${step.refactoring ?? ""}|${step.target?.file ?? ""}`;
-
   // Decisions are keyed by step_id, which only means anything within one plan.
   // When the plan is replaced, carry each decision over to the step it was
   // actually made on instead of dropping the lot. Adjusted during render
@@ -136,51 +157,67 @@ export default function RefactoringPlanApprovalPage({
   const [prevPlanKey, setPrevPlanKey] = useState(planKey);
   const [prevSteps, setPrevSteps] = useState(steps);
   if (planKey !== prevPlanKey) {
-    const byIdentity = new Map();
-    const reasonsByIdentity = new Map();
-    prevSteps.forEach((step) => {
-      const decision = decisions[step.step_id];
-      if (decision) byIdentity.set(identityOf(step), decision);
-      const reason = overrideReasons[step.step_id];
-      if (reason) reasonsByIdentity.set(identityOf(step), reason);
-    });
-
-    const carried = {};
-    const carriedReasons = {};
-    steps.forEach((step) => {
-      const identity = identityOf(step);
-      const decision = byIdentity.get(identity);
-      if (decision) carried[step.step_id] = decision;
-      const reason = reasonsByIdentity.get(identity);
-      if (reason) carriedReasons[step.step_id] = reason;
-    });
-
+    const carried = carryDecisions(prevSteps, steps, decisions, overrideReasons);
     setPrevPlanKey(planKey);
     setPrevSteps(steps);
-    setDecisions(carried);
-    setOverrideReasons(carriedReasons);
+    setDecisions(carried.decisions);
+    setOverrideReasons(carried.extras);
     setExplaining(null);
+    setConfirming(null);
   }
 
-  /** Approve / reject one step. Local only — never regenerates the plan. */
-  const decide = (id, val) =>
-    setDecisions((prev) => (prev[id] === val ? prev : { ...prev, [id]: val }));
+  const stepById = (id) => steps.find((step) => step.step_id === id) || null;
 
   /**
-   * File-wise decision: every step planned for that file takes the same verdict,
-   * so approving a file approves its whole plan and rejecting it drops the lot.
-   * Clicking the verdict the file already carries clears it back to pending.
+   * Approve / reject / mark-manual one step. Local only — never regenerates
+   * the plan, never calls an agent.
+   *
+   * An override reason belongs to the decision that provoked it, so a verdict
+   * that stops being an override drops its reason rather than carrying a
+   * stale justification into the audit trail.
    */
-  const decideGroup = (group, val) =>
-    setDecisions((prev) => {
-      const alreadyAll = group.steps.every((step) => prev[step.step_id] === val);
-      const next = { ...prev };
-      group.steps.forEach((step) => {
-        if (alreadyAll) delete next[step.step_id];
-        else next[step.step_id] = val;
+  const decide = (id, val) => {
+    setDecisions((prev) => (prev[id] === val ? prev : { ...prev, [id]: val }));
+
+    // Two independent updates rather than one nested inside the other's
+    // updater: an updater function has to be pure, and React may call it more
+    // than once per commit.
+    if (!isOverride(stepById(id), val)) {
+      setOverrideReasons((prev) => {
+        if (!prev[id]) return prev;
+        const trimmed = { ...prev };
+        delete trimmed[id];
+        return trimmed;
       });
-      return next;
-    });
+    }
+  };
+
+  /**
+   * The single entry point for a decision made from a card or the drawer.
+   *
+   * Approving a step DIWO advised against goes through the confirmation first.
+   * The developer is never blocked — the dialog's own button completes the
+   * approval — but the click that overrides a recommendation cannot be the
+   * same reflex as the click that follows one.
+   */
+  const requestDecision = (id, val) => {
+    const step = stepById(id);
+    const category = categoryOf(step);
+    const actions = actionModel(category);
+    if (val === APPROVE && actions.confirmApprove && decisions[id] !== APPROVE) {
+      setConfirming(id);
+      return;
+    }
+    decide(id, val);
+  };
+
+  /** Every step in a group takes the same verdict; re-clicking clears it. */
+  const decideAllIn = (groupSteps, val) =>
+    setDecisions((prev) => decideGroup(groupSteps, val, prev));
+
+  /** The group-scoped form of Select Recommended (§35). */
+  const approveRecommendedInGroup = (groupSteps) =>
+    setDecisions((prev) => approveRecommendedIn(groupSteps, prev));
 
   /**
    * Ask the backend to re-rank and re-score the plan for a new developer goal.
@@ -192,37 +229,31 @@ export default function RefactoringPlanApprovalPage({
    * both are sent as well so an older backend still understands the request.
    */
   const applyStrategy = (next) => {
+    // Snapshot what the plan looked like BEFORE the re-rank, so the effect of
+    // the change can be shown. Captured here rather than derived later: once
+    // the new plan lands, the old distribution is gone.
+    setBaselineSummary(planSummary(currentPlan, strategy));
     setStrategy(next);
-    const preferences = {
-      developer_strategy: next,
-      ...({
-        safety_first: { risk_tolerance: "conservative", impact_focus: "medium" },
-        balanced: { risk_tolerance: "balanced", impact_focus: "high" },
-        max_improvement: { risk_tolerance: "aggressive", impact_focus: "high" },
-      }[next] || { risk_tolerance: "balanced", impact_focus: "high" }),
-    };
-    onDecisionChange?.({ decisions, preferences });
+    onDecisionChange?.({ decisions, preferences: preferencesFor(next) });
   };
 
   /**
    * Approve exactly the steps the backend marked `auto_select_eligible`.
    *
-   * LOCAL STATE ONLY. No RDP call, no SCTVA call, no plan submission — the
-   * developer still presses Forward, and may change any of these before they
-   * do. Review, not-recommended and manual-only steps are left pending on
-   * purpose: they are the ones worth reading.
+   * LOCAL STATE ONLY. No RDP call, no SCTVA call, no plan submission. Review,
+   * not-recommended and manual-only steps are left pending on purpose: they
+   * are the ones worth reading. A step the developer has already decided is
+   * left alone — see selectRecommended().
    */
-  const selectRecommended = () =>
-    setDecisions((prev) => {
-      const next = { ...prev };
-      steps.forEach((step) => {
-        if (isAutoSelectable(step)) next[step.step_id] = "approve";
-      });
-      return next;
-    });
+  const applySelectRecommended = () =>
+    setDecisions((prev) => selectRecommended(steps, prev));
 
-  const selectAll = () =>
-    setDecisions(Object.fromEntries(steps.map((step) => [step.step_id, "approve"])));
+  const applySelectAll = () =>
+    setDecisions((prev) => selectAll(steps, prev));
+
+  /** Reject every step. Local only, like every other bulk action here. */
+  const applyRejectAll = () =>
+    setDecisions((prev) => rejectAll(steps, prev));
 
   const clearDecisions = () => {
     setDecisions({});
@@ -246,41 +277,45 @@ export default function RefactoringPlanApprovalPage({
   }
 
   const summary = planSummary(currentPlan, strategy);
+  const strategyDelta = distributionDelta(baselineSummary, summary);
 
   const matchesStatus = (step) => {
     if (filter === "all") return true;
-    if (filter === "approved") return decisions[step.step_id] === "approve";
-    if (filter === "rejected") return decisions[step.step_id] === "reject";
+    if (filter === "approved") return decisions[step.step_id] === APPROVE;
+    if (filter === "rejected") return decisions[step.step_id] === REJECT;
+    if (filter === "manual") return decisions[step.step_id] === MANUAL;
     if (filter === "pending") return !decisions[step.step_id];
-    // Anything else is a recommendation category.
-    return categoryOf(step) === filter;
+    return true;
+  };
+
+  // The recommendation the BACKEND assigned — read, never re-derived here.
+  // "unassessed" is its own choice rather than being folded into a category,
+  // because a step DIWO never scored is a different thing from a step it
+  // scored badly, and the developer filtering for one does not want the other.
+  const matchesCategory = (step) => {
+    if (categoryFilter === "any") return true;
+    if (categoryFilter === "unassessed") return categoryOf(step) === null;
+    return categoryOf(step) === categoryFilter;
   };
 
   const matchesImpact = (step) =>
     impactFilter === "any" || (step.impact || step.expected_impact) === impactFilter;
 
-  const filtered = steps.filter((step) => matchesStatus(step) && matchesImpact(step));
+  const filtered = steps.filter(
+    (step) => matchesStatus(step) && matchesCategory(step) && matchesImpact(step));
 
-  // Steps are grouped under the file they touch, the same way the Code Smell
-  // Review page groups smells: the file is the unit of review, and its header
-  // decides every step planned for it.
-  const groups = [];
-  const groupByFile = new Map();
-  for (const step of filtered) {
-    const file = step.target?.file || "(module level)";
-    let group = groupByFile.get(file);
-    if (!group) {
-      group = { file, steps: [] };
-      groupByFile.set(file, group);
-      groups.push(group);
-    }
-    group.steps.push(step);
-  }
+  // Counts for the recommendation pills, taken over the WHOLE plan rather than
+  // the filtered set: a filter row whose numbers change as you filter cannot
+  // tell you what is there to filter for.
+  const planBreakdown = groupBreakdown(steps);
+  const anyFilterActive =
+    filter !== "all" || categoryFilter !== "any" || impactFilter !== "any";
 
-  const approved = steps.filter(s => decisions[s.step_id] === "approve").length;
-  const rejected = steps.filter(s => decisions[s.step_id] === "reject").length;
-  const pending = steps.filter(s => !decisions[s.step_id]).length;
+  const sections = buildSections(filtered, groupMode);
+  const counts = countDecisions(steps, decisions);
+  const { approved, rejected, manual, pending } = counts;
   const canProceed = approved > 0 && pending === 0;
+
   const refactoringTypes = [...new Set(steps.map(s => s.refactoring))];
   const summaryText = typeof currentPlan.summary === "string"
     ? currentPlan.summary
@@ -290,27 +325,21 @@ export default function RefactoringPlanApprovalPage({
   // Steps where the developer went against the recommendation. Surfaced before
   // submit, not to argue with them, but because a disagreement is worth one
   // sentence of context for whoever reads the audit trail later.
-  const overrides = steps.filter((step) => {
-    const category = categoryOf(step);
-    const verdict = decisions[step.step_id];
-    if (!category || !verdict) return false;
-    return (verdict === "approve" && (category === "not_recommended" || category === "manual_only"))
-      || (verdict === "reject" && category === "recommended");
-  });
+  const overrides = steps.filter((step) => isOverride(step, decisions[step.step_id]));
 
-  const explainedStep = explaining === null
-    ? null
-    : steps.find((step) => step.step_id === explaining) || null;
+  const explainedStep = explaining === null ? null : stepById(explaining);
+  const confirmingStep = confirming === null ? null : stepById(confirming);
 
   const submit = () => {
     if (!canProceed) return;
 
-    // The structured override reasons ride along with the free-text note, so
-    // the backend's plan-decision feedback keeps them without a schema change.
+    // The structured override reasons ride along with the free-text note, so an
+    // older backend keeps them without a schema change; they are also sent as
+    // their own field for the step-level feedback rows.
     const overrideNote = overrides
       .map((step) => {
         const reason = overrideReasons[step.step_id];
-        const verdict = decisions[step.step_id] === "approve" ? "approved" : "rejected";
+        const verdict = decisions[step.step_id] === APPROVE ? "approved" : "rejected";
         return `step ${step.step_id} (${step.refactoring}) ${verdict} against DIWO's ${categoryOf(step)}${reason ? `: ${reason}` : ""}`;
       })
       .join("; ");
@@ -320,14 +349,7 @@ export default function RefactoringPlanApprovalPage({
       opinion: [opinion, overrideNote && `Overrides — ${overrideNote}`]
         .filter(Boolean).join(" | "),
       plan: currentPlan,
-      preferences: {
-        developer_strategy: strategy,
-        ...({
-          safety_first: { risk_tolerance: "conservative", impact_focus: "medium" },
-          balanced: { risk_tolerance: "balanced", impact_focus: "high" },
-          max_improvement: { risk_tolerance: "aggressive", impact_focus: "high" },
-        }[strategy]),
-      },
+      preferences: preferencesFor(strategy),
       override_reasons: overrideReasons,
     });
   };
@@ -336,26 +358,15 @@ export default function RefactoringPlanApprovalPage({
     <div>
       <SourceBanner origin={origin} meta={planMeta} />
 
-      <PlanningDecisionSummary
-        summary={summary}
-        totalSteps={steps.length}
-        approved={approved}
-        rejected={rejected}
-        pending={pending}
-        strategy={strategy}
-        onStrategyChange={applyStrategy}
-        strategyBusy={loading}
-        onSelectRecommended={selectRecommended}
-        onSelectAll={selectAll}
-        onClearSelection={clearDecisions}
-        activeFilter={filter}
-        onFilterCategory={(category) =>
-          setFilter((prev) => (prev === category ? "all" : category))}
-        planSource={planMeta?.plan_source}
-      />
+      {/* ── What RDP produced ───────────────────────────────────────────────
+          The plan's own identity comes first, because it is the thing being
+          reviewed. DIWO's assessment below is a reading OF this plan, and a
+          reading is easier to trust when the reader has already seen what it
+          is a reading of — plan id, target, step count, and the smells RDP
+          could find no viable refactoring for.
 
-      {/* The RDP plan's own identity, kept intact: DIWO's assessment sits
-          above it, it does not replace it. */}
+          It also keeps the agents in the order the workflow ran them: RDP
+          planned, DIWO assessed, the developer decides. */}
       <Card style={{ marginBottom: 14 }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: 12 }}>
           <div>
@@ -388,69 +399,130 @@ export default function RefactoringPlanApprovalPage({
         )}
       </Card>
 
+      {/* ── What DIWO makes of it ─────────────────────────────────────────── */}
+      <PlanningDecisionSummary
+        summary={summary}
+        totalSteps={steps.length}
+        approved={approved}
+        rejected={rejected}
+        manual={manual}
+        pending={pending}
+        strategy={strategy}
+        onStrategyChange={applyStrategy}
+        strategyBusy={loading}
+        strategyDelta={strategyDelta}
+        onSelectRecommended={applySelectRecommended}
+        onSelectAll={applySelectAll}
+        onRejectAll={applyRejectAll}
+        onClearSelection={clearDecisions}
+        activeFilter={categoryFilter}
+        onFilterCategory={(category) =>
+          setCategoryFilter((prev) => (prev === category ? "any" : category))}
+        planSource={planMeta?.plan_source}
+      />
+
       {/* ── Filters ─────────────────────────────────────────────────────────
-          Status here; recommendation categories are the counters in the header
-          above, which double as filters. Two rows of pills would crowd the
-          control strip for no extra reach. */}
-      <div style={{ display: "flex", gap: 8, marginBottom: 14, flexWrap: "wrap", alignItems: "center" }}>
-        {STATUS_FILTERS.map(f => (
-          <button key={f} onClick={() => setFilter(f)} style={{
-            padding: "5px 12px", borderRadius: 20, fontSize: 11, fontWeight: 600, cursor: "pointer", textTransform: "capitalize",
-            background: filter === f ? C.accent : C.panel, color: filter === f ? "#000" : C.textMuted, border: `1px solid ${filter === f ? C.accent : C.border}`
-          }}>{f}</button>
-        ))}
-
-        {CATEGORY_ORDER.includes(filter) && (
+          Two rows, because they are two different questions and the developer
+          routinely asks them together: "what have I not decided yet" (status)
+          and "what did DIWO flag" (recommendation). Folding both into one
+          field made them mutually exclusive, so "the review-carefully steps I
+          still have not decided" — the single most useful view on this page —
+          could not be expressed at all. */}
+      <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 14 }}>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
           <span style={{
-            padding: "5px 12px", borderRadius: 20, fontSize: 11, fontWeight: 700,
-            background: `${categoryStyle(filter).color}18`,
-            border: `1px solid ${categoryStyle(filter).color}`,
-            color: categoryStyle(filter).color,
+            fontSize: 9.5, color: C.textMuted, textTransform: "uppercase",
+            letterSpacing: 0.9, fontWeight: 700, width: 74, flexShrink: 0,
           }}>
-            {categoryStyle(filter).icon} {categoryStyle(filter).label}
-            <button onClick={() => setFilter("all")} title="Clear this filter" style={{
-              background: "none", border: "none", color: "inherit", cursor: "pointer",
-              marginLeft: 6, padding: 0, fontWeight: 800,
-            }}>✕</button>
+            Decision
           </span>
-        )}
+          {STATUS_FILTERS.map(f => (
+            <button key={f.value} onClick={() => setFilter(f.value)} style={{
+              padding: "5px 12px", borderRadius: 20, fontSize: 11, fontWeight: 600, cursor: "pointer",
+              background: filter === f.value ? C.accent : C.panel,
+              color: filter === f.value ? "#000" : C.textMuted,
+              border: `1px solid ${filter === f.value ? C.accent : C.border}`,
+            }}>{f.label}</button>
+          ))}
 
-        <select
-          value={impactFilter}
-          onChange={(e) => setImpactFilter(e.target.value)}
-          aria-label="Filter by expected impact"
-          style={{ padding: "5px 10px", borderRadius: 8, fontSize: 11, background: C.panel, color: C.text, border: `1px solid ${C.border}`, marginLeft: "auto" }}
-        >
-          <option value="any">Impact: any</option>
-          <option value="high">Impact: High</option>
-          <option value="medium">Impact: Medium</option>
-          <option value="low">Impact: Low</option>
-        </select>
+          <div style={{ marginLeft: "auto", display: "flex", gap: 8, alignItems: "center" }}>
+            <select
+              value={groupMode}
+              onChange={(e) => setGroupMode(e.target.value)}
+              aria-label="Group plan steps by"
+              style={{ padding: "5px 10px", borderRadius: 8, fontSize: 11, background: C.panel, color: C.text, border: `1px solid ${C.border}` }}
+            >
+              <option value="recommendation">Group: recommendation</option>
+              <option value="file">Group: file</option>
+            </select>
+            <select
+              value={impactFilter}
+              onChange={(e) => setImpactFilter(e.target.value)}
+              aria-label="Filter by expected impact"
+              style={{ padding: "5px 10px", borderRadius: 8, fontSize: 11, background: C.panel, color: C.text, border: `1px solid ${C.border}` }}
+            >
+              <option value="any">Impact: any</option>
+              <option value="high">Impact: High</option>
+              <option value="medium">Impact: Medium</option>
+              <option value="low">Impact: Low</option>
+            </select>
+          </div>
+        </div>
+
+        <RecommendationFilterBar
+          value={categoryFilter}
+          onChange={setCategoryFilter}
+          breakdown={planBreakdown}
+          total={steps.length}
+        />
+
+        {anyFilterActive && (
+          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            <span style={{ width: 74, flexShrink: 0 }} />
+            <button
+              onClick={() => { setFilter("all"); setCategoryFilter("any"); setImpactFilter("any"); }}
+              style={{
+                padding: "3px 11px", borderRadius: 20, fontSize: 10.5, fontWeight: 600,
+                cursor: "pointer", background: "none", color: C.textMuted,
+                border: `1px solid ${C.border}`,
+              }}
+            >
+              Clear filters
+            </button>
+            <span style={{ fontSize: 10.5, color: C.textMuted }}>
+              Filters only change what is shown — no decision is altered.
+            </span>
+          </div>
+        )}
       </div>
 
       {/* Height-capped column: the group cards must not shrink, or a file with
           many steps would be squeezed and its last rows clipped by the card's
           own overflow:hidden instead of scrolling here. */}
       <div style={{
-        display: "flex", flexDirection: "column", gap: 10,
-        maxHeight: "min(72vh, 760px)", overflowY: "auto", paddingRight: 4,
+        display: "flex", flexDirection: "column", gap: 14,
+        maxHeight: "min(74vh, 820px)", overflowY: "auto", paddingRight: 4,
       }}>
         {filtered.length === 0 && (
           <div style={{ padding: "28px 20px", textAlign: "center", background: C.panel, border: `1px dashed ${C.border}`, borderRadius: 10, color: C.textMuted, fontSize: 13, flexShrink: 0 }}>
             {steps.length === 0
               ? "The Refactoring Planning Agent produced no steps for this report — every smell was skipped. Fall back to Smell Review and select different files."
-              : "No steps match the current filter."}
+              : categoryFilter !== "any"
+                ? `No ${categoryFilter === "unassessed" ? "unassessed" : categoryStyle(categoryFilter).short.toLowerCase()} step matches the other filters.`
+                : "No steps match the current filter."}
           </div>
         )}
 
-        {groups.map(group => (
-          <PlanFileGroup
-            key={group.file}
-            group={group}
+        {sections.map(section => (
+          <CategorySection
+            key={section.key}
+            section={section}
+            grouped={groupMode === "recommendation"}
             decisions={decisions}
             overrideReasons={overrideReasons}
-            onDecide={decide}
-            onDecideGroup={decideGroup}
+            onDecide={requestDecision}
+            onDecideAllIn={decideAllIn}
+            onApproveRecommendedIn={approveRecommendedInGroup}
             onExplain={setExplaining}
             onOverrideReason={(id, reason) =>
               setOverrideReasons((prev) => ({ ...prev, [id]: reason }))}
@@ -460,19 +532,33 @@ export default function RefactoringPlanApprovalPage({
 
       {filtered.length > 0 && (
         <div style={{ marginTop: 10, fontSize: 11, color: C.textMuted }}>
-          Showing {filtered.length} step{filtered.length > 1 ? "s" : ""} across {groups.length} file{groups.length > 1 ? "s" : ""}
+          Showing {filtered.length} step{filtered.length > 1 ? "s" : ""} in {sections.length}{" "}
+          {groupMode === "recommendation" ? "recommendation group" : "file"}
+          {sections.length > 1 ? "s" : ""}
           {filtered.length < steps.length && ` (${steps.length - filtered.length} hidden by the current filter)`}.
-          {" "}Approving or rejecting a file applies to every step planned for it.
         </div>
       )}
 
-      {overrides.length > 0 && (
+      {manual > 0 && (
         <div style={{
           marginTop: 14, padding: "12px 16px", borderRadius: 10,
           background: `${C.info}0a`, border: `1px solid ${C.info}40`,
           fontSize: 12, color: C.textSub, lineHeight: 1.6,
         }}>
-          <b style={{ color: C.info }}>ⓘ You went against DIWO on {overrides.length} step{overrides.length > 1 ? "s" : ""}.</b>
+          <b style={{ color: C.info }}>🔧 {manual} step{manual > 1 ? "s" : ""} marked for manual work.</b>
+          {" "}These stay on your list and are recorded with the plan, but they are
+          <b> not</b> forwarded to the Transformation Agent — SCTVA has no safe
+          automatic form for them, so approving them would send a step it cannot execute.
+        </div>
+      )}
+
+      {overrides.length > 0 && (
+        <div style={{
+          marginTop: 10, padding: "12px 16px", borderRadius: 10,
+          background: `${C.warn}0a`, border: `1px solid ${C.warn}40`,
+          fontSize: 12, color: C.textSub, lineHeight: 1.6,
+        }}>
+          <b style={{ color: C.warn }}>ⓘ You went against DIWO on {overrides.length} step{overrides.length > 1 ? "s" : ""}.</b>
           {" "}That is exactly what this stage is for — DIWO advises, you decide.
           A one-word reason on those steps (optional) helps DIWO learn where its
           recommendations do not fit how you work.
@@ -502,21 +588,29 @@ export default function RefactoringPlanApprovalPage({
         </button>
         {!canProceed && pending > 0 && (
           <div style={{ display: "flex", alignItems: "center", fontSize: 12, color: C.warn }}>
-            ⚠ Review all {pending} pending steps to proceed
+            ⚠ Decide the {pending} remaining step{pending > 1 ? "s" : ""} to proceed
+          </div>
+        )}
+        {!canProceed && pending === 0 && approved === 0 && (
+          <div style={{ display: "flex", alignItems: "center", fontSize: 12, color: C.warn }}>
+            ⚠ At least one step must be approved for automatic transformation
           </div>
         )}
         <button onClick={submit} disabled={!canProceed} title={
-          rejected > 0
-            ? `${approved} approved step(s) will be transformed; ${rejected} rejected step(s) are dropped from the plan.`
-            : `${approved} approved step(s) will be transformed.`
+          `${approved} approved step(s) will be transformed by SCTVA` +
+          (manual > 0 ? `; ${manual} marked for manual work are not sent` : "") +
+          (rejected > 0 ? `; ${rejected} rejected step(s) are dropped` : "") + "."
         } style={{
           padding: "10px 24px", borderRadius: 8, fontWeight: 700, fontSize: 13, cursor: canProceed ? "pointer" : "not-allowed",
           background: canProceed ? C.accent : C.border, color: canProceed ? "#000" : C.textMuted, border: "none",
           boxShadow: canProceed ? `0 0 20px ${C.accentGlow}` : "none", transition: "all 0.2s"
         }}>
           Forward {approved} Approved Step{approved === 1 ? "" : "s"} to Transformation →
-          {rejected > 0 && (
-            <span style={{ fontWeight: 500, opacity: 0.75 }}> ({rejected} rejected, skipped)</span>
+          {(rejected > 0 || manual > 0) && (
+            <span style={{ fontWeight: 500, opacity: 0.75 }}>
+              {" "}({[rejected > 0 && `${rejected} rejected`, manual > 0 && `${manual} manual`]
+                .filter(Boolean).join(", ")}, not sent)
+            </span>
           )}
         </button>
       </div>
@@ -532,19 +626,286 @@ export default function RefactoringPlanApprovalPage({
           key={explainedStep.step_id}
           step={explainedStep}
           decision={decisions[explainedStep.step_id]}
-          onDecide={decide}
+          onDecide={requestDecision}
           onClose={() => setExplaining(null)}
+        />
+      )}
+
+      {confirmingStep && (
+        <OverrideConfirmDialog
+          key={confirmingStep.step_id}
+          step={confirmingStep}
+          support={supportOf(confirmingStep)}
+          reason={overrideReasons[confirmingStep.step_id]}
+          onReason={(id, reason) =>
+            setOverrideReasons((prev) => {
+              const next = { ...prev };
+              if (reason) next[id] = reason;
+              else delete next[id];
+              return next;
+            })}
+          onConfirm={(id) => {
+            setDecisions((prev) => ({ ...prev, [id]: APPROVE }));
+            setConfirming(null);
+          }}
+          onCancel={() => setConfirming(null)}
         />
       )}
     </div>
   );
 }
 
+// ─── Grouping ────────────────────────────────────────────────────────────────
+
+/**
+ * Group the visible steps for display.
+ *
+ * "recommendation" gives the two-level arrangement: category section → file →
+ * steps. Grouping by category first is what makes the recommendation load
+ * bearing — a flat list of twelve cards makes "6 recommended, 3 to review" a
+ * claim the developer has to verify by reading every card, while a section
+ * headed "Recommended (6)" is the claim and the evidence at once.
+ *
+ * "file" keeps the original arrangement, which is still the better one when the
+ * developer is reasoning about a particular class rather than about the plan.
+ * The file level is preserved inside the category sections either way, so the
+ * path is never lost.
+ */
+function buildSections(steps, mode) {
+  const byFile = (list) => {
+    const groups = [];
+    const index = new Map();
+    list.forEach((step) => {
+      const file = step.target?.file || "(module level)";
+      let group = index.get(file);
+      if (!group) {
+        group = { file, steps: [] };
+        index.set(file, group);
+        groups.push(group);
+      }
+      group.steps.push(step);
+    });
+    return groups;
+  };
+
+  if (mode === "file") {
+    return byFile(steps).map((group) => ({
+      key: `file:${group.file}`,
+      category: null,
+      files: [group],
+      steps: group.steps,
+    }));
+  }
+
+  // Category order first, then anything the backend did not assess.
+  const order = [...CATEGORY_ORDER, null];
+  return order
+    .map((category) => {
+      const inCategory = steps.filter((step) => categoryOf(step) === category);
+      if (inCategory.length === 0) return null;
+      return {
+        key: `cat:${category || "unassessed"}`,
+        category,
+        files: byFile(inCategory),
+        steps: inCategory,
+      };
+    })
+    .filter(Boolean);
+}
+
 // ─── Sub-components ──────────────────────────────────────────────────────────
 
-/** The file path banner heading each group. Its border is the file's own colour,
- *  so one file's block is told from the next at a glance. Sticky, so the path
- *  stays visible while scrolling a file with many steps. */
+/**
+ * One recommendation category, with the files it touches inside it.
+ *
+ * The section header carries the count and the bulk action appropriate to the
+ * category: Recommended offers "Approve all N", Manual offers "Add all N to
+ * manual work", and Not Recommended offers "Reject all N". Not Recommended is
+ * deliberately given no bulk approve — a one-click "approve everything DIWO
+ * advised against" is the exact affordance this redesign removed from the top
+ * of the page.
+ */
+function CategorySection({
+  section, grouped, decisions, overrideReasons,
+  onDecide, onDecideAllIn, onApproveRecommendedIn, onExplain, onOverrideReason,
+}) {
+  const style = categoryStyle(section.category);
+  const total = section.steps.length;
+  const counts = countDecisions(section.steps, decisions);
+
+  const bulk = [];
+  if (section.category === MANUAL_ONLY) {
+    bulk.push({ label: `Add all ${total} to manual work`, verdict: MANUAL, tone: C.info });
+    bulk.push({ label: "Skip all", verdict: REJECT, tone: C.danger });
+  } else if (section.category === NOT_RECOMMENDED) {
+    bulk.push({ label: `Reject all ${total}`, verdict: REJECT, tone: C.danger });
+  } else if (section.category) {
+    bulk.push({ label: `Approve all ${total}`, verdict: APPROVE, tone: C.accent });
+    bulk.push({ label: "Reject all", verdict: REJECT, tone: C.danger });
+  }
+
+  return (
+    <div style={{ flexShrink: 0 }}>
+      {grouped && (
+        <div style={{
+          display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap",
+          padding: "9px 14px", marginBottom: 8, borderRadius: 9,
+          background: `${style.color}0d`, border: `1px solid ${style.color}40`,
+        }}>
+          <span aria-hidden="true" style={{ fontSize: 13 }}>{style.sectionIcon}</span>
+          <span style={{ fontSize: 13, fontWeight: 800, color: style.color }}>
+            {style.section}
+          </span>
+          <span style={{
+            fontFamily: "monospace", fontSize: 12, fontWeight: 800, color: style.color,
+            background: `${style.color}18`, padding: "1px 8px", borderRadius: 20,
+          }}>
+            {total}
+          </span>
+          <span style={{ fontSize: 11, color: C.textMuted, flex: "1 1 220px", minWidth: 160 }}>
+            {style.blurb}
+          </span>
+
+          <span style={{ fontSize: 10.5, color: C.textMuted, display: "flex", gap: 9 }}>
+            {counts.approved > 0 && <span style={{ color: C.accent }}>{counts.approved} approved</span>}
+            {counts.manual > 0 && <span style={{ color: C.info }}>{counts.manual} manual</span>}
+            {counts.rejected > 0 && <span style={{ color: C.danger }}>{counts.rejected} rejected</span>}
+            {counts.pending > 0 && <span style={{ color: C.warn }}>{counts.pending} pending</span>}
+          </span>
+
+          <span style={{ display: "flex", gap: 7, flexShrink: 0 }}>
+            {bulk.map((action) => (
+              <button
+                key={action.label}
+                type="button"
+                onClick={() => onDecideAllIn(section.steps, action.verdict)}
+                title={`${action.label} — a local decision; nothing is submitted`}
+                style={{
+                  padding: "5px 12px", borderRadius: 7, fontSize: 11, fontWeight: 700,
+                  cursor: "pointer", border: `1px solid ${action.tone}40`,
+                  background: `${action.tone}14`, color: action.tone,
+                }}
+              >
+                {action.label}
+              </button>
+            ))}
+          </span>
+        </div>
+      )}
+
+      <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+        {section.files.map((group) => (
+          <PlanFileGroup
+            key={group.file}
+            group={group}
+            showBreakdown={!grouped}
+            decisions={decisions}
+            overrideReasons={overrideReasons}
+            onDecide={onDecide}
+            onDecideAllIn={onDecideAllIn}
+            onApproveRecommendedIn={onApproveRecommendedIn}
+            onExplain={onExplain}
+            onOverrideReason={onOverrideReason}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Filter by the recommendation DIWO assigned.
+ *
+ *     RECOMMENDATION  [All 12] [🟢 Recommended 6] [🟡 Review 3] …
+ *
+ * The counts are over the whole plan, not the filtered view, so the row
+ * doubles as a legend: it says what this plan contains before the developer
+ * commits to looking at any of it. A category the plan has none of is shown
+ * disabled rather than hidden — "there are no red steps here" is worth
+ * knowing, and a row whose buttons come and go between plans is harder to aim
+ * at than one that does not move.
+ *
+ * Every count comes from the categories the BACKEND assigned. This component
+ * groups them; it never decides one.
+ */
+function RecommendationFilterBar({ value, onChange, breakdown, total }) {
+  const options = [
+    { value: "any", icon: "◈", label: "All", count: total, color: C.textSub },
+    ...CATEGORY_ORDER.map((category) => ({
+      value: category,
+      icon: categoryStyle(category).icon,
+      label: categoryStyle(category).short,
+      count: breakdown.counts[category],
+      color: categoryStyle(category).color,
+    })),
+  ];
+
+  // Only offered when the plan actually holds steps DIWO could not assess.
+  if (breakdown.unassessed > 0) {
+    options.push({
+      value: "unassessed", icon: "○", label: "Not assessed",
+      count: breakdown.unassessed, color: C.textMuted,
+    });
+  }
+
+  return (
+    <div role="radiogroup" aria-label="Filter by DIWO recommendation"
+         style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+      <span style={{
+        fontSize: 9.5, color: C.textMuted, textTransform: "uppercase",
+        letterSpacing: 0.9, fontWeight: 700, width: 74, flexShrink: 0,
+      }}>
+        DIWO says
+      </span>
+
+      {options.map((option) => {
+        const selected = value === option.value;
+        const empty = option.value !== "any" && !option.count;
+        return (
+          <button
+            key={option.value}
+            type="button"
+            role="radio"
+            aria-checked={selected}
+            disabled={empty}
+            // Clicking the active one clears it, so the row needs no separate
+            // reset control of its own.
+            onClick={() => onChange(selected ? "any" : option.value)}
+            title={
+              empty
+                ? `This plan has no ${option.label.toLowerCase()} step`
+                : `Show only the ${option.count} ${option.label.toLowerCase()} step(s)`
+            }
+            style={{
+              display: "inline-flex", alignItems: "center", gap: 6,
+              padding: "5px 12px", borderRadius: 20,
+              fontSize: 11, fontWeight: selected ? 800 : 600,
+              cursor: empty ? "not-allowed" : "pointer",
+              background: selected ? `${option.color}26` : C.panel,
+              color: selected ? option.color : C.textMuted,
+              border: `1px solid ${selected ? option.color : C.border}`,
+              opacity: empty ? 0.4 : 1,
+              transition: "all 0.15s",
+            }}
+          >
+            {/* Never colour alone: the icon and the word carry it too. */}
+            <span aria-hidden="true">{option.icon}</span>
+            <span>{option.label}</span>
+            <span style={{
+              fontFamily: "monospace", fontWeight: 800,
+              color: selected ? option.color : C.textSub,
+            }}>
+              {option.count ?? 0}
+            </span>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+/** The file path banner heading each group. Sticky, so the path stays visible
+ *  while scrolling a file with many steps. */
 function FilePathBar({ file, color, children }) {
   return (
     <div style={{
@@ -555,15 +916,15 @@ function FilePathBar({ file, color, children }) {
       position: "sticky", top: 0, zIndex: 1,
     }}>
       <span style={{
-        fontSize: 16, fontWeight: 700, color, letterSpacing: 1,
+        fontSize: 13, fontWeight: 700, color, letterSpacing: 1,
         textTransform: "uppercase", flexShrink: 0,
       }}>
-        File Path
+        File
       </span>
       <span
         title={file}
         style={{
-          fontSize: 16, fontWeight: 700, color: C.text, fontFamily: "monospace",
+          fontSize: 14, fontWeight: 700, color: C.text, fontFamily: "monospace",
           overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
           minWidth: 0, flexShrink: 1,
         }}
@@ -576,70 +937,83 @@ function FilePathBar({ file, color, children }) {
 }
 
 /**
- * One file's planned steps, laid out the way the Code Smell Review page lays
- * out a file's smells: a sticky file header, then the steps row by row.
+ * One file's planned steps: a sticky file header, then the step cards.
  *
- * The header decides the whole file — every step in it takes the same verdict —
- * while each row keeps its own buttons for overriding a single step afterwards.
- * The card is never height-capped: it grows with the number of steps, and
- * flexShrink: 0 stops the scrolling parent squeezing it.
- *
- * When the file's steps do not all carry the same recommendation, the mix is
- * spelled out above the "All ✓" button. Approving four steps at once must not
- * imply that all four are equally safe when one of them is manual-only.
+ * The header's primary bulk action is "Approve recommended" — the same rule as
+ * the plan-level button, scoped to this file. "All ✓" survives beside it as the
+ * secondary, because a file whose steps are all green is a real case, but when
+ * the file's steps do NOT all carry the same recommendation the mix is spelled
+ * out first: approving four steps at once must not imply that all four are
+ * equally safe when one of them is manual-only.
  */
 function PlanFileGroup({
-  group, decisions, overrideReasons,
-  onDecide, onDecideGroup, onExplain, onOverrideReason,
+  group, showBreakdown, decisions, overrideReasons,
+  onDecide, onDecideAllIn, onApproveRecommendedIn, onExplain, onOverrideReason,
 }) {
   const total = group.steps.length;
-  const approved = group.steps.filter(s => decisions[s.step_id] === "approve").length;
-  const rejected = group.steps.filter(s => decisions[s.step_id] === "reject").length;
-  const pending = total - approved - rejected;
-
-  const allApproved = approved === total;
-  const allRejected = rejected === total;
-  const borderColor = pending > 0 ? C.border : approved > 0 ? C.accent : C.danger;
-  const color = FILE_ACCENT;
+  const counts = countDecisions(group.steps, decisions);
   const breakdown = groupBreakdown(group.steps);
+
+  const allApproved = counts.approved === total;
+  const allRejected = counts.rejected === total;
+  const borderColor = counts.pending > 0
+    ? C.border
+    : counts.approved > 0 ? C.accent : counts.manual > 0 ? C.info : C.danger;
 
   return (
     <div style={{
       background: C.panel,
       border: `1px solid ${borderColor}`,
       borderRadius: 10, overflow: "hidden", flexShrink: 0,
-      boxShadow: pending === 0 && approved > 0 ? `0 0 12px ${C.accentGlow}` : "none",
+      boxShadow: counts.pending === 0 && counts.approved > 0 ? `0 0 12px ${C.accentGlow}` : "none",
       transition: "all 0.2s",
     }}>
-      <FilePathBar file={group.file} color={color}>
+      <FilePathBar file={group.file} color={FILE_ACCENT}>
         <Badge label={`${total} step${total > 1 ? "s" : ""}`} color={C.info} />
         <span style={{ marginLeft: "auto", fontSize: 11, flexShrink: 0, display: "flex", gap: 10, alignItems: "center" }}>
-          <span style={{ color: approved > 0 ? C.accent : C.textMuted }}>{approved}/{total} approved</span>
-          {rejected > 0 && <span style={{ color: C.danger }}>{rejected} rejected</span>}
-          {pending > 0 && <span style={{ color: C.warn }}>{pending} pending</span>}
+          <span style={{ color: counts.approved > 0 ? C.accent : C.textMuted }}>{counts.approved}/{total} approved</span>
+          {counts.manual > 0 && <span style={{ color: C.info }}>{counts.manual} manual</span>}
+          {counts.rejected > 0 && <span style={{ color: C.danger }}>{counts.rejected} rejected</span>}
+          {counts.pending > 0 && <span style={{ color: C.warn }}>{counts.pending} pending</span>}
         </span>
         <div style={{ display: "flex", gap: 8, flexShrink: 0 }}>
+          {/* Primary: only what DIWO can vouch for. */}
+          {breakdown.autoSelectable > 0 && breakdown.autoSelectable < total && (
+            <button
+              onClick={() => onApproveRecommendedIn(group.steps)}
+              title={`Approve the ${breakdown.autoSelectable} recommended step(s) in this file, leaving the rest for you to read`}
+              style={{
+                padding: "6px 13px", borderRadius: 7, fontSize: 12, fontWeight: 700,
+                cursor: "pointer", border: "none",
+                background: C.accent, color: "#000",
+              }}
+            >
+              ✓ Approve {breakdown.autoSelectable} recommended
+            </button>
+          )}
           <button
-            onClick={() => onDecideGroup(group, "approve")}
+            onClick={() => onDecideAllIn(group.steps, APPROVE)}
             title={
               breakdown.mixed
                 ? `Approve all ${total} step(s) for this file — they do NOT all carry the same recommendation`
                 : `Approve all ${total} step(s) planned for this file`
             }
             style={{
-              padding: "6px 14px", borderRadius: 7, fontSize: 12, fontWeight: 700, cursor: "pointer", border: "none",
-              background: allApproved ? C.accent : `${C.accent}18`, color: allApproved ? "#000" : C.accent,
+              padding: "6px 13px", borderRadius: 7, fontSize: 12, fontWeight: 700, cursor: "pointer",
+              border: `1px solid ${C.accent}40`,
+              background: allApproved ? C.accent : `${C.accent}14`, color: allApproved ? "#000" : C.accent,
               transition: "all 0.2s",
             }}
           >
-           All ✓
+            All ✓
           </button>
           <button
-            onClick={() => onDecideGroup(group, "reject")}
+            onClick={() => onDecideAllIn(group.steps, REJECT)}
             title={`Reject all ${total} step(s) planned for this file`}
             style={{
-              padding: "6px 14px", borderRadius: 7, fontSize: 12, fontWeight: 700, cursor: "pointer", border: "none",
-              background: allRejected ? C.danger : `${C.danger}18`, color: allRejected ? "#fff" : C.danger,
+              padding: "6px 13px", borderRadius: 7, fontSize: 12, fontWeight: 700, cursor: "pointer",
+              border: `1px solid ${C.danger}40`,
+              background: allRejected ? C.danger : `${C.danger}14`, color: allRejected ? "#fff" : C.danger,
               transition: "all 0.2s",
             }}
           >
@@ -648,8 +1022,10 @@ function PlanFileGroup({
         </div>
       </FilePathBar>
 
-      {/* §47: what "All ✓" is actually about to approve. */}
-      {breakdown.mixed && (
+      {/* What "All ✓" is actually about to approve. Only needed when the file
+          groups steps of different categories together — inside a category
+          section they are all the same by construction. */}
+      {showBreakdown && breakdown.mixed && (
         <div style={{
           display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap",
           padding: "7px 16px", background: `${C.warn}0a`,
@@ -670,7 +1046,7 @@ function PlanFileGroup({
 
       <div style={{ display: "flex", flexDirection: "column" }}>
         {group.steps.map((step, rowIdx) => (
-          <PlanStepRow
+          <PlanStepCard
             key={step.step_id}
             step={step}
             rowIdx={rowIdx}
@@ -687,189 +1063,323 @@ function PlanFileGroup({
 }
 
 /**
- * One planned refactoring step: a fixed-height row that answers the
- * approve/reject question and nothing more.
+ * One planned refactoring step.
  *
- * The recommendation badge and score, the refactoring, impact, risk, smell
- * type, RDP's own score, SCTVA status, the target, RDP's explanation, and
- * DIWO's verdict in one sentence. That is the whole row, so twelve of them are
- * still a list a developer can scan.
+ * Two columns. The left one answers, in order: what DIWO says, what the step
+ * is, the four facts that decide it, and why DIWO says it in one sentence. The
+ * right one is the verdict, in a fixed-width column so that every card in the
+ * plan puts Approve and Reject in the same place — the evidence varies in
+ * height from step to step, and buttons that move with it make a twelve-step
+ * plan a hunt.
  *
- * Everything else — the full reason list, the projected effect, the deferral
- * cost, the score breakdown, the transformation parameters, RDP's prediction
- * and its rejected alternatives — lives in PlanStepDrawer, opened from the
- * button below. It is taller than the viewport, so expanding it here would
- * push the rest of the plan off screen; and it is never built for a step
- * nobody opened.
+ * What is NOT on it: the approve/skip consequence columns, the five-factor
+ * score breakdown, the full reason list, the transformation parameters, RDP's
+ * prediction and its rejected alternatives. Those are the evidence behind the
+ * recommendation, they are together taller than the viewport, and a developer
+ * needs them on the two or three steps they stop at — not on all twelve. They
+ * live in PlanStepDrawer, opened by "Why this recommendation?", and nothing
+ * below this card moves when it opens.
  */
-function PlanStepRow({
-  step, rowIdx, decision, overrideReason,
-  onDecide, onExplain, onOverrideReason,
-}) {
+function PlanStepCard({ step, rowIdx, decision, overrideReason, onDecide, onExplain, onOverrideReason }) {
   const support = supportOf(step);
   const category = support?.category || null;
   const style = categoryStyle(category);
+  const actions = actionModel(category);
 
-  const bgColor =
-    decision === "approve" ? `${C.accent}0a` : decision === "reject" ? `${C.danger}0a` : "transparent";
+  const decisionColor =
+    decision === APPROVE ? C.accent : decision === REJECT ? C.danger : decision === MANUAL ? C.info : null;
+
   const targetLabel =
     [step.target?.class, step.target?.method].filter(Boolean).join(".") ||
     step.target?.file ||
     "(module level)";
 
-  // Only the capability is read here, for the SCTVA chip in the header. The
-  // impact, deferral and factor figures belong to the drawer.
-  const capability = support?.capability;
+  const override = isOverride(step, decision);
 
-  const isOverride =
-    (decision === "approve" && (category === "not_recommended" || category === "manual_only")) ||
-    (decision === "reject" && category === "recommended");
+  // The right column holds verdicts only. "Review details" is an action in the
+  // model for the review category — it is what that card should lead with —
+  // but it opens the same drawer as the "Why this recommendation?" link below,
+  // so it is rendered there once rather than as two buttons doing one thing.
+  const verdictKinds = actions.order.filter((kind) => kind !== "explain");
+  const explainLeads = actions.primary === "explain";
 
   return (
     <div style={{
-      padding: "14px 18px", flexShrink: 0, background: bgColor,
+      padding: "14px 18px", flexShrink: 0,
+      background: decisionColor ? `${decisionColor}0a` : "transparent",
       borderTop: rowIdx > 0 ? `1px solid ${C.border}` : "none",
-      borderLeft: `3px solid ${decision === "approve" ? C.accent : decision === "reject" ? C.danger : "transparent"}`,
+      borderLeft: `3px solid ${decisionColor || "transparent"}`,
       transition: "all 0.2s",
     }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12, flexWrap: "wrap" }}>
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", marginBottom: 6 }}>
-            <span style={{ fontSize: 11, color: C.textMuted, fontFamily: "monospace" }}>Step {step.step_id}</span>
-            <PlanningRecommendationBadge support={support} />
-            <Badge label={step.refactoring} color={C.info} />
-            <Pill label={`Impact: ${step.impact || step.expected_impact || "medium"}`} color={impactColor(step.impact || step.expected_impact || "medium")} />
-            <Pill label={`Risk: ${step.risk}`} color={riskColor(step.risk)} />
-            {step.smell_type && (
-              <Pill label={step.smell_type} color={severityColor(step.severity)} />
-            )}
-            {/* RDP's own score is preserved beside DIWO's, never replaced by it. */}
-            {typeof step.score === "number" && (
-              <span style={{ fontSize: 10, color: C.textMuted, fontFamily: "monospace" }} title={`RDP MCDA score (${step.scoring_method || "mcda"})`}>
-                RDP {step.score.toFixed(2)}
-              </span>
-            )}
-            {capability && (
-              <span
-                title={capability.reason || ""}
+    <div style={{ display: "flex", gap: 16, alignItems: "flex-start", flexWrap: "wrap" }}>
+      {/* ── Evidence, left ────────────────────────────────────────────────── */}
+      <div style={{ flex: "1 1 380px", minWidth: 0 }}>
+      {/* ── What DIWO says, first ─────────────────────────────────────────── */}
+      <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", marginBottom: 8 }}>
+        <span style={{ fontSize: 11, color: C.textMuted, fontFamily: "monospace" }}>Step {step.step_id}</span>
+        <PlanningRecommendationBadge support={support} />
+        {decision && (
+          <span style={{
+            fontSize: 10, fontWeight: 800, letterSpacing: 0.7, textTransform: "uppercase",
+            padding: "2px 9px", borderRadius: 20,
+            background: `${decisionColor}1e`, color: decisionColor,
+            border: `1px solid ${decisionColor}55`,
+          }}>
+            {decision === APPROVE ? "✓ Approved" : decision === REJECT ? "✕ Rejected" : "🔧 Manual work"}
+          </span>
+        )}
+        {override && (
+          <span style={{ fontSize: 10, fontWeight: 700, color: C.warn }}>
+            ⚠ Against DIWO's advice
+          </span>
+        )}
+      </div>
+
+      {/* ── What the step is ──────────────────────────────────────────────── */}
+      <div style={{ fontSize: 14, fontWeight: 700, color: C.text, marginBottom: 3 }}>
+        {step.smell_type ? `${step.smell_type} → ` : ""}{step.refactoring}
+      </div>
+      <div style={{ fontSize: 11.5, color: C.textMuted, fontFamily: "monospace", marginBottom: 9 }}>
+        {targetLabel}
+        {Array.isArray(step.target?.lines) && step.target.lines.length > 0 && (
+          <span style={{ marginLeft: 8 }}>L{step.target.lines.join("-")}</span>
+        )}
+        {typeof step.score === "number" && (
+          <span style={{ marginLeft: 10 }} title={`RDP MCDA score (${step.scoring_method || "mcda"})`}>
+            · RDP {step.score.toFixed(2)}
+          </span>
+        )}
+      </div>
+
+      {/* ── The four facts ────────────────────────────────────────────────── */}
+      {support
+        ? <StepFacts step={step} support={support} />
+        : <UnassessedFallback step={step} />}
+
+      {/* ── Why, in one sentence ──────────────────────────────────────────── */}
+      {support && (
+        <div style={{
+          marginTop: 9, padding: "8px 12px", borderRadius: 8,
+          background: `${style.color}0a`, borderLeft: `3px solid ${style.color}`,
+          fontSize: 12, color: C.textSub, lineHeight: 1.5,
+        }}>
+          <b style={{ color: style.color }}>{style.verb}:</b> {support.summary}
+        </div>
+      )}
+
+      {/* ── The way in to the evidence ────────────────────────────────────
+             Emphasised on a Review Carefully card, where reading IS the
+             recommended next action and approving without opening it is the
+             habit this stage exists to interrupt. */}
+      <button
+        onClick={() => onExplain?.(step.step_id)}
+        aria-haspopup="dialog"
+        title="Open the full explanation, what approving buys, what skipping costs, the score breakdown and the transformation details"
+        style={{
+          marginTop: 10, padding: explainLeads ? "7px 14px" : "6px 12px",
+          borderRadius: 7, cursor: "pointer",
+          background: explainLeads ? `${C.warn}18` : C.bg,
+          color: explainLeads ? C.warn : C.textSub,
+          border: `1px solid ${explainLeads ? C.warn : C.border}`,
+          fontSize: explainLeads ? 12 : 11,
+          fontWeight: explainLeads ? 700 : 600,
+          display: "inline-flex", alignItems: "center", gap: 6,
+        }}
+      >
+        <span aria-hidden="true">ⓘ</span>
+        {!support
+          ? "Transformation details"
+          : explainLeads
+            ? (actions.explainLabel || "Review details")
+            : "Why this recommendation?"}
+      </button>
+
+      {/* Optional, never blocking. Shown inline for a rejection of a green
+          step; an approval of a red one collects it in the confirm dialog. */}
+      {override && (
+        <div style={{
+          marginTop: 10, padding: "9px 12px", borderRadius: 8,
+          background: `${C.info}0a`, border: `1px dashed ${C.info}50`,
+        }}>
+          <div style={{ fontSize: 11, color: C.textSub, marginBottom: 6 }}>
+            DIWO marked this <b style={{ color: style.color }}>{style.short.toLowerCase()}</b>, and you{" "}
+            {decision === APPROVE ? "approved" : "rejected"} it. Optional — why?
+          </div>
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+            {OVERRIDE_REASONS.map((reason) => (
+              <button
+                key={reason}
+                onClick={() => onOverrideReason(step.step_id, overrideReason === reason ? "" : reason)}
+                aria-pressed={overrideReason === reason}
                 style={{
-                  fontSize: 10, fontFamily: "monospace", fontWeight: 700,
-                  color: capability.actual_step_mappable ? C.accent : C.warn,
+                  padding: "3px 10px", borderRadius: 20, fontSize: 10.5, fontWeight: 600,
+                  cursor: "pointer",
+                  background: overrideReason === reason ? `${C.info}25` : C.bg,
+                  color: overrideReason === reason ? C.info : C.textMuted,
+                  border: `1px solid ${overrideReason === reason ? C.info : C.border}`,
                 }}
               >
-                SCTVA {String(capability.status || "unknown").toUpperCase()}
-                {capability.actual_step_mappable ? " ✓" : " ⚠"}
-              </span>
-            )}
+                {reason}
+              </button>
+            ))}
           </div>
+        </div>
+      )}
+      </div>
 
-          <div style={{ fontSize: 13, fontWeight: 600, color: C.text, marginBottom: 4 }}>
-            {targetLabel}
-            {Array.isArray(step.target?.lines) && step.target.lines.length > 0 && (
-              <span style={{ fontSize: 11, fontWeight: 400, color: C.textMuted, marginLeft: 8, fontFamily: "monospace" }}>
-                L{step.target.lines.join("-")}
-              </span>
-            )}
-          </div>
-
-          <div style={{ fontSize: 12, color: C.textSub, lineHeight: 1.5 }}>{step.explanation}</div>
-
-          {/* The verdict in one sentence, always visible — a badge and a number
-              with nothing behind them is exactly what this stage replaced.
-              Everything that BACKS it up sits behind the toggle: a card
-              carrying the full reason list, the projected effect, the deferral
-              cost and the score breakdown is unreadable twelve times down a
-              page, and the developer only needs that depth on the steps they
-              stop at. */}
-          {support && (
-            <div style={{
-              marginTop: 9, padding: "8px 12px", borderRadius: 8,
-              background: `${style.color}0a`, borderLeft: `3px solid ${style.color}`,
-              fontSize: 12, color: C.textSub, lineHeight: 1.5,
-            }}>
-              <b style={{ color: style.color }}>{style.verb}:</b> {support.summary}
-            </div>
-          )}
-
-          {/* Opens the explanation in a dialog rather than expanding here. The
-              evidence is taller than the viewport, so inline expansion pushed
-              every other step off screen and cost the developer their place in
-              the plan. Nothing below this row moves when it is clicked. */}
-          <button
-            onClick={() => onExplain?.(step.step_id)}
-            aria-haspopup="dialog"
-            title="Open the full explanation, score breakdown and transformation details"
-            style={{
-              marginTop: 9, padding: "5px 12px", borderRadius: 7, cursor: "pointer",
-              background: C.bg, color: C.textSub, border: `1px solid ${C.border}`,
-              fontSize: 11, fontWeight: 600,
-              display: "inline-flex", alignItems: "center", gap: 6,
-            }}
-          >
-            <span aria-hidden="true">ⓘ</span>
-            {support ? "Why this recommendation? · Transformation details" : "Transformation details"}
-          </button>
-
-          {/* §48: optional, never blocking. */}
-          {isOverride && (
-            <div style={{
-              marginTop: 10, padding: "9px 12px", borderRadius: 8,
-              background: `${C.info}0a`, border: `1px dashed ${C.info}50`,
-            }}>
-              <div style={{ fontSize: 11, color: C.textSub, marginBottom: 6 }}>
-                DIWO marked this <b style={{ color: style.color }}>{style.short.toLowerCase()}</b>, and you{" "}
-                {decision === "approve" ? "approved" : "rejected"} it. Optional — why?
-              </div>
-              <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-                {OVERRIDE_REASONS.map((reason) => (
-                  <button
-                    key={reason}
-                    onClick={() => onOverrideReason(step.step_id, overrideReason === reason ? "" : reason)}
-                    style={{
-                      padding: "3px 10px", borderRadius: 20, fontSize: 10.5, fontWeight: 600,
-                      cursor: "pointer",
-                      background: overrideReason === reason ? `${C.info}25` : C.bg,
-                      color: overrideReason === reason ? C.info : C.textMuted,
-                      border: `1px solid ${overrideReason === reason ? C.info : C.border}`,
-                    }}
-                  >
-                    {reason}
-                  </button>
-                ))}
-              </div>
-            </div>
-          )}
+      {/* ── Decision, right ────────────────────────────────────────────────
+             Every card puts its verdicts in the same place at the same width,
+             so a developer working down a twelve-step plan is not re-locating
+             the buttons on each card as the evidence above them changes
+             height. The column wraps underneath on a narrow viewport rather
+             than squeezing the evidence into a ribbon of one-word lines. */}
+      <div style={{
+        display: "flex", flexDirection: "column", gap: 7,
+        flexShrink: 0, width: 190, minWidth: 190,
+      }}>
+        <div style={{
+          fontSize: 9, color: C.textMuted, textTransform: "uppercase",
+          letterSpacing: 0.9, fontWeight: 700,
+        }}>
+          Your decision
         </div>
 
-        <div style={{ display: "flex", flexDirection: "column", gap: 8, flexShrink: 0 }}>
-          <div style={{ display: "flex", gap: 8 }}>
-            <button onClick={() => onDecide(step.step_id, "approve")} style={{
-              padding: "6px 14px", borderRadius: 7, fontSize: 12, fontWeight: 700, cursor: "pointer", border: "none",
-              background: decision === "approve" ? C.accent : `${C.accent}18`, color: decision === "approve" ? "#000" : C.accent,
-              transition: "all 0.2s"
-            }}>✓ Approve</button>
-            <button onClick={() => onDecide(step.step_id, "reject")} style={{
-              padding: "6px 14px", borderRadius: 7, fontSize: 12, fontWeight: 700, cursor: "pointer", border: "none",
-              background: decision === "reject" ? C.danger : `${C.danger}18`, color: decision === "reject" ? "#fff" : C.danger,
-              transition: "all 0.2s"
-            }}>✕ Reject</button>
-          </div>
+        {verdictKinds.map((kind) => (
+          <StepActionButton
+            key={kind}
+            kind={kind}
+            actions={actions}
+            primary={actions.primary === kind}
+            decision={decision}
+            block
+            onClick={() => onDecide(step.step_id, kind)}
+          />
+        ))}
 
-          {/* Approving a step DIWO warned about is allowed, and says so. */}
-          {decision === "approve" && category === "not_recommended" && (
-            <span style={{ fontSize: 10, color: C.danger, maxWidth: 150, textAlign: "right", lineHeight: 1.4 }}>
-              ⚠ Approved against DIWO's advice
-            </span>
-          )}
-          {decision === "approve" && category === "manual_only" && (
-            <span style={{ fontSize: 10, color: C.info, maxWidth: 150, textAlign: "right", lineHeight: 1.4 }}>
-              ⓘ Will not change code automatically
-            </span>
-          )}
-        </div>
+        {/* Deciding against the advice is allowed, and says so. */}
+        {decision === APPROVE && category === NOT_RECOMMENDED && (
+          <span style={{ fontSize: 10, color: C.danger, lineHeight: 1.4 }}>
+            &#9888; Approved against DIWO advice
+          </span>
+        )}
+        {decision === APPROVE && category === MANUAL_ONLY && (
+          <span style={{ fontSize: 10, color: C.warn, lineHeight: 1.4 }}>
+            &#9888; SCTVA cannot execute this &mdash; it may change no code
+          </span>
+        )}
+        {decision === MANUAL && (
+          <span style={{ fontSize: 10, color: C.info, lineHeight: 1.4 }}>
+            &#9432; Yours to do by hand &mdash; not sent to SCTVA
+          </span>
+        )}
       </div>
     </div>
+    </div>
   );
+}
+
+/**
+ * One action button, styled by whether it leads for this category.
+ *
+ * The primary action is filled; the rest are outlined. That difference is the
+ * mechanism by which the recommendation reaches the developer's hands rather
+ * than only their eyes: on a red card the filled button is Reject, on a blue
+ * one it is "Add to manual work", and approving is still right there but is no
+ * longer the path of least resistance.
+ */
+function StepActionButton({ kind, actions, primary, decision, block = false, onClick }) {
+  const spec = {
+    [APPROVE]: { label: actions.approveLabel || "✓ Approve", tone: C.accent, on: "#000" },
+    [REJECT]: { label: actions.rejectLabel || "✕ Reject", tone: C.danger, on: "#fff" },
+    [MANUAL]: { label: actions.manualLabel || "🔧 Manual work", tone: C.info, on: "#fff" },
+    explain: { label: actions.explainLabel || "Review details", tone: C.warn, on: "#000" },
+  }[kind];
+
+  if (!spec) return null;
+
+  const active = kind !== "explain" && decision === kind;
+
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      title={
+        kind === APPROVE && actions.confirmApprove
+          ? "DIWO advised against this — you will be asked to confirm"
+          : undefined
+      }
+      style={{
+        padding: primary ? "8px 16px" : "7px 13px",
+        borderRadius: 7,
+        fontSize: 12,
+        fontWeight: 700,
+        cursor: "pointer",
+        width: block ? "100%" : undefined,
+        textAlign: "center",
+        border: active || primary ? "none" : `1px solid ${spec.tone}40`,
+        background: active ? spec.tone : primary ? `${spec.tone}22` : `${spec.tone}10`,
+        color: active ? spec.on : spec.tone,
+        boxShadow: primary && !active ? `inset 0 0 0 1px ${spec.tone}66` : "none",
+        opacity: primary ? 1 : 0.92,
+        transition: "all 0.2s",
+      }}
+    >
+      {spec.label}
+    </button>
+  );
+}
+
+/**
+ * A step the backend produced no recommendation for.
+ *
+ * Stage 2 has to render whether or not the assessment ran — an older backend,
+ * the bundled sample plan, or an enrichment that failed. The card falls back to
+ * the RDP evidence it does have and says plainly that the recommendation is
+ * missing, rather than showing an empty badge that could be read as "no
+ * concerns".
+ */
+function UnassessedFallback({ step }) {
+  return (
+    <div style={{
+      padding: "9px 12px", borderRadius: 8,
+      background: C.bg, border: `1px dashed ${C.border}`,
+    }}>
+      <div style={{ fontSize: 11.5, color: C.textMuted, lineHeight: 1.5, marginBottom: 7 }}>
+        <b style={{ color: C.textSub }}>DIWO decision support is unavailable for this step.</b>{" "}
+        Review the RDP evidence below manually.
+      </div>
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+        <Pill
+          label={`Impact: ${step.impact || step.expected_impact || "medium"}`}
+          color={impactColor(step.impact || step.expected_impact || "medium")}
+        />
+        <Pill label={`Risk: ${step.risk}`} color={riskColor(step.risk)} />
+        {step.smell_type && <Pill label={step.smell_type} color={severityColor(step.severity)} />}
+        {typeof step.score === "number" && (
+          <span style={{ fontSize: 11, color: C.textMuted, fontFamily: "monospace" }}>
+            RDP {step.score.toFixed(2)}
+          </span>
+        )}
+      </div>
+      {step.explanation && (
+        <div style={{ fontSize: 11.5, color: C.textSub, lineHeight: 1.55, marginTop: 7 }}>
+          {step.explanation}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Goal → the preference pair the backend re-ranker has always taken. */
+function preferencesFor(strategy) {
+  return {
+    developer_strategy: strategy,
+    ...({
+      safety_first: { risk_tolerance: "conservative", impact_focus: "medium" },
+      balanced: { risk_tolerance: "balanced", impact_focus: "high" },
+      max_improvement: { risk_tolerance: "aggressive", impact_focus: "high" },
+    }[strategy] || { risk_tolerance: "balanced", impact_focus: "high" }),
+  };
 }
 
 const ORIGIN_LABEL = {

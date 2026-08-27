@@ -1,6 +1,6 @@
 /**
- * Stage 2 decision-support presentation helpers
- * =============================================
+ * Stage 2 decision-support presentation
+ * =====================================
  * R26-SE-008 | Bandara S M Y M | IT22277886
  *
  * PRESENTATION ONLY. The recommendation itself — the category, the Decision
@@ -13,21 +13,19 @@
  * one produced a given screenshot — so this module maps a category the backend
  * already chose onto a colour, an icon and a label, and stops.
  *
- * The one thing it does compute is `summarizeSteps()`, and only as a fallback
- * for a plan that arrived without `decision_support_summary` (an older backend,
- * or the bundled sample plan). It counts categories the backend assigned; it
- * never assigns one.
+ * The decision SEMANTICS — what a bulk action touches, what survives a
+ * re-rank, what reaches SCTVA — live in planningSelection.js, which imports
+ * nothing and is therefore testable under plain `node`. They are re-exported
+ * here so the components keep importing one module.
  */
 
 import { C } from "../diwoTheme.jsx";
+import {
+  MANUAL_ONLY, NOT_RECOMMENDED, RECOMMENDED, REVIEW,
+} from "./planningSelection.js";
 
-export const RECOMMENDED = "recommended";
-export const REVIEW = "review";
-export const NOT_RECOMMENDED = "not_recommended";
-export const MANUAL_ONLY = "manual_only";
-
-/** Display order, worst-to-best being the wrong way round for a summary row. */
-export const CATEGORY_ORDER = [RECOMMENDED, REVIEW, NOT_RECOMMENDED, MANUAL_ONLY];
+// The decision semantics, re-exported so components import one module.
+export * from "./planningSelection.js";
 
 /**
  * Colour, icon and wording per category.
@@ -42,28 +40,40 @@ export const CATEGORY_STYLE = {
     icon: "🟢",
     label: "Recommended",
     short: "Recommended",
+    section: "Recommended",
+    sectionIcon: "✓",
     verb: "DIWO recommends this step",
+    blurb: "High expected improvement, low transformation risk, and SCTVA can execute it.",
   },
   [REVIEW]: {
     color: C.warn,
     icon: "🟡",
     label: "Review Carefully",
     short: "Review",
+    section: "Needs Your Review",
+    sectionIcon: "⚠",
     verb: "DIWO suggests reading this step first",
+    blurb: "Worth doing, but something about it needs your judgement before it runs.",
   },
   [NOT_RECOMMENDED]: {
     color: C.danger,
     icon: "🔴",
     label: "Not Recommended",
     short: "Not recommended",
+    section: "Not Recommended",
+    sectionIcon: "✕",
     verb: "DIWO does not recommend this step",
+    blurb: "The expected benefit does not cover the risk or the missing evidence.",
   },
   [MANUAL_ONLY]: {
     color: C.info,
     icon: "🔵",
     label: "Manual Refactoring Suggested",
     short: "Manual only",
+    section: "Manual Refactoring",
+    sectionIcon: "🔧",
     verb: "DIWO suggests doing this by hand",
+    blurb: "SCTVA has no safe automatic form for this refactoring in the current build.",
   },
 };
 
@@ -72,20 +82,14 @@ const UNCLASSIFIED = {
   icon: "○",
   label: "Not assessed",
   short: "Not assessed",
+  section: "Not Assessed",
+  sectionIcon: "○",
   verb: "No recommendation was produced for this step",
+  blurb: "DIWO decision support is unavailable for this step — review the RDP evidence manually.",
 };
 
 /** The style block for a category, or a neutral one for an unassessed step. */
 export const categoryStyle = (category) => CATEGORY_STYLE[category] || UNCLASSIFIED;
-
-/** `step.decision_support`, or null when the backend did not assess this step. */
-export const supportOf = (step) =>
-  step && typeof step.decision_support === "object" ? step.decision_support : null;
-
-export const categoryOf = (step) => supportOf(step)?.category || null;
-
-/** Only the backend may mark a step auto-selectable. Absence means "no". */
-export const isAutoSelectable = (step) => supportOf(step)?.auto_select_eligible === true;
 
 /** Human label for the developer strategy the backend reported. */
 export const STRATEGY_OPTIONS = [
@@ -100,108 +104,8 @@ export const STRATEGY_OPTIONS = [
 export const strategyLabel = (value) =>
   STRATEGY_OPTIONS.find((option) => option.value === value)?.label || "Balanced";
 
-/**
- * A per-file breakdown, so a file-level "approve all" says what it is about to
- * approve. §47: a file holding 2 recommended, 1 review and 1 manual-only must
- * not present itself as four equally safe steps.
- */
-export function groupBreakdown(steps) {
-  const counts = { [RECOMMENDED]: 0, [REVIEW]: 0, [NOT_RECOMMENDED]: 0, [MANUAL_ONLY]: 0 };
-  let unassessed = 0;
+/** Risk band → colour, shared by the header metric and the card fact strip. */
+export const RISK_COLOR = { low: C.low, medium: C.warn, high: C.danger };
 
-  (steps || []).forEach((step) => {
-    const category = categoryOf(step);
-    if (category && category in counts) counts[category] += 1;
-    else unassessed += 1;
-  });
-
-  return {
-    counts,
-    unassessed,
-    /** True when the file's steps do not all carry the same recommendation. */
-    mixed: CATEGORY_ORDER.filter((c) => counts[c] > 0).length + (unassessed ? 1 : 0) > 1,
-    nonGreen: counts[REVIEW] + counts[NOT_RECOMMENDED] + counts[MANUAL_ONLY] + unassessed,
-  };
-}
-
-/**
- * Fallback plan-level summary, for a plan that arrived without one.
- *
- * Counts only. The categories were assigned by the backend; a step with no
- * `decision_support` is counted as `unclassified` rather than being guessed
- * into one of the four, because a plan half of which was never assessed must
- * not read as a plan that was.
- */
-export function summarizeSteps(steps, developerStrategy = "balanced") {
-  const list = steps || [];
-  const counts = { [RECOMMENDED]: 0, [REVIEW]: 0, [NOT_RECOMMENDED]: 0, [MANUAL_ONLY]: 0 };
-  const riskRank = { low: 0, medium: 1, high: 2 };
-
-  let unclassified = 0;
-  let autoSelectable = 0;
-  let projectedGain = 0;
-  let gainSeen = false;
-  let reviewMinutes = 0;
-  let minutesSeen = false;
-  let maxRisk = null;
-
-  list.forEach((step) => {
-    const support = supportOf(step);
-    if (!support) {
-      unclassified += 1;
-      return;
-    }
-    if (support.category in counts) counts[support.category] += 1;
-
-    const impact = support.impact || {};
-    const minutes = typeof impact.effort_minutes === "number" ? impact.effort_minutes : null;
-
-    // Gain and effort describe the same set — the steps Select Recommended
-    // would tick — so the two numbers in the header can be read together.
-    if (support.auto_select_eligible) {
-      autoSelectable += 1;
-      if (typeof impact.quality_gain_points === "number") {
-        projectedGain += impact.quality_gain_points;
-        gainSeen = true;
-      }
-      if (minutes !== null) {
-        reviewMinutes += minutes;
-        minutesSeen = true;
-      }
-    }
-
-    const band = impact.risk_band;
-    if (band in riskRank && (maxRisk === null || riskRank[band] > riskRank[maxRisk])) {
-      maxRisk = band;
-    }
-  });
-
-  return {
-    ...counts,
-    unclassified,
-    total_steps: list.length,
-    auto_selectable: autoSelectable,
-    projected_quality_gain: gainSeen ? Math.round(projectedGain * 100) / 100 : null,
-    estimated_review_minutes: minutesSeen ? reviewMinutes : null,
-    max_risk: maxRisk,
-    developer_strategy: developerStrategy,
-    source: "frontend_fallback",
-  };
-}
-
-/** The plan's own summary when it has one, otherwise the counted fallback. */
-export function planSummary(plan, developerStrategy) {
-  const provided = plan?.decision_support_summary;
-  if (provided && typeof provided === "object") return provided;
-  return summarizeSteps(plan?.steps, developerStrategy);
-}
-
-/** "~6.3" / "—". Never invents a value for a figure the backend left null. */
-export const formatPoints = (value, { signed = true } = {}) => {
-  if (typeof value !== "number" || Number.isNaN(value)) return "—";
-  const rounded = Math.round(value * 10) / 10;
-  return `${signed && rounded > 0 ? "+" : ""}${rounded}`;
-};
-
-export const formatMinutes = (value) =>
-  typeof value === "number" && !Number.isNaN(value) ? `~${value} min` : "—";
+/** Impact band → colour, for the "Benefit" fact. */
+export const BENEFIT_COLOR = { high: C.accent, medium: C.warn, low: C.textSub };
