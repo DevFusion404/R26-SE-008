@@ -695,6 +695,7 @@ class SafeCodeTransformationValidationAgent:
             strict_mode=request.execution_options.strict_mode,
             project_source_files=project_files,
             current_file_name=file_entry.file_name,
+            structural_validation_passed=structural_step.passed,
         )
 
         invariant_step = self.invariant_miner.mine(
@@ -2504,6 +2505,23 @@ class SafeCodeTransformationValidationAgent:
             if entry.action_type not in EXTRACT_CLASS_ACTIONS:
                 continue
             metadata = entry.metadata
+            if str(metadata.get("status") or "").lower() == "not_applicable":
+                metadata["final_checks"] = {
+                    "plan_compliance": "NOT_APPLICABLE",
+                    "structural_refactoring": "NOT_APPLICABLE",
+                    "behavior_preservation": "PASS" if behavioral_passed else "FAIL",
+                    "full_api_preservation": "NOT_APPLICABLE",
+                    "state_compatibility": "NOT_APPLICABLE",
+                    "single_state_owner": "NOT_APPLICABLE",
+                    "large_class_reduction": "NOT_APPLICABLE",
+                    "invariant_preservation": "PASS" if invariant_passed else "FAIL",
+                }
+                metadata["behavioral_safety"] = metadata["final_checks"][
+                    "behavior_preservation"
+                ]
+                metadata["final_status"] = "NOT_APPLICABLE"
+                metadata["final_decision"] = "NOT_APPLICABLE"
+                continue
             internal = metadata.get("validation") or {}
             checks = {
                 "plan_compliance": "PASS" if metadata.get("plan_compliance") == "PASS" else "FAIL",
@@ -2581,6 +2599,8 @@ class SafeCodeTransformationValidationAgent:
                     and internal.get("target_resolution") == "PASS"
                     and internal.get("data_flow") == "PASS"
                     and internal.get("structural") == "PASS"
+                    and internal.get("scope_validation", "PASS") == "PASS"
+                    and internal.get("compilation_validation", "PASS") == "PASS"
                     else "FAIL"
                 ),
                 "long_method_reduction": (
@@ -3059,10 +3079,14 @@ class SafeCodeTransformationValidationAgent:
 
             effective_parameters = log_entry.metadata.get("effective_action_parameters")
             if isinstance(effective_parameters, dict):
+                validation_parameters = dict(effective_parameters)
+                validation_parameters["applied_transformation_metadata"] = dict(
+                    log_entry.metadata
+                )
                 effective_actions.append(
                     RefactoringAction(
                         action_type=effective_type,
-                        parameters=dict(effective_parameters),
+                        parameters=validation_parameters,
                         source_step_id=action.source_step_id,
                         source_refactoring=action.source_refactoring,
                         warnings=list(action.warnings),
@@ -3071,13 +3095,29 @@ class SafeCodeTransformationValidationAgent:
                 continue
 
             if effective_type == action.action_type:
-                effective_actions.append(action)
+                validation_parameters = dict(action.parameters or {})
+                validation_parameters["applied_transformation_metadata"] = dict(
+                    log_entry.metadata
+                )
+                effective_actions.append(
+                    RefactoringAction(
+                        action_type=effective_type,
+                        parameters=validation_parameters,
+                        source_step_id=action.source_step_id,
+                        source_refactoring=action.source_refactoring,
+                        warnings=list(action.warnings),
+                    )
+                )
                 continue
 
+            validation_parameters = dict(action.parameters or {})
+            validation_parameters["applied_transformation_metadata"] = dict(
+                log_entry.metadata
+            )
             effective_actions.append(
                 RefactoringAction(
                     action_type=effective_type,
-                    parameters=dict(action.parameters or {}),
+                    parameters=validation_parameters,
                     source_step_id=action.source_step_id,
                     source_refactoring=action.source_refactoring,
                     warnings=list(action.warnings),
