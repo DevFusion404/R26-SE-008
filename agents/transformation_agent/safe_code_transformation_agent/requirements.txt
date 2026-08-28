@@ -16,3 +16,6 @@ gunicorn>=21.0.0
 # to perform safe structure-preserving Python source rewrites.
 # ------------------------------------------------------------------
 libcst>=1.4.0
+
+# Java AST parsing used by Extract Method live-variable and scope analysis.
+javalang>=0.13.0

@@ -167,7 +167,25 @@ class SafeCodeTransformationValidationAgent:
             )
             actions = [*plan_actions, *local_actions]
             if not actions:
-                return index, None
+                file_result = {
+                    "file_name": file_entry.file_name,
+                    "source_mode": file_entry.source_mode,
+                    "origin": file_entry.origin,
+                    "success": True,
+                    "rollback_occurred": False,
+                    "transformation_applied": False,
+                    "refactored_code": file_entry.source_code,
+                    "total_replacements": 0,
+                    "status": "FULL_SUCCESS",
+                    "safety_report": {
+                        "rollback_occurred": False,
+                        "rollback_reason": None,
+                        "transformation_log": [],
+                        "risk_flags": [],
+                        "human_messages": ["No plan actions required for this file."],
+                    },
+                }
+                return index, file_result
 
             file_result = self._execute_single_file(
                 request=request,
@@ -233,8 +251,56 @@ class SafeCodeTransformationValidationAgent:
         ]
         avg_validation = sum(validation_scores) / len(validation_scores) if validation_scores else None
 
-        return {
+        modified_by_name = {
+            res.get("file_name"): res.get("refactored_code")
+            for res in file_results
+            if isinstance(res, dict) and res.get("file_name")
+        }
+        all_workspace_files = []
+        for file_entry in file_entries:
+            fname = file_entry.file_name
+            final_content = modified_by_name.get(fname, file_entry.source_code)
+            all_workspace_files.append({
+                "file_name": fname,
+                "file_path": fname,
+                "source_code": final_content,
+                "language": file_entry.language,
+                "modified": fname in modified_by_name and final_content != file_entry.source_code,
+            })
+
+        has_review_global = any(
+            res.get("status") == "REVIEW_REQUIRED"
+            or any(
+                str(e.get("metadata", {}).get("status") if isinstance(e, dict) else getattr(e, "metadata", {}).get("status", "")).lower() == "review_required"
+                or "review" in str(e.get("warnings") if isinstance(e, dict) else getattr(e, "warnings", "")).lower()
+                for e in res.get("safety_report", {}).get("transformation_log", [])
+            )
+            for res in file_results if isinstance(res, dict)
+        )
+        if rollback_occurred or any(res.get("rollback_occurred") for res in file_results if isinstance(res, dict)):
+            overall_status = "FAILED"
+        elif has_review_global:
+            overall_status = "REVIEW_REQUIRED"
+        elif success and files_succeeded == files_total and files_total > 0:
+            overall_status = "FULL_SUCCESS"
+        elif files_succeeded > 0 or total_replacements > 0:
+            overall_status = "PARTIAL_SUCCESS"
+        else:
+            overall_status = "FAILED"
+
+        target_res = None
+        if len(file_results) == 1:
+            target_res = file_results[0]
+        else:
+            modified = [res for res in file_results if isinstance(res, dict) and res.get("transformation_applied")]
+            if modified:
+                target_res = modified[0]
+            elif file_results and isinstance(file_results[0], dict):
+                target_res = file_results[0]
+
+        res_dict = {
             "request_id": request.request_id,
+            "status": overall_status,
             "language": language_summary,
             "success": success,
             "rollback_occurred": rollback_occurred,
@@ -259,7 +325,19 @@ class SafeCodeTransformationValidationAgent:
                 "not_applied": max(0, files_not_applied),
             },
             "file_results": file_results,
+            "transformed_workspace_files": all_workspace_files,
         }
+        if target_res and isinstance(target_res, dict):
+            res_dict["file_name"] = target_res.get("file_name")
+            res_dict["source_mode"] = target_res.get("source_mode")
+            res_dict["origin"] = target_res.get("origin")
+            res_dict["refactored_code"] = target_res.get("refactored_code")
+            res_dict["safety_report"] = target_res.get("safety_report")
+            res_dict["validation_syntax"] = target_res.get("validation_syntax")
+            res_dict["validation_structural"] = target_res.get("validation_structural")
+            res_dict["validation_behavioral"] = target_res.get("validation_behavioral")
+            res_dict["validation_invariant"] = target_res.get("validation_invariant")
+        return res_dict
 
     def _collect_source_files(self, request: SCTVARequestContract) -> List[SourceFileContract]:
         if request.source_files:
@@ -695,6 +773,7 @@ class SafeCodeTransformationValidationAgent:
             strict_mode=request.execution_options.strict_mode,
             project_source_files=project_files,
             current_file_name=file_entry.file_name,
+            structural_validation_passed=structural_step.passed,
         )
 
         invariant_step = self.invariant_miner.mine(
@@ -1043,6 +1122,23 @@ class SafeCodeTransformationValidationAgent:
                 else ("PASS" if polymorphism_plan_complete else "FAIL")
             ),
         }
+        has_review = any(
+            str(e.metadata.get("status") if hasattr(e, "metadata") else "").lower() == "review_required"
+            or any("review" in str(w).lower() for w in (e.warnings if hasattr(e, "warnings") else []))
+            for e in transformation_log
+        )
+        if rollback_occurred:
+            file_status = "FAILED"
+        elif has_review:
+            file_status = "REVIEW_REQUIRED"
+        elif success:
+            file_status = "FULL_SUCCESS"
+        elif total_replacements > 0:
+            file_status = "PARTIAL_SUCCESS"
+        else:
+            file_status = "FAILED"
+
+        result["status"] = file_status
         return result
 
     @staticmethod
@@ -2504,6 +2600,23 @@ class SafeCodeTransformationValidationAgent:
             if entry.action_type not in EXTRACT_CLASS_ACTIONS:
                 continue
             metadata = entry.metadata
+            if str(metadata.get("status") or "").lower() == "not_applicable":
+                metadata["final_checks"] = {
+                    "plan_compliance": "NOT_APPLICABLE",
+                    "structural_refactoring": "NOT_APPLICABLE",
+                    "behavior_preservation": "PASS" if behavioral_passed else "FAIL",
+                    "full_api_preservation": "NOT_APPLICABLE",
+                    "state_compatibility": "NOT_APPLICABLE",
+                    "single_state_owner": "NOT_APPLICABLE",
+                    "large_class_reduction": "NOT_APPLICABLE",
+                    "invariant_preservation": "PASS" if invariant_passed else "FAIL",
+                }
+                metadata["behavioral_safety"] = metadata["final_checks"][
+                    "behavior_preservation"
+                ]
+                metadata["final_status"] = "NOT_APPLICABLE"
+                metadata["final_decision"] = "NOT_APPLICABLE"
+                continue
             internal = metadata.get("validation") or {}
             checks = {
                 "plan_compliance": "PASS" if metadata.get("plan_compliance") == "PASS" else "FAIL",
@@ -2581,6 +2694,8 @@ class SafeCodeTransformationValidationAgent:
                     and internal.get("target_resolution") == "PASS"
                     and internal.get("data_flow") == "PASS"
                     and internal.get("structural") == "PASS"
+                    and internal.get("scope_validation", "PASS") == "PASS"
+                    and internal.get("compilation_validation", "PASS") == "PASS"
                     else "FAIL"
                 ),
                 "long_method_reduction": (
@@ -3059,10 +3174,14 @@ class SafeCodeTransformationValidationAgent:
 
             effective_parameters = log_entry.metadata.get("effective_action_parameters")
             if isinstance(effective_parameters, dict):
+                validation_parameters = dict(effective_parameters)
+                validation_parameters["applied_transformation_metadata"] = dict(
+                    log_entry.metadata
+                )
                 effective_actions.append(
                     RefactoringAction(
                         action_type=effective_type,
-                        parameters=dict(effective_parameters),
+                        parameters=validation_parameters,
                         source_step_id=action.source_step_id,
                         source_refactoring=action.source_refactoring,
                         warnings=list(action.warnings),
@@ -3071,13 +3190,29 @@ class SafeCodeTransformationValidationAgent:
                 continue
 
             if effective_type == action.action_type:
-                effective_actions.append(action)
+                validation_parameters = dict(action.parameters or {})
+                validation_parameters["applied_transformation_metadata"] = dict(
+                    log_entry.metadata
+                )
+                effective_actions.append(
+                    RefactoringAction(
+                        action_type=effective_type,
+                        parameters=validation_parameters,
+                        source_step_id=action.source_step_id,
+                        source_refactoring=action.source_refactoring,
+                        warnings=list(action.warnings),
+                    )
+                )
                 continue
 
+            validation_parameters = dict(action.parameters or {})
+            validation_parameters["applied_transformation_metadata"] = dict(
+                log_entry.metadata
+            )
             effective_actions.append(
                 RefactoringAction(
                     action_type=effective_type,
-                    parameters=dict(action.parameters or {}),
+                    parameters=validation_parameters,
                     source_step_id=action.source_step_id,
                     source_refactoring=action.source_refactoring,
                     warnings=list(action.warnings),

@@ -16,6 +16,12 @@ from typing import Any, Dict, Iterable, Sequence
 SUCCESS = "success"
 REVIEW_REQUIRED = "review_required"
 ALREADY_APPLIED = "already_applied"
+NOT_APPLICABLE = "not_applicable"
+
+# Included in every Extract Class result so reports can prove which runtime
+# implementation actually executed. If this value is missing from a report,
+# the running SCTVA process/container is using an older or different code copy.
+IMPLEMENTATION_REVISION = "java_extract_class_reduction_v12_20260827"
 
 _IDENTIFIER = r"[A-Za-z_$][A-Za-z0-9_$]*"
 _MODIFIERS = {
@@ -112,6 +118,8 @@ def apply_extract_class(
     required_public_methods: Sequence[str] | None = None,
     required_public_fields: Sequence[str] | None = None,
     source_resolution_error: str = "",
+    repository_original_code: str = "",
+    prior_transformations: Sequence[Dict[str, Any]] | None = None,
 ) -> tuple[str, int, Dict[str, Any]]:
     del behavior_tests
     transformer = JavaExtractClassRefactoring(source_code)
@@ -130,6 +138,8 @@ def apply_extract_class(
         required_public_methods=required_public_methods,
         required_public_fields=required_public_fields,
         source_resolution_error=source_resolution_error,
+        repository_original_code=repository_original_code,
+        prior_transformations=prior_transformations,
     )
 
 
@@ -182,7 +192,17 @@ class JavaExtractClassRefactoring:
         required_public_methods: Sequence[str] | None,
         required_public_fields: Sequence[str] | None,
         source_resolution_error: str,
+        repository_original_code: str,
+        prior_transformations: Sequence[Dict[str, Any]] | None,
     ) -> tuple[str, int, Dict[str, Any]]:
+        accepted_prior = [
+            dict(item)
+            for item in (prior_transformations or [])
+            if int(item.get("replacements_count") or 0) > 0
+            and str(item.get("status") or "success").lower()
+            in {"success", "pass", "accepted", "already_applied"}
+        ]
+        immutable_original = repository_original_code or self.source
         metadata: Dict[str, Any] = {
             "refactoring": "Extract Class",
             "language": "java",
@@ -194,6 +214,15 @@ class JavaExtractClassRefactoring:
             "delegation_strategy": "explicit_java_delegation",
             "plan_compliance": "UNKNOWN",
             "behavioral_safety": "PENDING_PIPELINE_VALIDATION",
+            "implementation_revision": IMPLEMENTATION_REVISION,
+            "source_states": {
+                "repository_original_code": "immutable",
+                "action_input_code": "current_working_source",
+                "candidate_output_code": "temporary_until_accepted",
+                "repository_original_length": len(immutable_original),
+                "action_input_length": len(self.source),
+            },
+            "prior_transformations": accepted_prior,
         }
         if source_resolution_error:
             return self._review(source_resolution_error, metadata)
@@ -207,6 +236,15 @@ class JavaExtractClassRefactoring:
         if plan_error:
             return self._review(plan_error, metadata)
 
+        resolved_source_class, resolution = self._resolve_current_source_class(
+            source_class,
+            methods_to_extract=methods_to_extract,
+            fields_to_extract=fields_to_extract,
+        )
+        metadata["current_class_resolution"] = resolution
+        if resolved_source_class:
+            source_class = resolved_source_class
+            metadata["source_class"] = source_class
         source_model = _parse_java_class(self.source, source_class)
         if source_model is None:
             return self._review("SOURCE_CLASS_NOT_FOUND", metadata)
@@ -221,57 +259,130 @@ class JavaExtractClassRefactoring:
             return self._review("CLASS_NAME_COLLISION", metadata)
 
         before_metrics = self._metrics(source_model)
+        current_smell = self._large_class(before_metrics)
         metadata["before_metrics"] = before_metrics
-        candidate_or_error = self._select_candidate(
+        metadata["large_class_before"] = current_smell
+
+        original_model = _parse_java_class(immutable_original, source_class)
+        original_metrics = self._metrics(original_model) if original_model else None
+        original_smell = self._large_class(original_metrics) if original_metrics else None
+        metadata["repository_original_metrics"] = original_metrics
+        metadata["repository_original_large_class"] = original_smell
+        if (
+            accepted_prior
+            and original_smell
+            and original_smell["detected"]
+            and not current_smell["detected"]
+        ):
+            return self._not_applicable(
+                "SMELL_ALREADY_RESOLVED_BY_PRIOR_TRANSFORMATIONS",
+                metadata,
+            )
+
+        candidates_or_error = self._select_candidates(
             source_model,
             methods_to_extract=methods_to_extract,
             fields_to_extract=fields_to_extract,
         )
-        if isinstance(candidate_or_error, str):
-            return self._review(candidate_or_error, metadata)
-        candidate = candidate_or_error
+        if isinstance(candidates_or_error, str):
+            return self._review(candidates_or_error, metadata)
+
+        helper_name = self._unique_helper_field(source_model, new_class_name)
+        evaluations: list[Dict[str, Any]] = []
+        accepted: list[tuple[float, str, JavaCandidate, Dict[str, Any], Dict[str, Any]]] = []
+        for candidate_index, candidate in enumerate(candidates_or_error, start=1):
+            evaluation: Dict[str, Any] = {
+                "candidate_index": candidate_index,
+                "methods": [method.name for method in candidate.methods],
+                "fields": [item.name for item in candidate.fields],
+                "cohesion": round(candidate.cohesion, 4),
+                "reason": candidate.reason,
+                "selected": False,
+            }
+            safety_error, dependency = self._validate_candidate(
+                source_model,
+                candidate,
+                preserve_public_api=preserve_public_api,
+                project_source_files=project_source_files,
+                repository_complete=repository_complete,
+                required_public_methods=required_public_methods,
+                required_public_fields=required_public_fields,
+            )
+            evaluation["dependency_analysis"] = dependency
+            if safety_error:
+                evaluation.update({"status": "rejected", "failure_reason": safety_error})
+                evaluations.append(evaluation)
+                continue
+
+            candidate_output = self._rewrite(
+                source_model,
+                candidate,
+                new_class_name=new_class_name,
+                helper_name=helper_name,
+                shared_fields=set(dependency.get("shared_fields") or []),
+                preserve_public_api=preserve_public_api,
+            )
+            post_error, post_metadata = self._validate_postconditions(
+                candidate_output,
+                source_class=source_class,
+                new_class_name=new_class_name,
+                candidate=candidate,
+                helper_name=helper_name,
+                before_metrics=before_metrics,
+                preserve_public_api=preserve_public_api,
+                dependency_analysis=dependency,
+            )
+            evaluation.update({
+                "status": "accepted" if not post_error else "rejected",
+                "failure_reason": post_error,
+                "after_metrics": post_metadata.get("after_metrics"),
+                "metric_deltas": post_metadata.get("metric_deltas"),
+                "large_class_reduction_status": post_metadata.get(
+                    "large_class_reduction_status"
+                ),
+            })
+            evaluations.append(evaluation)
+            if not post_error:
+                score = self._candidate_score(candidate, post_metadata)
+                evaluation["score"] = round(score, 4)
+                accepted.append(
+                    (score, candidate_output, candidate, dependency, post_metadata)
+                )
+
+        metadata["candidate_evaluations"] = evaluations
+        if not accepted:
+            if len(evaluations) == 1:
+                metadata["dependency_analysis"] = evaluations[0].get(
+                    "dependency_analysis"
+                ) or {}
+            explicit_plan = bool(_clean_names(methods_to_extract) or _clean_names(fields_to_extract))
+            if explicit_plan and len(evaluations) == 1:
+                reason = str(evaluations[0].get("failure_reason") or "")
+            else:
+                reason = "NO_SAFE_MEANINGFUL_EXTRACT_CLASS_CANDIDATE"
+            return self._review(reason or "NO_SAFE_MEANINGFUL_EXTRACT_CLASS_CANDIDATE", metadata)
+
+        _, transformed, candidate, dependency, post_metadata = max(
+            accepted,
+            key=lambda item: (item[0], len(item[2].methods), -item[2].methods[0].start),
+        )
+        selected_methods = [method.name for method in candidate.methods]
+        selected_fields = [item.name for item in candidate.fields]
+        for evaluation in evaluations:
+            if evaluation["methods"] == selected_methods and evaluation["fields"] == selected_fields:
+                evaluation["selected"] = True
+                break
+        metadata.update(post_metadata)
+        metadata["source_states"]["candidate_output_length"] = len(transformed)
+        metadata["source_states"]["committed_state"] = "selected_candidate_output"
         metadata.update({
-            "methods_moved": [method.name for method in candidate.methods],
-            "fields_moved": [item.name for item in candidate.fields],
+            "methods_moved": selected_methods,
+            "fields_moved": selected_fields,
             "candidate_reason": candidate.reason,
             "candidate_cohesion": round(candidate.cohesion, 4),
             "responsibilities_moved": candidate.responsibility_count,
+            "dependency_analysis": dependency,
         })
-
-        safety_error, dependency = self._validate_candidate(
-            source_model,
-            candidate,
-            preserve_public_api=preserve_public_api,
-            project_source_files=project_source_files,
-            repository_complete=repository_complete,
-            required_public_methods=required_public_methods,
-            required_public_fields=required_public_fields,
-        )
-        metadata["dependency_analysis"] = dependency
-        if safety_error:
-            return self._review(safety_error, metadata)
-
-        helper_name = self._unique_helper_field(source_model, new_class_name)
-        transformed = self._rewrite(
-            source_model,
-            candidate,
-            new_class_name=new_class_name,
-            helper_name=helper_name,
-            shared_fields=set(dependency.get("shared_fields") or []),
-            preserve_public_api=preserve_public_api,
-        )
-        post_error, post_metadata = self._validate_postconditions(
-            transformed,
-            source_class=source_class,
-            new_class_name=new_class_name,
-            candidate=candidate,
-            helper_name=helper_name,
-            before_metrics=before_metrics,
-            preserve_public_api=preserve_public_api,
-        )
-        metadata.update(post_metadata)
-        if post_error:
-            return self._review(post_error, metadata)
 
         metadata.update({
             "status": SUCCESS,
@@ -319,6 +430,130 @@ class JavaExtractClassRefactoring:
         }:
             return "MULTI_FILE_ARTIFACT_UNSUPPORTED"
         return ""
+
+    def _resolve_current_source_class(
+        self,
+        requested_class: str,
+        *,
+        methods_to_extract: Sequence[str] | None,
+        fields_to_extract: Sequence[str] | None,
+    ) -> tuple[str, Dict[str, Any]]:
+        """Resolve the action target against the current working source."""
+        if _parse_java_class(self.source, requested_class) is not None:
+            return requested_class, {
+                "status": "success",
+                "strategy": "current_ast_exact_class",
+                "requested_class": requested_class,
+                "resolved_class": requested_class,
+            }
+
+        requested_methods = set(_clean_names(methods_to_extract))
+        requested_fields = set(_clean_names(fields_to_extract))
+        candidates: list[tuple[int, str]] = []
+        for class_name in declared_class_names(self.source):
+            model = _parse_java_class(self.source, class_name)
+            if model is None:
+                continue
+            method_names = set(model.methods_by_name)
+            field_names = set(model.fields)
+            if requested_methods and not requested_methods <= method_names:
+                continue
+            if requested_fields and not requested_fields <= field_names:
+                continue
+            score = len(requested_methods & method_names) + len(requested_fields & field_names)
+            if score:
+                candidates.append((score, class_name))
+
+        if candidates:
+            best_score = max(score for score, _ in candidates)
+            best = sorted(name for score, name in candidates if score == best_score)
+            if len(best) == 1:
+                return best[0], {
+                    "status": "success",
+                    "strategy": "current_ast_member_identity_recovery",
+                    "requested_class": requested_class,
+                    "resolved_class": best[0],
+                }
+            return "", {
+                "status": "review_required",
+                "strategy": "current_ast_ambiguous_member_identity",
+                "requested_class": requested_class,
+                "candidates": best,
+            }
+        return "", {
+            "status": "not_found",
+            "strategy": "current_ast_no_matching_class",
+            "requested_class": requested_class,
+        }
+
+    def _select_candidates(
+        self,
+        source_class: JavaClass,
+        *,
+        methods_to_extract: Sequence[str] | None,
+        fields_to_extract: Sequence[str] | None,
+    ) -> list[JavaCandidate] | str:
+        """Return all reasonable candidates without changing working source."""
+        requested_methods = _clean_names(methods_to_extract)
+        requested_fields = _clean_names(fields_to_extract)
+        if requested_methods or requested_fields:
+            explicit = self._select_candidate(
+                source_class,
+                methods_to_extract=requested_methods,
+                fields_to_extract=requested_fields,
+            )
+            return explicit if isinstance(explicit, str) else [explicit]
+
+        methods = [method for method in source_class.methods if not method.is_constructor]
+        extraction_limit = max(self.MIN_METHODS, int(len(methods) * 0.5))
+        focused = [method for method in methods if method.fields_used and len(method.fields_used) <= 3]
+        components = [
+            sorted(component, key=lambda method: method.start)
+            for component in self._method_components(focused)
+            if self.MIN_METHODS <= len(component) < len(methods)
+            and len(component) <= extraction_limit
+            and set().union(*(method.fields_used for method in component))
+        ]
+        if not components:
+            return "NO_SAFE_EXTRACTION_CLUSTER"
+
+        method_groups: list[list[JavaMethod]] = list(components)
+        # Adjacent responsibility groups can form a stronger extraction than
+        # either weak component alone. Every component is still evaluated.
+        ordered = sorted(components, key=lambda group: min(method.start for method in group))
+        for index, left in enumerate(ordered):
+            for right in ordered[index + 1:]:
+                combined = sorted({method.start: method for method in left + right}.values(), key=lambda m: m.start)
+                if len(combined) <= extraction_limit and len(combined) < len(methods):
+                    method_groups.append(combined)
+
+        candidates: list[JavaCandidate] = []
+        seen: set[tuple[tuple[str, int], ...]] = set()
+        for group in method_groups:
+            identity = tuple((method.name, method.start) for method in group)
+            if identity in seen:
+                continue
+            seen.add(identity)
+            used_fields = set().union(*(method.fields_used for method in group))
+            fields = [
+                source_class.fields[name]
+                for name in sorted(used_fields)
+                if name in source_class.fields
+            ]
+            if not fields:
+                continue
+            field_names = {item.name for item in fields}
+            cohesion = sum(bool(method.fields_used & field_names) for method in group) / len(group)
+            candidates.append(JavaCandidate(
+                methods=group,
+                fields=fields,
+                cohesion=cohesion,
+                reason="inferred_field_method_dependency_graph",
+                responsibility_count=self._component_count(group),
+            ))
+        if not candidates:
+            return "NO_SAFE_EXTRACTION_CLUSTER"
+        return candidates
 
     def _select_candidate(
         self,
@@ -488,8 +723,11 @@ class JavaExtractClassRefactoring:
             if any(field_name in method.fields_used for method in remaining_methods)
         )
         unsupported: list[str] = []
+        symbol_ownership: Dict[str, Any] = {}
         for method in candidate.methods:
             header_and_body = f"{method.header} {method.body}"
+            ownership = _java_method_symbol_ownership(method, set(source_class.fields))
+            symbol_ownership[f"{method.name}@{method.start}"] = ownership
             if "static" in method.modifiers:
                 unsupported.append(f"{method.name}:static_method")
             if re.search(r"@Override\b", method.header):
@@ -503,9 +741,17 @@ class JavaExtractClassRefactoring:
                 unsupported.extend(
                     f"{method.name}:source_method:{name}" for name in sorted(outside_calls)
                 )
-            for field_name in selected_fields:
-                if field_name in method.parameters or _declares_local(method.body, field_name):
-                    unsupported.append(f"{method.name}:shadowed_field:{field_name}")
+            # A parameter/local and ``this.field`` are distinct Java symbols.
+            # Setter shadowing such as ``this.name = name`` is therefore safe:
+            # the qualified access remains helper state while the unqualified
+            # name remains the lexical parameter after the method is moved.
+            unresolved_this_members = set(ownership["qualified_members"]) - (
+                set(source_class.fields) | set(source_class.methods_by_name)
+            )
+            unsupported.extend(
+                f"{method.name}:inherited_or_unresolved_member:{name}"
+                for name in sorted(unresolved_this_members)
+            )
             if " native " in f" {header_and_body} " or " abstract " in f" {header_and_body} ":
                 unsupported.append(f"{method.name}:non_concrete_method")
 
@@ -513,12 +759,16 @@ class JavaExtractClassRefactoring:
         constructors = [method for method in source_class.methods if method.is_constructor]
         for constructor in constructors:
             for field_name in selected_fields:
-                if re.search(
-                    rf"(?:\bthis\s*\.\s*)?\b{re.escape(field_name)}\b\s*"
-                    r"(?:[+\-*/%&|^]?=(?!=))",
-                    constructor.body,
-                ):
+                if _java_method_assigns_field(constructor, field_name):
                     constructor_dependencies.append(field_name)
+
+        constructor_bound_final_fields = sorted(
+            item.name
+            for item in candidate.fields
+            if "final" in item.modifiers
+            and not item.initializer
+            and item.name in constructor_dependencies
+        )
 
         externally_visible_fields = sorted(
             item.name
@@ -558,12 +808,21 @@ class JavaExtractClassRefactoring:
         )
         required_methods = set(_clean_names(required_public_methods))
         missing_required_methods = sorted(required_methods - selected_methods)
+        reflection_files = self._reflection_sensitive_usage(
+            source_class=source_class.name,
+            selected_fields=selected_fields,
+            selected_methods=selected_methods,
+            project_source_files=project_source_files,
+        )
 
         details = {
             "repository_complete": repository_complete,
             "shared_fields": shared_fields,
+            "symbol_ownership": symbol_ownership,
             "unsupported_method_dependencies": unsupported,
             "constructor_field_assignments": sorted(set(constructor_dependencies)),
+            "constructor_rewrite_supported": not constructor_bound_final_fields,
+            "constructor_bound_final_fields": constructor_bound_final_fields,
             "unsafe_direct_field_api": unsafe_field_api,
             "externally_visible_fields": externally_visible_fields,
             "package_private_fields": package_private_fields,
@@ -572,11 +831,12 @@ class JavaExtractClassRefactoring:
             "static_fields": static_fields,
             "dependent_initializers": dependent_initializers,
             "missing_required_methods": missing_required_methods,
+            "reflection_sensitive_files": reflection_files,
         }
         if unsupported:
             return "UNSUPPORTED_METHOD_DEPENDENCY", details
-        if constructor_dependencies:
-            return "CONSTRUCTOR_FIELD_DEPENDENCY_UNSUPPORTED", details
+        if constructor_bound_final_fields:
+            return "FINAL_CONSTRUCTOR_STATE_REQUIRES_HELPER_CONSTRUCTOR", details
         if static_fields:
             return "STATIC_STATE_EXTRACTION_UNSUPPORTED", details
         if dependent_initializers:
@@ -585,6 +845,8 @@ class JavaExtractClassRefactoring:
             return "DIRECT_FIELD_API_CANNOT_BE_FORWARDED_SAFELY", details
         if missing_required_methods:
             return "REQUIRED_PUBLIC_METHOD_NOT_SELECTED", details
+        if reflection_files:
+            return "REFLECTION_SENSITIVE_DEPENDENCY", details
         return "", details
 
     @staticmethod
@@ -600,15 +862,61 @@ class JavaExtractClassRefactoring:
                 continue
             masked = _mask_c_like(source)
             aliases = set(re.findall(rf"\b{re.escape(source_class)}\s+({_IDENTIFIER})\b", masked))
+            aliases.update(
+                re.findall(
+                    rf"\b({_IDENTIFIER})\s*=\s*new\s+{re.escape(source_class)}\s*\(",
+                    masked,
+                )
+            )
             aliases.add("this")
             for field_name in selected_fields:
                 if any(
                     re.search(rf"\b{re.escape(alias)}\s*\.\s*{re.escape(field_name)}\b", masked)
                     for alias in aliases
                     if alias != "this"
+                ) or re.search(
+                    rf"\b{re.escape(source_class)}\s*\.\s*{re.escape(field_name)}\b",
+                    masked,
                 ):
                     used.add(field_name)
         return used
+
+    @staticmethod
+    def _reflection_sensitive_usage(
+        *,
+        source_class: str,
+        selected_fields: set[str],
+        selected_methods: set[str],
+        project_source_files: Sequence[Any] | None,
+    ) -> list[str]:
+        sensitive: list[str] = []
+        member_names = selected_fields | selected_methods
+        if not member_names:
+            return sensitive
+        member_pattern = "|".join(re.escape(name) for name in sorted(member_names))
+        for item in project_source_files or []:
+            source = item.get("source_code") if isinstance(item, dict) else getattr(item, "source_code", None)
+            if not isinstance(source, str):
+                continue
+            masked = _mask_c_like(source)
+            # String literals are intentionally inspected in the original
+            # source because reflective member names live inside strings.
+            reflection = bool(
+                re.search(
+                    rf"\b(?:getDeclaredField|getField|getDeclaredMethod|getMethod)\s*"
+                    rf"\(\s*[\"'](?:{member_pattern})[\"']",
+                    source,
+                )
+                or re.search(
+                    rf"\b{re.escape(source_class)}\s*\.\s*class\b.*\b(?:getDeclaredFields|getFields|getDeclaredMethods|getMethods)\s*\(",
+                    masked,
+                    re.DOTALL,
+                )
+            )
+            if reflection:
+                name = item.get("file_name") if isinstance(item, dict) else getattr(item, "file_name", "")
+                sensitive.append(str(name or "<unknown-java-source>"))
+        return sorted(set(sensitive))
 
     def _rewrite(
         self,
@@ -639,6 +947,10 @@ class JavaExtractClassRefactoring:
                     rewritten_body,
                     field_name,
                     f"{helper_name}.{field_name}",
+                    rewrite_unqualified=(
+                        field_name not in method.parameters
+                        and not _declares_local(method.body, field_name)
+                    ),
                 )
             if rewritten_body != method.body:
                 edits.append((method.open_brace + 1, method.end - 1, rewritten_body))
@@ -713,6 +1025,7 @@ class JavaExtractClassRefactoring:
         helper_name: str,
         before_metrics: Dict[str, Any],
         preserve_public_api: bool,
+        dependency_analysis: Dict[str, Any],
     ) -> tuple[str, Dict[str, Any]]:
         source_after = _parse_java_class(transformed, source_class)
         helper_after = _parse_java_class(transformed, new_class_name)
@@ -740,6 +1053,32 @@ class JavaExtractClassRefactoring:
             for name in selected_methods
         }
         api_passed = not preserve_public_api or all(wrappers.values())
+        unresolved_internal_references = {
+            method.name: sorted(
+                field_name
+                for field_name in selected_fields
+                if _has_unresolved_java_field_reference(method, field_name)
+            )
+            for method in source_after.methods
+        }
+        unresolved_internal_references = {
+            name: fields
+            for name, fields in unresolved_internal_references.items()
+            if fields
+        }
+        constructor_fields = set(
+            dependency_analysis.get("constructor_field_assignments") or []
+        )
+        constructor_references_updated = all(
+            not _has_unresolved_java_field_reference(method, field_name)
+            for method in source_after.methods
+            if method.is_constructor
+            for field_name in constructor_fields
+        )
+        repository_references_valid = not (
+            dependency_analysis.get("unsafe_direct_field_api")
+            or dependency_analysis.get("reflection_sensitive_files")
+        )
 
         after_metrics = self._metrics(source_after, composition_fields={helper_name})
         extracted_metrics = self._metrics(helper_after)
@@ -757,19 +1096,27 @@ class JavaExtractClassRefactoring:
         before_smell = self._large_class(before_metrics)
         after_smell = self._large_class(after_metrics)
         extracted_smell = self._large_class(extracted_metrics)
-        reduction = (
-            all(value > 0 for value in deltas.values())
-            and after_smell["severity"] < before_smell["severity"]
-            and (not before_smell["detected"] or not after_smell["detected"])
-            and not extracted_smell["detected"]
+        reduction_status = self._classify_large_class_reduction(
+            before_smell=before_smell,
+            after_smell=after_smell,
+            extracted_smell=extracted_smell,
+            deltas=deltas,
         )
-        structural = methods_moved and fields_moved and helper_initialized
+        reduction = reduction_status in {"ELIMINATED", "REDUCED"}
+        structural = (
+            methods_moved
+            and fields_moved
+            and helper_initialized
+            and not unresolved_internal_references
+            and constructor_references_updated
+        )
         metadata = {
             "after_metrics": after_metrics,
             "extracted_class_metrics": extracted_metrics,
             "metric_deltas": deltas,
             "large_class_before": before_smell,
             "large_class_after": after_smell,
+            "large_class_reduction_status": reduction_status,
             "extracted_class_smells": extracted_smell,
             "post_refactoring_smells": {
                 "source_large_class": after_smell["detected"],
@@ -781,11 +1128,24 @@ class JavaExtractClassRefactoring:
                 "fields_moved": fields_moved,
                 "helper_initialized": helper_initialized,
                 "delegation_wrappers": wrappers,
+                "internal_references_updated": not unresolved_internal_references,
+                "unresolved_internal_references": unresolved_internal_references,
+                "constructor_initialization_updated": constructor_references_updated,
+                "repository_references_valid": repository_references_valid,
             },
             "validation": {
                 "syntax": "PASS",
                 "structural": "PASS" if structural else "FAIL",
                 "dependency": "PASS" if structural else "FAIL",
+                "internal_references_updated": (
+                    "PASS" if not unresolved_internal_references else "FAIL"
+                ),
+                "constructor_initialization": (
+                    "PASS" if constructor_references_updated else "FAIL"
+                ),
+                "repository_references": (
+                    "PASS" if repository_references_valid else "FAIL"
+                ),
                 "full_api_preservation": "PASS" if api_passed else "FAIL",
                 "state_compatibility": "PASS" if fields_moved else "FAIL",
                 "single_state_owner": "PASS" if fields_moved else "FAIL",
@@ -794,7 +1154,10 @@ class JavaExtractClassRefactoring:
                 "smell_reduction": "PASS" if reduction else "FAIL",
                 "large_class_reduction": "PASS" if reduction else "FAIL",
                 "post_smell_detection": (
-                    "PASS" if not after_smell["detected"] and not extracted_smell["detected"] else "FAIL"
+                    "PASS"
+                    if reduction_status in {"ELIMINATED", "REDUCED"}
+                    and not extracted_smell["detected"]
+                    else "FAIL"
                 ),
                 "raw_loc_reduced": after_metrics["loc"] < before_metrics["loc"],
             },
@@ -807,6 +1170,59 @@ class JavaExtractClassRefactoring:
         if not reduction:
             return "INSUFFICIENT_CLASS_REDUCTION", metadata
         return "", metadata
+
+    @staticmethod
+    def _classify_large_class_reduction(
+        *,
+        before_smell: Dict[str, Any],
+        after_smell: Dict[str, Any],
+        extracted_smell: Dict[str, Any],
+        deltas: Dict[str, float],
+    ) -> str:
+        if extracted_smell["detected"]:
+            return "WORSENED"
+        core = (
+            "effective_method_count",
+            "weighted_complexity",
+            "owned_field_count",
+            "responsibility_count",
+        )
+        if (
+            after_smell["severity"] > before_smell["severity"] + 0.01
+            or any(deltas[name] < 0 for name in core)
+        ):
+            return "WORSENED"
+        if before_smell["detected"] and not after_smell["detected"]:
+            return "ELIMINATED"
+
+        improved = sum(deltas[name] > 0 for name in deltas)
+        severity_drop = before_smell["severity"] - after_smell["severity"]
+        # Delegation can keep raw method count stable, so reduction is judged
+        # using implementation weight, state ownership, complexity and
+        # responsibility rather than raw declarations alone.
+        if improved >= 3 and severity_drop >= 0.005:
+            return "REDUCED"
+        return "UNCHANGED"
+
+    @staticmethod
+    def _candidate_score(
+        candidate: JavaCandidate,
+        post_metadata: Dict[str, Any],
+    ) -> float:
+        status_weight = {
+            "ELIMINATED": 100.0,
+            "REDUCED": 50.0,
+        }.get(str(post_metadata.get("large_class_reduction_status") or ""), 0.0)
+        deltas = post_metadata.get("metric_deltas") or {}
+        reduction_weight = (
+            float(deltas.get("effective_method_count") or 0.0) * 3.0
+            + float(deltas.get("weighted_complexity") or 0.0) * 1.5
+            + float(deltas.get("owned_field_count") or 0.0) * 4.0
+            + float(deltas.get("responsibility_count") or 0.0) * 6.0
+            + float(deltas.get("implementation_loc") or 0.0) * 0.1
+        )
+        delegation_penalty = len(candidate.methods) * 0.15
+        return status_weight + reduction_weight + (candidate.cohesion * 5.0) - delegation_penalty
 
     @classmethod
     def _metrics(
@@ -880,6 +1296,29 @@ class JavaExtractClassRefactoring:
             "reason": reason,
             "plan_compliance": "FAIL",
             "behavioral_safety": "NOT_EVALUATED_NO_CHANGE",
+        }
+
+    def _not_applicable(
+        self,
+        reason: str,
+        metadata: Dict[str, Any],
+    ) -> tuple[str, int, Dict[str, Any]]:
+        return self.source, 0, {
+            **metadata,
+            "status": NOT_APPLICABLE,
+            "reason": reason,
+            "final_decision": "NOT_APPLICABLE",
+            "plan_compliance": "NOT_APPLICABLE",
+            "behavioral_safety": "NOT_REQUIRED_NO_CHANGE",
+            "validation": {
+                "syntax": "PASS",
+                "structural": "NOT_APPLICABLE",
+                "dependency": "NOT_APPLICABLE",
+                "full_api_preservation": "NOT_APPLICABLE",
+                "state_compatibility": "NOT_APPLICABLE",
+                "single_state_owner": "NOT_APPLICABLE",
+                "large_class_reduction": "NOT_APPLICABLE",
+            },
         }
 
 
@@ -1118,11 +1557,18 @@ def _populate_java_dependencies(model: JavaClass) -> None:
     method_names = set(model.methods_by_name)
     for method in model.methods:
         masked_body = _mask_c_like(method.body)
+        lexical_names = set(method.parameters) | _java_local_names(method.body)
         method.fields_used = {
             name for name in field_names
-            if re.search(
-                rf"(?:\bthis\s*\.\s*|(?<![A-Za-z0-9_$.])){re.escape(name)}\b",
-                masked_body,
+            if (
+                re.search(rf"\bthis\s*\.\s*{re.escape(name)}\b", masked_body)
+                or (
+                    name not in lexical_names
+                    and re.search(
+                        rf"(?<![A-Za-z0-9_$.]){re.escape(name)}\b",
+                        masked_body,
+                    )
+                )
             )
         }
         method.methods_called = {
@@ -1146,12 +1592,17 @@ def _java_parameter_names(params_raw: str) -> list[str]:
     return names
 
 
-def _rewrite_java_field_reference(body: str, field_name: str, replacement: str) -> str:
+def _rewrite_java_field_reference(
+    body: str,
+    field_name: str,
+    replacement: str,
+    *,
+    rewrite_unqualified: bool = True,
+) -> str:
     masked = _mask_c_like(body)
-    patterns = [
-        re.compile(rf"\bthis\s*\.\s*{re.escape(field_name)}\b"),
-        re.compile(rf"(?<![A-Za-z0-9_$.]){re.escape(field_name)}\b"),
-    ]
+    patterns = [re.compile(rf"\bthis\s*\.\s*{re.escape(field_name)}\b")]
+    if rewrite_unqualified:
+        patterns.append(re.compile(rf"(?<![A-Za-z0-9_$.]){re.escape(field_name)}\b"))
     edits: list[tuple[int, int, str]] = []
     occupied: list[tuple[int, int]] = []
     for pattern in patterns:
@@ -1161,6 +1612,35 @@ def _rewrite_java_field_reference(body: str, field_name: str, replacement: str) 
             occupied.append((match.start(), match.end()))
             edits.append((match.start(), match.end(), replacement))
     return _apply_edits(body, edits)
+
+
+def _has_unresolved_java_field_reference(method: JavaMethod, field_name: str) -> bool:
+    masked = _mask_c_like(method.body)
+    if re.search(rf"\bthis\s*\.\s*{re.escape(field_name)}\b", masked):
+        return True
+    if field_name in method.parameters or _declares_local(method.body, field_name):
+        return False
+    return bool(
+        re.search(rf"(?<![A-Za-z0-9_$.]){re.escape(field_name)}\b", masked)
+    )
+
+
+def _java_method_assigns_field(method: JavaMethod, field_name: str) -> bool:
+    masked = _mask_c_like(method.body)
+    assignment = r"\s*(?:[+\-*/%&|^]?=(?!=)|\+\+|--)"
+    if re.search(
+        rf"\bthis\s*\.\s*{re.escape(field_name)}\b{assignment}",
+        masked,
+    ):
+        return True
+    if field_name in method.parameters or _declares_local(method.body, field_name):
+        return False
+    return bool(
+        re.search(
+            rf"(?<![A-Za-z0-9_$.]){re.escape(field_name)}\b{assignment}",
+            masked,
+        )
+    )
 
 
 def _is_java_delegate(method: JavaMethod, helper_name: str) -> bool:
@@ -1334,6 +1814,47 @@ def _has_top_level(text: str, delimiter: str) -> bool:
 
 def _identifiers(text: str) -> set[str]:
     return set(re.findall(rf"\b{_IDENTIFIER}\b", _mask_c_like(text)))
+
+
+def _java_local_names(body: str) -> set[str]:
+    names: set[str] = set()
+    masked = _mask_c_like(body)
+    pattern = re.compile(
+        rf"(?:^|[;{{(])\s*(?:final\s+)?"
+        rf"(?P<type>{_IDENTIFIER}(?:\s*<[^;=()]+>)?(?:\s*\[\s*\])?)\s+"
+        rf"(?P<name>{_IDENTIFIER})\b(?=\s*(?:=|;|,|\)))",
+        re.MULTILINE,
+    )
+    for match in pattern.finditer(masked):
+        if match.group("type").strip() not in {"return", "throw", "new", "case"}:
+            names.add(match.group("name"))
+    return names
+
+
+def _java_method_symbol_ownership(
+    method: JavaMethod,
+    field_names: set[str],
+) -> Dict[str, Any]:
+    masked = _mask_c_like(method.body)
+    parameters = set(method.parameters)
+    locals_ = _java_local_names(method.body)
+    qualified_members = set(
+        re.findall(rf"\bthis\s*\.\s*({_IDENTIFIER})\b", masked)
+    )
+    qualified_fields = qualified_members & field_names
+    unqualified_fields = {
+        name
+        for name in field_names - parameters - locals_
+        if re.search(rf"(?<![A-Za-z0-9_$.]){re.escape(name)}\b", masked)
+    }
+    return {
+        "parameters": sorted(parameters),
+        "locals": sorted(locals_),
+        "qualified_members": sorted(qualified_members),
+        "qualified_fields": sorted(qualified_fields),
+        "unqualified_fields": sorted(unqualified_fields),
+        "shadowed_field_names": sorted((parameters | locals_) & field_names),
+    }
 
 
 def _declares_local(body: str, name: str) -> bool:
