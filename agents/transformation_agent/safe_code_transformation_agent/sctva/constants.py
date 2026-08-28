@@ -25,6 +25,10 @@ ACTION_NORMALIZE_MULTILINE_STATEMENT = "normalize_multiline_statement"
 ACTION_INTRODUCE_PARAMETER_OBJECT = "introduce_parameter_object"
 ACTION_INTRODUCE_JAVA_PARAMETER_OBJECT = "introduce_java_parameter_object"
 ACTION_INTRODUCE_PYTHON_PARAMETER_OBJECT = "introduce_python_parameter_object"
+# Internal action emitted by the SCTVA transaction coordinator.  It is never
+# expected from RDP directly: it updates one verified Java caller as part of a
+# repository-wide Introduce Parameter Object operation.
+ACTION_UPDATE_JAVA_PARAMETER_OBJECT_CALL_SITE = "update_java_parameter_object_call_site"
 ACTION_MOVE_PYTHON_METHOD = "move_python_method"
 ACTION_INLINE_PYTHON_CLASS = "inline_python_class"
 ACTION_HIDE_DELEGATE = "hide_delegate"
@@ -54,6 +58,7 @@ SUPPORTED_ACTIONS = {
     ACTION_INTRODUCE_PARAMETER_OBJECT,
     ACTION_INTRODUCE_JAVA_PARAMETER_OBJECT,
     ACTION_INTRODUCE_PYTHON_PARAMETER_OBJECT,
+    ACTION_UPDATE_JAVA_PARAMETER_OBJECT_CALL_SITE,
     ACTION_MOVE_PYTHON_METHOD,
     ACTION_INLINE_PYTHON_CLASS,
     ACTION_HIDE_DELEGATE,
