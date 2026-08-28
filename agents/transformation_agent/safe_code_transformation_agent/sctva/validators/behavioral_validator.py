@@ -66,6 +66,7 @@ class BehavioralValidator:
         strict_mode: bool,
         project_source_files: Sequence[Any] | None = None,
         current_file_name: str | None = None,
+        structural_validation_passed: bool | None = None,
     ) -> ValidationStepResult:
         start_iso = utc_now_iso()
         started = time.perf_counter()
@@ -122,6 +123,7 @@ class BehavioralValidator:
                 strict_mode=strict_mode,
                 project_source_files=project_source_files,
                 current_file_name=current_file_name,
+                structural_validation_passed=structural_validation_passed,
             )
 
         return ValidationStepResult(
@@ -1342,6 +1344,7 @@ class BehavioralValidator:
         strict_mode: bool,
         project_source_files: Sequence[Any] | None = None,
         current_file_name: str | None = None,
+        structural_validation_passed: bool | None = None,
     ) -> tuple[bool, float, str, Dict[str, Any]]:
         checks: List[str] = []
         failures: List[str] = []
@@ -1604,6 +1607,7 @@ class BehavioralValidator:
                 transformed_code=transformed_code,
                 actions=actions,
                 return_similarity=return_similarity,
+                structural_validation_passed=structural_validation_passed,
             )
             static_details["checks"] = [
                 *checks,
@@ -1815,6 +1819,7 @@ class BehavioralValidator:
         transformed_code: str,
         actions: Sequence[RefactoringAction],
         return_similarity: float,
+        structural_validation_passed: bool | None = None,
     ) -> tuple[bool, float, str, Dict[str, Any]]:
         original_summary = self._java_static_summary(original_code)
         transformed_summary = self._java_static_summary(transformed_code)
@@ -1822,10 +1827,16 @@ class BehavioralValidator:
             original_summary,
             transformed_summary,
             actions,
+            structural_validation_passed=structural_validation_passed,
         )
 
         matched = bool(comparison.get("matched"))
         score = (0.6 * (1.0 if matched else 0.0)) + (0.4 * return_similarity)
+        validation_mode = (
+            "refactoring_aware_static_fallback"
+            if comparison.get("signature_change") == "EXPECTED"
+            else "java_static_fallback"
+        )
         return (
             matched,
             round(score, 4),
@@ -1841,6 +1852,13 @@ class BehavioralValidator:
                     "Used Java static behavioral fallback because runtime probes could not execute with available dependencies."
                 ],
                 "return_similarity": round(return_similarity, 4),
+                "behavioral_validation_mode": validation_mode,
+                "signature_change": comparison.get("signature_change", "NONE"),
+                "signature_compatibility": comparison.get(
+                    "signature_compatibility",
+                    "PASS" if matched else "FAIL",
+                ),
+                "compatibility_reason": comparison.get("compatibility_reason"),
                 "static_comparison": comparison,
                 "fingerprint_status": "passed" if matched else "failed",
                 "fingerprint_summary": (
@@ -1851,7 +1869,7 @@ class BehavioralValidator:
                 "java_results": [
                     {
                         "name": "static_java_summary",
-                        "mode": "static_java_fingerprint",
+                        "mode": validation_mode,
                         "original_fingerprint": original_summary,
                         "transformed_fingerprint": transformed_summary,
                         "comparison": comparison,
@@ -1865,8 +1883,13 @@ class BehavioralValidator:
         clean = self._strip_java_comments_and_literals(source_code)
         class_names = self._extract_java_class_names(clean)
         methods: Dict[str, Dict[str, Any]] = {}
+        class_fields: Dict[str, List[Dict[str, str]]] = {}
 
         for class_name in class_names:
+            class_fields[class_name] = self._extract_java_class_fields(
+                source_code=clean,
+                class_name=class_name,
+            )
             for candidate in self._extract_java_method_candidates(
                 original_code=clean,
                 class_name=class_name,
@@ -1879,6 +1902,12 @@ class BehavioralValidator:
                     "class_name": class_name,
                     "method_name": method_name,
                     "param_types": candidate.get("param_types", []),
+                    "param_names": candidate.get("param_names", []),
+                    "return_type": candidate.get("return_type", ""),
+                    "access_modifier": candidate.get("access_modifier", "package"),
+                    "is_static": bool(candidate.get("is_static")),
+                    "checked_exceptions": candidate.get("checked_exceptions", []),
+                    "body": body,
                     "return_count": len(re.findall(r"\breturn\b", body)),
                     "throw_count": len(re.findall(r"\bthrow\b", body)),
                     "branch_count": len(re.findall(r"\b(?:if|for|while|switch|case|catch)\b", body)),
@@ -1888,6 +1917,7 @@ class BehavioralValidator:
             "class_names": class_names,
             "method_count": len(methods),
             "methods": methods,
+            "class_fields": class_fields,
             "return_count": len(re.findall(r"\breturn\b", clean)),
             "throw_count": len(re.findall(r"\bthrow\b", clean)),
         }
@@ -1897,6 +1927,8 @@ class BehavioralValidator:
         original_summary: Dict[str, Any],
         transformed_summary: Dict[str, Any],
         actions: Sequence[RefactoringAction],
+        *,
+        structural_validation_passed: bool | None = None,
     ) -> Dict[str, Any]:
         class_renames: Dict[str, str] = {}
         method_renames: Dict[str, str] = {}
@@ -1923,6 +1955,7 @@ class BehavioralValidator:
         }
         missing_methods = []
         changed_methods = []
+        expected_signature_migrations: List[Dict[str, Any]] = []
 
         for method_key, original_method in original_methods.items():
             original_class = original_method.get("class_name")
@@ -1940,7 +1973,14 @@ class BehavioralValidator:
                 )
                 continue
 
-            for field in ("param_types", "return_count", "throw_count"):
+            for field in (
+                "return_type",
+                "access_modifier",
+                "is_static",
+                "checked_exceptions",
+                "return_count",
+                "throw_count",
+            ):
                 if original_method.get(field) != transformed_method.get(field):
                     changed_methods.append(
                         {
@@ -1952,10 +1992,56 @@ class BehavioralValidator:
                         }
                     )
 
+            if original_method.get("param_types") != transformed_method.get("param_types"):
+                migration = self._validate_java_parameter_object_migration(
+                    original_method=original_method,
+                    transformed_method=transformed_method,
+                    transformed_summary=transformed_summary,
+                    actions=actions,
+                    structural_validation_passed=structural_validation_passed,
+                )
+                if migration.get("matched"):
+                    expected_signature_migrations.append(migration)
+                else:
+                    changed_methods.append(
+                        {
+                            "method": method_key,
+                            "expected_method": f"{expected_class}.{expected_method}",
+                            "field": "param_types",
+                            "original": original_method.get("param_types"),
+                            "transformed": transformed_method.get("param_types"),
+                            "signature_compatibility": "FAIL",
+                            "compatibility_reason": migration.get(
+                                "compatibility_reason",
+                                "UNAPPROVED_SIGNATURE_CHANGE",
+                            ),
+                            "compatibility_details": migration,
+                        }
+                    )
+
         matched = not missing_methods and not changed_methods
+        expected_signature_change = bool(expected_signature_migrations)
         return {
             "matched": matched,
-            "reason": "java_static_summary_preserved" if matched else "java_static_summary_mismatch",
+            "reason": (
+                "INTRODUCE_PARAMETER_OBJECT_MAPPING_PRESERVED"
+                if matched and expected_signature_change
+                else "java_static_summary_preserved"
+                if matched
+                else "java_static_summary_mismatch"
+            ),
+            "signature_change": "EXPECTED" if expected_signature_change else (
+                "NONE" if matched else "UNEXPECTED"
+            ),
+            "signature_compatibility": "PASS" if matched else "FAIL",
+            "compatibility_reason": (
+                "INTRODUCE_PARAMETER_OBJECT_MAPPING_PRESERVED"
+                if matched and expected_signature_change
+                else "EXACT_SIGNATURE_PRESERVED"
+                if matched
+                else "JAVA_STATIC_COMPATIBILITY_FAILED"
+            ),
+            "expected_signature_migrations": expected_signature_migrations,
             "original": {
                 "method_count": original_summary.get("method_count", 0),
                 "methods": original_methods,
@@ -1969,6 +2055,167 @@ class BehavioralValidator:
                 "changed_methods": changed_methods,
             },
         }
+
+    def _validate_java_parameter_object_migration(
+        self,
+        *,
+        original_method: Dict[str, Any],
+        transformed_method: Dict[str, Any],
+        transformed_summary: Dict[str, Any],
+        actions: Sequence[RefactoringAction],
+        structural_validation_passed: bool | None,
+    ) -> Dict[str, Any]:
+        """Prove one metadata-approved Java parameter-object migration."""
+
+        target_class = str(original_method.get("class_name") or "")
+        target_method = str(original_method.get("method_name") or "")
+        for action in actions:
+            if action.action_type not in PARAMETER_OBJECT_ACTIONS:
+                continue
+
+            params = action.parameters or {}
+            applied = params.get("applied_transformation_metadata")
+            if not isinstance(applied, dict):
+                continue
+            if str(applied.get("language") or "").lower() != "java":
+                continue
+            if str(applied.get("method") or "") != target_method:
+                continue
+            if str(applied.get("source_class") or "") != target_class:
+                continue
+
+            failure = self._java_parameter_object_migration_failure(
+                original_method=original_method,
+                transformed_method=transformed_method,
+                transformed_summary=transformed_summary,
+                applied=applied,
+                structural_validation_passed=structural_validation_passed,
+            )
+            if failure:
+                return {
+                    "matched": False,
+                    "signature_change": "UNEXPECTED",
+                    "signature_compatibility": "FAIL",
+                    "compatibility_reason": failure,
+                }
+
+            moved = list(applied.get("parameters_moved") or [])
+            return {
+                "matched": True,
+                "method": f"{target_class}.{target_method}",
+                "refactoring": "Introduce Parameter Object",
+                "signature_change": "EXPECTED",
+                "signature_compatibility": "PASS",
+                "compatibility_reason": "INTRODUCE_PARAMETER_OBJECT_MAPPING_PRESERVED",
+                "parameter_object_name": applied.get("parameter_object_name"),
+                "parameter_name": applied.get("parameter_name"),
+                "parameters_moved": moved,
+                "parameter_types": dict(applied.get("parameter_types") or {}),
+                "structural_validation": "PASS",
+                "body_migration": "PASS",
+            }
+
+        return {
+            "matched": False,
+            "signature_change": "UNEXPECTED",
+            "signature_compatibility": "FAIL",
+            "compatibility_reason": "NO_ACCEPTED_SIGNATURE_CHANGING_REFACTORING",
+        }
+
+    def _java_parameter_object_migration_failure(
+        self,
+        *,
+        original_method: Dict[str, Any],
+        transformed_method: Dict[str, Any],
+        transformed_summary: Dict[str, Any],
+        applied: Dict[str, Any],
+        structural_validation_passed: bool | None,
+    ) -> str:
+        if structural_validation_passed is not True:
+            return "STRUCTURAL_VALIDATION_NOT_PASSED"
+        if str(applied.get("status") or "").lower() not in {
+            "success",
+            "pass",
+            "accepted",
+            "already_applied",
+        }:
+            return "TRANSFORMATION_NOT_ACCEPTED"
+        if str(applied.get("plan_compliance") or "").upper() != "PASS":
+            return "PLAN_COMPLIANCE_NOT_PASSED"
+        validation = applied.get("validation")
+        if not isinstance(validation, dict) or not validation or any(
+            str(value).upper() != "PASS" for value in validation.values()
+        ):
+            return "PARAMETER_OBJECT_STRUCTURAL_POSTCONDITION_FAILED"
+
+        moved = [str(item) for item in applied.get("parameters_moved") or []]
+        original_names = [str(item) for item in original_method.get("param_names") or []]
+        if len(original_names) < 2 or moved != original_names:
+            return "PARAMETER_MAPPING_INCOMPLETE_OR_REORDERED"
+
+        type_map = applied.get("parameter_types")
+        if not isinstance(type_map, dict) or list(type_map) != moved:
+            return "PARAMETER_TYPE_MAPPING_INCOMPLETE_OR_REORDERED"
+        original_types = [
+            self._normalize_java_type_name(item)
+            for item in original_method.get("param_types") or []
+        ]
+        mapped_types = [
+            self._normalize_java_type_name(type_map.get(name)) for name in moved
+        ]
+        if mapped_types != original_types:
+            return "PARAMETER_TYPES_NOT_PRESERVED"
+
+        object_name = str(applied.get("parameter_object_name") or "")
+        parameter_name = str(applied.get("parameter_name") or "")
+        if not object_name or transformed_method.get("param_types") != [object_name]:
+            return "PARAMETER_OBJECT_SIGNATURE_NOT_PRESERVED"
+        if transformed_method.get("param_names") != [parameter_name]:
+            return "PARAMETER_OBJECT_VARIABLE_NOT_PRESERVED"
+
+        fields = (transformed_summary.get("class_fields") or {}).get(object_name, [])
+        field_names = [str(item.get("name") or "") for item in fields]
+        field_types = [
+            self._normalize_java_type_name(item.get("type")) for item in fields
+        ]
+        if field_names != moved:
+            return "PARAMETER_OBJECT_FIELDS_INCOMPLETE_OR_REORDERED"
+        if field_types != original_types:
+            return "PARAMETER_OBJECT_FIELD_TYPES_NOT_PRESERVED"
+
+        for field in (
+            "return_type",
+            "access_modifier",
+            "is_static",
+            "checked_exceptions",
+            "return_count",
+            "throw_count",
+            "branch_count",
+        ):
+            if original_method.get(field) != transformed_method.get(field):
+                return f"METHOD_{field.upper()}_CHANGED"
+
+        original_body = str(original_method.get("body") or "")
+        original_usage_pattern = re.compile(
+            rf"(?<![A-Za-z0-9_$.])({'|'.join(re.escape(name) for name in moved)})\b"
+        )
+        original_usage_sequence = [
+            match.group(1) for match in original_usage_pattern.finditer(original_body)
+        ]
+        transformed_usage_sequence = [
+            match.group(1)
+            for match in re.finditer(
+                rf"\b{re.escape(parameter_name)}\s*\.\s*([A-Za-z_$][A-Za-z0-9_$]*)\b",
+                str(transformed_method.get("body") or ""),
+            )
+        ]
+        if original_usage_sequence != transformed_usage_sequence:
+            return "PARAMETER_OBJECT_BODY_MAPPING_NOT_PRESERVED"
+        return ""
+
+    @staticmethod
+    def _normalize_java_type_name(value: Any) -> str:
+        return re.sub(r"\s+", "", str(value or ""))
 
     @staticmethod
     def _strip_java_comments_and_literals(source: str) -> str:
@@ -2408,15 +2655,19 @@ class BehavioralValidator:
         class_body = original_code[body_start + 1 : body_end]
 
         method_pattern = re.compile(
+            r"(?P<prefix>"
             r"(?:public|protected|private)?\s*"
             r"(?:static\s+)?"
             r"(?:final\s+)?"
             r"(?:synchronized\s+)?"
             r"(?:native\s+)?"
             r"(?:abstract\s+)?"
-            r"[\w<>\[\], ?]+\s+"
+            r"(?:strictfp\s+)?"
+            r"[\w$<>\[\], ?.]+\s+"
+            r")"
             r"(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*"
-            r"\((?P<params>[^)]*)\)",
+            r"\((?P<params>[^)]*)\)\s*"
+            r"(?:throws\s+(?P<throws>[A-Za-z0-9_$.,\s]+?))?\s*(?:\{|;)",
             re.MULTILINE,
         )
 
@@ -2432,6 +2683,42 @@ class BehavioralValidator:
             param_list = self._split_java_params(params_raw)
             param_types = [self._normalize_java_param_type(p) for p in param_list]
             param_types = [p for p in param_types if p]
+            param_names = [self._java_parameter_name(p) for p in param_list]
+            param_names = [p for p in param_names if p]
+            prefix = str(match.group("prefix") or "").strip()
+            prefix_without_annotations = re.sub(
+                r"@\w+(?:\s*\([^)]*\))?\s*",
+                "",
+                prefix,
+            )
+            prefix_tokens = prefix_without_annotations.split()
+            modifier_names = {
+                "public",
+                "protected",
+                "private",
+                "static",
+                "final",
+                "synchronized",
+                "native",
+                "abstract",
+                "strictfp",
+            }
+            return_type = " ".join(
+                token for token in prefix_tokens if token not in modifier_names
+            ).strip()
+            access_modifier = next(
+                (
+                    token
+                    for token in prefix_tokens
+                    if token in {"public", "protected", "private"}
+                ),
+                "package",
+            )
+            checked_exceptions = [
+                item.strip()
+                for item in str(match.group("throws") or "").split(",")
+                if item.strip()
+            ]
 
             key = (method_name, len(param_types))
             if key in seen:
@@ -2442,10 +2729,44 @@ class BehavioralValidator:
                 {
                     "name": method_name,
                     "param_types": param_types,
+                    "param_names": param_names,
+                    "return_type": return_type,
+                    "access_modifier": access_modifier,
+                    "is_static": "static" in prefix_tokens,
+                    "checked_exceptions": checked_exceptions,
                 }
             )
 
         return candidates
+
+    @staticmethod
+    def _java_parameter_name(parameter: str) -> str:
+        cleaned = re.sub(r"@\w+(?:\s*\([^)]*\))?", "", parameter)
+        cleaned = re.sub(r"\bfinal\b", "", cleaned).strip()
+        match = re.search(r"([A-Za-z_$][A-Za-z0-9_$]*)\s*(?:\[\s*\])?\s*$", cleaned)
+        return match.group(1) if match else ""
+
+    def _extract_java_class_fields(
+        self,
+        *,
+        source_code: str,
+        class_name: str,
+    ) -> List[Dict[str, str]]:
+        # Reuse the parsed Java member model used by the transformer so field
+        # order and types are checked with the same grammar that created the
+        # parameter object.
+        try:
+            from ..transformers.java_extract_class import _parse_java_class
+
+            model = _parse_java_class(source_code, class_name)
+        except (ImportError, TypeError, ValueError):
+            model = None
+        if model is None:
+            return []
+        return [
+            {"name": field.name, "type": field.type_name}
+            for field in model.fields.values()
+        ]
 
     @staticmethod
     def _java_brace_depth_at(source_code: str, end_index: int) -> int:

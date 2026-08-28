@@ -206,3 +206,115 @@ def test_java_parameter_object_resolves_numbered_filename_to_unique_method_owner
     assert "static class calculateInvoiceParams" in result["refactored_code"]
     assert "calculateInvoice(calculateInvoiceParams params)" in result["refactored_code"]
     assert "calculateInvoice(new calculateInvoiceParams(" in result["refactored_code"]
+
+
+def test_java_parameter_object_static_fallback_preserves_prior_extract_method():
+    source = '''import missing.Dependency;
+
+public class Calculator {
+    public static int process(int a, int b, int c, int d, int e, int f, int g) {
+        int subtotal = a + b;
+        int discount = subtotal / c;
+        int tax = subtotal / d;
+        int total = subtotal - discount + tax + e + f + g;
+        System.out.println(total);
+        return total;
+    }
+}
+'''
+    result = SafeCodeTransformationValidationAgent().execute({
+        "request_id": "java_parameter_object_after_extract_method",
+        "language": "java",
+        "source_files": [{
+            "file_name": "Calculator.java",
+            "source_code": source,
+            "language": "java",
+            "source_mode": "raw",
+        }],
+        "refactoring_plan": {
+            "plan_id": "java_parameter_object_after_extract_method_plan",
+            "actions": [{
+                "action_type": "extract_method",
+                "parameters": {
+                    "source_file": "Calculator.java",
+                    "source_class": "Calculator",
+                    "method": "process",
+                    "new_method_name": "calculateTotal",
+                    "start_line": 1000,
+                    "end_line": 1010,
+                },
+            }, {
+                "action_type": "introduce_java_parameter_object",
+                "parameters": {
+                    "source_file": "Calculator.java",
+                    "source_class": "Calculator",
+                    "method": "process",
+                    "parameter_object_name": "ProcessParams",
+                },
+            }],
+            "behavior_tests": [],
+            "metadata": {},
+        },
+        "execution_options": _options(),
+    })
+
+    logs = result["safety_report"]["transformation_log"]
+    assert result["success"] is True, result
+    assert result["rollback_occurred"] is False
+    assert result["transformation_applied"] is True
+    assert result["validation"]["behavioral"]["details"][
+        "behavioral_validation_mode"
+    ] == "refactoring_aware_static_fallback"
+    assert logs[0]["metadata"]["final_decision"] == "PASS"
+    assert logs[1]["metadata"]["final_decision"] == "PASS"
+    assert "calculateTotal(" in result["refactored_code"]
+    assert "process(ProcessParams params)" in result["refactored_code"]
+
+
+def test_java_parameter_object_cross_file_caller_remains_review_required():
+    source = '''class Service {
+    int combine(int a, int b, int c) { return a + b + c; }
+}
+'''
+    caller = '''class Caller {
+    int call(Service service) { return service.combine(1, 2, 3); }
+}
+'''
+    result = SafeCodeTransformationValidationAgent().execute({
+        "request_id": "java_parameter_object_cross_file_review",
+        "language": "java",
+        "source_files": [{
+            "file_name": "Service.java",
+            "source_code": source,
+            "language": "java",
+            "source_mode": "raw",
+        }, {
+            "file_name": "Caller.java",
+            "source_code": caller,
+            "language": "java",
+            "source_mode": "raw",
+        }],
+        "refactoring_plan": {
+            "plan_id": "java_parameter_object_cross_file_review_plan",
+            "actions": [{
+                "action_type": "introduce_java_parameter_object",
+                "parameters": {
+                    "source_file": "Service.java",
+                    "source_class": "Service",
+                    "method": "combine",
+                    "parameter_object_name": "CombineParams",
+                },
+            }],
+            "behavior_tests": [],
+            "metadata": {},
+        },
+        "execution_options": _options(),
+    })
+
+    log = result["safety_report"]["transformation_log"][0]
+    assert result["transformation_applied"] is False
+    assert log["replacements_count"] == 0
+    assert log["metadata"]["status"] == "review_required"
+    assert log["metadata"]["reason"] == (
+        "CROSS_FILE_CALL_SITES_REQUIRE_COORDINATED_EDIT"
+    )
