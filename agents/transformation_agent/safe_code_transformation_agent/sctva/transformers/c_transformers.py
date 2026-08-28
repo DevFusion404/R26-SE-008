@@ -1038,33 +1038,79 @@ def apply_replace_unsafe_function(
         if source_line is not None and index != source_line:
             continue
 
+def _is_c_pointer_variable(var_name: str, source_code: str) -> bool:
+    """Return True if var_name is explicitly declared as a pointer (e.g. char *var, void *var)."""
+    clean_var = var_name.strip()
+    if not clean_var or not clean_var.isidentifier():
+        return False
+    # Check for pointer declaration on same line: e.g. char *dst, char* dst, void *dst (no newlines between * and name)
+    ptr_re = re.compile(rf"\b\w+\s*\*+[^\S\r\n]*{re.escape(clean_var)}\b|\b{re.escape(clean_var)}\s*\[\s*\]")
+    return bool(ptr_re.search(source_code))
+
+
+def apply_replace_unsafe_function(
+    source_code: str,
+    unsafe_function: str,
+    safe_alternative: str,
+    target_line: Optional[int] = None,
+) -> Tuple[str, int]:
+    """
+    Replace calls to unsafe C standard functions (gets, strcpy, strcat, sprintf, scanf)
+    with safe bounded equivalents (fgets, strncpy, strncat, snprintf).
+    Requires a known buffer size for pointers to prevent memory truncation.
+    """
+    lines = source_code.splitlines(keepends=True)
+    replacements = 0
+
+    call_pattern = re.compile(
+        rf"\b{re.escape(unsafe_function)}\s*\((.*?)\)",
+        re.DOTALL,
+    )
+
+    candidate_lines = (
+        [target_line]
+        if (target_line and 1 <= target_line <= len(lines))
+        else list(range(1, len(lines) + 1))
+    )
+
+    for index in candidate_lines:
+        line = lines[index - 1]
+        masked = _mask_c_comments_and_strings(line)
+        if unsafe_function not in masked:
+            continue
+
         def replace_call(match: re.Match[str]) -> str:
             nonlocal replacements
             args = _split_call_args(match.group(1))
             if unsafe_function == "gets" and safe_alternative == "fgets" and args:
-                replacements += 1
                 buffer = args[0]
+                if _is_c_pointer_variable(buffer, source_code):
+                    return match.group(0)
+                replacements += 1
                 return f"fgets({buffer}, sizeof({buffer}), stdin)"
             if unsafe_function == "strcpy" and safe_alternative == "strncpy" and len(args) >= 2:
-                replacements += 1
                 destination, source = args[0], args[1]
-                return f"strncpy({destination}, {source}, sizeof({destination}) - 1)"
+                if _is_c_pointer_variable(destination, source_code):
+                    return match.group(0)  # Require known array buffer size for pointer destination
+                replacements += 1
+                return f"strncpy({destination}, {source}, sizeof({destination}) - 1);\n    {destination}[sizeof({destination}) - 1] = '\\0'"
             if unsafe_function == "strcat" and safe_alternative == "strncat" and len(args) >= 2:
-                replacements += 1
                 destination, source = args[0], args[1]
+                if _is_c_pointer_variable(destination, source_code):
+                    return match.group(0)
+                replacements += 1
                 return f"strncat({destination}, {source}, sizeof({destination}) - strlen({destination}) - 1)"
             if unsafe_function == "sprintf" and safe_alternative == "snprintf" and len(args) >= 2:
-                replacements += 1
                 destination = args[0]
                 rest = ", ".join(args[1:])
+                if _is_c_pointer_variable(destination, source_code):
+                    return match.group(0)
+                replacements += 1
                 return f"snprintf({destination}, sizeof({destination}), {rest})"
             if unsafe_function == "scanf" and safe_alternative == "fgets" and len(args) >= 1:
-                # scanf("%d", &var)  →  char _buf[256]; fgets(_buf, sizeof(_buf), stdin); sscanf(_buf, "%d", &var)
                 replacements += 1
-                fmt = args[0]  # e.g. "%d" or "%f"
-                rest = ", ".join(args[1:])  # e.g. &price
-                # Preserve the leading indent of the original line so the
-                # two-statement expansion keeps the same column alignment.
+                fmt = args[0]
+                rest = ", ".join(args[1:])
                 leading = re.match(r"^(\s*)", match.string[match.pos:])
                 indent = leading.group(1) if leading else ""
                 buf_decl = "char _scanf_buf[256]"
@@ -1075,13 +1121,42 @@ def apply_replace_unsafe_function(
                     sscanf_call = f"sscanf(_scanf_buf, {fmt})"
                 return f"{buf_decl};\n{indent}{fgets_call};\n{indent}{sscanf_call}"
 
-            replacements += 1
-            return f"{safe_alternative}({match.group(1)})"
+            return match.group(0)
 
         updated = call_pattern.sub(replace_call, line)
         lines[index - 1] = updated
 
     return "".join(lines), replacements
+
+
+def apply_replace_nested_conditional_with_guard_clauses(
+    source_code: str,
+    method_name: Optional[str] = None,
+    target_line: Optional[int] = None,
+) -> Tuple[str, int, Dict[str, Any]]:
+    """
+    Transform nested conditionals in C into guard clauses where safe.
+    If transformation cannot be applied safely, returns original code with count=0
+    and status='review_required'.
+    """
+    lines = source_code.splitlines(keepends=True)
+    if not lines:
+        return source_code, 0, {"status": "review_required", "reason": "EMPTY_SOURCE"}
+
+    nested_if_re = re.compile(
+        r"(\s*)if\s*\(([^)]+)\)\s*\{\s*\n\1\s+if\s*\(([^)]+)\)\s*\{\s*\n",
+        re.MULTILINE,
+    )
+    m = nested_if_re.search(source_code)
+    if m:
+        indent = m.group(1)
+        cond1 = m.group(2).strip()
+        cond2 = m.group(3).strip()
+        combined = f"{indent}if (!({cond1}) || !({cond2})) return;\n"
+        transformed = nested_if_re.sub(combined, source_code, count=1)
+        return transformed, 1, {"status": "success"}
+
+    return source_code, 0, {"status": "review_required", "reason": "CANNOT_SAFELY_INVERT_CONDITIONAL"}
 
 
 def _mask_c_comments_and_strings(source_code: str) -> str:
