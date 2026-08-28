@@ -13,6 +13,10 @@ weights:
   risk_weight: 0.4
   impact_weight: 0.4
   impact_prediction_weight: 0.3
+  mcda_quality_weight: 0.40
+  mcda_complexity_weight: 0.25
+  mcda_risk_weight: 0.20
+  mcda_dependency_weight: 0.15
   ml_prediction_weight: 0.25
 
 # Severity priority (higher number = higher priority during sequencing).
