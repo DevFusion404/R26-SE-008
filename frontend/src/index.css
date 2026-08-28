@@ -847,3 +847,48 @@ code {
   color: #f87171;
   border-color: rgba(239,68,68,0.35);
 }
+
+/* ================================================================
+   Light Theme — targeted overrides for elements that hard-code
+   dark values not covered by the CSS variable flip in theme.css.
+   ================================================================ */
+
+/* Spinner ring */
+[data-theme="light"] .spinner {
+  border-color: rgba(0, 153, 181, 0.2);
+  border-top-color: var(--accent);
+}
+
+/* Scrollbar */
+[data-theme="light"] ::-webkit-scrollbar-thumb          { background: #cbd5e1; }
+[data-theme="light"] ::-webkit-scrollbar-thumb:hover    { background: var(--accent-dim); }
+
+/* Inline code */
+[data-theme="light"] code {
+  background: rgba(0, 153, 181, 0.08);
+  color: #1d4ed8;
+}
+
+/* Alert variants */
+[data-theme="light"] .alert-error  { background: rgba(220,38,38,0.08);  border-color: rgba(220,38,38,0.3);  color: #dc2626; }
+[data-theme="light"] .alert-warn   { background: rgba(202,138,4,0.08);  border-color: rgba(202,138,4,0.3);  color: #b45309; }
+
+/* Sidebar active link */
+[data-theme="light"] .sidebar-item.active {
+  background: rgba(0, 153, 181, 0.10);
+  border-left-color: var(--accent);
+  color: var(--accent);
+}
+
+/* File tree */
+[data-theme="light"] .file-tree-item:hover { background: var(--bg-hover); }
+
+/* Badges */
+[data-theme="light"] .badge {
+  background: var(--bg-elevated);
+  border-color: var(--border);
+  color: var(--text-secondary);
+}
+
+/* Priority pills — keep readable in light */
+[data-theme="light"] .pill-critical { background: rgba(220,38,38,0.12);  color: #dc2626; border-color: rgba(220,38,38,0.3); }
