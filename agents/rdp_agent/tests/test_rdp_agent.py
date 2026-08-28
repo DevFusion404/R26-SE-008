@@ -19,6 +19,8 @@ from rdp_agent import (
     RefactoringPlan,
     RefactoringStep,
     ImpactPrediction,
+    MLPrediction,
+    RefactoringKnowledgeBase,
     DEFAULT_CATALOG,
     DEFAULT_DEPENDENCIES,
     RATING_MAP,
@@ -776,8 +778,164 @@ class TestScoringWithImpact:
 
 
 # ---------------------------------------------------------------------------
+# MCDA + ML Selection Tests
+# ---------------------------------------------------------------------------
+
+
+class _FakeMLScorer:
+    """Fast deterministic ML scorer used to prove selection consumes ML scores."""
+
+    def is_available(self) -> bool:
+        return True
+
+    def predict(self, smell: CodeSmell, candidate: Dict[str, Any]) -> MLPrediction:
+        if candidate["name"] == "Replace Temp with Query":
+            return MLPrediction(
+                refactoring=candidate["name"],
+                smell_id=smell.id,
+                contextual_suitability=0.95,
+                quality_improvement=0.95,
+                behavioral_risk=0.05,
+                confidence=1.0,
+                embedding_norm=10.0,
+            )
+
+        return MLPrediction(
+            refactoring=candidate["name"],
+            smell_id=smell.id,
+            contextual_suitability=0.05,
+            quality_improvement=0.05,
+            behavioral_risk=0.95,
+            confidence=1.0,
+            embedding_norm=10.0,
+        )
+
+
+class TestMCDAMLSelection:
+    """Tests that MCDA ranking uses ML predictions, not only catalog scores."""
+
+    @staticmethod
+    def _report() -> QualityReport:
+        return QualityReport.from_dict({
+            "target": "Example.py",
+            "smells": [
+                {
+                    "id": "s1",
+                    "type": "Long Method",
+                    "location": {
+                        "file": "example.py",
+                        "class": "Example",
+                        "method": "calculate",
+                        "lines": [1, 80],
+                    },
+                    "metrics": {
+                        "lines_of_code": 80,
+                        "cyclomatic_complexity": 16,
+                    },
+                    "severity": "high",
+                },
+            ],
+        })
+
+    @staticmethod
+    def _knowledge_base() -> RefactoringKnowledgeBase:
+        return RefactoringKnowledgeBase(
+            catalog={
+                "Long Method": [
+                    {
+                        "name": "Extract Method",
+                        "complexity": "low",
+                        "risk": "low",
+                        "impact": "high",
+                        "preconditions": [],
+                    },
+                    {
+                        "name": "Replace Temp with Query",
+                        "complexity": "low",
+                        "risk": "low",
+                        "impact": "medium",
+                        "preconditions": [],
+                    },
+                ],
+            },
+            dependencies={},
+        )
+
+    def test_ml_adjusted_mcda_score_can_change_selected_candidate(self) -> None:
+        no_ml = RDPAgent(
+            knowledge_base=self._knowledge_base(),
+            ml_config={"enabled": False},
+        ).process_report_with_trace(self._report())
+        no_ml_selection = no_ml["trace"]["candidate_generation"][0]
+        assert no_ml_selection["selected"] == "Extract Method"
+        assert no_ml_selection["scoring_method"] == "mcda"
+
+        with_ml = RDPAgent(
+            knowledge_base=self._knowledge_base(),
+            ml_scorer=_FakeMLScorer(),
+            weights={"ml_prediction_weight": 0.25},
+        ).process_report_with_trace(self._report())
+
+        selection = with_ml["trace"]["candidate_generation"][0]
+        assert selection["selected"] == "Replace Temp with Query"
+        assert selection["scoring_method"] == "mcda_ml"
+
+        scores = {c["name"]: c for c in selection["candidates"]}
+        assert scores["Replace Temp with Query"]["scoring_method"] == "mcda_ml"
+        assert scores["Replace Temp with Query"]["score"] == selection["selected_score"]
+        assert scores["Replace Temp with Query"]["ml_adjustment"] > 0
+        assert scores["Extract Method"]["ml_adjustment"] < 0
+
+        mcda_trace = with_ml["trace"]["mcda_selection"][0]["predictions"]
+        mcda_scores = {entry["refactoring"]: entry for entry in mcda_trace}
+        assert mcda_scores["Replace Temp with Query"]["final_score"] > (
+            mcda_scores["Extract Method"]["final_score"]
+        )
+        assert mcda_scores["Replace Temp with Query"]["base_final_score"] < (
+            mcda_scores["Extract Method"]["base_final_score"]
+        )
+
+
+# ---------------------------------------------------------------------------
 # End-to-End with Impact Prediction Tests
 # ---------------------------------------------------------------------------
+
+
+class TestEndToEndWithImpact:
+    """Integration tests verifying impact prediction in the full pipeline."""
+
+    def test_trace_contains_impact_prediction(
+        self, sample_quality_report_dict: Dict[str, Any]
+    ) -> None:
+        """The pipeline trace should include impact_prediction data."""
+        report = QualityReport.from_dict(sample_quality_report_dict)
+        agent = RDPAgent()
+        result = agent.process_report_with_trace(report)
+
+        trace = result["trace"]
+        assert "impact_prediction" in trace
+        assert isinstance(trace["impact_prediction"], list)
+        assert len(trace["impact_prediction"]) > 0
+
+        # Each impact entry should have predictions list
+        for entry in trace["impact_prediction"]:
+            assert "smell_id" in entry
+            assert "predictions" in entry
+            assert isinstance(entry["predictions"], list)
+
+    def test_predictions_have_required_fields(
+        self, sample_quality_report_dict: Dict[str, Any]
+    ) -> None:
+        """Each prediction in the trace should have all expected metric fields."""
+        report = QualityReport.from_dict(sample_quality_report_dict)
+        agent = RDPAgent()
+        result = agent.process_report_with_trace(report)
+
+        for entry in result["trace"]["impact_prediction"]:
+            for pred in entry["predictions"]:
+                assert "refactoring" in pred
+                assert "smell_id" in pred
+                assert "predicted_complexity_after" in pred
 
 
 class TestEndToEndWithImpact:
@@ -832,3 +990,57 @@ class TestEndToEndWithImpact:
         assert len(plan["steps"]) > 0
         assert "summary" in plan
 
+    def test_feature_envy_move_method_generated_without_rejection(self) -> None:
+        """Verify Move Method is generated for Feature Envy when target parameters exist."""
+        report_dict = {
+            "target": "order_service.py",
+            "language": "python",
+            "smells": [{
+                "id": "smell_fe_01",
+                "type": "Feature Envy",
+                "severity": "medium",
+                "location": {
+                    "file": "order_service.py",
+                    "class": "OrderService",
+                    "method": "calculate_shipping",
+                    "destination_class": "ShippingCalculator",
+                    "lines": [10, 25],
+                },
+                "details": "Method calculate_shipping exhibits Feature Envy toward ShippingCalculator",
+                "metrics": {"external_field_accesses": 6, "lines_of_code": 20},
+            }],
+            "metrics_summary": {"total_lines": 100},
+        }
+        plan = generate_plan_from_dict(report_dict)
+        assert len(plan["steps"]) == 1
+        step = plan["steps"][0]
+        assert step["refactoring"] == "Move Method"
+        assert step["parameters"]["source_class"] == "OrderService"
+        assert step["parameters"]["destination_class"] == "ShippingCalculator"
+
+    def test_feature_envy_without_destination_class_derives_target_class(self) -> None:
+        """Verify Move Method is generated and destination class derived when missing from smell."""
+        report_dict = {
+            "target": "order_service.py",
+            "language": "python",
+            "smells": [{
+                "id": "smell_fe_02",
+                "type": "Feature Envy",
+                "severity": "medium",
+                "location": {
+                    "file": "order_service.py",
+                    "class": "OrderService",
+                    "method": "calculate_tax",
+                    "lines": [30, 45],
+                },
+                "details": "Feature envy detected in method calculate_tax",
+                "metrics": {"external_field_accesses": 5, "lines_of_code": 15},
+            }],
+            "metrics_summary": {"total_lines": 100},
+        }
+        plan = generate_plan_from_dict(report_dict)
+        assert len(plan["steps"]) == 1
+        step = plan["steps"][0]
+        assert step["refactoring"] == "Move Method"
+        assert step["parameters"]["source_class"] == "OrderService"
+        assert step["parameters"]["destination_class"] == "CalculateTaxHelper"
