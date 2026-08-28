@@ -308,3 +308,183 @@ int check_number(int value) {
     assert result["rollback_occurred"] is False
     assert "old_calculation" not in result["refactored_code"]
     assert result["validation"]["structural"]["details"]["dead_code_validation"][0]["passed"] is True
+
+
+def test_python_sequential_dead_code_removals_use_action_snapshots():
+    source = '''def old_alpha():
+    return "alpha"
+
+def old_beta():
+    return "beta"
+
+def live_value():
+    return "live"
+'''
+    result = SafeCodeTransformationValidationAgent().execute({
+        "request_id": "sequential_dead_removals",
+        "language": "python",
+        "source_files": [{
+            "file_name": "helpers.py", "source_code": source,
+            "language": "python", "source_mode": "raw",
+        }],
+        "refactoring_plan": {
+            "plan_id": "sequential_dead_removals",
+            "actions": [
+                {"action_type": "remove_dead_code", "parameters": {"method": "old_alpha"}},
+                {"action_type": "remove_dead_code", "parameters": {"method": "old_beta"}},
+            ],
+            "behavior_tests": [], "metadata": {},
+        },
+        "execution_options": _options(),
+    })
+
+    assert result["success"] is True, result
+    assert result["rollback_occurred"] is False
+    assert "old_alpha" not in result["refactored_code"]
+    assert "old_beta" not in result["refactored_code"]
+    validations = result["validation"]["structural"]["details"]["dead_code_validation"]
+    assert len(validations) == 2
+    assert all(item["checks"]["unrelated_source_preserved"] for item in validations)
+    logs = result["safety_report"]["transformation_log"]
+    assert all(
+        entry["metadata"]["dead_code_removal_ledger_entry"]["validation_result"] == "APPLIED"
+        for entry in logs
+        if entry["action_type"] == "remove_dead_code"
+    )
+
+
+def test_python_cross_file_reference_is_not_deleted():
+    helpers = '''def shared_format(value):
+    return f"value={value}"
+
+def obsolete_format(value):
+    return f"old={value}"
+'''
+    caller = '''from helpers import shared_format
+
+def render(value):
+    return shared_format(value)
+'''
+    result = SafeCodeTransformationValidationAgent().execute({
+        "request_id": "cross_file_deadness",
+        "language": "python",
+        "source_files": [
+            {"file_name": "helpers.py", "source_code": helpers, "language": "python", "source_mode": "raw"},
+            {"file_name": "caller.py", "source_code": caller, "language": "python", "source_mode": "raw"},
+        ],
+        "refactoring_plan": {
+            "plan_id": "cross_file_deadness",
+            "actions": [
+                {"action_type": "remove_dead_code", "parameters": {"method": "shared_format", "source_file": "helpers.py"}},
+                {"action_type": "remove_dead_code", "parameters": {"method": "obsolete_format", "source_file": "helpers.py"}},
+            ],
+            "behavior_tests": [], "metadata": {},
+        },
+        "execution_options": _options(),
+    })
+
+    helper_result = next(
+        item for item in result.get("file_results", [result])
+        if item["file_name"] == "helpers.py"
+    )
+    assert helper_result["rollback_occurred"] is False
+    assert "def shared_format" in helper_result["refactored_code"]
+    assert "def obsolete_format" not in helper_result["refactored_code"]
+    first_log = helper_result["safety_report"]["transformation_log"][0]
+    assert first_log["metadata"]["dead_code_status"] == "NOT_DEAD"
+
+
+def test_python_duplicate_dead_code_request_is_already_handled():
+    source = '''def obsolete_helper():
+    return 1
+'''
+    result = SafeCodeTransformationValidationAgent().execute({
+        "request_id": "duplicate_dead_removal",
+        "language": "python",
+        "source_files": [{
+            "file_name": "helpers.py", "source_code": source,
+            "language": "python", "source_mode": "raw",
+        }],
+        "refactoring_plan": {
+            "plan_id": "duplicate_dead_removal",
+            "actions": [
+                {"action_type": "remove_dead_code", "parameters": {"method": "obsolete_helper"}},
+                {"action_type": "remove_dead_code", "parameters": {"method": "obsolete_helper"}},
+            ],
+            "behavior_tests": [], "metadata": {},
+        },
+        "execution_options": _options(),
+    })
+
+    assert result["success"] is True, result
+    logs = result["safety_report"]["transformation_log"]
+    assert logs[0]["metadata"]["final_decision"] == "PASS"
+    assert logs[1]["metadata"]["final_decision"] == "ALREADY_HANDLED"
+
+
+def test_python_later_live_removal_does_not_rollback_prior_dead_removal():
+    source = '''def obsolete_helper():
+    return "obsolete"
+
+def active_helper(value):
+    return value
+
+def run(value):
+    return active_helper(value)
+'''
+    result = SafeCodeTransformationValidationAgent().execute({
+        "request_id": "selective_dead_code_action_outcome",
+        "language": "python",
+        "source_files": [{
+            "file_name": "helpers.py", "source_code": source,
+            "language": "python", "source_mode": "raw",
+        }],
+        "refactoring_plan": {
+            "plan_id": "selective_dead_code_action_outcome",
+            "actions": [
+                {"action_type": "remove_dead_code", "parameters": {"method": "obsolete_helper"}},
+                {"action_type": "remove_dead_code", "parameters": {"method": "active_helper"}},
+            ],
+            "behavior_tests": [], "metadata": {},
+        },
+        "execution_options": _options(),
+    })
+
+    assert result["success"] is True, result
+    assert result["rollback_occurred"] is False
+    assert "def obsolete_helper" not in result["refactored_code"]
+    assert "def active_helper" in result["refactored_code"]
+    logs = result["safety_report"]["transformation_log"]
+    assert logs[0]["metadata"]["final_decision"] == "PASS"
+    assert logs[1]["metadata"]["dead_code_status"] == "NOT_DEAD"
+
+
+def test_python_unreferenced_class_is_removed_only_after_repository_proof():
+    source = '''class LegacyFormatter:
+    def format(self, value):
+        return str(value)
+
+def live_value():
+    return "live"
+'''
+    result = SafeCodeTransformationValidationAgent().execute({
+        "request_id": "dead_class_removal",
+        "language": "python",
+        "source_files": [{
+            "file_name": "formatters.py", "source_code": source,
+            "language": "python", "source_mode": "raw",
+        }],
+        "refactoring_plan": {
+            "plan_id": "dead_class_removal",
+            "actions": [{
+                "action_type": "remove_dead_code",
+                "parameters": {"class_name": "LegacyFormatter", "source_file": "formatters.py"},
+            }],
+            "behavior_tests": [], "metadata": {},
+        },
+        "execution_options": _options(),
+    })
+
+    assert result["success"] is True, result
+    assert "class LegacyFormatter" not in result["refactored_code"]
+    assert "def live_value" in result["refactored_code"]

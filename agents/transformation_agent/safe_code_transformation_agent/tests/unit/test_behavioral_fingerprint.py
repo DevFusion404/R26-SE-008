@@ -1,6 +1,9 @@
 from sctva.contracts import RefactoringAction
 from sctva.validators.behavior_fingerprint import compare_fingerprints
 from sctva.validators.behavioral_validator import BehavioralValidator
+import shutil
+
+import pytest
 
 
 def test_java_nested_class_uses_binary_runtime_name():
@@ -61,6 +64,75 @@ def test_java_source_probe_fallback_uses_direct_nested_method_owner():
     assert {probe["original_target_method"] for probe in probes} == {
         "count", "available",
     }
+
+
+@pytest.mark.skipif(
+    not shutil.which("java") or not shutil.which("javac"),
+    reason="Java runtime is unavailable",
+)
+def test_java_runtime_probe_uses_compiled_classes_root_for_packaged_target():
+    source = """package example.validation;
+
+public class PackagedProbe {
+    public static int value() { return 7; }
+}
+"""
+
+    fingerprint = BehavioralValidator()._run_java_runtime_probe(
+        source_code=source,
+        target_class="PackagedProbe",
+        target_method="value",
+        args=[],
+        timeout_seconds=8,
+        current_file_name="src/main/java/example/validation/PackagedProbe.java",
+    )
+
+    assert fingerprint["success"] is True
+    assert fingerprint["return_value_repr"] == "7"
+    diagnostics = fingerprint["runtime_diagnostics"]
+    assert diagnostics["fully_qualified_class_name"] == "example.validation.PackagedProbe"
+    assert diagnostics["target_class_file_exists"] is True
+
+
+def test_java_matching_classpath_failures_use_static_fallback(monkeypatch):
+    source = """package example.validation;
+
+public class Probe {
+    public static int value() { return 7; }
+}
+"""
+    unavailable = {
+        "success": False,
+        "timeout": False,
+        "exception_type": "RuntimeInfrastructureError",
+        "exception_message_category": "target_class_load_failed",
+        "runtime_infrastructure": True,
+        "runtime_failure_category": "TARGET_CLASS_LOAD_FAILED",
+    }
+    validator = BehavioralValidator()
+    monkeypatch.setattr(
+        validator,
+        "_run_java_runtime_probe",
+        lambda **_kwargs: dict(unavailable),
+    )
+
+    result = validator.validate(
+        language="java",
+        original_code=source,
+        transformed_code=source,
+        behavior_tests=[{"target_class": "Probe", "target_method": "value"}],
+        enable_behavior_tests=True,
+        actions=[],
+        strict_mode=True,
+        structural_validation_passed=True,
+    )
+
+    assert result.passed is True
+    assert result.details["fingerprint_status"] == "degraded_static_passed"
+    assert result.details["runtime_unavailable_reason"] == (
+        "java_runtime_infrastructure_unavailable"
+    )
+    assert result.details["runtime_failure_categories"] == ["TARGET_CLASS_LOAD_FAILED"]
 
 
 def test_behavior_match_success():
