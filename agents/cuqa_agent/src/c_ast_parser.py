@@ -73,17 +73,16 @@ except Exception:
 # ---------------------------------------------------------------------------
 
 # Match a C function definition header: <type> <name> ( ... ) {
-# This intentionally keeps it simple — it catches most real-world cases.
 _FUNC_DEF_RE = re.compile(
     r"""
-    ^                                      # start of line
-    (?!.*\b(?:if|for|while|switch|else)\b) # exclude control structures
-    [\w\s\*]+?                             # return type (non-greedy)
-    \b(?P<name>[A-Za-z_]\w*)              # function name
+    ^\s*                                   # start of line with optional indent
+    [\w\s\*]+?\s+                          # return type (requires space before function name)
+    (?!(?:if|for|while|switch|else|return|sizeof|typedef)\b) # name must not be a control keyword
+    \b(?P<name>[A-Za-z_]\w*)               # function name
     \s*\(                                  # opening paren
-    (?P<params>[^)]*)                      # parameters (no nested parens)
+    (?P<params>[^)]*?)                     # parameters (can span lines inside parens)
     \)
-    \s*\{                                  # opening brace on same/next line
+    [^\S\r\n]*(?:\n[^\S\r\n]*)?\{          # opening brace on same or next line (no semicolon)
     """,
     re.VERBOSE | re.MULTILINE,
 )
@@ -482,10 +481,19 @@ def _is_c_constant_line(line_str: str) -> bool:
 def analyze_c_magic_numbers(source: str, filename: str = "untitled.c") -> list[dict]:
     """Detect magic numbers in C code using tree-sitter AST or regex fallback,
     extracting variable context if compared in a relational expression.
-    Ignores numeric literals assigned to constants or defined in #define macros.
+    Ignores numeric literals assigned to constants, test fixtures, array declarations, or switch cases.
     """
-    SAFE_NUMBERS = {"0", "1", "-1", "2", "0.0", "1.0", "0f", "1f", "0L", "1L"}
+    SAFE_NUMBERS = {
+        "0", "1", "-1", "2", "0.0", "1.0", "0f", "1f", "0L", "1L",
+        "80", "443", "8080", "1024", "2048", "4096", "256", "512", "128", "64", "32", "16",
+        "0x00", "0xFF", "0xff", "NULL", "100", "200", "404", "500"
+    }
     smells: list[dict] = []
+
+    # Ignore magic numbers in test fixtures / spec files
+    fn_lower = filename.lower()
+    if any(k in fn_lower for k in ("test_", "_test", "fixture", "spec")):
+        return []
 
     clean_no_comments = _strip_comments(source)
     clean = _strip_string_literals(clean_no_comments)
@@ -515,8 +523,10 @@ def analyze_c_magic_numbers(source: str, filename: str = "untitled.c") -> list[d
 
                 line_no = node.start_point[0] + 1
                 line_str = split_lines[line_no - 1] if line_no <= len(split_lines) else ""
-                if _is_c_constant_line(line_str):
-                    continue  # Constant definition -> NOT a magic number
+                if _is_c_constant_line(line_str) or any(k in line_str for k in ("case ", "assert", "EXPECT_", "ASSERT_", "CU_ASSERT")):
+                    continue  # Constant definition, switch case, or test assertion -> NOT a magic number
+                if re.search(r"\[\s*\d+\s*\]", line_str):
+                    continue  # Array buffer dimension declaration -> NOT a magic number
 
                 parent = node.parent
                 while parent and parent.type in ("parenthesized_expression", "cast_expression", "argument_list"):
