@@ -417,7 +417,7 @@ export default function PipelineViewer({ trace, id = 'pipeline-section' }) {
 
     // Build map of smell_id → selected refactoring from candidate_generation
     const selectedMap = {};
-    candidate_data.forEach((cand, idx) => {
+    candidate_data.forEach((cand) => {
       const smell_id = cand.smell_id;
       if (cand.selected) {
         selectedMap[smell_id] = cand.selected;
@@ -426,7 +426,7 @@ export default function PipelineViewer({ trace, id = 'pipeline-section' }) {
 
     return (
       <div style={{ padding: '12px', background: 'rgba(139,92,246,0.02)', borderRadius: '6px', border: '1px solid rgba(139,92,246,0.1)' }}>
-        <p style={{ fontSize: '13px', color: 'var(--text-secondary)', marginBottom: '16px', lineHeight: '1.5' }}>Multi-Criteria Decision Making evaluates candidates using weighted criteria: Quality (40%) + Complexity (25%) + Risk (20%) + Dependency (15%).</p>
+        <p style={{ fontSize: '13px', color: 'var(--text-secondary)', marginBottom: '16px', lineHeight: '1.5' }}>Multi-Criteria Decision Making evaluates candidates using Quality, Complexity, Risk, and Dependency. When ML scoring is available, Final Score includes the confidence-weighted ML adjustment.</p>
         
         {mcda_data.map((item, idx) => {
           const selected = selectedMap[item.smell_id];
@@ -483,7 +483,14 @@ export default function PipelineViewer({ trace, id = 'pipeline-section' }) {
                               <td style={{ padding: '12px', color: 'var(--text-secondary)', fontSize: '12px', textAlign: 'center', fontWeight: isSelected ? '600' : '400' }}>{(pred.complexity || 0).toFixed(2)}</td>
                               <td style={{ padding: '12px', color: 'var(--text-secondary)', fontSize: '12px', textAlign: 'center', fontWeight: isSelected ? '600' : '400' }}>{(pred.risk || 0).toFixed(2)}</td>
                               <td style={{ padding: '12px', color: 'var(--text-secondary)', fontSize: '12px', textAlign: 'center', fontWeight: isSelected ? '600' : '400' }}>{(pred.dependency || 0).toFixed(2)}</td>
-                              <td style={{ padding: '12px', fontWeight: isSelected ? '700' : '700', color: isSelected ? 'rgba(34,197,94,1)' : 'rgba(139,92,246,1)', fontSize: '12px', textAlign: 'center' }}>{(pred.final_score || 0).toFixed(3)}</td>
+                              <td style={{ padding: '12px', fontWeight: '700', color: isSelected ? 'rgba(34,197,94,1)' : 'rgba(139,92,246,1)', fontSize: '12px', textAlign: 'center' }}>
+                                <div>{(pred.final_score || 0).toFixed(3)}</div>
+                                {pred.scoring_method && (
+                                  <div style={{ marginTop: '3px', color: 'var(--text-secondary)', fontSize: '10px', fontWeight: '500' }}>
+                                    {pred.scoring_method}
+                                  </div>
+                                )}
+                              </td>
                             </tr>
                           );
                         })}
