@@ -6,7 +6,7 @@ from sctva.contracts import RefactoringAction, SourceFileContract
 from sctva.agent import SafeCodeTransformationValidationAgent
 from sctva.analysis import LocalRefactorDetector
 from sctva.integration.planner_adapter import PlannerAdapter
-from sctva.transformers import python_transformers
+from sctva.transformers import python_inline_class, python_transformers
 from sctva.transformers.engine import TransformationEngine
 from sctva.validators.structural_validator import StructuralValidator
 
@@ -106,6 +106,96 @@ class Shipment:
 class OnlineOrder:
     def __init__(self, shipment):
         self.shipment = shipment
+'''
+
+
+FIELD_ONLY_WRAPPER_SOURCE = '''class DeliveryDetails:
+    def __init__(self, reference):
+        self.reference = reference
+
+
+class Order:
+    def __init__(self, reference):
+        self.delivery = DeliveryDetails(reference)
+
+    def delivery_reference(self):
+        return self.delivery.reference
+
+
+def run_order():
+    return Order("REF-42").delivery_reference()
+'''
+
+
+ACCESSOR_WRAPPER_SOURCE = '''class Preferences:
+    def __init__(self, theme):
+        self.theme = theme
+
+    def get_theme(self):
+        return self.theme
+
+    def set_theme(self, theme):
+        self.theme = theme
+
+    def theme_label(self):
+        return f"Theme: {self.theme}"
+
+
+class Profile:
+    def __init__(self, theme):
+        self.preferences = Preferences(theme)
+
+    def update(self, theme):
+        self.preferences.set_theme(theme)
+        return self.preferences.theme_label()
+
+
+def run_profile():
+    return Profile("light").update("dark")
+'''
+
+
+MEANINGFUL_WRAPPER_SOURCE = '''class DiscountPolicy:
+    def __init__(self, rate):
+        self.rate = rate
+
+    def calculate(self, total):
+        if total > 100:
+            return total * self.rate
+        return 0
+
+
+class Cart:
+    def __init__(self, rate):
+        self.policy = DiscountPolicy(rate)
+'''
+
+
+INLINE_CHAIN_SOURCE = '''class Country:
+    def __init__(self, code):
+        self.code = code
+
+
+class Address:
+    def __init__(self, code):
+        self.country = Country(code)
+
+
+class Profile:
+    def __init__(self, code):
+        self.address = Address(code)
+
+
+class User:
+    def __init__(self, code):
+        self.profile = Profile(code)
+
+    def country_code(self):
+        return self.profile.address.country.code
+
+
+def run_user():
+    return User("LK").country_code()
 '''
 
 
@@ -594,6 +684,180 @@ def test_owned_lazy_class_preserves_console_output():
         return output.getvalue()
 
     assert run_main(OWNED_LAZY_CLASS_SOURCE) == run_main(transformed)
+
+
+def test_owned_inline_class_accepts_field_only_wrapper_without_fake_responsibility():
+    transformed, replacements, metadata = python_inline_class.apply_owned_inline_class(
+        FIELD_ONLY_WRAPPER_SOURCE,
+        class_to_inline="DeliveryDetails",
+    )
+
+    assert metadata["status"] == "success", metadata
+    assert replacements > 0
+    assert metadata["responsibility_profile"]["effective_responsibility_count"] == 0
+    assert "class DeliveryDetails" not in transformed
+    assert "self.reference = reference" in transformed
+    assert "return self.reference" in transformed
+    assert _run(FIELD_ONLY_WRAPPER_SOURCE, "run_order") == _run(
+        transformed, "run_order"
+    )
+
+
+def test_owned_inline_class_treats_getters_setters_and_field_formatting_as_wrapper_api():
+    transformed, replacements, metadata = python_inline_class.apply_owned_inline_class(
+        ACCESSOR_WRAPPER_SOURCE,
+        class_to_inline="Preferences",
+    )
+
+    assert metadata["status"] == "success", metadata
+    assert replacements > 0
+    assert metadata["responsibility_profile"]["meaningful_methods"] == []
+    assert "class Preferences" not in transformed
+    assert "self.preferences.set_theme" not in transformed
+    assert "self.set_theme(theme)" in transformed
+    assert _run(ACCESSOR_WRAPPER_SOURCE, "run_profile") == _run(
+        transformed, "run_profile"
+    )
+
+
+def test_owned_inline_class_keeps_cross_file_wrapper_for_atomic_repository_edit():
+    transformed, replacements, metadata = python_inline_class.apply_owned_inline_class(
+        FIELD_ONLY_WRAPPER_SOURCE,
+        class_to_inline="DeliveryDetails",
+        current_file_name="order.py",
+        project_source_files=[
+            {
+                "file_name": "consumer.py",
+                "language": "python",
+                "source_code": "from order import DeliveryDetails\n",
+            }
+        ],
+    )
+
+    assert transformed == FIELD_ONLY_WRAPPER_SOURCE
+    assert replacements == 0
+    assert metadata["status"] == "review_required"
+    assert metadata["reason"] == "EXTERNAL_REFERENCES"
+    assert metadata["reference_files"] == ["consumer.py"]
+
+
+def test_owned_inline_class_keeps_meaningful_business_class_for_review():
+    transformed, replacements, metadata = python_inline_class.apply_owned_inline_class(
+        MEANINGFUL_WRAPPER_SOURCE,
+        class_to_inline="DiscountPolicy",
+    )
+
+    assert transformed == MEANINGFUL_WRAPPER_SOURCE
+    assert replacements == 0
+    assert metadata["status"] == "review_required"
+    assert metadata["reason"] == "CLASS_RESPONSIBILITY_NOT_SMALL"
+    assert metadata["responsibility_profile"]["meaningful_methods"] == ["calculate"]
+
+
+def test_sequential_duplicate_inline_class_action_is_already_handled_via_lineage():
+    action = RefactoringAction(
+        action_type="inline_python_class",
+        parameters={"class_to_inline": "DeliveryDetails"},
+    )
+    transformed, logs, _ = TransformationEngine().apply_actions(
+        language="python",
+        source_code=FIELD_ONLY_WRAPPER_SOURCE,
+        actions=[action, action],
+        strict_mode=True,
+        current_file_name="order.py",
+    )
+
+    assert "class DeliveryDetails" not in transformed
+    assert logs[0].metadata["status"] == "success"
+    assert logs[1].metadata["status"] == "already_handled"
+    assert logs[1].metadata["reason"] == "ALREADY_HANDLED_BY_PRIOR_INLINE_CLASS"
+
+
+def test_structural_validation_follows_three_step_inline_class_lineage_to_terminal_owner():
+    actions = [
+        RefactoringAction(
+            action_type="inline_python_class",
+            parameters={"class_to_inline": class_name},
+        )
+        for class_name in ("Country", "Address", "Profile")
+    ]
+    transformed, logs, _ = TransformationEngine().apply_actions(
+        language="python",
+        source_code=INLINE_CHAIN_SOURCE,
+        actions=actions,
+        strict_mode=True,
+        current_file_name="user.py",
+    )
+
+    assert [log.metadata["status"] for log in logs] == ["success"] * 3
+    assert [
+        log.metadata["inline_class_lineage"]["terminal_destination_class"]
+        for log in logs
+    ] == ["User", "User", "User"]
+    assert all(f"class {class_name}" not in transformed for class_name in (
+        "Country", "Address", "Profile",
+    ))
+    assert "class User" in transformed
+    assert "return self.code" in transformed
+    assert _run(INLINE_CHAIN_SOURCE, "run_user") == _run(transformed, "run_user")
+
+    effective_actions = []
+    for index, log in enumerate(logs, start=1):
+        parameters = dict(log.metadata["effective_action_parameters"])
+        parameters["_sctva_action_index"] = index
+        parameters["applied_transformation_metadata"] = dict(log.metadata)
+        effective_actions.append(RefactoringAction(
+            action_type="inline_python_class",
+            parameters=parameters,
+        ))
+
+    result = StructuralValidator().validate(
+        language="python",
+        original_code=INLINE_CHAIN_SOURCE,
+        transformed_code=transformed,
+        actions=effective_actions,
+    )
+
+    assert result.passed is True, result.details
+    validations = result.details["inline_class_validation"]
+    assert all(item["passed"] is True for item in validations)
+    assert validations[0]["terminal_destination_class"] == "User"
+    assert validations[0]["superseded_by_inline_class"] is True
+    assert validations[0]["checks"]["required_methods_and_state_preserved_elsewhere"] is True
+
+
+def test_structural_validation_reports_incorrect_inline_class_terminal_destination():
+    action = RefactoringAction(
+        action_type="inline_python_class",
+        parameters={"class_to_inline": "DeliveryDetails"},
+    )
+    transformed, logs, _ = TransformationEngine().apply_actions(
+        language="python",
+        source_code=FIELD_ONLY_WRAPPER_SOURCE,
+        actions=[action],
+        strict_mode=True,
+        current_file_name="order.py",
+    )
+    applied = dict(logs[0].metadata)
+    lineage = dict(applied["inline_class_lineage"])
+    lineage["destination_class"] = "MissingTerminalOwner"
+    applied["inline_class_lineage"] = lineage
+    parameters = dict(logs[0].metadata["effective_action_parameters"])
+    parameters["destination_class"] = "MissingTerminalOwner"
+    parameters["applied_transformation_metadata"] = applied
+    result = StructuralValidator().validate(
+        language="python",
+        original_code=FIELD_ONLY_WRAPPER_SOURCE,
+        transformed_code=transformed,
+        actions=[RefactoringAction(
+            action_type="inline_python_class",
+            parameters=parameters,
+        )],
+    )
+
+    validation = result.details["inline_class_validation"][0]
+    assert validation["passed"] is False
+    assert validation["reason"] == "TERMINAL_DESTINATION_NOT_FOUND"
 
 
 def test_owned_lazy_class_structural_validation_passes():

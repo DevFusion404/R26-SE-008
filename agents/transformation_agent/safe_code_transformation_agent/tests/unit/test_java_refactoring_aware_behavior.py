@@ -65,6 +65,83 @@ def test_parameter_object_signature_migration_is_behaviorally_compatible():
     )
 
 
+def test_java_parameter_object_signature_migration_follows_extracted_helper_body():
+    original = '''class CustomerService {
+    public static String update(String name, String address, String email) {
+        String combined = name + address;
+        return combined + email;
+    }
+}
+'''
+    transformed = '''class CustomerService {
+    static class UpdateParams {
+        String name;
+        String address;
+        String email;
+
+        UpdateParams(String name, String address, String email) {
+            this.name = name;
+            this.address = address;
+            this.email = email;
+        }
+    }
+
+    public static String update(UpdateParams params) {
+        return buildUpdate(params);
+    }
+
+    private static String buildUpdate(UpdateParams params) {
+        String combined = params.name + params.address;
+        return combined + params.email;
+    }
+}
+'''
+    metadata = {
+        "language": "java",
+        "method": "update",
+        "source_class": "CustomerService",
+        "parameter_object_name": "UpdateParams",
+        "parameter_name": "params",
+        "parameters_moved": ["name", "address", "email"],
+        "parameter_types": {
+            "name": "String",
+            "address": "String",
+            "email": "String",
+        },
+        "status": "success",
+        "plan_compliance": "PASS",
+        "validation": {
+            "syntax": "PASS",
+            "parameter_object": "PASS",
+            "signature_reduction": "PASS",
+            "body_access": "PASS",
+            "call_sites": "PASS",
+        },
+    }
+    action = RefactoringAction(
+        action_type="introduce_java_parameter_object",
+        parameters={
+            "method": "update",
+            "source_class": "CustomerService",
+            "parameter_object_name": "UpdateParams",
+            "applied_transformation_metadata": metadata,
+        },
+    )
+    validator = BehavioralValidator()
+
+    comparison = validator._compare_java_static_compatibility(
+        validator._java_static_summary(original),
+        validator._java_static_summary(transformed),
+        [action],
+        structural_validation_passed=True,
+    )
+
+    assert comparison["matched"] is True
+    assert comparison["signature_change"] == "EXPECTED"
+    assert comparison["signature_compatibility"] == "PASS"
+    assert comparison["expected_signature_migrations"][0]["body_migration"] == "PASS"
+
+
 @pytest.mark.parametrize(
     ("mutate", "reason"),
     [
