@@ -20,6 +20,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Tuple
 
 from .models import CodeSmell, RefactoringStep, RefactoringPlan
+from .move_method_resolver import MoveMethodPlanResolver
 
 logger = logging.getLogger("rdp_agent.plan_generator")
 
@@ -41,6 +42,7 @@ class PlanGenerator:
         target: str,
         ordered_selections: List[Tuple[CodeSmell, Dict[str, Any]]],
         total_smells: int,
+        move_method_resolver: MoveMethodPlanResolver | None = None,
     ) -> RefactoringPlan:
         """Build a complete refactoring plan.
 
@@ -58,7 +60,44 @@ class PlanGenerator:
 
         step_idx = 1
         for idx, (smell, candidate) in enumerate(ordered_selections, start=1):
-            params = self._build_parameters(candidate, smell)
+            if candidate["name"] == "Move Method":
+                resolution = candidate.get("_move_method_resolution")
+                if not isinstance(resolution, dict) and move_method_resolver:
+                    resolution = move_method_resolver.resolve(smell, candidate)
+                if not isinstance(resolution, dict) or resolution.get("status") != "success":
+                    reason = (
+                        resolution.get("reason")
+                        if isinstance(resolution, dict)
+                        else "MOVE_METHOD_REQUIRES_REPOSITORY_AST"
+                    )
+                    logger.warning(
+                        "Skipping invalid Move Method step for smell %s: %s.",
+                        smell.id,
+                        reason,
+                    )
+                    validation_warnings.append(
+                        f"Smell {smell.id} (Move Method): REVIEW_REQUIRED reason={reason}."
+                    )
+                    continue
+                params = self._build_move_method_parameters_from_resolution(
+                    resolution,
+                    smell,
+                )
+                if move_method_resolver:
+                    final_check = move_method_resolver.validate_plan(params)
+                    if final_check.get("status") != "success":
+                        reason = final_check.get("reason") or "NO_VALID_DESTINATION_CLASS"
+                        logger.warning(
+                            "Skipping Move Method step for smell %s after final validation: %s.",
+                            smell.id,
+                            reason,
+                        )
+                        validation_warnings.append(
+                            f"Smell {smell.id} (Move Method): REVIEW_REQUIRED reason={reason}."
+                        )
+                        continue
+            else:
+                params = self._build_parameters(candidate, smell)
 
             # Reject invalid Move Method if prerequisites (source_class, method, destination_class) are missing
             if candidate["name"] == "Move Method":
@@ -72,6 +111,12 @@ class PlanGenerator:
                 for k, v in smell.location.items()
                 if k in ("class", "method", "lines", "file", "entity", "duplicate_group") and v and v != "unknown"
             }
+            if candidate["name"] == "Move Method":
+                target_dict.update({
+                    "file": params["source_file"],
+                    "class": params["source_class"],
+                    "method": params["source_method"],
+                })
             target_dict["smell_type"] = smell.type
             target_dict["smell_id"] = smell.id
             params["smell_type"] = smell.type
@@ -109,6 +154,50 @@ class PlanGenerator:
             target,
         )
         return plan
+
+    @staticmethod
+    def _build_move_method_parameters_from_resolution(
+        resolution: Dict[str, Any],
+        smell: CodeSmell,
+    ) -> Dict[str, Any]:
+        """Build SCTVA-facing Move Method parameters from proven AST evidence."""
+
+        source_line = resolution.get("lineno")
+        source_method = resolution.get("source_method") or resolution["method"]
+        params: Dict[str, Any] = {
+            "source_file": resolution["source_file"],
+            "source_class": resolution["source_class"],
+            "method": resolution["method"],
+            "source_method": source_method,
+            "destination_class": resolution["destination_class"],
+            "destination_parameter": resolution.get("destination_parameter", ""),
+            "smell_type": smell.type,
+            "smell_id": smell.id,
+            "move_method_planning_evidence": {
+                "source_class_exists": True,
+                "method_belongs_to_source_class": True,
+                "destination_class_exists": True,
+                "source_and_destination_differ": (
+                    resolution["source_class"] != resolution["destination_class"]
+                ),
+                "dependencies_can_be_mapped": True,
+                "call_sites_can_be_updated": bool(
+                    resolution.get("call_sites_rewritable")
+                ),
+                "destination_parameter": resolution.get("destination_parameter", ""),
+                "feature_envy_accesses": resolution.get("feature_envy_accesses"),
+                "source_self_accesses": resolution.get("source_self_accesses"),
+                "call_sites_checked": resolution.get("call_sites_checked", 0),
+            },
+        }
+        if source_line is not None:
+            params["source_line"] = int(source_line)
+        if source_line is not None and resolution.get("end_lineno") is not None:
+            params["source_lines"] = [
+                int(source_line),
+                int(resolution["end_lineno"]),
+            ]
+        return params
 
     # -----------------------------------------------------------------
     # Explanation Generation

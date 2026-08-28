@@ -134,6 +134,31 @@ def _translate_cuqa_to_rdp(data: dict) -> dict:
 
     files = data.get("files", [])
     summary = data.get("summary", {})
+    source_files = []
+    for entry in data.get("source_files") or []:
+        if not isinstance(entry, dict):
+            continue
+        source = entry.get("source_code")
+        if not isinstance(source, str):
+            continue
+        source_files.append({
+            "file_name": (
+                entry.get("file_name")
+                or entry.get("file_path")
+                or entry.get("relative_path")
+                or entry.get("file")
+                or entry.get("path")
+            ),
+            "file_path": (
+                entry.get("file_path")
+                or entry.get("file_name")
+                or entry.get("relative_path")
+                or entry.get("file")
+                or entry.get("path")
+            ),
+            "language": entry.get("language"),
+            "source_code": source,
+        })
 
     # Use first file name as target, or repo name from summary, or "unknown"
     if files:
@@ -151,6 +176,13 @@ def _translate_cuqa_to_rdp(data: dict) -> dict:
         file_metrics = file_entry.get("metrics", {})
         language = file_entry.get("language", "unknown")
         code_smells = file_entry.get("code_smells", [])
+        if isinstance(file_entry.get("source_code"), str):
+            source_files.append({
+                "file_name": file_entry.get("relative_path") or file_path,
+                "file_path": file_entry.get("relative_path") or file_path,
+                "language": language,
+                "source_code": file_entry["source_code"],
+            })
 
         for raw in code_smells:
             smell_id = f"smell_{smell_idx:03d}"
@@ -283,11 +315,22 @@ def _translate_cuqa_to_rdp(data: dict) -> dict:
         "total_lines_of_code": summary.get("total_lines_of_code", 0),
     }
 
-    return {
+    translated = {
         "target": target,
         "smells": smells,
         "metrics_summary": metrics_summary,
     }
+    if source_files:
+        seen = set()
+        unique_sources = []
+        for entry in source_files:
+            key = (entry.get("file_path") or entry.get("file_name"), entry.get("source_code"))
+            if key in seen:
+                continue
+            seen.add(key)
+            unique_sources.append(entry)
+        translated["source_files"] = unique_sources
+    return translated
 
 
 
