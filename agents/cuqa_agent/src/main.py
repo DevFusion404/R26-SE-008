@@ -37,7 +37,7 @@ from urllib.parse import urlparse
 from pydantic import BaseModel, HttpUrl
 
 import requests
-from fastapi import FastAPI, File, Form, UploadFile, HTTPException
+from fastapi import FastAPI, File, Form, UploadFile, HTTPException, Body
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, HttpUrl
@@ -657,7 +657,7 @@ class SingleSourceFileRequest(BaseModel):
 
 @app.post("/api/source-files")
 @app.post("/api/cuqa/source-files")
-def fetch_source_files(payload: SourceFilesRequest):
+def fetch_source_files(raw_payload: dict = Body(...)):
     """
     Return raw source code content for a list of workspace file paths.
     Used by downstream Transformation (SCTVA) and Orchestration (DIWO) Agents.
@@ -665,13 +665,14 @@ def fetch_source_files(payload: SourceFilesRequest):
     if not _workspace["root"]:
         raise HTTPException(400, "No repository loaded.")
 
-    if not isinstance(payload.file_paths, list):
+    file_paths = raw_payload.get("file_paths")
+    if not isinstance(file_paths, list):
         raise HTTPException(400, "file_paths must be a list of string paths.")
 
     found_files = []
     missing_files = []
 
-    for rel_path in payload.file_paths:
+    for rel_path in file_paths:
         clean_path = str(rel_path).strip()
         if not clean_path:
             continue
@@ -695,7 +696,7 @@ def fetch_source_files(payload: SourceFilesRequest):
     return {
         "files": found_files,
         "imported": len(found_files),
-        "total": len(payload.file_paths),
+        "total": len(file_paths),
         "missing": missing_files,
         "source": "cuqa_workspace",
     }
