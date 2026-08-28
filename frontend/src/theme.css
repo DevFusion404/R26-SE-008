@@ -6,6 +6,7 @@
 
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap');
 
+/* ── Dark Theme (Default) ──────────────────────────────────── */
 :root {
   /* ── Base colours ──────────────────────────────────────── */
   --bg-root:        #080d14;
@@ -103,4 +104,98 @@
   --gradient-accent: linear-gradient(135deg, #00d4e8 0%, #0066ff 100%);
   --gradient-card:   linear-gradient(160deg, #111f30 0%, #0a1520 100%);
   --gradient-hero:   linear-gradient(160deg, #0a0f1a 0%, #0a1520 60%, #071420 100%);
+}
+
+/* ================================================================
+   Light Theme Override
+   Applied when <html data-theme="light"> is set via ThemeContext.
+   All CSS variables used project-wide flip automatically —
+   no JSX component changes needed.
+   ================================================================ */
+[data-theme="light"] {
+  /* ── Base colours ──────────────────────────────────────── */
+  --bg-root:        #f0f4f8;
+  --bg-base:        #f5f7fa;
+  --bg-sidebar:     #ffffff;
+  --bg-surface:     #eef2f7;
+  --bg-card:        #ffffff;
+  --bg-elevated:    #e8edf4;
+  --bg-hover:       #e2e8f0;
+  --bg-input:       #f0f4f8;
+  --bg-overlay:     rgba(240, 244, 248, 0.92);
+
+  /* ── Accent ─────────────────────────────────────────────── */
+  --accent:         #0099b5;
+  --accent-dim:     #00708a;
+  --accent-muted:   rgba(0, 153, 181, 0.10);
+  --accent-glow:    0 0 24px rgba(0, 153, 181, 0.2);
+  --accent-border:  rgba(0, 153, 181, 0.35);
+
+  /* ── Agent accent colours ──────────────────────────────── */
+  --color-cuqa:         #0099b5;
+  --color-rdp:          #7c3aed;
+  --color-transform:    #d97706;
+  --color-orchestrate:  #059669;
+
+  /* ── Semantic colours ──────────────────────────────────── */
+  --color-critical: #dc2626;
+  --color-high:     #ea580c;
+  --color-medium:   #ca8a04;
+  --color-low:      #2563eb;
+  --color-ok:       #16a34a;
+  --color-info:     #0099b5;
+
+  /* ── Text ──────────────────────────────────────────────── */
+  --text-primary:   #0f172a;
+  --text-secondary: #475569;
+  --text-muted:     #94a3b8;
+  --text-accent:    #0099b5;
+  --text-code:      #1d4ed8;
+
+  /* ── Borders ───────────────────────────────────────────── */
+  --border:         #cbd5e1;
+  --border-light:   #e2e8f0;
+  --border-accent:  rgba(0, 153, 181, 0.4);
+
+  /* ── Shadows (lighter & softer) ─────────────────────────── */
+  --shadow-sm:   0 1px 4px rgba(0, 0, 0, 0.08);
+  --shadow-md:   0 4px 20px rgba(0, 0, 0, 0.10);
+  --shadow-lg:   0 8px 40px rgba(0, 0, 0, 0.12);
+  --shadow-card: 0 2px 12px rgba(0, 0, 0, 0.07);
+
+  /* ── Gradients ─────────────────────────────────────────── */
+  --gradient-accent: linear-gradient(135deg, #0099b5 0%, #0044cc 100%);
+  --gradient-card:   linear-gradient(160deg, #ffffff 0%, #f0f4f8 100%);
+  --gradient-hero:   linear-gradient(160deg, #f5f7fa 0%, #e8edf4 60%, #dde5f0 100%);
+}
+
+/* ── Smooth whole-page theme transition ────────────────────── */
+/* Excludes animation-sensitive elements to avoid jank.         */
+html {
+  transition:
+    background-color 0.28s ease,
+    color 0.28s ease;
+}
+
+body,
+.app-shell,
+.topbar,
+.sidebar,
+.main-content,
+.card,
+.btn,
+.sidebar-item,
+.metric-card,
+.badge,
+.alert,
+input,
+select,
+textarea,
+code,
+pre {
+  transition:
+    background-color 0.28s ease,
+    border-color 0.28s ease,
+    color 0.28s ease,
+    box-shadow 0.28s ease !important;
 }
