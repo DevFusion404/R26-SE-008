@@ -478,10 +478,17 @@ def test_c_remove_dead_code_can_remove_safe_line_by_source_line():
 
 
 def test_c_replace_unsafe_function_uses_safer_call_shape():
-    source = "#include <string.h>\nvoid copy(char *dst, char *src) {\n    strcpy(dst, src);\n}\n"
-    transformed, count = c_transformers.apply_replace_unsafe_function(source, "strcpy", "strncpy", 3)
+    source = "#include <string.h>\nvoid copy(char *src) {\n    char dst[256];\n    strcpy(dst, src);\n}\n"
+    transformed, count = c_transformers.apply_replace_unsafe_function(source, "strcpy", "strncpy", 4)
     assert count == 1
     assert "strncpy(dst, src, sizeof(dst) - 1)" in transformed
+
+
+def test_c_replace_unsafe_function_skips_pointer_dest():
+    source = "#include <string.h>\nvoid copy(char *dst, char *src) {\n    strcpy(dst, src);\n}\n"
+    transformed, count = c_transformers.apply_replace_unsafe_function(source, "strcpy", "strncpy", 3)
+    assert count == 0
+    assert "strcpy(dst, src)" in transformed
 
 
 def test_c_encapsulate_variable_adds_getter_and_setter():
