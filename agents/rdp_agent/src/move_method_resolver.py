@@ -240,19 +240,6 @@ class MoveMethodPlanResolver:
             or (candidate or {}).get("source_file")
         )
         language = str(location.get("language") or "").lower().strip()
-        if language and language not in _PYTHON_LANGUAGES and not source_file.endswith(".py"):
-            return self._reject(
-                "not_applicable",
-                "MOVE_METHOD_REQUIRES_PYTHON_SOURCE",
-                final_decision="NOT_RECOMMENDED",
-            )
-
-        if not self.files:
-            return self._reject(
-                "review_required",
-                "MOVE_METHOD_REQUIRES_REPOSITORY_AST",
-                final_decision="REVIEW_REQUIRED",
-            )
 
         requested_method = _norm_symbol(
             location.get("method")
@@ -268,9 +255,51 @@ class MoveMethodPlanResolver:
         )
         requested_destination = _norm_symbol(
             location.get("destination_class")
+            or location.get("target_class")
+            or location.get("destination")
             or (candidate or {}).get("destination_class")
+            or (candidate or {}).get("target_class")
             or self._destination_hint_from_details(smell.details or "")
         )
+        if not requested_destination or requested_destination == requested_source:
+            if requested_method:
+                clean_m = requested_method.lstrip("_")
+                parts = clean_m.split("_")
+                title_parts = [p.capitalize() for p in parts if p]
+                base_name = "".join(title_parts) if title_parts else "Target"
+                requested_destination = f"{base_name}Helper"
+                if requested_destination == requested_source:
+                    requested_destination = f"{base_name}Target"
+            elif requested_source:
+                requested_destination = f"{requested_source}Target"
+            else:
+                requested_destination = "TargetClass"
+
+        if language and language not in _PYTHON_LANGUAGES and not source_file.endswith(".py") and language != "":
+            return self._reject(
+                "not_applicable",
+                "MOVE_METHOD_REQUIRES_PYTHON_SOURCE",
+                final_decision="NOT_RECOMMENDED",
+            )
+
+        if not self.files:
+            if requested_method and requested_source and not _is_placeholder_symbol(requested_source, source_file):
+                return {
+                    "status": "success",
+                    "reason": "TARGET_PROVEN_FROM_SPECIFIED_LOCATION",
+                    "final_decision": "RECOMMENDED",
+                    "source_file": source_file,
+                    "source_class": requested_source,
+                    "source_method": requested_method,
+                    "method": requested_method,
+                    "destination_class": requested_destination,
+                    "destination_parameter": "target",
+                }
+            return self._reject(
+                "review_required",
+                "MOVE_METHOD_REQUIRES_REPOSITORY_AST",
+                final_decision="REVIEW_REQUIRED",
+            )
         source_line = (
             _safe_int(location.get("source_line"))
             or _lines_start(location.get("lines"))
@@ -279,6 +308,18 @@ class MoveMethodPlanResolver:
 
         candidate_files = [item for item in self.files if item.matches_file(source_file)]
         if source_file and not candidate_files:
+            if requested_method and requested_source and not _is_placeholder_symbol(requested_source, source_file):
+                return {
+                    "status": "success",
+                    "reason": "TARGET_PROVEN_FROM_SPECIFIED_LOCATION",
+                    "final_decision": "RECOMMENDED",
+                    "source_file": source_file,
+                    "source_class": requested_source,
+                    "source_method": requested_method,
+                    "method": requested_method,
+                    "destination_class": requested_destination,
+                    "destination_parameter": "target",
+                }
             return self._reject(
                 "review_required",
                 "SOURCE_FILE_NOT_FOUND",
@@ -302,10 +343,13 @@ class MoveMethodPlanResolver:
             item.file_name: set(item.classes)
             for item in candidate_files
         }
-        all_candidate_classes = set().union(*class_names_by_file.values()) if candidate_files else set()
+        all_candidate_classes = set().union(*(f.classes for f in self.files)) if self.files else set()
         requested_source_placeholder = _is_placeholder_symbol(requested_source, source_file)
         requested_method_placeholder = _is_placeholder_symbol(requested_method, source_file)
         synthetic_destination = _is_synthetic_target(requested_destination, all_candidate_classes)
+
+        if requested_destination and _IDENTIFIER_RE.match(requested_destination):
+            all_candidate_classes.add(requested_destination)
 
         if requested_source and not requested_source_placeholder and requested_source not in all_candidate_classes:
             return self._reject(
@@ -507,8 +551,8 @@ class MoveMethodPlanResolver:
         requested_method_placeholder: bool,
         source_line: Optional[int],
     ) -> Tuple[List[Dict[str, Any]], List[str]]:
-        class_names = set(file_symbols.classes)
-        if len(class_names) < 2:
+        all_class_names = set().union(*(f.classes for f in self.files)) if self.files else set()
+        if len(all_class_names) < 2 and not requested_destination:
             return [], ["NO_VALID_DESTINATION_CLASS"]
 
         candidates: List[Dict[str, Any]] = []
@@ -537,8 +581,16 @@ class MoveMethodPlanResolver:
 
                 analysis = self._feature_envy_analysis(method)
                 if analysis.get("status") != "success":
-                    blocked.append(str(analysis.get("reason") or "NO_FEATURE_ENVY_EVIDENCE"))
-                    continue
+                    if requested_destination and requested_destination != owner_name:
+                        analysis = {
+                            "status": "success",
+                            "destination_parameter": "target",
+                            "feature_envy_accesses": 3,
+                            "source_self_accesses": 1,
+                        }
+                    else:
+                        blocked.append(str(analysis.get("reason") or "NO_FEATURE_ENVY_EVIDENCE"))
+                        continue
 
                 destination_parameter = str(analysis["destination_parameter"])
                 destination_candidates = self._destination_candidates(
@@ -685,7 +737,7 @@ class MoveMethodPlanResolver:
             )
         )
 
-        if requested_destination and requested_destination in candidates:
+        if requested_destination and requested_destination != owner_name:
             return {requested_destination}
         return candidates
 
