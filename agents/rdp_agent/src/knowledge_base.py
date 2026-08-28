@@ -77,7 +77,7 @@ DEFAULT_CATALOG: Dict[str, List[Dict[str, Any]]] = {
             "complexity": "low",
             "risk": "medium",
             "impact": "high",
-            "preconditions": ["has_external_field_access"],
+            "preconditions": ["has_external_field_access", "is_class_method", "has_valid_destination"],
         },
     ],
     "Duplicate Code": [
@@ -118,7 +118,7 @@ DEFAULT_CATALOG: Dict[str, List[Dict[str, Any]]] = {
             "complexity": "medium",
             "risk": "medium",
             "impact": "high",
-            "preconditions": ["has_external_field_access"],
+            "preconditions": ["has_external_field_access", "is_class_method", "has_valid_destination"],
         },
         {
             "name": "Inline Class",
@@ -248,7 +248,7 @@ DEFAULT_CATALOG: Dict[str, List[Dict[str, Any]]] = {
             "complexity": "medium",
             "risk": "medium",
             "impact": "high",
-            "preconditions": ["has_external_field_access"],
+            "preconditions": ["has_external_field_access", "is_class_method", "has_valid_destination"],
         },
         {
             "name": "Extract Method",
@@ -333,13 +333,13 @@ DEFAULT_CATALOG: Dict[str, List[Dict[str, Any]]] = {
             "preconditions": [],
         },
     ],
-    # Bare except is a Python anti-pattern — treat as Dead Code / defensive smell
+    # Bare except is a Python anti-pattern — replace with specific exception
     "Bare Except": [
         {
-            "name": "Remove Dead Code",
+            "name": "Replace Bare Except with Specific Exception",
             "complexity": "low",
             "risk": "low",
-            "impact": "medium",
+            "impact": "high",
             "preconditions": [],
         },
         {
@@ -352,7 +352,7 @@ DEFAULT_CATALOG: Dict[str, List[Dict[str, Any]]] = {
     ],
     "Exception Overreach": [
         {
-            "name": "Remove Dead Code",
+            "name": "Replace Bare Except with Specific Exception",
             "complexity": "low",
             "risk": "low",
             "impact": "medium",
@@ -402,17 +402,17 @@ DEFAULT_CATALOG: Dict[str, List[Dict[str, Any]]] = {
 
     "Deep Nesting": [
         {
-            "name": "Extract Method",
+            "name": "Replace Nested Conditional with Guard Clauses",
             "complexity": "low",
             "risk": "low",
             "impact": "high",
             "preconditions": ["has_nesting"],
         },
         {
-            "name": "Replace Conditional with Polymorphism",
-            "complexity": "high",
-            "risk": "medium",
-            "impact": "high",
+            "name": "Extract Method",
+            "complexity": "low",
+            "risk": "low",
+            "impact": "medium",
             "preconditions": ["has_nesting"],
         },
     ],
@@ -518,48 +518,40 @@ class RefactoringKnowledgeBase:
             dependencies if dependencies is not None else DEFAULT_DEPENDENCIES
         )
 
-    def get_candidates(self, smell_type: str) -> List[Dict[str, Any]]:
+    def get_candidates(self, smell_type: str, language: str = "") -> List[Dict[str, Any]]:
         """Retrieve candidate refactorings for a given smell type.
-
-        Falls back to generic low-risk refactorings if the smell type is
-        not in the catalog, so that unknown smells are never silently dropped
-        from the plan.
 
         Args:
             smell_type: The code smell category (e.g., ``"Long Method"``).
+            language: Optional target programming language.
 
         Returns:
-            List of candidate dictionaries. If the smell type is unknown,
-            returns a set of generic fallback candidates and logs a WARNING.
+            List of candidate dictionaries.
         """
-        candidates = self.catalog.get(smell_type, [])
+        norm_type = {
+            "DeepNesting": "Deep Nesting",
+            "DuplicateCode": "Duplicate Code",
+            "DeadCode": "Dead Code",
+            "TooManyParameters": "Too Many Parameters",
+            "UnsafeFunctionUsage": "Unsafe Function Usage",
+            "GlobalVariable": "Global Variable",
+            "LongFunction": "Long Method",
+            "LongMethod": "Long Method",
+            "LargeClass": "Large Class",
+        }.get(smell_type, smell_type)
 
+        candidates = self.catalog.get(norm_type, [])
         if not candidates:
-            logger.warning(
-                "Unknown smell type '%s' — no catalog entry found. "
-                "Using generic refactoring fallback to avoid silent skip.",
-                smell_type,
-            )
-            # Fallback: return safe, low-risk refactorings applicable to most smells.
-            # These have no preconditions so they will always pass precondition checks.
-            candidates = [
-                {
-                    "name": "Extract Method",
-                    "complexity": "low",
-                    "risk": "low",
-                    "impact": "medium",
-                    "preconditions": [],
-                },
-                {
-                    "name": "Rename Method",
-                    "complexity": "low",
-                    "risk": "low",
-                    "impact": "low",
-                    "preconditions": [],
-                },
-            ]
+            logger.info("Unknown smell type '%s' — no catalog entry found.", smell_type)
+            return []
 
-        return candidates
+        res = [dict(c) for c in candidates]
+        if language.lower() in ("c", "cpp"):
+            res = [
+                c for c in res
+                if c["name"] not in ("Replace Parameter with Method Call", "Replace Conditional with Polymorphism", "Move Method")
+            ]
+        return res
 
     def get_dependencies(self, refactoring_name: str) -> List[str]:
         """Retrieve prerequisite refactorings for a given refactoring.
