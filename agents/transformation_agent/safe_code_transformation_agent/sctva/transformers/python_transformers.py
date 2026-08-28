@@ -728,6 +728,29 @@ class _RemoveDeadCodeTransformer(cst.CSTTransformer):
         return updated_node
 
 
+class _RemoveDeadClassTransformer(cst.CSTTransformer):
+    METADATA_DEPENDENCIES = (PositionProvider,)
+
+    def __init__(self, class_name: str, target_line: int) -> None:
+        self.class_name = class_name
+        self.target_line = target_line
+        self.replacements = 0
+
+    def leave_ClassDef(
+        self,
+        original_node: cst.ClassDef,
+        updated_node: cst.ClassDef,
+    ) -> cst.CSTNode:
+        position = self.get_metadata(PositionProvider, original_node)
+        if (
+            original_node.name.value == self.class_name
+            and position.start.line == self.target_line
+        ):
+            self.replacements += 1
+            return cst.RemoveFromParent()
+        return updated_node
+
+
 def _apply_transformer(
     source_code: str,
     transformer: cst.CSTTransformer,
@@ -1225,8 +1248,8 @@ def apply_remove_dead_code(
     dead_code_kind: str = "",
     target_statement_fingerprint: str = "",
 ) -> Tuple[str, int]:
-    if not method_name and source_line is None:
-        raise ValueError("remove_dead_code requires 'method_name' or 'source_line'.")
+    if not method_name and source_line is None and not class_name:
+        raise ValueError("remove_dead_code requires 'method_name', 'class_name', or 'source_line'.")
 
     # RDP can provide the owning method together with the line of a dead
     # statement inside it. Resolve that statement before considering removal
@@ -1280,6 +1303,22 @@ def apply_remove_dead_code(
         tree = ast.parse(source_code)
     except SyntaxError:
         return source_code, 0
+
+    if not method_name and class_name and dead_code_kind == "unused_class":
+        classes = [
+            node for node in tree.body
+            if isinstance(node, ast.ClassDef) and node.name == class_name
+        ]
+        if len(classes) != 1:
+            return source_code, 0
+        target = classes[0]
+        return _apply_transformer(
+            source_code,
+            _RemoveDeadClassTransformer(
+                class_name,
+                target_line=int(getattr(target, "lineno", 0) or 0),
+            ),
+        )
 
     target = _resolve_python_dead_callable_identity(
         tree,
@@ -3970,6 +4009,424 @@ def resolve_dead_code_target(
                 include_attributes=False,
             )
     return "", ""
+
+
+def analyze_python_dead_code_target(
+    source_code: str,
+    *,
+    method_name: str = "",
+    class_name: Optional[str] = None,
+    source_line: Optional[int] = None,
+    dead_code_kind: str = "",
+    target_statement_fingerprint: str = "",
+    project_source_files: Sequence[Any] | None = None,
+    current_file_name: str = "",
+) -> dict[str, Any]:
+    """Prove whether one Python dead-code target is safe to remove.
+
+    This is deliberately conservative.  A requested callable is removable only
+    when its identity is unique and no repository AST indicates a reference,
+    export, framework hook, inheritance dependency, or dynamic lookup.
+    Statement-level targets are accepted only when their deadness is proven by
+    local control flow or an unused literal assignment.
+    """
+    try:
+        tree = ast.parse(source_code)
+    except SyntaxError:
+        return {"status": "REVIEW_REQUIRED", "reason": "SOURCE_PARSE_FAILED"}
+
+    anchored_kinds = {
+        "unused_callable",
+        "constant_false_branch",
+        "unreachable_after_terminator",
+        "unused_literal_assignment",
+    }
+    if (
+        dead_code_kind in anchored_kinds - {"unused_callable"}
+        and target_statement_fingerprint
+    ):
+        return {
+            "status": "SAFE_TO_REMOVE",
+            "target_kind": dead_code_kind,
+            "target_fingerprint": target_statement_fingerprint,
+            "deadness_evidence": [f"accepted_ast_anchor:{dead_code_kind}"],
+        }
+
+    kind, fingerprint = resolve_dead_code_target(
+        source_code,
+        method_name=method_name,
+        class_name=class_name,
+        source_line=source_line,
+    )
+    if kind in {
+        "constant_false_branch",
+        "unreachable_after_terminator",
+        "unused_literal_assignment",
+    }:
+        return {
+            "status": "SAFE_TO_REMOVE",
+            "target_kind": kind,
+            "target_fingerprint": fingerprint,
+            "deadness_evidence": [f"ast_proven_{kind}"],
+        }
+    if kind == "dynamic_callable":
+        return {
+            "status": "REVIEW_REQUIRED",
+            "target_kind": kind,
+            "target_fingerprint": fingerprint,
+            "reason": "DYNAMIC_REFERENCE_DETECTED",
+        }
+    if kind == "live_callable":
+        return {
+            "status": "NOT_DEAD",
+            "target_kind": kind,
+            "target_fingerprint": fingerprint,
+            "reason": "LOCAL_REFERENCE_DETECTED",
+        }
+    if not method_name and source_line is not None:
+        # A line-only plan action must not expand into the enclosing function
+        # after a prior action shifted source lines.  An internal AST anchor can
+        # relocate a proven statement later; without one this action is stale.
+        return {"status": "NOT_APPLICABLE", "reason": "STALE_LINE_TARGET"}
+
+    if not method_name and class_name:
+        classes = [
+            node for node in tree.body
+            if isinstance(node, ast.ClassDef) and node.name == class_name
+        ]
+        if len(classes) != 1:
+            return {"status": "NOT_APPLICABLE", "reason": "CLASS_TARGET_NOT_FOUND"}
+        target_class = classes[0]
+        target_fingerprint = ast.dump(target_class, include_attributes=False)
+        if target_class.decorator_list:
+            return {
+                "status": "REVIEW_REQUIRED",
+                "target_kind": "unused_class",
+                "target_fingerprint": target_fingerprint,
+                "reason": "DECORATOR_OR_FRAMEWORK_HOOK",
+            }
+        repository = _python_dead_code_repository_sources(
+            source_code=source_code,
+            project_source_files=project_source_files,
+            current_file_name=current_file_name,
+        )
+        references: list[str] = []
+        uncertain: list[str] = []
+        for file_name, candidate_source in repository:
+            try:
+                candidate_tree = ast.parse(candidate_source)
+            except SyntaxError:
+                uncertain.append(f"unparseable_repository_file:{file_name}")
+                continue
+            candidate_parents = {
+                child: parent
+                for parent in ast.walk(candidate_tree)
+                for child in ast.iter_child_nodes(parent)
+            }
+            class_in_tree = next(
+                (
+                    node for node in ast.walk(candidate_tree)
+                    if isinstance(node, ast.ClassDef)
+                    and ast.dump(node, include_attributes=False) == target_fingerprint
+                ),
+                None,
+            )
+            for node in ast.walk(candidate_tree):
+                if class_in_tree is not None and _python_ast_descends_from(
+                    node, class_in_tree, candidate_parents
+                ):
+                    continue
+                if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load) and node.id == class_name:
+                    references.append(f"class_reference:{file_name}:{getattr(node, 'lineno', 0)}")
+                elif isinstance(node, ast.Attribute) and node.attr == class_name:
+                    references.append(f"class_attribute_reference:{file_name}:{getattr(node, 'lineno', 0)}")
+                elif isinstance(node, ast.ImportFrom) and any(
+                    alias.name == class_name or alias.asname == class_name for alias in node.names
+                ):
+                    references.append(f"class_import_reference:{file_name}:{getattr(node, 'lineno', 0)}")
+                elif _python_dead_code_export_contains(node, class_name):
+                    references.append(f"class_export_reference:{file_name}:{getattr(node, 'lineno', 0)}")
+                elif _python_dead_code_dynamic_lookup(node, class_name):
+                    uncertain.append(f"dynamic_class_reference:{file_name}:{getattr(node, 'lineno', 0)}")
+                elif isinstance(node, ast.ClassDef) and any(
+                    isinstance(base, ast.Name) and base.id == class_name
+                    or isinstance(base, ast.Attribute) and base.attr == class_name
+                    for base in node.bases
+                ):
+                    references.append(f"inheritance_reference:{file_name}:{getattr(node, 'lineno', 0)}")
+        if references:
+            return {
+                "status": "NOT_DEAD", "target_kind": "unused_class",
+                "target_fingerprint": target_fingerprint,
+                "reason": "REPOSITORY_REFERENCE_DETECTED", "deadness_evidence": references,
+            }
+        if uncertain:
+            return {
+                "status": "REVIEW_REQUIRED", "target_kind": "unused_class",
+                "target_fingerprint": target_fingerprint,
+                "reason": "REPOSITORY_DEADNESS_UNCERTAIN", "deadness_evidence": uncertain,
+            }
+        return {
+            "status": "SAFE_TO_REMOVE", "target_kind": "unused_class",
+            "target_fingerprint": target_fingerprint,
+            "deadness_evidence": ["repository_ast_no_class_references", "no_dynamic_or_export_risk"],
+        }
+
+    target = _resolve_python_dead_callable_identity(
+        tree,
+        method_name=method_name,
+        class_name=class_name,
+        source_line=source_line,
+    )
+    if target is None:
+        return {"status": "NOT_APPLICABLE", "reason": "TARGET_NOT_FOUND"}
+
+    parents = {
+        child: parent
+        for parent in ast.walk(tree)
+        for child in ast.iter_child_nodes(parent)
+    }
+    owner = _python_callable_class_name(target, parents) or ""
+    if target.decorator_list or target.name.startswith(("test_", "pytest_")) or (
+        target.name.startswith("__") and target.name.endswith("__")
+    ):
+        return {
+            "status": "REVIEW_REQUIRED",
+            "target_kind": "callable",
+            "target_fingerprint": ast.dump(target, include_attributes=False),
+            "reason": "DECORATOR_OR_FRAMEWORK_HOOK",
+        }
+    if not owner and target.name.lower() in {"main", "app", "application", "cli", "setup", "teardown"}:
+        return {
+            "status": "REVIEW_REQUIRED",
+            "target_kind": "callable",
+            "target_fingerprint": ast.dump(target, include_attributes=False),
+            "reason": "ENTRY_POINT_OR_FRAMEWORK_HOOK",
+        }
+
+    repository = _python_dead_code_repository_sources(
+        source_code=source_code,
+        project_source_files=project_source_files,
+        current_file_name=current_file_name,
+    )
+    reference_evidence: list[str] = []
+    uncertain_evidence: list[str] = []
+    target_fingerprint = ast.dump(target, include_attributes=False)
+    for file_name, candidate_source in repository:
+        try:
+            candidate_tree = ast.parse(candidate_source)
+        except SyntaxError:
+            uncertain_evidence.append(f"unparseable_repository_file:{file_name}")
+            continue
+        candidate_parents = {
+            child: parent
+            for parent in ast.walk(candidate_tree)
+            for child in ast.iter_child_nodes(parent)
+        }
+        target_in_this_tree = next(
+            (
+                node for node in ast.walk(candidate_tree)
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and ast.dump(node, include_attributes=False) == target_fingerprint
+            ),
+            None,
+        )
+        for node in ast.walk(candidate_tree):
+            if target_in_this_tree is not None and _python_ast_descends_from(
+                node, target_in_this_tree, candidate_parents
+            ):
+                continue
+            if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load) and node.id == target.name:
+                reference_evidence.append(f"direct_reference:{file_name}:{getattr(node, 'lineno', 0)}")
+            elif isinstance(node, ast.Attribute) and node.attr == target.name:
+                reference_evidence.append(f"attribute_reference:{file_name}:{getattr(node, 'lineno', 0)}")
+            elif isinstance(node, ast.ImportFrom) and any(
+                alias.name == target.name or alias.asname == target.name
+                for alias in node.names
+            ):
+                reference_evidence.append(f"import_reference:{file_name}:{getattr(node, 'lineno', 0)}")
+            elif _python_dead_code_export_contains(node, target.name):
+                reference_evidence.append(f"export_reference:{file_name}:{getattr(node, 'lineno', 0)}")
+            elif _python_dead_code_dynamic_lookup(node, target.name):
+                uncertain_evidence.append(f"dynamic_reference:{file_name}:{getattr(node, 'lineno', 0)}")
+
+        if owner and _python_dead_code_has_inheritance_risk(candidate_tree, owner, target.name):
+            uncertain_evidence.append(f"inheritance_or_override:{file_name}")
+        if owner and any(
+            isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == owner
+            for node in ast.walk(candidate_tree)
+        ):
+            # An instance can invoke the method dynamically, so exact method
+            # reachability cannot be proven from the imported snapshot.
+            uncertain_evidence.append(f"class_instantiation:{file_name}")
+
+    if reference_evidence:
+        return {
+            "status": "NOT_DEAD",
+            "target_kind": "unused_callable",
+            "target_role": "method" if owner else "function",
+            "target_fingerprint": target_fingerprint,
+            "owner": owner,
+            "reason": "REPOSITORY_REFERENCE_DETECTED",
+            "deadness_evidence": reference_evidence,
+        }
+    if uncertain_evidence:
+        return {
+            "status": "REVIEW_REQUIRED",
+            "target_kind": "unused_callable",
+            "target_role": "method" if owner else "function",
+            "target_fingerprint": target_fingerprint,
+            "owner": owner,
+            "reason": "REPOSITORY_DEADNESS_UNCERTAIN",
+            "deadness_evidence": uncertain_evidence,
+        }
+    return {
+        "status": "SAFE_TO_REMOVE",
+        "target_kind": "unused_callable",
+        "target_role": "method" if owner else "function",
+        "target_fingerprint": target_fingerprint,
+        "owner": owner,
+        "deadness_evidence": ["repository_ast_no_references", "no_dynamic_or_export_risk"],
+    }
+
+
+def _python_dead_code_repository_sources(
+    *,
+    source_code: str,
+    project_source_files: Sequence[Any] | None,
+    current_file_name: str,
+) -> list[tuple[str, str]]:
+    sources: list[tuple[str, str]] = [(current_file_name or "<current>", source_code)]
+    normalized_current = str(current_file_name or "").replace("\\", "/").lower()
+    for item in project_source_files or []:
+        if isinstance(item, dict):
+            file_name = str(item.get("file_name") or item.get("name") or item.get("path") or "")
+            code = str(item.get("source_code") or item.get("code") or "")
+        else:
+            file_name = str(getattr(item, "file_name", "") or getattr(item, "name", ""))
+            code = str(getattr(item, "source_code", "") or getattr(item, "code", ""))
+        normalized_name = file_name.replace("\\", "/").lower()
+        if not code or (normalized_current and normalized_name == normalized_current):
+            continue
+        if file_name.lower().endswith(".py"):
+            sources.append((file_name, code))
+    return sources
+
+
+def resolve_applied_dead_code_identity(
+    before_code: str,
+    after_code: str,
+    *,
+    dead_code_kind: str,
+) -> str:
+    """Return the exact pre-action AST statement removed by one safe action."""
+    try:
+        before_tree = ast.parse(before_code)
+        after_tree = ast.parse(after_code)
+    except SyntaxError:
+        return ""
+    after_dumps = {
+        ast.dump(node, include_attributes=False)
+        for node in ast.walk(after_tree)
+        if isinstance(node, ast.stmt)
+    }
+    if dead_code_kind == "unused_callable":
+        candidates = [
+            node for node in ast.walk(before_tree)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and ast.dump(node, include_attributes=False) not in after_dumps
+        ]
+    elif dead_code_kind == "unused_class":
+        candidates = [
+            node for node in ast.walk(before_tree)
+            if isinstance(node, ast.ClassDef)
+            and ast.dump(node, include_attributes=False) not in after_dumps
+        ]
+    elif dead_code_kind == "constant_false_branch":
+        candidates = [
+            node for node in ast.walk(before_tree)
+            if isinstance(node, ast.If)
+            and not node.orelse
+            and _static_python_boolean(node.test) is False
+            and ast.dump(node, include_attributes=False) not in after_dumps
+        ]
+    elif dead_code_kind == "unreachable_after_terminator":
+        candidates = [
+            node for node in _unreachable_python_statements(before_tree)
+            if ast.dump(node, include_attributes=False) not in after_dumps
+        ]
+    elif dead_code_kind == "unused_literal_assignment":
+        candidates = [
+            node for node in ast.walk(before_tree)
+            if isinstance(node, (ast.Assign, ast.AnnAssign))
+            and ast.dump(node, include_attributes=False) not in after_dumps
+        ]
+    else:
+        candidates = []
+    if len(candidates) != 1:
+        return ""
+    return ast.dump(candidates[0], include_attributes=False)
+
+
+def _python_ast_descends_from(
+    node: ast.AST,
+    ancestor: ast.AST,
+    parents: dict[ast.AST, ast.AST],
+) -> bool:
+    current: ast.AST | None = node
+    while current is not None:
+        if current is ancestor:
+            return True
+        current = parents.get(current)
+    return False
+
+
+def _python_dead_code_export_contains(node: ast.AST, target_name: str) -> bool:
+    if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+        return False
+    targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+    if not any(isinstance(target, ast.Name) and target.id == "__all__" for target in targets):
+        return False
+    value = node.value
+    if value is None:
+        return False
+    return any(
+        isinstance(item, ast.Constant) and item.value == target_name
+        for item in ast.walk(value)
+    )
+
+
+def _python_dead_code_dynamic_lookup(node: ast.AST, target_name: str) -> bool:
+    if not isinstance(node, ast.Call):
+        return False
+    name = node.func.id if isinstance(node.func, ast.Name) else ""
+    if name not in {"getattr", "setattr", "hasattr", "delattr", "globals", "locals", "vars", "eval", "exec", "__import__", "import_module"}:
+        return False
+    return any(isinstance(arg, ast.Constant) and arg.value == target_name for arg in ast.walk(node)) or name in {
+        "globals", "locals", "vars", "eval", "exec"
+    }
+
+
+def _python_dead_code_has_inheritance_risk(
+    tree: ast.Module,
+    owner: str,
+    method_name: str,
+) -> bool:
+    for node in (item for item in ast.walk(tree) if isinstance(item, ast.ClassDef)):
+        if node.name == owner:
+            continue
+        inherited = any(
+            isinstance(base, ast.Name) and base.id == owner
+            or isinstance(base, ast.Attribute) and base.attr == owner
+            for base in node.bases
+        )
+        overrides = any(
+            isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)) and item.name == method_name
+            for item in node.body
+        )
+        if inherited or overrides:
+            return True
+    return False
 
 
 def resolve_dead_code_callable_name(

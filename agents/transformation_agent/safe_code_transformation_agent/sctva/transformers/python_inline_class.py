@@ -340,6 +340,215 @@ def _method_safety_error(
     return ""
 
 
+def _is_field_centric_expression(
+    expression: ast.AST,
+    *,
+    allowed_names: set[str],
+) -> bool:
+    """Return whether an expression only reads helper state/arguments.
+
+    This intentionally accepts formatting and small arithmetic over fields. A
+    wrapper does not become an independent responsibility merely because a
+    getter formats ``self.name`` before returning it.
+    """
+
+    for node in ast.walk(expression):
+        if isinstance(node, (ast.Call, ast.Await, ast.Yield, ast.YieldFrom)):
+            return False
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
+            if node.id not in allowed_names and node.id != "self":
+                return False
+        if isinstance(node, ast.Attribute):
+            if not (
+                isinstance(node.value, ast.Name)
+                and node.value.id == "self"
+            ):
+                return False
+    return True
+
+
+def _is_trivial_wrapper_method(
+    method: ast.FunctionDef,
+    *,
+    field_names: set[str],
+    method_names: set[str],
+) -> bool:
+    """Recognise accessors, mutators, and one-hop forwarding methods.
+
+    The previous implementation counted every method other than ``__init__``
+    as a responsibility.  That rejected harmless value wrappers with several
+    getters/setters.  This test is deliberately narrow: control flow, calls to
+    arbitrary collaborators, nested scopes, and non-field state remain real
+    behaviour and therefore do not pass as trivial.
+    """
+
+    body = _strip_docstring(method.body)
+    if len(body) != 1:
+        return False
+    statement = body[0]
+    arguments = {argument.arg for argument in method.args.args[1:]}
+    allowed_names = arguments | {"self"}
+
+    if isinstance(statement, ast.Return):
+        value = statement.value
+        if value is None:
+            return True
+        # A direct forwarding call such as ``return self.label()`` stays a
+        # small façade.  The called helper is validated separately.
+        if (
+            isinstance(value, ast.Call)
+            and isinstance(value.func, ast.Attribute)
+            and isinstance(value.func.value, ast.Name)
+            and value.func.value.id == "self"
+            and value.func.attr in method_names
+            and all(
+                _is_field_centric_expression(
+                    argument,
+                    allowed_names=allowed_names,
+                )
+                for argument in value.args
+            )
+            and all(
+                keyword.arg is not None
+                and _is_field_centric_expression(
+                    keyword.value,
+                    allowed_names=allowed_names,
+                )
+                for keyword in value.keywords
+            )
+        ):
+            return True
+        return _is_field_centric_expression(value, allowed_names=allowed_names)
+
+    if (
+        isinstance(statement, ast.Assign)
+        and len(statement.targets) == 1
+        and isinstance(statement.targets[0], ast.Attribute)
+        and isinstance(statement.targets[0].value, ast.Name)
+        and statement.targets[0].value.id == "self"
+        and statement.targets[0].attr in field_names
+    ):
+        return _is_field_centric_expression(
+            statement.value,
+            allowed_names=allowed_names,
+        )
+
+    if isinstance(statement, ast.Expr) and isinstance(statement.value, ast.Call):
+        call = statement.value
+        return (
+            isinstance(call.func, ast.Attribute)
+            and isinstance(call.func.value, ast.Name)
+            and call.func.value.id == "self"
+            and call.func.attr in field_names
+        )
+    return False
+
+
+def _inline_class_responsibility_profile(
+    *,
+    business_methods: Sequence[ast.FunctionDef],
+    field_names: set[str],
+) -> dict[str, Any]:
+    """Measure semantic wrapper responsibility without inflating boilerplate."""
+
+    method_names = {method.name for method in business_methods}
+    trivial = [
+        method.name
+        for method in business_methods
+        if _is_trivial_wrapper_method(
+            method,
+            field_names=field_names,
+            method_names=method_names,
+        )
+    ]
+    meaningful = [
+        method.name
+        for method in business_methods
+        if method.name not in trivial
+    ]
+    return {
+        "state_field_count": len(field_names),
+        "method_count": len(business_methods),
+        "trivial_methods": trivial,
+        "meaningful_methods": meaningful,
+        "effective_responsibility_count": len(meaningful),
+    }
+
+
+def _repository_reference_files(
+    *,
+    project_source_files: Sequence[dict[str, Any]],
+    current_file_name: str,
+    class_name: str,
+) -> list[str]:
+    """Find conservative cross-file references to a class symbol.
+
+    The per-file engine cannot safely commit a partial cross-file rewrite.
+    Detecting these references here keeps the class intact and gives the
+    coordinator a precise reason to schedule an atomic repository edit.
+    """
+
+    current_path = str(current_file_name or "").replace("\\", "/").lower()
+    references: list[str] = []
+    for item in project_source_files:
+        if not isinstance(item, dict):
+            continue
+        file_name = str(item.get("file_name") or item.get("name") or item.get("path") or "")
+        normalized_name = file_name.replace("\\", "/").lower()
+        if current_path and normalized_name == current_path:
+            continue
+        language = str(item.get("language") or "").strip().lower()
+        if language and language != "python" and not normalized_name.endswith(".py"):
+            continue
+        code = item.get("source_code") or item.get("code")
+        if not isinstance(code, str) or not code.strip():
+            continue
+        try:
+            peer_tree = ast.parse(code)
+        except SyntaxError:
+            # A source file which cannot be analysed prevents a reliable
+            # absence proof for a public class name.
+            references.append(file_name or "<unparsed-python-source>")
+            continue
+        defines_same_class = any(
+            isinstance(node, ast.ClassDef) and node.name == class_name
+            for node in peer_tree.body
+        )
+        for node in ast.walk(peer_tree):
+            if isinstance(node, ast.ImportFrom) and any(
+                alias.name == class_name for alias in node.names
+            ):
+                references.append(file_name)
+                break
+            if isinstance(node, ast.Import) and any(
+                alias.name.split(".")[-1] == class_name for alias in node.names
+            ):
+                references.append(file_name)
+                break
+            if isinstance(node, ast.Name) and node.id == class_name and not defines_same_class:
+                references.append(file_name)
+                break
+            if isinstance(node, ast.Attribute) and node.attr == class_name:
+                references.append(file_name)
+                break
+    return sorted({name for name in references if name})
+
+
+def _was_enriched_by_prior_move(
+    class_to_inline: str,
+    prior_transformations: Sequence[dict[str, Any]],
+) -> bool:
+    """Recognise a class that gained real behavior earlier in this run."""
+
+    return any(
+        str(item.get("action_type") or "") == "move_python_method"
+        and str(item.get("status") or "").lower() in {"success", "already_applied"}
+        and str(item.get("destination_class") or "") == class_to_inline
+        for item in prior_transformations
+        if isinstance(item, dict)
+    )
+
+
 def _owner_self_fields(owner: ast.ClassDef) -> set[str]:
     fields: set[str] = set()
     for node in ast.walk(owner):
@@ -523,6 +732,10 @@ def apply_owned_inline_class(
     class_to_inline: str,
     preferred_destination_class: str = "",
     preferred_owner_attribute: str = "",
+    project_source_files: Sequence[dict[str, Any]] | None = None,
+    current_file_name: str = "",
+    prior_lineage: Sequence[dict[str, Any]] | None = None,
+    prior_transformations: Sequence[dict[str, Any]] | None = None,
 ) -> Tuple[str, int, dict[str, Any]]:
     """Inline a tiny helper class into its unique owning Python class.
 
@@ -597,13 +810,6 @@ def apply_owned_inline_class(
             reason="EMPTY_CLASS_CLEANUP_CANDIDATE",
         )
 
-    if not business_methods or len(business_methods) > 3:
-        return _review(
-            source_code,
-            class_to_inline=class_to_inline,
-            reason="CLASS_RESPONSIBILITY_NOT_SMALL",
-        )
-
     allowed_members = set(methods)
     for member in target_class.body:
         if member in allowed_members:
@@ -641,6 +847,39 @@ def apply_owned_inline_class(
 
     field_names = set(field_expressions)
     method_names = {method.name for method in business_methods}
+
+    responsibility = _inline_class_responsibility_profile(
+        business_methods=business_methods,
+        field_names=field_names,
+    )
+    # The class is a value/wrapper object when all exposed methods are simple
+    # accessors/mutators/field formatting.  Only real independent behaviour is
+    # counted as a responsibility.  Keep a finite API limit to avoid silently
+    # moving a large public façade merely because each method is individually
+    # short.
+    if (
+        responsibility["state_field_count"] > 5
+        or responsibility["method_count"] > 8
+        or responsibility["effective_responsibility_count"] > 0
+    ):
+        if _was_enriched_by_prior_move(
+            class_to_inline,
+            prior_transformations or [],
+        ):
+            # Let the main transformer report the more accurate
+            # SMELL_RESOLVED_BY_PRIOR_REFACTORING outcome for a class that was
+            # enriched by an earlier accepted Move Method in this pipeline.
+            return _not_applicable(
+                source_code,
+                class_to_inline=class_to_inline,
+                reason="CURRENT_CLASS_ENRICHED_BY_PRIOR_REFACTORING",
+            )
+        return _review(
+            source_code,
+            class_to_inline=class_to_inline,
+            reason="CLASS_RESPONSIBILITY_NOT_SMALL",
+            responsibility_profile=responsibility,
+        )
 
     for method in business_methods:
         error = _method_safety_error(
@@ -690,6 +929,21 @@ def apply_owned_inline_class(
     owner_attribute = str(construction["owner_attribute"])
     construction_statement: ast.AST = construction["statement"]
     construction_call: ast.Call = construction["call"]
+
+    external_reference_files = _repository_reference_files(
+        project_source_files=project_source_files or [],
+        current_file_name=current_file_name,
+        class_name=class_to_inline,
+    )
+    if external_reference_files:
+        return _review(
+            source_code,
+            class_to_inline=class_to_inline,
+            reason="EXTERNAL_REFERENCES",
+            reference_files=external_reference_files,
+            destination_class=owner_class.name,
+            owner_attribute=owner_attribute,
+        )
 
     bound, bind_error = _bind_constructor_arguments(
         call=construction_call,
@@ -831,11 +1085,12 @@ def apply_owned_inline_class(
         line_offsets,
         owner_class.end_lineno,
     )
-    rendered_methods = "\n\n".join(
-        textwrap.indent(method_source, "    ")
-        for method_source in method_sources
-    )
-    edits.append((insertion_offset, insertion_offset, f"\n{rendered_methods}\n"))
+    if method_sources:
+        rendered_methods = "\n\n".join(
+            textwrap.indent(method_source, "    ")
+            for method_source in method_sources
+        )
+        edits.append((insertion_offset, insertion_offset, f"\n{rendered_methods}\n"))
 
     chain_edits, updated_accesses, chain_error = _chain_rewrite_edits(
         source_code=source_code,
@@ -916,4 +1171,19 @@ def apply_owned_inline_class(
         "inlined_fields": sorted(field_names),
         "removed_instantiations": 1,
         "updated_owner_member_accesses": updated_accesses,
+        "responsibility_profile": responsibility,
+        "ownership_graph": {
+            "owner_class": owner_class.name,
+            "owner_attribute": owner_attribute,
+            "construction_count": len(constructions),
+            "external_reference_files": external_reference_files,
+        },
+        "inline_class_lineage": {
+            "source_class": class_to_inline,
+            "destination_class": owner_class.name,
+            "owner_attribute": owner_attribute,
+            "moved_fields": sorted(field_names),
+            "moved_methods": [method.name for method in business_methods],
+            "prior_lineage": list(prior_lineage or []),
+        },
     }
