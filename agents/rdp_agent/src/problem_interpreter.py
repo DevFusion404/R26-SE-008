@@ -224,6 +224,36 @@ class ProblemInterpreter:
                 return depth >= 4
             return True  # nesting_depth not provided → trust the smell detector
 
+        # --- is_class_method ---
+        if precondition == "is_class_method":
+            cls = location.get("class")
+            method = location.get("method") or location.get("entity")
+            file_name = location.get("file") or smell.location.get("file", "")
+            base_file = str(file_name).rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+            base_file_no_ext = base_file.split(".")[0]
+
+            if not cls or cls in ("unknown", "null", "") or cls == base_file or cls == base_file_no_ext:
+                return False
+            if not method or method in ("unknown", "null", "") or method == base_file or method == base_file_no_ext:
+                return False
+            return True
+
+        # --- has_valid_destination ---
+        if precondition == "has_valid_destination":
+            destination = location.get("destination_class")
+            if not destination and smell.details:
+                import re
+                _class_m = re.search(r"(?:class|of|to|target)\s+['\"]?([A-Z]\w+)['\"]?", smell.details, re.IGNORECASE)
+                if _class_m:
+                    found_name = _class_m.group(1)
+                else:
+                    found_name = smell.details.strip()
+                cls = location.get("class")
+                method = location.get("method")
+                if found_name and found_name != cls and found_name != method and re.match(r"^[A-Za-z_]\w*$", found_name):
+                    destination = found_name
+            return bool(destination and destination not in ("unknown", "null", ""))
+
         # Unknown precondition → pass by default
         logger.warning(
             "Unknown precondition '%s'; assuming satisfied.", precondition
