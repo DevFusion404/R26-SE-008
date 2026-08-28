@@ -29,7 +29,7 @@ from ..constants import (
 from ..transformers import c_transformers, java_transformers, python_transformers
 from ..transformers import java_hide_delegate, python_hide_delegate, python_replace_conditional
 from ..transformers import java_extract_method
-from ..transformers.java_extract_class import _parse_java_class, declared_class_names
+from ..transformers.java_extract_class import _mask_c_like, _parse_java_class, declared_class_names
 from ..transformers.python_ast_fingerprints import (
     literal_constant_bindings,
     meaningful_top_level_statements,
@@ -176,14 +176,22 @@ class StructuralValidator:
             for action in actions or []
             if language == "python" and action.action_type == ACTION_MOVE_PYTHON_METHOD
         ]
+        inline_class_actions = [
+            action
+            for action in actions or []
+            if language == "python" and action.action_type == ACTION_INLINE_PYTHON_CLASS
+        ]
+        inline_class_lineage = self._python_inline_class_lineage_ledger(
+            inline_class_actions
+        )
         inline_class_checks = [
             self._validate_python_inline_class_action(
                 original_code=original_code,
                 transformed_code=transformed_code,
                 action=action,
+                lineage_ledger=inline_class_lineage,
             )
-            for action in actions or []
-            if language == "python" and action.action_type == ACTION_INLINE_PYTHON_CLASS
+            for action in inline_class_actions
         ]
         c_global_variable_checks = [
             self._validate_c_encapsulate_variable_action(
@@ -243,6 +251,12 @@ class StructuralValidator:
             ]
         )
         if polymorphism_checks and all(item.get("passed") for item in polymorphism_checks):
+            score = max(score, threshold)
+        if dead_code_checks and all(item.get("passed") for item in dead_code_checks):
+            # Remove Dead Code has a dedicated AST-level preservation proof for
+            # every accepted State(N-1) -> State(N) deletion.  A small module
+            # can legitimately have low whole-file similarity after its only
+            # dead declaration is removed; do not override that stronger proof.
             score = max(score, threshold)
         passed = score >= threshold and specific_passed
         message = (
@@ -311,6 +325,7 @@ class StructuralValidator:
                 "extract_method_validation": extract_method_checks,
                 "move_method_validation": move_method_checks,
                 "inline_class_validation": inline_class_checks,
+                "inline_class_lineage": inline_class_lineage,
                 "c_global_variable_validation": c_global_variable_checks,
                 "hide_delegate_validation": hide_delegate_checks,
                 "rename_method_validation": rename_method_checks,
@@ -583,7 +598,7 @@ class StructuralValidator:
         ).strip()
         parameter_name = str(params.get("parameter_name") or "params").strip()
         if language == "python":
-            return self._validate_python_parameter_object(
+            result = self._validate_python_parameter_object(
                 original_code,
                 transformed_code,
                 method=method,
@@ -591,8 +606,8 @@ class StructuralValidator:
                 object_name=object_name,
                 parameter_name=parameter_name,
             )
-        if language == "java":
-            return self._validate_java_parameter_object(
+        elif language == "java":
+            result = self._validate_java_parameter_object(
                 original_code,
                 transformed_code,
                 method=method,
@@ -600,7 +615,17 @@ class StructuralValidator:
                 object_name=object_name,
                 parameter_name=parameter_name,
             )
-        return {"passed": False, "reason": "unsupported_language"}
+        else:
+            result = {"passed": False, "reason": "unsupported_language"}
+        result["action_index"] = params.get("_sctva_action_index")
+        result["ledger_entry"] = dict(
+            params.get("parameter_object_ledger_entry")
+            or (params.get("applied_transformation_metadata") or {}).get(
+                "parameter_object_ledger_entry"
+            )
+            or {}
+        )
+        return result
 
     @staticmethod
     def _validate_python_parameter_object(
@@ -701,6 +726,8 @@ class StructuralValidator:
         ).strip()
         raw_line = params.get("source_line")
         source_line = int(raw_line) if isinstance(raw_line, (int, float)) else None
+        applied = params.get("applied_transformation_metadata")
+        applied = applied if isinstance(applied, dict) else {}
         if language == "python":
             return self._validate_python_dead_code(
                 original_code,
@@ -708,6 +735,7 @@ class StructuralValidator:
                 method=method,
                 class_name=class_name,
                 source_line=source_line,
+                removal_ledger=applied.get("dead_code_removal_ledger_entry"),
             )
         if language == "c":
             return self._validate_c_dead_code(
@@ -958,7 +986,10 @@ class StructuralValidator:
         method: str,
         class_name: str,
         source_line: int | None,
+        removal_ledger: Any = None,
     ) -> Dict[str, Any]:
+        if isinstance(removal_ledger, dict):
+            return self._validate_python_dead_code_ledger_entry(removal_ledger)
         try:
             original_tree = ast.parse(original)
             transformed_tree = ast.parse(transformed)
@@ -1042,6 +1073,103 @@ class StructuralValidator:
             "language": "python",
             "target_kind": type(target).__name__,
             "checks": checks,
+        }
+
+    @staticmethod
+    def _validate_python_dead_code_ledger_entry(
+        ledger: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Validate one accepted removal against its own sequential snapshot.
+
+        Later removals are intentionally absent from the final file, so checking
+        this action against the final combined state would create a false
+        ``unrelated_source_preserved`` failure.  The ledger keeps the exact
+        State(N-1) -> State(N) evidence for this action instead.
+        """
+        before = str(ledger.get("before_snapshot") or "")
+        after = str(ledger.get("after_snapshot") or "")
+        target_identity = str(ledger.get("original_ast_identity") or "")
+        target_kind = str(ledger.get("target_kind") or "")
+        try:
+            before_tree = ast.parse(before)
+            after_tree = ast.parse(after)
+        except SyntaxError:
+            return {
+                "passed": False,
+                "reason": "ledger_snapshot_parse_failed",
+                "action_index": ledger.get("action_index"),
+            }
+
+        before_statements = {
+            ast.dump(node, include_attributes=False)
+            for node in ast.walk(before_tree)
+            if isinstance(node, ast.stmt)
+        }
+        after_statements = {
+            ast.dump(node, include_attributes=False)
+            for node in ast.walk(after_tree)
+            if isinstance(node, ast.stmt)
+        }
+        target_nodes = [
+            node for node in ast.walk(before_tree)
+            if isinstance(node, ast.stmt)
+            and ast.dump(node, include_attributes=False) == target_identity
+        ]
+        target_existed = len(target_nodes) == 1
+        target_removed = bool(target_identity) and target_identity not in after_statements
+        before_parents = {
+            child: parent
+            for parent in ast.walk(before_tree)
+            for child in ast.iter_child_nodes(parent)
+        }
+        removed_subtree_statements = {
+            ast.dump(node, include_attributes=False)
+            for node in ast.walk(target_nodes[0])
+            if isinstance(node, ast.stmt)
+        } if target_existed else set()
+        changed_container_statements: set[str] = set()
+        required_named_scopes: set[tuple[str, str]] = set()
+        if target_existed:
+            ancestor = before_parents.get(target_nodes[0])
+            while ancestor is not None:
+                if isinstance(ancestor, ast.stmt):
+                    changed_container_statements.add(
+                        ast.dump(ancestor, include_attributes=False)
+                    )
+                if isinstance(ancestor, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                    required_named_scopes.add((type(ancestor).__name__, ancestor.name))
+                ancestor = before_parents.get(ancestor)
+        after_named_scopes = {
+            (type(node).__name__, node.name)
+            for node in ast.walk(after_tree)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+        }
+
+        # An extracted target owns its nested statements too.  They are
+        # expected to disappear with the target and must not be counted as
+        # independent unrelated deletions.
+        expected_remaining = before_statements - removed_subtree_statements - changed_container_statements
+        unrelated_preserved = expected_remaining <= after_statements
+        before_docstring = ast.get_docstring(before_tree, clean=False)
+        after_docstring = ast.get_docstring(after_tree, clean=False)
+        checks = {
+            "target_existed_before": target_existed,
+            "target_removed_after": target_removed,
+            "deadness_was_proven": bool(ledger.get("deadness_evidence")),
+            "unrelated_source_preserved": unrelated_preserved and required_named_scopes <= after_named_scopes,
+            "module_docstring_preserved": before_docstring == after_docstring,
+            "python_syntax_valid": True,
+        }
+        return {
+            "passed": all(checks.values()),
+            "language": "python",
+            "status": "APPLIED" if all(checks.values()) else "ROLLED_BACK",
+            "target": ledger.get("target"),
+            "target_kind": target_kind,
+            "action_index": ledger.get("action_index"),
+            "expected_removed": [ledger.get("target")],
+            "checks": checks,
+            "deadness_evidence": list(ledger.get("deadness_evidence") or []),
         }
 
     def _validate_narrow_exception_handler_action(
@@ -1687,12 +1815,134 @@ class StructuralValidator:
             if isinstance(target, ast.Name)
         }
 
+    @staticmethod
+    def _python_inline_class_lineage_ledger(
+        actions: Sequence[RefactoringAction],
+    ) -> list[Dict[str, Any]]:
+        """Build accepted owner-inline lineage from immutable action metadata.
+
+        Final validation receives the original source and the final source, so
+        it cannot infer intermediate classes from the final AST.  The engine
+        records the actual owner rewrite for every accepted action; this ledger
+        makes that evidence available to every action-level final check.
+        """
+
+        ledger: list[Dict[str, Any]] = []
+        for position, action in enumerate(actions, start=1):
+            params = action.parameters or {}
+            applied = params.get("applied_transformation_metadata")
+            applied = applied if isinstance(applied, dict) else {}
+            lineage = applied.get("inline_class_lineage")
+            lineage = lineage if isinstance(lineage, dict) else {}
+            inline_mode = str(
+                params.get("inline_mode") or applied.get("inline_mode") or ""
+            ).strip()
+            source_class = str(
+                lineage.get("source_class")
+                or params.get("class_to_inline")
+                or params.get("source_class")
+                or ""
+            ).strip()
+            destination_class = str(
+                lineage.get("destination_class")
+                or applied.get("destination_class")
+                or params.get("destination_class")
+                or ""
+            ).strip()
+            if inline_mode != "owner_class" or not source_class or not destination_class:
+                continue
+            ledger.append({
+                "source_class": source_class,
+                "destination_class": destination_class,
+                "terminal_destination_class": str(
+                    lineage.get("terminal_destination_class")
+                    or destination_class
+                ).strip(),
+                "owner_attribute": str(
+                    lineage.get("owner_attribute")
+                    or applied.get("owner_attribute")
+                    or params.get("owner_attribute")
+                    or ""
+                ).strip(),
+                "moved_fields": [
+                    str(field) for field in lineage.get("moved_fields") or applied.get("inlined_fields") or []
+                    if str(field)
+                ],
+                "moved_methods": [
+                    str(method) for method in lineage.get("moved_methods") or applied.get("inlined_methods") or []
+                    if str(method)
+                ],
+                "action_index": params.get("_sctva_action_index") or position,
+                "inline_mode": inline_mode,
+                "previous_lineage": list(lineage.get("prior_lineage") or []),
+            })
+        return sorted(ledger, key=lambda item: int(item.get("action_index") or 0))
+
+    @staticmethod
+    def _python_inline_class_lineage_for_action(
+        *,
+        action: RefactoringAction,
+        class_name: str,
+        ledger: Sequence[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        params = action.parameters or {}
+        action_index = params.get("_sctva_action_index")
+        for item in ledger:
+            if (
+                item.get("source_class") == class_name
+                and (action_index is None or item.get("action_index") == action_index)
+            ):
+                return dict(item)
+        return {}
+
+    @staticmethod
+    def _python_inline_class_lineage_path(
+        *,
+        source_class: str,
+        ledger: Sequence[Dict[str, Any]],
+    ) -> list[Dict[str, Any]]:
+        """Follow ``source -> owner -> ... -> terminal owner`` safely."""
+
+        by_source = {
+            str(item.get("source_class") or ""): item
+            for item in ledger
+            if str(item.get("source_class") or "")
+        }
+        path: list[Dict[str, Any]] = []
+        current = source_class
+        visited: set[str] = set()
+        while current and current not in visited:
+            visited.add(current)
+            entry = by_source.get(current)
+            if entry is None:
+                break
+            path.append(dict(entry))
+            current = str(entry.get("destination_class") or "")
+        return path
+
+    @classmethod
+    def _python_inline_class_terminal_destination(
+        cls,
+        *,
+        source_class: str,
+        immediate_destination: str,
+        ledger: Sequence[Dict[str, Any]],
+    ) -> str:
+        path = cls._python_inline_class_lineage_path(
+            source_class=source_class,
+            ledger=ledger,
+        )
+        if path:
+            return str(path[-1].get("destination_class") or "")
+        return immediate_destination
+
     def _validate_python_inline_class_action(
         self,
         *,
         original_code: str,
         transformed_code: str,
         action: RefactoringAction,
+        lineage_ledger: Sequence[Dict[str, Any]] | None = None,
     ) -> Dict[str, Any]:
         """Require a complete Inline Class transformation, not just parsing.
 
@@ -1770,6 +2020,26 @@ class StructuralValidator:
 
         destination_class_name = str(params.get("destination_class") or "").strip()
         owner_attribute = str(params.get("owner_attribute") or "").strip()
+        lineage = self._python_inline_class_lineage_for_action(
+            action=action,
+            class_name=class_name,
+            ledger=lineage_ledger or [],
+        )
+        lineage_mode = str(lineage.get("inline_mode") or "").strip()
+        if lineage_mode:
+            inline_mode = lineage_mode
+        immediate_destination_class = str(
+            lineage.get("destination_class") or destination_class_name
+        ).strip()
+        terminal_destination_class = self._python_inline_class_terminal_destination(
+            source_class=class_name,
+            immediate_destination=immediate_destination_class,
+            ledger=lineage_ledger or [],
+        )
+        if terminal_destination_class:
+            destination_class_name = terminal_destination_class
+        if lineage.get("owner_attribute"):
+            owner_attribute = str(lineage["owner_attribute"])
 
         # Engine metadata normally provides destination_class for owned Inline
         # Class.  For direct validator use, infer it only when exactly one
@@ -1795,7 +2065,30 @@ class StructuralValidator:
             else None
         )
 
-        if destination_class is not None:
+        if inline_mode == "owner_class" and destination_class is None:
+            return {
+                "passed": False,
+                "language": "python",
+                "inline_mode": "owner_class",
+                "class_to_inline": class_name,
+                "immediate_destination_class": immediate_destination_class,
+                "terminal_destination_class": terminal_destination_class,
+                "lineage": self._python_inline_class_lineage_path(
+                    source_class=class_name,
+                    ledger=lineage_ledger or [],
+                ),
+                "reason": "TERMINAL_DESTINATION_NOT_FOUND",
+                "checks": {
+                    "target_class_existed_before": True,
+                    "target_class_removed_after": class_removed,
+                    "terminal_destination_exists_after": False,
+                    "required_methods_and_state_preserved_elsewhere": False,
+                    "no_unresolved_references_to_removed_class": False,
+                    "python_syntax_valid": True,
+                },
+            }
+
+        if inline_mode == "owner_class" or destination_class is not None:
             # ------------------------------
             # Owned-composition Inline Class
             # ------------------------------
@@ -1826,7 +2119,28 @@ class StructuralValidator:
                     and isinstance(node.ctx, ast.Store)
                 )
             }
-            state_preserved = original_fields <= destination_fields
+            lineage_fields = {
+                str(field)
+                for item in self._python_inline_class_lineage_path(
+                    source_class=class_name,
+                    ledger=lineage_ledger or [],
+                )
+                for field in item.get("moved_fields") or []
+                if str(field)
+            }
+            # An intermediate owner field (for example Address.country) is a
+            # composition handle, not surviving domain state.  Once Country
+            # is inlined, its own fields are represented by the preceding
+            # lineage entry and the handle itself must disappear.
+            consumed_owner_handles = {
+                str(item.get("owner_attribute") or "")
+                for item in lineage_ledger or []
+                if str(item.get("destination_class") or "") == class_name
+            }
+            expected_fields = (
+                original_fields - consumed_owner_handles
+            ) | lineage_fields
+            state_preserved = expected_fields <= destination_fields
 
             before_constants = self._python_sctva_module_constant_values(before_tree)
             after_constants = self._python_sctva_module_constant_values(after_tree)
@@ -1857,8 +2171,16 @@ class StructuralValidator:
                 and node.func.id == class_name
                 for node in ast.walk(after_tree)
             )
+            consumed_classes = {
+                str(item.get("source_class") or "")
+                for item in self._python_inline_class_lineage_path(
+                    source_class=class_name,
+                    ledger=lineage_ledger or [],
+                )
+            }
+            consumed_classes.add(class_name)
             unresolved_class_references = any(
-                isinstance(node, ast.Name) and node.id == class_name
+                isinstance(node, ast.Name) and node.id in consumed_classes
                 for node in ast.walk(after_tree)
             )
 
@@ -1901,6 +2223,7 @@ class StructuralValidator:
                 "target_class_existed_before": True,
                 "target_class_removed_after": class_removed,
                 "destination_class_exists_after": destination_class is not None,
+                "terminal_destination_exists_after": destination_class is not None,
                 "required_methods_and_state_preserved_elsewhere": (
                     methods_preserved and state_preserved and logic_preserved
                 ),
@@ -1918,6 +2241,16 @@ class StructuralValidator:
                 "inline_mode": "owner_class",
                 "class_to_inline": class_name,
                 "destination_class": destination_class_name,
+                "immediate_destination_class": immediate_destination_class,
+                "terminal_destination_class": terminal_destination_class or destination_class_name,
+                "lineage": self._python_inline_class_lineage_path(
+                    source_class=class_name,
+                    ledger=lineage_ledger or [],
+                ),
+                "superseded_by_inline_class": bool(
+                    immediate_destination_class
+                    and immediate_destination_class != destination_class_name
+                ),
                 "owner_attribute": owner_attribute,
                 "before_direct_call_sites": before_chained_calls,
                 "after_direct_call_sites": after_direct_calls,
@@ -2495,13 +2828,12 @@ class StructuralValidator:
             name for name in before.parameters
             if re.search(rf"(?<![A-Za-z0-9_$.]){re.escape(name)}\b", before.body)
         }
-        accessed_after = {
-            match.group(1)
-            for match in re.finditer(
-                rf"\b{re.escape(parameter_name)}\s*\.\s*([A-Za-z_$][A-Za-z0-9_$]*)\b",
-                after.body,
-            )
-        }
+        accessed_after = StructuralValidator._java_parameter_object_accessed_fields(
+            after_model,
+            after,
+            parameter_name=parameter_name,
+            object_name=object_name,
+        )
         checks = {
             "parameter_object_created": bool(object_model),
             "fields_preserved": set(before.parameters) <= set(object_model.fields),
@@ -2516,8 +2848,56 @@ class StructuralValidator:
             "before_parameter_count": len(before.parameters),
             "after_parameter_count": len(after.parameters),
             "fields": sorted(object_model.fields),
+            "migrated_body_accesses": sorted(accessed_after),
             "checks": checks,
         }
+
+    @staticmethod
+    def _java_parameter_object_accessed_fields(
+        model: Any,
+        target: Any,
+        *,
+        parameter_name: str,
+        object_name: str,
+        max_depth: int = 3,
+    ) -> set[str]:
+        method_lookup = {
+            item.name: item
+            for item in getattr(model, "methods", []) or []
+            if not getattr(item, "is_constructor", False)
+        }
+        visited: set[str] = set()
+
+        def direct_accesses(body: str, param_name: str) -> set[str]:
+            return {
+                match.group(1)
+                for match in re.finditer(
+                    rf"\b{re.escape(param_name)}\s*\.\s*([A-Za-z_$][A-Za-z0-9_$]*)\b",
+                    _mask_c_like(body),
+                )
+            }
+
+        def collect(method: Any, param_name: str, depth: int) -> set[str]:
+            name = str(getattr(method, "name", "") or "")
+            if not name or name in visited or depth > max_depth:
+                return set()
+            visited.add(name)
+            body = str(getattr(method, "body", "") or "")
+            fields = direct_accesses(body, param_name)
+            masked = _mask_c_like(body)
+            for call in re.finditer(
+                rf"(?:\bthis\s*\.\s*)?([A-Za-z_$][A-Za-z0-9_$]*)\s*\(\s*{re.escape(param_name)}\s*\)",
+                masked,
+            ):
+                helper = method_lookup.get(call.group(1))
+                if helper is None:
+                    continue
+                helper_params = list(getattr(helper, "parameters", []) or [])
+                if len(helper_params) == 1:
+                    fields.update(collect(helper, str(helper_params[0]), depth + 1))
+            return fields
+
+        return collect(target, parameter_name, 0)
 
     @staticmethod
     def _java_tokens(code: str) -> List[str]:
