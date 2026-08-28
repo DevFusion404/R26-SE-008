@@ -773,6 +773,30 @@ class StructuralValidator:
             return all(values) if isinstance(node.op, ast.And) else any(values)
         return None
 
+    @staticmethod
+    def _python_literal_assignment_names(statement: ast.AST) -> list[str]:
+        if isinstance(statement, ast.Assign):
+            targets = statement.targets
+            value = statement.value
+        elif isinstance(statement, ast.AnnAssign) and statement.value is not None:
+            targets = [statement.target]
+            value = statement.value
+        else:
+            return []
+
+        try:
+            ast.literal_eval(value)
+        except (ValueError, TypeError, SyntaxError, MemoryError, RecursionError):
+            return []
+
+        names: list[str] = []
+        for target in targets:
+            if isinstance(target, ast.Name):
+                names.append(target.id)
+            else:
+                return []
+        return names
+
     def _python_dead_target(
         self,
         tree: ast.Module,
