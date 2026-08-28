@@ -127,6 +127,14 @@ class RDPAgent:
         result = self.process_report_with_trace(report)
         return result["plan_object"]
 
+    def generate_plan(self, report: Any) -> RefactoringPlan:
+        """Alias for process_report supporting dict or QualityReport payloads."""
+        if isinstance(report, dict):
+            report_obj = QualityReport.from_dict(report)
+        else:
+            report_obj = report
+        return self.process_report(report_obj)
+
     def process_report_with_trace(
         self, report: QualityReport
     ) -> Dict[str, Any]:
@@ -196,8 +204,8 @@ class RDPAgent:
                 "severity": smell.severity,
             }
 
-            # Step 2: Get candidates from knowledge base
-            all_candidates = self.knowledge_base.get_candidates(smell.type)
+            lang = getattr(report, "language", None) or getattr(report, "target", "")
+            all_candidates = self.knowledge_base.get_candidates(smell.type, language=str(lang))
             smell_trace["candidates_from_catalog"] = len(all_candidates)
 
             # Step 1 & 3: Filter by preconditions
@@ -357,6 +365,7 @@ class RDPAgent:
                 skipped_smells.append({
                     "smell_id":   smell.id,
                     "smell_type": smell.type,
+                    "entity":     smell.location.get("method") or smell.location.get("class") or smell.location.get("file") or "unknown",
                     "severity":   smell.severity,
                     "reason":     reason,
                 })
