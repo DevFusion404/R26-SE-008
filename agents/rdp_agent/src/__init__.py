@@ -81,6 +81,9 @@ from .config import load_config, setup_logging
 # --- Pipeline (orchestration) ---
 from .pipeline import RDPAgent, generate_plan, generate_plan_from_dict
 
+# --- Evaluation ---
+from .evaluator import PlanEvaluation, evaluate_rdp_plan, evaluate_rdp_result
+
 # --- Backward-compatible function aliases ---
 from .problem_interpreter import ProblemInterpreter as _PI
 
@@ -138,6 +141,9 @@ __all__ = [
     "RDPAgent",
     "generate_plan",
     "generate_plan_from_dict",
+    "PlanEvaluation",
+    "evaluate_rdp_plan",
+    "evaluate_rdp_result",
     # Config
     "load_config",
     "setup_logging",

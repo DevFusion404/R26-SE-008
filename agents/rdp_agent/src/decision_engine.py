@@ -260,6 +260,14 @@ class DecisionEngine:
         """MCDA weight for dependency criterion (default 0.15)."""
         return self.weights.get("mcda_dependency_weight", 0.15)
 
+    @property
+    def mcda_ml_weight(self) -> float:
+        """MCDA adjustment weight for ML predictions (default 0.25)."""
+        return self.weights.get(
+            "mcda_ml_weight",
+            self.weights.get("ml_prediction_weight", 0.25),
+        )
+
     def normalize_score(self, score: float, min_val: float = 1.0, max_val: float = 3.0) -> float:
         """Normalize a score to 0-1 range.
         
@@ -280,7 +288,8 @@ class DecisionEngine:
         candidate: Dict[str, Any],
         smell: CodeSmell,
         dependency_score: float = 0.5,
-    ) -> Dict[str, float]:
+        ml_prediction: Optional[MLPrediction] = None,
+    ) -> Dict[str, Any]:
         """Score a candidate using MCDA (Multi-Criteria Decision Making).
         
         Formula:
@@ -295,6 +304,9 @@ class DecisionEngine:
             smell: The code smell being addressed.
             dependency_score: Dependency criterion score (0-1, higher is better).
                              Default 0.5 (neutral).
+            ml_prediction: Optional ML prediction for this candidate. When
+                           confidence is greater than zero, MCDA selection is
+                           adjusted by the ML signal.
 
         Returns:
             Dictionary with keys:
@@ -334,11 +346,12 @@ class DecisionEngine:
         risk_weighted = risk_norm * self.mcda_risk_weight
         dependency_weighted = dependency_norm * self.mcda_dependency_weight
 
-        # Calculate final score
-        final_score = (
+        # Calculate MCDA score before optional ML adjustment.
+        base_final_score = (
             quality_weighted + complexity_weighted + 
             risk_weighted + dependency_weighted
         )
+        final_score = base_final_score
 
         result = {
             "quality": round(quality_norm, 3),
@@ -349,18 +362,44 @@ class DecisionEngine:
             "complexity_weighted": round(complexity_weighted, 3),
             "risk_weighted": round(risk_weighted, 3),
             "dependency_weighted": round(dependency_weighted, 3),
+            "base_final_score": round(base_final_score, 3),
             "final_score": round(final_score, 3),
+            "scoring_method": "mcda",
         }
+
+        if ml_prediction is not None and ml_prediction.confidence > 0:
+            ml_confidence = min(1.0, max(0.0, ml_prediction.confidence))
+            ml_suitability = min(1.0, max(0.0, ml_prediction.contextual_suitability))
+            ml_quality = min(1.0, max(0.0, ml_prediction.quality_improvement))
+            ml_risk = min(1.0, max(0.0, ml_prediction.behavioral_risk))
+            ml_safety = 1.0 - ml_risk
+            ml_score = (ml_suitability + ml_quality + ml_safety) / 3.0
+            ml_adjustment = (ml_score - 0.5) * 2.0 * ml_confidence * self.mcda_ml_weight
+            final_score = min(1.0, max(0.0, base_final_score + ml_adjustment))
+
+            result.update({
+                "ml": round(ml_score, 3),
+                "ml_contextual_suitability": round(ml_suitability, 3),
+                "ml_quality_improvement": round(ml_quality, 3),
+                "ml_behavioral_risk": round(ml_risk, 3),
+                "ml_behavioral_safety": round(ml_safety, 3),
+                "ml_confidence": round(ml_confidence, 3),
+                "ml_weight": round(self.mcda_ml_weight, 3),
+                "ml_adjustment": round(ml_adjustment, 3),
+                "final_score": round(final_score, 3),
+                "scoring_method": "mcda_ml",
+            })
 
         logger.debug(
             "MCDA score for '%s': quality=%.3f complexity=%.3f risk=%.3f "
-            "dependency=%.3f → final=%.3f",
+            "dependency=%.3f final=%.3f method=%s",
             candidate.get("name", "?"),
             quality_norm,
             complexity_norm,
             risk_norm,
             dependency_norm,
             final_score,
+            result["scoring_method"],
         )
         return result
 
