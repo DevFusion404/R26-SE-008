@@ -61,10 +61,14 @@ class SyntaxValidator:
         try:
             language = str(language or "").strip().lower()
             source_code = source_code or ""
-            if not source_code.strip():
+            if not source_code.strip() and language != "python":
                 passed = False
                 message = "Syntax validation failed: source code is empty."
                 details["diagnostics"].append({"severity": "error", "message": message})
+            elif not source_code.strip() and language == "python":
+                details["warnings"].append(
+                    "Python module is empty after removing proven dead code; ast.parse accepts an empty module."
+                )
 
             if language == "python":
                 if passed:
@@ -129,6 +133,103 @@ class SyntaxValidator:
             started_at=start_iso,
             finished_at=end_iso,
             duration_ms=duration_ms,
+        )
+
+    def validate_java_project(
+        self,
+        sources: list[dict],
+        *,
+        require_compilation: bool,
+        timeout_seconds: int,
+    ) -> ValidationStepResult:
+        """Reparse and, when requested, compile a complete Java source set."""
+        start_iso = utc_now_iso()
+        started = time.perf_counter()
+        details = {"checks": ["java_repository_reparse"], "warnings": [], "diagnostics": []}
+        prepared: list[tuple[str, str]] = []
+        for item in sources:
+            file_name = str(item.get("file_name") or "")
+            source = str(item.get("source_code") or "")
+            local = self.validate(
+                language="java",
+                source_code=source,
+                require_compilation=False,
+                timeout_seconds=timeout_seconds,
+            )
+            if not local.passed:
+                message = f"Java repository static validation failed in {file_name}: {local.message}"
+                details["diagnostics"].append({"severity": "error", "file": file_name, "message": local.message})
+                return ValidationStepResult(
+                    name="java_repository_syntax",
+                    passed=False,
+                    score=0.0,
+                    message=message,
+                    details=details,
+                    started_at=start_iso,
+                    finished_at=utc_now_iso(),
+                    duration_ms=int((time.perf_counter() - started) * 1000),
+                )
+            prepared.append((file_name, source.lstrip("\ufeff")))
+
+        message = "Java repository static validation passed."
+        passed = True
+        if require_compilation:
+            details["checks"].append("javac_project_compile")
+            javac = shutil.which("javac")
+            if not javac:
+                details["warnings"].append("javac not available; repository compile check skipped.")
+            else:
+                temp_dir = _make_syntax_temp_dir("java_project")
+                try:
+                    classes_dir = temp_dir / "classes"
+                    classes_dir.mkdir(parents=True, exist_ok=True)
+                    java_files: list[str] = []
+                    written: set[Path] = set()
+                    for file_name, source in prepared:
+                        clean = self._strip_comments_and_literals(source)
+                        public_type = self._JAVA_PUBLIC_TYPE_RE.search(clean)
+                        first_type = self._JAVA_TYPE_RE.search(clean)
+                        type_name = (public_type or first_type).group(1) if (public_type or first_type) else Path(file_name).stem
+                        package_match = re.search(r"(?m)^\s*package\s+([A-Za-z_$][\w.$]*)\s*;", clean)
+                        package_dir = Path(*(package_match.group(1).split(".") if package_match else []))
+                        destination = temp_dir / package_dir / f"{type_name}.java"
+                        if destination in written:
+                            passed = False
+                            message = f"Java repository compile check failed: duplicate type source {destination.name}."
+                            details["diagnostics"].append({"severity": "error", "file": file_name, "message": message})
+                            break
+                        destination.parent.mkdir(parents=True, exist_ok=True)
+                        destination.write_text(source, encoding="utf-8")
+                        written.add(destination)
+                        java_files.append(str(destination))
+                    if passed and java_files:
+                        proc = subprocess.run(
+                            [javac, "-proc:none", "-d", str(classes_dir), *java_files],
+                            capture_output=True,
+                            text=True,
+                            timeout=timeout_seconds,
+                        )
+                        if proc.returncode != 0:
+                            passed = False
+                            stderr = (proc.stderr or proc.stdout or "").strip()
+                            message = f"Java repository compile check failed: {stderr}"
+                            details["diagnostics"].append({"severity": "error", "message": message})
+                except subprocess.TimeoutExpired:
+                    passed = False
+                    message = "Java repository compile check timed out."
+                    details["diagnostics"].append({"severity": "error", "message": message})
+                finally:
+                    shutil.rmtree(temp_dir, ignore_errors=True)
+
+        return ValidationStepResult(
+            name="java_repository_syntax",
+            passed=passed,
+            score=1.0 if passed else 0.0,
+            message=message,
+            details=details,
+            started_at=start_iso,
+            finished_at=utc_now_iso(),
+            duration_ms=int((time.perf_counter() - started) * 1000),
         )
 
     def _validate_python(self, source: str, details: dict) -> tuple[bool, str]:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import os
 import re
 import shutil
 import subprocess
@@ -1526,7 +1527,7 @@ class BehavioralValidator:
             )
 
             comparison = compare_fingerprints(original_fp, transformed_fp)
-            dependency_unavailable = self._fingerprints_dependency_unavailable(
+            runtime_infrastructure_unavailable = self._fingerprints_runtime_infrastructure_unavailable(
                 original_fp,
                 transformed_fp,
                 language="java",
@@ -1539,12 +1540,12 @@ class BehavioralValidator:
             )
             if expected_failure:
                 comparison = {"matched": False, "reason": expected_failure}
-                dependency_unavailable = False
+                runtime_infrastructure_unavailable = False
 
-            if dependency_unavailable:
+            if runtime_infrastructure_unavailable:
                 comparison = {
                     "matched": False,
-                    "reason": "runtime_unavailable_due_to_dependencies",
+                    "reason": "runtime_unavailable_due_to_infrastructure",
                 }
 
             java_results.append(
@@ -1560,14 +1561,16 @@ class BehavioralValidator:
                     "original_fingerprint": original_fp,
                     "transformed_fingerprint": transformed_fp,
                     "comparison": comparison,
-                    "dependency_unavailable": dependency_unavailable,
+                    "dependency_unavailable": runtime_infrastructure_unavailable,
+                    "runtime_infrastructure_unavailable": runtime_infrastructure_unavailable,
                 }
             )
 
-            if dependency_unavailable:
+            if runtime_infrastructure_unavailable:
                 dependency_unavailable_count += 1
                 warnings.append(
-                    f"{name}: Java runtime probe could not execute because project or external dependencies were unavailable."
+                    f"{name}: Java runtime probe could not execute because its compile/classpath "
+                    "environment was unavailable."
                 )
                 remaining_tests = runtime_tests[idx:]
                 if remaining_tests and not failures:
@@ -1587,8 +1590,9 @@ class BehavioralValidator:
                                 "name": remaining_name,
                                 "status": "skipped",
                                 "auto_generated": bool(remaining.get("auto_generated")),
-                                "reason": "dependency_unavailable_after_preflight",
+                                "reason": "runtime_infrastructure_unavailable_after_preflight",
                                 "dependency_unavailable": True,
+                                "runtime_infrastructure_unavailable": True,
                             }
                         )
                         dependency_unavailable_count += 1
@@ -1616,10 +1620,28 @@ class BehavioralValidator:
             ]
             static_details["warnings"] = warnings + static_details.get("warnings", [])
             static_details["java_results"] = java_results
-            static_details["runtime_unavailable_reason"] = "missing_java_dependencies"
+            runtime_categories = sorted(
+                {
+                    str(fingerprint.get("runtime_failure_category") or "")
+                    for result in java_results
+                    for fingerprint in (
+                        result.get("original_fingerprint", {}),
+                        result.get("transformed_fingerprint", {}),
+                    )
+                    if fingerprint.get("runtime_infrastructure")
+                }
+                - {""}
+            )
+            static_details["runtime_unavailable_reason"] = (
+                "missing_java_dependencies"
+                if not runtime_categories or runtime_categories == ["MISSING_DEPENDENCY"]
+                else "java_runtime_infrastructure_unavailable"
+            )
+            static_details["runtime_failure_categories"] = runtime_categories
             static_details["fingerprint_status"] = "degraded_static_passed" if static_passed else "failed"
             static_details["fingerprint_summary"] = (
-                "Java runtime probes could not execute because dependencies were unavailable; "
+                "Java runtime probes could not execute because the compile/classpath environment "
+                "was unavailable; "
                 + static_details.get("fingerprint_summary", static_message)
             )
             return static_passed, min(static_score, 0.75), static_message, static_details
@@ -1658,15 +1680,51 @@ class BehavioralValidator:
         *,
         language: str,
     ) -> bool:
+        """Backward-compatible name for Java runtime infrastructure checks."""
+        return cls._fingerprints_runtime_infrastructure_unavailable(
+            original_fp,
+            transformed_fp,
+            language=language,
+        )
+
+    @classmethod
+    def _fingerprints_runtime_infrastructure_unavailable(
+        cls,
+        original_fp: Dict[str, Any],
+        transformed_fp: Dict[str, Any],
+        *,
+        language: str,
+    ) -> bool:
         return (
-            cls._fingerprint_dependency_unavailable(original_fp, language=language)
-            and cls._fingerprint_dependency_unavailable(transformed_fp, language=language)
+            cls._fingerprint_runtime_infrastructure_unavailable(
+                original_fp,
+                language=language,
+            )
+            and cls._fingerprint_runtime_infrastructure_unavailable(
+                transformed_fp,
+                language=language,
+            )
         )
 
     @staticmethod
     def _fingerprint_dependency_unavailable(fp: Dict[str, Any], *, language: str) -> bool:
+        """Backward-compatible dependency-only entry point."""
+        return BehavioralValidator._fingerprint_runtime_infrastructure_unavailable(
+            fp,
+            language=language,
+        )
+
+    @staticmethod
+    def _fingerprint_runtime_infrastructure_unavailable(
+        fp: Dict[str, Any],
+        *,
+        language: str,
+    ) -> bool:
         if fp.get("success"):
             return False
+
+        if fp.get("runtime_infrastructure"):
+            return True
 
         exception_type = str(fp.get("exception_type") or "")
         raw_message = "\n".join(
@@ -1695,6 +1753,12 @@ class BehavioralValidator:
             )
 
         if language == "java":
+            if exception_type == "RuntimeUnavailable":
+                return True
+
+            if exception_type == "RuntimeInfrastructureError":
+                return True
+
             if exception_type != "CompilationError":
                 return False
 
@@ -1849,7 +1913,7 @@ class BehavioralValidator:
                 "checks": ["java_static_behavioral_fallback"],
                 "failures": [] if matched else [comparison.get("reason", "java_static_summary_mismatch")],
                 "warnings": [
-                    "Used Java static behavioral fallback because runtime probes could not execute with available dependencies."
+                    "Used Java static behavioral fallback because the runtime probe compile/classpath environment was unavailable."
                 ],
                 "return_similarity": round(return_similarity, 4),
                 "behavioral_validation_mode": validation_mode,
@@ -2209,9 +2273,79 @@ class BehavioralValidator:
                 str(transformed_method.get("body") or ""),
             )
         ]
+        expanded_usage_sequence = self._java_parameter_object_usage_sequence(
+            transformed_summary=transformed_summary,
+            transformed_method=transformed_method,
+            parameter_name=parameter_name,
+            object_name=object_name,
+        )
+        if expanded_usage_sequence:
+            transformed_usage_sequence = expanded_usage_sequence
         if original_usage_sequence != transformed_usage_sequence:
             return "PARAMETER_OBJECT_BODY_MAPPING_NOT_PRESERVED"
         return ""
+
+    def _java_parameter_object_usage_sequence(
+        self,
+        *,
+        transformed_summary: Dict[str, Any],
+        transformed_method: Dict[str, Any],
+        parameter_name: str,
+        object_name: str,
+        max_depth: int = 3,
+    ) -> list[str]:
+        methods = transformed_summary.get("methods") or {}
+        method_lookup = {
+            (
+                str(item.get("class_name") or ""),
+                str(item.get("method_name") or ""),
+            ): item
+            for item in methods.values()
+            if isinstance(item, dict)
+        }
+
+        event_pattern = re.compile(
+            rf"\b(?P<param>{re.escape(parameter_name)})\s*\.\s*(?P<field>[A-Za-z_$][A-Za-z0-9_$]*)\b"
+            rf"|(?:\bthis\s*\.\s*)?(?P<call>[A-Za-z_$][A-Za-z0-9_$]*)\s*\(\s*{re.escape(parameter_name)}\s*\)"
+        )
+
+        def collect(method_info: Dict[str, Any], param_name: str, depth: int, seen: set[tuple[str, str]]) -> list[str]:
+            class_name = str(method_info.get("class_name") or "")
+            method_name = str(method_info.get("method_name") or "")
+            key = (class_name, method_name)
+            if depth > max_depth or key in seen:
+                return []
+            seen.add(key)
+
+            body = str(method_info.get("body") or "")
+            if param_name != parameter_name:
+                local_pattern = re.compile(
+                    rf"\b(?P<param>{re.escape(param_name)})\s*\.\s*(?P<field>[A-Za-z_$][A-Za-z0-9_$]*)\b"
+                    rf"|(?:\bthis\s*\.\s*)?(?P<call>[A-Za-z_$][A-Za-z0-9_$]*)\s*\(\s*{re.escape(param_name)}\s*\)"
+                )
+            else:
+                local_pattern = event_pattern
+
+            sequence: list[str] = []
+            for match in local_pattern.finditer(body):
+                field = match.group("field")
+                if field:
+                    sequence.append(field)
+                    continue
+                helper_name = match.group("call")
+                if not helper_name:
+                    continue
+                helper = method_lookup.get((class_name, helper_name))
+                if not helper:
+                    continue
+                helper_param_types = list(helper.get("param_types") or [])
+                helper_param_names = [str(item) for item in helper.get("param_names") or []]
+                if helper_param_types != [object_name] or len(helper_param_names) != 1:
+                    continue
+                sequence.extend(collect(helper, helper_param_names[0], depth + 1, set(seen)))
+            return sequence
+
+        return collect(transformed_method, parameter_name, 0, set())
 
     @staticmethod
     def _normalize_java_type_name(value: Any) -> str:
@@ -2981,21 +3115,15 @@ class BehavioralValidator:
         javac_exe = shutil.which("javac")
 
         if not java_exe or not javac_exe:
-            return {
-                "success": False,
-                "return_value_repr": None,
-                "return_type": None,
-                "exception_type": "RuntimeUnavailable",
-                "exception_message_category": "java_runtime_unavailable",
-                "stdout": "",
-                "execution_time_ms": 0,
-                "timeout": False,
-                "runtime_error_details": "java/javac not available",
-                "observed_invariants": {
-                    **mine_exception_invariants("RuntimeUnavailable", "java_runtime_unavailable"),
-                    **stdout_invariants(""),
+            return self._java_runtime_probe_failure(
+                category="JAVA_COMPILE_UNAVAILABLE",
+                details="java/javac not available",
+                diagnostics={
+                    "javac_exit_status": None,
+                    "java_exit_status": None,
+                    "dependency_resolution_status": "unavailable",
                 },
-            }
+            )
 
         source_code = source_code.lstrip("\ufeff")
         class_name = self._extract_java_class_name(source_code)
@@ -3007,9 +3135,10 @@ class BehavioralValidator:
 
         temp_path = _make_runtime_temp_dir("java_fp")
         try:
-
             source_path = temp_path / f"{class_name}.java"
             harness_path = temp_path / "JavaRuntimeProbeHarness.java"
+            classes_path = temp_path / "classes"
+            classes_path.mkdir(parents=True, exist_ok=True)
 
             source_path.write_text(source_code, encoding="utf-8")
             project_java_paths = self._write_java_project_sources(
@@ -3030,13 +3159,29 @@ class BehavioralValidator:
             )
 
             started = time.perf_counter()
+            classpath_entries = self._java_runtime_classpath_entries(classes_path)
+            diagnostics = {
+                "source_file": current_file_name or f"{class_name}.java",
+                "package_name": package_name or None,
+                "fully_qualified_class_name": target_class_name,
+                "compiled_classes_directory": str(classes_path),
+                "classpath_entries": classpath_entries,
+                "target_class_file": str(
+                    classes_path / f"{target_class_name.replace('.', '/')}.class"
+                ),
+                "dependency_resolution_status": (
+                    "classpath_available" if len(classpath_entries) > 1 else "source_only"
+                ),
+            }
 
             try:
-                compile_args = [javac_exe, source_path.name, harness_path.name]
+                compile_args = [javac_exe, "-proc:none", "-d", str(classes_path)]
+                dependency_classpath = classpath_entries[1:]
+                if dependency_classpath:
+                    compile_args.extend(["-classpath", os.pathsep.join(dependency_classpath)])
                 compile_args.extend(
                     str(path.relative_to(temp_path)).replace("\\", "/")
-                    for path in project_java_paths
-                    if path.name != source_path.name or path.read_text(encoding="utf-8") != source_code
+                    for path in [source_path, *project_java_paths, harness_path]
                 )
                 compile_proc = subprocess.run(
                     compile_args,
@@ -3046,171 +3191,98 @@ class BehavioralValidator:
                     timeout=timeout_seconds,
                 )
             except subprocess.TimeoutExpired:
-                return {
-                    "success": False,
-                    "return_value_repr": None,
-                    "return_type": None,
-                    "exception_type": "TimeoutError",
-                    "exception_message_category": "javac_timeout",
-                    "stdout": "",
-                    "execution_time_ms": int((time.perf_counter() - started) * 1000),
-                    "timeout": True,
-                    "runtime_error_details": "javac timed out.",
-                    "observed_invariants": {
-                        **mine_exception_invariants("TimeoutError", "javac_timeout"),
-                        **stdout_invariants(""),
-                    },
-                }
+                return self._java_runtime_probe_failure(
+                    category="JAVA_COMPILE_TIMEOUT",
+                    details="javac timed out.",
+                    diagnostics={**diagnostics, "javac_exit_status": None, "java_exit_status": None},
+                    duration_ms=int((time.perf_counter() - started) * 1000),
+                    timeout=True,
+                )
 
             if compile_proc.returncode != 0:
-                missing_symbols = re.findall(
-                    r"symbol:\s+class\s+([A-Za-z_][A-Za-z0-9_]*)",
-                    compile_proc.stderr or "",
-                )
-                missing_symbols = sorted(set(missing_symbols))
-
-                if missing_symbols:
-                    stub_paths: List[Path] = []
-                    for symbol in missing_symbols:
-                        if symbol == class_name:
-                            continue
-                        package_dir = temp_path
-                        package_decl = ""
-                        if package_name:
-                            package_dir = temp_path / package_name.replace(".", "/")
-                            package_dir.mkdir(parents=True, exist_ok=True)
-                            package_decl = f"package {package_name};\n\n"
-
-                        stub_path = package_dir / f"{symbol}.java"
-                        if not stub_path.exists():
-                            stub_path.write_text(
-                                (
-                                    f"{package_decl}public class {symbol} {{\n"
-                                    f"    public {symbol}() {{}}\n"
-                                    f"    public {symbol}(Object... args) {{}}\n"
-                                    f"}}\n"
-                                ),
-                                encoding="utf-8",
-                            )
-                        stub_paths.append(stub_path)
-
-                    if stub_paths:
-                        compile_args = [
-                            javac_exe,
-                            source_path.name,
-                            harness_path.name,
-                        ]
-                        compile_args.extend(
-                            str(path.relative_to(temp_path)).replace("\\", "/")
-                            for path in project_java_paths
-                            if path.exists()
-                        )
-                        compile_args.extend(
-                            str(path.relative_to(temp_path)).replace("\\", "/")
-                            for path in stub_paths
-                        )
-
-                        compile_proc = subprocess.run(
-                            compile_args,
-                            cwd=temp_path,
-                            capture_output=True,
-                            text=True,
-                            timeout=timeout_seconds,
-                        )
-
-                        if compile_proc.returncode == 0:
-                            pass
-                        else:
-                            return {
-                                "success": False,
-                                "return_value_repr": None,
-                                "return_type": None,
-                                "exception_type": "CompilationError",
-                                "exception_message_category": "javac_failed",
-                                "stdout": compile_proc.stdout,
-                                "stderr": compile_proc.stderr,
-                                "execution_time_ms": int((time.perf_counter() - started) * 1000),
-                                "timeout": False,
-                                "runtime_error_details": compile_proc.stderr,
-                                "observed_invariants": {
-                                    **mine_exception_invariants("CompilationError", "javac_failed"),
-                                    **stdout_invariants(compile_proc.stdout or ""),
-                                },
-                            }
-                    else:
-                        return {
-                            "success": False,
-                            "return_value_repr": None,
-                            "return_type": None,
-                            "exception_type": "CompilationError",
-                            "exception_message_category": "javac_failed",
-                            "stdout": compile_proc.stdout,
-                            "stderr": compile_proc.stderr,
-                            "execution_time_ms": int((time.perf_counter() - started) * 1000),
-                            "timeout": False,
-                            "runtime_error_details": compile_proc.stderr,
-                            "observed_invariants": {
-                                **mine_exception_invariants("CompilationError", "javac_failed"),
-                                **stdout_invariants(compile_proc.stdout or ""),
-                            },
-                        }
-                else:
-                    return {
-                        "success": False,
-                        "return_value_repr": None,
-                        "return_type": None,
-                        "exception_type": "CompilationError",
-                        "exception_message_category": "javac_failed",
-                        "stdout": compile_proc.stdout,
-                        "stderr": compile_proc.stderr,
-                        "execution_time_ms": int((time.perf_counter() - started) * 1000),
-                        "timeout": False,
-                        "runtime_error_details": compile_proc.stderr,
-                        "observed_invariants": {
-                            **mine_exception_invariants("CompilationError", "javac_failed"),
-                            **stdout_invariants(compile_proc.stdout or ""),
+                category = self._classify_java_compile_failure(compile_proc.stderr or "")
+                if category:
+                    return self._java_runtime_probe_failure(
+                        category=category,
+                        details=compile_proc.stderr or compile_proc.stdout,
+                        diagnostics={
+                            **diagnostics,
+                            "javac_exit_status": compile_proc.returncode,
+                            "java_exit_status": None,
                         },
-                    }
+                        duration_ms=int((time.perf_counter() - started) * 1000),
+                        stdout=compile_proc.stdout,
+                        stderr=compile_proc.stderr,
+                    )
+                return self._java_runtime_probe_failure(
+                    category="JAVA_COMPILE_FAILED",
+                    details=compile_proc.stderr or compile_proc.stdout,
+                    diagnostics={
+                        **diagnostics,
+                        "javac_exit_status": compile_proc.returncode,
+                        "java_exit_status": None,
+                    },
+                    duration_ms=int((time.perf_counter() - started) * 1000),
+                    stdout=compile_proc.stdout,
+                    stderr=compile_proc.stderr,
+                    infrastructure=False,
+                    exception_type="CompilationError",
+                )
+
+            target_class_file = Path(diagnostics["target_class_file"])
+            diagnostics["target_class_file_exists"] = target_class_file.exists()
+            if not target_class_file.exists():
+                return self._java_runtime_probe_failure(
+                    category="TARGET_CLASS_NOT_COMPILED",
+                    details=f"Compiled target class was not found: {target_class_file}",
+                    diagnostics={**diagnostics, "javac_exit_status": compile_proc.returncode, "java_exit_status": None},
+                    duration_ms=int((time.perf_counter() - started) * 1000),
+                )
 
             try:
                 run_proc = subprocess.run(
-                    [java_exe, "-cp", str(temp_path), "JavaRuntimeProbeHarness"],
+                    [java_exe, "-cp", os.pathsep.join(classpath_entries), "JavaRuntimeProbeHarness"],
                     cwd=temp_path,
                     capture_output=True,
                     text=True,
                     timeout=timeout_seconds,
                 )
             except subprocess.TimeoutExpired:
-                return {
-                    "success": False,
-                    "return_value_repr": None,
-                    "return_type": None,
-                    "exception_type": "TimeoutError",
-                    "exception_message_category": "java_probe_timeout",
-                    "stdout": "",
-                        "execution_time_ms": int((time.perf_counter() - started) * 1000),
-                        "timeout": True,
-                        "runtime_error_details": "Java runtime probe timed out.",
-                        "observed_invariants": {
-                            **mine_exception_invariants("TimeoutError", "java_probe_timeout"),
-                            **stdout_invariants(""),
-                        },
-                    }
+                return self._java_runtime_probe_failure(
+                    category="JAVA_RUNTIME_TIMEOUT",
+                    details="Java runtime probe timed out.",
+                    diagnostics={**diagnostics, "javac_exit_status": compile_proc.returncode, "java_exit_status": None},
+                    duration_ms=int((time.perf_counter() - started) * 1000),
+                    timeout=True,
+                )
 
             stdout_raw = (run_proc.stdout or "").strip()
 
             if run_proc.returncode != 0:
+                runtime_error = run_proc.stderr or run_proc.stdout or ""
+                category = (
+                    "CLASSPATH_CONFIGURATION_ERROR"
+                    if "Could not find or load main class JavaRuntimeProbeHarness" in runtime_error
+                    else "JAVA_PROBE_PROCESS_FAILED"
+                )
                 return {
                     "success": False,
                     "return_value_repr": None,
                     "return_type": None,
-                    "exception_type": "RuntimeError",
-                    "exception_message_category": "java_probe_failed",
+                    "exception_type": "RuntimeInfrastructureError" if category == "CLASSPATH_CONFIGURATION_ERROR" else "RuntimeError",
+                    "exception_message_category": category.lower(),
                     "stdout": stdout_raw,
                     "stderr": run_proc.stderr,
                     "execution_time_ms": int((time.perf_counter() - started) * 1000),
                     "timeout": False,
                     "runtime_error_details": run_proc.stderr,
+                    "runtime_infrastructure": category == "CLASSPATH_CONFIGURATION_ERROR",
+                    "runtime_failure_category": category,
+                    "runtime_diagnostics": {
+                        **diagnostics,
+                        "javac_exit_status": compile_proc.returncode,
+                        "java_exit_status": run_proc.returncode,
+                    },
                     "observed_invariants": {
                         **mine_exception_invariants("RuntimeError", "java_probe_failed"),
                         **stdout_invariants(stdout_raw),
@@ -3240,6 +3312,21 @@ class BehavioralValidator:
                     },
                 }
 
+            if last_line.startswith("INFRA:"):
+                category_part, _, message = last_line.partition("|")
+                return self._java_runtime_probe_failure(
+                    category=category_part.replace("INFRA:", "") or "JAVA_RUNTIME_INFRASTRUCTURE_UNAVAILABLE",
+                    details=message,
+                    diagnostics={
+                        **diagnostics,
+                        "javac_exit_status": compile_proc.returncode,
+                        "java_exit_status": run_proc.returncode,
+                    },
+                    duration_ms=int((time.perf_counter() - started) * 1000),
+                    stdout=stdout_raw,
+                    stderr=run_proc.stderr,
+                )
+
             return_type = "unknown"
             return_value = last_line
 
@@ -3258,6 +3345,12 @@ class BehavioralValidator:
                 "execution_time_ms": int((time.perf_counter() - started) * 1000),
                 "timeout": False,
                 "runtime_error_details": None,
+                "runtime_infrastructure": False,
+                "runtime_diagnostics": {
+                    **diagnostics,
+                    "javac_exit_status": compile_proc.returncode,
+                    "java_exit_status": run_proc.returncode,
+                },
                 "observed_invariants": {
                     "return": mine_value_invariants(return_value),
                     **stdout_invariants(return_value),
@@ -3265,6 +3358,84 @@ class BehavioralValidator:
             }
         finally:
             shutil.rmtree(temp_path, ignore_errors=True)
+
+    @staticmethod
+    def _java_runtime_classpath_entries(classes_path: Path) -> List[str]:
+        """Return an isolated probe classpath rooted at the freshly compiled classes."""
+        entries = [str(classes_path)]
+        inherited = os.environ.get("CLASSPATH", "")
+        for entry in inherited.split(os.pathsep):
+            normalized = entry.strip()
+            if normalized and normalized not in entries:
+                entries.append(normalized)
+        return entries
+
+    @staticmethod
+    def _classify_java_compile_failure(stderr: str) -> str | None:
+        """Classify environment/compiler setup failures without hiding source errors."""
+        message = str(stderr or "").lower()
+        dependency_markers = (
+            "package ",
+            " does not exist",
+            "class file for ",
+            "cannot access ",
+            "bad class file",
+            "module not found",
+        )
+        syntax_or_transform_markers = (
+            "';' expected",
+            "illegal start of",
+            "not a statement",
+            "reached end of file",
+            "missing return statement",
+            "incompatible types",
+            "unclosed string literal",
+            "cannot find symbol",
+        )
+        unresolved_sctva_constant = re.search(
+            r"symbol:\s+(?:variable|class|interface|method)\s+(?:magic|constant)_[a-z0-9_]*",
+            message,
+        )
+        if "cannot find symbol" in message and not unresolved_sctva_constant:
+            return "MISSING_DEPENDENCY"
+        if any(marker in message for marker in dependency_markers) and not any(
+            marker in message for marker in syntax_or_transform_markers
+        ):
+            return "MISSING_DEPENDENCY"
+        return None
+
+    @staticmethod
+    def _java_runtime_probe_failure(
+        *,
+        category: str,
+        details: str | None,
+        diagnostics: Dict[str, Any],
+        duration_ms: int = 0,
+        timeout: bool = False,
+        stdout: str | None = None,
+        stderr: str | None = None,
+        infrastructure: bool = True,
+        exception_type: str = "RuntimeInfrastructureError",
+    ) -> Dict[str, Any]:
+        return {
+            "success": False,
+            "return_value_repr": None,
+            "return_type": None,
+            "exception_type": exception_type,
+            "exception_message_category": category.lower(),
+            "stdout": stdout or "",
+            "stderr": stderr or "",
+            "execution_time_ms": duration_ms,
+            "timeout": timeout,
+            "runtime_error_details": details or "",
+            "runtime_infrastructure": infrastructure,
+            "runtime_failure_category": category,
+            "runtime_diagnostics": diagnostics,
+            "observed_invariants": {
+                **mine_exception_invariants(exception_type, category.lower()),
+                **stdout_invariants(stdout or ""),
+            },
+        }
 
     @classmethod
     def _java_binary_class_name(cls, source_code: str, target_class: str) -> str:
@@ -3370,6 +3541,7 @@ class BehavioralValidator:
         parameter_object: bool = False,
     ) -> str:
         raw_args = BehavioralValidator._java_string_array(args or [])
+        target_package = target_class.rpartition(".")[0]
         expected_arity = "1" if parameter_object else "rawArgs.length"
         build_values = (
             "buildParameterObjectArgs(targetMethod.getParameterTypes()[0], rawArgs)"
@@ -3385,8 +3557,15 @@ import java.util.*;
 public class JavaRuntimeProbeHarness {{
     public static void main(String[] args) throws Exception {{
         try {{
-            Class<?> targetClass = Class.forName("{target_class}");
-            Object instance = targetClass.getDeclaredConstructor().newInstance();
+            Class<?> targetClass;
+            try {{
+                targetClass = Class.forName("{target_class}");
+            }} catch (ClassNotFoundException | LinkageError ex) {{
+                System.out.println(
+                    "INFRA:TARGET_CLASS_LOAD_FAILED|" + String.valueOf(ex.getMessage())
+                );
+                return;
+            }}
             String[] rawArgs = {raw_args};
 
             Method targetMethod = null;
@@ -3411,6 +3590,20 @@ public class JavaRuntimeProbeHarness {{
             targetMethod.setAccessible(true);
 
             Object[] values = {build_values};
+            Object instance = null;
+            if (!Modifier.isStatic(targetMethod.getModifiers())) {{
+                try {{
+                    Constructor<?> constructor = targetClass.getDeclaredConstructor();
+                    constructor.setAccessible(true);
+                    instance = constructor.newInstance();
+                }} catch (ReflectiveOperationException ex) {{
+                    System.out.println(
+                        "INFRA:TARGET_INSTANTIATION_UNAVAILABLE|"
+                        + String.valueOf(ex.getMessage())
+                    );
+                    return;
+                }}
+            }}
             Object result = targetMethod.invoke(instance, values);
 
             String resultType = result == null
@@ -3547,7 +3740,7 @@ public class JavaRuntimeProbeHarness {{
             }}
 
             if (simpleName.equals("Order")) {{
-                Class<?> customerClass = Class.forName("Customer");
+                Class<?> customerClass = Class.forName(siblingClassName("Customer"));
 
                 Object customer = customerClass
                     .getDeclaredConstructor(
@@ -3570,7 +3763,7 @@ public class JavaRuntimeProbeHarness {{
                     .newInstance(1001, customer);
 
                 try {{
-                    Class<?> itemClass = Class.forName("OrderItem");
+                    Class<?> itemClass = Class.forName(siblingClassName("OrderItem"));
 
                     Object item = itemClass
                         .getDeclaredConstructor(
@@ -3613,6 +3806,11 @@ public class JavaRuntimeProbeHarness {{
         }} catch (Exception ex) {{
             return null;
         }}
+    }}
+
+    private static String siblingClassName(String simpleName) {{
+        String targetPackage = "{target_package}";
+        return targetPackage.isEmpty() ? simpleName : targetPackage + "." + simpleName;
     }}
 }}
 """
