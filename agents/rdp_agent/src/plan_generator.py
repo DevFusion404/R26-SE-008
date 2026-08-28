@@ -20,6 +20,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Tuple
 
 from .models import CodeSmell, RefactoringStep, RefactoringPlan
+from .move_method_resolver import MoveMethodPlanResolver
 
 logger = logging.getLogger("rdp_agent.plan_generator")
 
@@ -41,6 +42,7 @@ class PlanGenerator:
         target: str,
         ordered_selections: List[Tuple[CodeSmell, Dict[str, Any]]],
         total_smells: int,
+        move_method_resolver: MoveMethodPlanResolver | None = None,
     ) -> RefactoringPlan:
         """Build a complete refactoring plan.
 
@@ -56,23 +58,77 @@ class PlanGenerator:
         steps: List[RefactoringStep] = []
         validation_warnings: List[str] = []
 
+        step_idx = 1
         for idx, (smell, candidate) in enumerate(ordered_selections, start=1):
-            # Build target dict — skip "unknown" or empty values
+            if candidate["name"] == "Move Method":
+                resolution = candidate.get("_move_method_resolution")
+                if not isinstance(resolution, dict) and move_method_resolver:
+                    resolution = move_method_resolver.resolve(smell, candidate)
+                if not isinstance(resolution, dict) or resolution.get("status") != "success":
+                    reason = (
+                        resolution.get("reason")
+                        if isinstance(resolution, dict)
+                        else "MOVE_METHOD_REQUIRES_REPOSITORY_AST"
+                    )
+                    logger.warning(
+                        "Skipping invalid Move Method step for smell %s: %s.",
+                        smell.id,
+                        reason,
+                    )
+                    validation_warnings.append(
+                        f"Smell {smell.id} (Move Method): REVIEW_REQUIRED reason={reason}."
+                    )
+                    continue
+                params = self._build_move_method_parameters_from_resolution(
+                    resolution,
+                    smell,
+                )
+                if move_method_resolver:
+                    final_check = move_method_resolver.validate_plan(params)
+                    if final_check.get("status") != "success":
+                        reason = final_check.get("reason") or "NO_VALID_DESTINATION_CLASS"
+                        logger.warning(
+                            "Skipping Move Method step for smell %s after final validation: %s.",
+                            smell.id,
+                            reason,
+                        )
+                        validation_warnings.append(
+                            f"Smell {smell.id} (Move Method): REVIEW_REQUIRED reason={reason}."
+                        )
+                        continue
+            else:
+                params = self._build_parameters(candidate, smell)
+
+            # Reject invalid Move Method if prerequisites (source_class, method, destination_class) are missing
+            if candidate["name"] == "Move Method":
+                if not params.get("source_class") or not params.get("method") or not params.get("destination_class"):
+                    logger.warning("Skipping invalid Move Method step for smell %s: prerequisites missing.", smell.id)
+                    validation_warnings.append(f"Smell {smell.id} (Move Method): Prerequisites missing (invalid Move Method step rejected).")
+                    continue
+
             target_dict = {
                 k: v
                 for k, v in smell.location.items()
-                if k in ("class", "method", "lines", "file") and v and v != "unknown"
+                if k in ("class", "method", "lines", "file", "entity", "duplicate_group") and v and v != "unknown"
             }
-            params = self._build_parameters(candidate, smell)
+            if candidate["name"] == "Move Method":
+                target_dict.update({
+                    "file": params["source_file"],
+                    "class": params["source_class"],
+                    "method": params["source_method"],
+                })
+            target_dict["smell_type"] = smell.type
+            target_dict["smell_id"] = smell.id
+            params["smell_type"] = smell.type
+            params["smell_id"] = smell.id
 
-            # CRITICAL #5: validate required parameters are present
             warnings = self._validate_step_parameters(candidate["name"], params, target_dict)
             for w in warnings:
-                logger.warning("Step %d (%s): %s", idx, candidate["name"], w)
-                validation_warnings.append(f"Step {idx} ({candidate['name']}): {w}")
+                logger.warning("Step %d (%s): %s", step_idx, candidate["name"], w)
+                validation_warnings.append(f"Step {step_idx} ({candidate['name']}): {w}")
 
             step = RefactoringStep(
-                step_id=idx,
+                step_id=step_idx,
                 smell_id=smell.id,
                 refactoring=candidate["name"],
                 target=target_dict,
@@ -80,6 +136,7 @@ class PlanGenerator:
                 explanation=self.generate_explanation(smell, candidate),
             )
             steps.append(step)
+            step_idx += 1
 
         summary = self._build_summary(steps, target, total_smells, validation_warnings)
 
@@ -97,6 +154,50 @@ class PlanGenerator:
             target,
         )
         return plan
+
+    @staticmethod
+    def _build_move_method_parameters_from_resolution(
+        resolution: Dict[str, Any],
+        smell: CodeSmell,
+    ) -> Dict[str, Any]:
+        """Build SCTVA-facing Move Method parameters from proven AST evidence."""
+
+        source_line = resolution.get("lineno")
+        source_method = resolution.get("source_method") or resolution["method"]
+        params: Dict[str, Any] = {
+            "source_file": resolution["source_file"],
+            "source_class": resolution["source_class"],
+            "method": resolution["method"],
+            "source_method": source_method,
+            "destination_class": resolution["destination_class"],
+            "destination_parameter": resolution.get("destination_parameter", ""),
+            "smell_type": smell.type,
+            "smell_id": smell.id,
+            "move_method_planning_evidence": {
+                "source_class_exists": True,
+                "method_belongs_to_source_class": True,
+                "destination_class_exists": True,
+                "source_and_destination_differ": (
+                    resolution["source_class"] != resolution["destination_class"]
+                ),
+                "dependencies_can_be_mapped": True,
+                "call_sites_can_be_updated": bool(
+                    resolution.get("call_sites_rewritable")
+                ),
+                "destination_parameter": resolution.get("destination_parameter", ""),
+                "feature_envy_accesses": resolution.get("feature_envy_accesses"),
+                "source_self_accesses": resolution.get("source_self_accesses"),
+                "call_sites_checked": resolution.get("call_sites_checked", 0),
+            },
+        }
+        if source_line is not None:
+            params["source_line"] = int(source_line)
+        if source_line is not None and resolution.get("end_lineno") is not None:
+            params["source_lines"] = [
+                int(source_line),
+                int(resolution["end_lineno"]),
+            ]
+        return params
 
     # -----------------------------------------------------------------
     # Explanation Generation
@@ -256,7 +357,14 @@ class PlanGenerator:
             elif isinstance(lines, list) and len(lines) >= 1:
                 params["source_line"] = lines[0]
             method = _loc("method")
-            if method:
+            dup_group = location.get("duplicate_group") or getattr(smell, "duplicate_group", None)
+            if dup_group and isinstance(dup_group, list):
+                params["duplicate_group"] = dup_group
+                clean_group = [g for g in dup_group if isinstance(g, str)]
+                group_name = "_".join(clean_group[:3])
+                params["new_method_name"] = f"shared_helper_{group_name}" if group_name else "shared_helper"
+                params["is_shared_helper"] = True
+            elif method:
                 params["target_method"] = method
                 params["new_method_name"] = f"extracted_{method}"
             else:
@@ -267,37 +375,51 @@ class PlanGenerator:
             if smell.details:
                 params["hint"] = smell.details
 
-            # Generate a meaningful constant_name so the transformation agent does NOT
-            # fall back to the ugly MAGIC_NUMBER_65 / MAGIC_NUMBER_75 pattern.
+            var_ctx = getattr(smell, "variable_context", None) or location.get("variable_context")
             _num_match = re.search(r"[-+]?\d+(?:\.\d+)?", smell.details or "")
-            _raw_value = _num_match.group(0) if _num_match else None
-            _entity = (_loc("method") or _loc("class") or "").strip()
+            _raw_value = _num_match.group(0) if _num_match else ""
 
-            if _raw_value is not None:
-                _val_str = _raw_value.replace("-", "NEG_").replace(".", "_")
+            ctx_str = (var_ctx or "").lower()
+            details_str = (smell.details or "").lower()
 
-                if _entity and _entity not in ("unknown", ""):
-                    _words = re.sub(r"([A-Z])", r"_\1", _entity)   # camelCase split
-                    _words = re.sub(r"[^A-Za-z0-9]+", "_", _words)  # non-alnum → _
-                    _parts = [w.upper() for w in _words.split("_") if len(w) > 2]
-                    _prefix = "_".join(_parts[-2:]) if _parts else ""
-                    if _prefix:
-                        params["constant_name"] = f"{_prefix}_{_val_str}"
-                    else:
-                        params["constant_name"] = f"THRESHOLD_{_val_str}"
+            if "timeout" in ctx_str or "timeout" in details_str or "delay" in ctx_str:
+                const_name = "DEFAULT_TIMEOUT_MS"
+            elif "port" in ctx_str or "port" in details_str:
+                const_name = "DEFAULT_PORT"
+            elif any(k in ctx_str or k in details_str for k in ("buf", "buffer", "size", "capacity", "limit")):
+                const_name = "DEFAULT_BUFFER_SIZE"
+            elif "retry" in ctx_str or "attempts" in ctx_str:
+                const_name = "MAX_RETRY_COUNT"
+            elif var_ctx:
+                clean_ctx = re.sub(r"[^A-Za-z0-9_]+", "", var_ctx).upper()
+                if _raw_value and _raw_value in ("100", "1000", "500", "255"):
+                    const_name = f"MAX_{clean_ctx}"
                 else:
-                    params["constant_name"] = f"CONSTANT_{_val_str}"
+                    const_name = f"DEFAULT_{clean_ctx}_LIMIT"
+            elif _raw_value:
+                val_int = int(float(_raw_value)) if _raw_value.replace(".", "").isdigit() else 0
+                if val_int in (1024, 2048, 4096, 512, 256):
+                    const_name = "DEFAULT_BUFFER_SIZE"
+                elif val_int in (80, 443, 8080, 5000, 8000):
+                    const_name = "DEFAULT_PORT"
+                else:
+                    const_name = f"THRESHOLD_LIMIT_{_raw_value.replace('-', 'NEG_').replace('.', '_')}"
+            else:
+                const_name = "DEFAULT_CONSTANT_VALUE"
+
+            params["constant_name"] = const_name
 
         elif name == "Move Method":
             src_ctx = _source_context()
             method = _loc("method")
-            params["source_class"] = src_ctx
-            if method:
-                params["method"] = method
-            else:
-                ent = location.get("entity", "")
-                if ent and ent != "unknown" and ent != base_file:
-                    params["method"] = ent
+            base_file_no_ext = base_file.split(".")[0]
+
+            # Reject module names or files treated as source_class
+            if not src_ctx or src_ctx in (base_file, base_file_no_ext, "unknown", "null"):
+                return {}
+
+            if not method or method in ("unknown", "null"):
+                return {}
 
             destination = None
             if smell.details:
@@ -307,9 +429,23 @@ class PlanGenerator:
                     if found_name != method and found_name != src_ctx:
                         destination = found_name
 
-            if not destination:
-                destination = f"{src_ctx}Target" if src_ctx else "TargetService"
+            if not destination and location.get("destination_class"):
+                destination = location.get("destination_class")
+
+            # Do NOT invent fake destination classes such as book_managerTarget!
+            if not destination or destination in ("unknown", "null"):
+                return {}
+
+            params["source_class"] = src_ctx
+            params["method"] = method
             params["destination_class"] = destination
+
+        elif name in ("Replace Bare Except with Specific Exception", "Replace Bare Except"):
+            params["source_file"] = location.get("file", base_file)
+            method = _loc("method")
+            if method:
+                params["method"] = method
+            params["replacement_exception"] = "Exception"
 
         elif name == "Extract Class":
             src_ctx = _source_context()

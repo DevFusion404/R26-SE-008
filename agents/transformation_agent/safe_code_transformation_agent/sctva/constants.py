@@ -1,6 +1,9 @@
 """Constants used across the SCTVA pipeline."""
 
-SUPPORTED_LANGUAGES = {"python", "java", "c"}
+SUPPORTED_LANGUAGES = {
+    "python", "java", "c", "cpp", "c++", "h", "hpp",
+    "markdown", "makefile", "text", "json", "yaml", "xml", "plain", "raw", "other",
+}
 
 ACTION_RENAME_SYMBOL = "rename_symbol"
 ACTION_RENAME_METHOD = "rename_method"
@@ -33,6 +36,10 @@ ACTION_MOVE_PYTHON_METHOD = "move_python_method"
 ACTION_INLINE_PYTHON_CLASS = "inline_python_class"
 ACTION_HIDE_DELEGATE = "hide_delegate"
 ACTION_REPLACE_CONDITIONAL_WITH_POLYMORPHISM = "replace_conditional_with_polymorphism"
+ACTION_REPLACE_NESTED_CONDITIONAL_WITH_GUARD_CLAUSES = "replace_nested_conditional_with_guard_clauses"
+ACTION_REPLACE_CONDITIONAL_WITH_GUARD_CLAUSES = "replace_conditional_with_guard_clauses"
+ACTION_SIMPLIFY_CONDITIONAL_LOOP = "simplify_conditional_loop"
+ACTION_GUARD_CLAUSES = "guard_clauses"
 
 SUPPORTED_ACTIONS = {
     ACTION_RENAME_SYMBOL,
@@ -63,6 +70,10 @@ SUPPORTED_ACTIONS = {
     ACTION_INLINE_PYTHON_CLASS,
     ACTION_HIDE_DELEGATE,
     ACTION_REPLACE_CONDITIONAL_WITH_POLYMORPHISM,
+    ACTION_REPLACE_NESTED_CONDITIONAL_WITH_GUARD_CLAUSES,
+    ACTION_REPLACE_CONDITIONAL_WITH_GUARD_CLAUSES,
+    ACTION_SIMPLIFY_CONDITIONAL_LOOP,
+    ACTION_GUARD_CLAUSES,
 }
 
 PARAMETER_OBJECT_ACTIONS = frozenset({

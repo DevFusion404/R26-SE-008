@@ -1820,6 +1820,30 @@ class TransformationEngine:
                             source_line,
                         )
 
+                elif action.action_type in {
+                    "replace_nested_conditional_with_guard_clauses",
+                    "replace_conditional_with_guard_clauses",
+                    "simplify_conditional_loop",
+                    "guard_clauses",
+                }:
+                    method_name = str(action.parameters.get("method") or action.parameters.get("target_method") or "").strip()
+                    source_line = action.parameters.get("source_line")
+                    source_line = int(source_line) if isinstance(source_line, (int, float)) else None
+                    if language == "c":
+                        current_code, replacements, action_metadata = c_transformers.apply_replace_nested_conditional_with_guard_clauses(
+                            current_code,
+                            method_name,
+                            source_line,
+                        )
+                        if replacements == 0:
+                            warnings.append(
+                                "Replace Nested Conditional with Guard Clauses: Review Required (cannot be safely transformed automatically)."
+                            )
+                        else:
+                            warnings.append(
+                                f"Replace Nested Conditional with Guard Clauses applied to function {method_name or 'target'}."
+                            )
+
                 elif action.action_type in {ACTION_ENCAPSULATE_VARIABLE, ACTION_ENCAPSULATE_C_VARIABLE}:
                     variable_name = str(action.parameters.get("variable_name") or "").strip()
                     getter_name = str(action.parameters.get("getter_name") or f"get_{variable_name}").strip()

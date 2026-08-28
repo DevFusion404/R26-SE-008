@@ -33,6 +33,7 @@ from .plan_generator import PlanGenerator
 from .impact_predictor import ImpactPredictor
 from .ml_scorer import MLScorer
 from .config import load_config, setup_logging
+from .move_method_resolver import MoveMethodPlanResolver
 
 logger = logging.getLogger("rdp_agent.pipeline")
 
@@ -127,6 +128,14 @@ class RDPAgent:
         result = self.process_report_with_trace(report)
         return result["plan_object"]
 
+    def generate_plan(self, report: Any) -> RefactoringPlan:
+        """Alias for process_report supporting dict or QualityReport payloads."""
+        if isinstance(report, dict):
+            report_obj = QualityReport.from_dict(report)
+        else:
+            report_obj = report
+        return self.process_report(report_obj)
+
     def process_report_with_trace(
         self, report: QualityReport
     ) -> Dict[str, Any]:
@@ -147,11 +156,13 @@ class RDPAgent:
             report.target,
             len(report.smells),
         )
+        move_method_resolver = MoveMethodPlanResolver.from_quality_report(report)
 
         trace: Dict[str, Any] = {
             "input_summary": {
                 "target": report.target,
                 "total_smells": len(report.smells),
+                "move_method_symbol_table": move_method_resolver.describe(),
                 "smells": [
                     {
                         "id": s.id,
@@ -196,8 +207,8 @@ class RDPAgent:
                 "severity": smell.severity,
             }
 
-            # Step 2: Get candidates from knowledge base
-            all_candidates = self.knowledge_base.get_candidates(smell.type)
+            lang = getattr(report, "language", None) or getattr(report, "target", "")
+            all_candidates = self.knowledge_base.get_candidates(smell.type, language=str(lang))
             smell_trace["candidates_from_catalog"] = len(all_candidates)
 
             # Step 1 & 3: Filter by preconditions
@@ -205,23 +216,41 @@ class RDPAgent:
             candidate_details = []
             for c in all_candidates:
                 preconditions = c.get("preconditions", [])
-                passed = self.interpreter.check_preconditions(
-                    preconditions, smell
-                )
+                semantic_resolution = None
+                if c.get("name") == "Move Method":
+                    semantic_resolution = move_method_resolver.resolve(smell, c)
+                    passed = semantic_resolution.get("status") == "success"
+                else:
+                    passed = self.interpreter.check_preconditions(
+                        preconditions, smell
+                    )
 
                 if passed:
-                    viable_candidates.append(c)
+                    candidate_with_resolution = dict(c)
+                    if semantic_resolution:
+                        candidate_with_resolution["_move_method_resolution"] = semantic_resolution
+                    viable_candidates.append(candidate_with_resolution)
 
-                candidate_details.append(
-                    {
-                        "name": c["name"],
-                        "complexity": c.get("complexity", "medium"),
-                        "risk": c.get("risk", "medium"),
-                        "impact": c.get("impact", "medium"),
-                        "preconditions": preconditions,
-                        "preconditions_met": passed,
+                detail = {
+                    "name": c["name"],
+                    "complexity": c.get("complexity", "medium"),
+                    "risk": c.get("risk", "medium"),
+                    "impact": c.get("impact", "medium"),
+                    "preconditions": preconditions,
+                    "preconditions_met": passed,
+                }
+                if semantic_resolution:
+                    detail["move_method_planning"] = {
+                        "status": semantic_resolution.get("status"),
+                        "final_decision": semantic_resolution.get("final_decision"),
+                        "reason": semantic_resolution.get("reason"),
+                        "source_file": semantic_resolution.get("source_file"),
+                        "source_class": semantic_resolution.get("source_class"),
+                        "source_method": semantic_resolution.get("source_method")
+                        or semantic_resolution.get("method"),
+                        "destination_class": semantic_resolution.get("destination_class"),
                     }
-                )
+                candidate_details.append(detail)
 
             # ----- Step 3b: Impact prediction for viable candidates -----
             impact_trace: Dict[str, Any] = {
@@ -344,22 +373,46 @@ class RDPAgent:
                     smell_trace["scoring_method"] = None
             else:
                 # CRITICAL #6: track skipped smells with reason
+                move_method_failure = None
                 if not all_candidates:
                     reason = f"no candidates in knowledge base for smell type '{smell.type}'"
                 elif not viable_candidates:
-                    reason = (
-                        f"all {len(all_candidates)} candidate(s) failed precondition checks "
-                        f"(missing metric data or conditions not met)"
+                    move_method_failure = next(
+                        (
+                            item.get("move_method_planning")
+                            for item in candidate_details
+                            if item.get("name") == "Move Method"
+                            and isinstance(item.get("move_method_planning"), dict)
+                        ),
+                        None,
                     )
+                    if move_method_failure:
+                        reason = str(
+                            move_method_failure.get("reason")
+                            or "NO_VALID_DESTINATION_CLASS"
+                        )
+                    else:
+                        reason = (
+                            f"all {len(all_candidates)} candidate(s) failed precondition checks "
+                            f"(missing metric data or conditions not met)"
+                        )
                 else:
                     reason = "no MCDA-scored candidates could be ranked"
 
-                skipped_smells.append({
+                skipped = {
                     "smell_id":   smell.id,
                     "smell_type": smell.type,
+                    "entity":     smell.location.get("method") or smell.location.get("class") or smell.location.get("file") or "unknown",
                     "severity":   smell.severity,
                     "reason":     reason,
-                })
+                }
+                if 'move_method_failure' in locals() and move_method_failure:
+                    skipped.update({
+                        "refactoring": "Move Method",
+                        "final_decision": move_method_failure.get("final_decision", "REVIEW_REQUIRED"),
+                        "planning_status": move_method_failure.get("status", "review_required"),
+                    })
+                skipped_smells.append(skipped)
                 logger.warning(
                     "Smell %s (%s, %s) skipped: %s",
                     smell.id, smell.type, smell.severity, reason,
@@ -438,6 +491,7 @@ class RDPAgent:
             target=report.target,
             ordered_selections=ordered,
             total_smells=len(report.smells),
+            move_method_resolver=move_method_resolver,
         )
 
         trace["plan_generation"] = {
