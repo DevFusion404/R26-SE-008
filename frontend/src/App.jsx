@@ -5,6 +5,7 @@
 
 import { useState, useEffect } from 'react';
 import './index.css';
+import { useTheme } from './context/ThemeContext.jsx';
 
 import Overview        from './pages/Overview.jsx';
 import Dashboard       from './pages/Dashboard.jsx';
@@ -97,6 +98,7 @@ export default function App() {
   const [cuqaReport,    setCuqaReport]    = useState(null); // quality report from CUQA → RDP bridge
   // 'idle' | 'cuqa_done' | 'rdp_running' | 'rdp_done'
   const [pipelineState, setPipelineState] = useState('idle');
+  const { theme, toggleTheme, isDark } = useTheme();
 
   async function handleLogout() {
     await UserService.logout();
@@ -232,6 +234,47 @@ export default function App() {
         <div className="topbar-spacer" />
 
         <div className="topbar-actions">
+          {/* ── Theme Toggle Button ─────────────────────────── */}
+          <button
+            id="theme-toggle-btn"
+            onClick={toggleTheme}
+            title={isDark ? 'Switch to Light Mode' : 'Switch to Dark Mode'}
+            aria-label={isDark ? 'Switch to Light Mode' : 'Switch to Dark Mode'}
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 6,
+              padding: '5px 12px',
+              border: '1px solid var(--border-light)',
+              borderRadius: 'var(--r-full)',
+              background: isDark ? 'var(--bg-elevated)' : '#fff8e1',
+              color: isDark ? '#a0aec0' : '#b45309',
+              cursor: 'pointer',
+              fontSize: 13,
+              fontWeight: 600,
+              fontFamily: 'var(--font-body)',
+              lineHeight: 1,
+              userSelect: 'none',
+              boxShadow: isDark ? 'none' : '0 1px 4px rgba(0,0,0,0.10)',
+              transition: 'background 0.25s ease, color 0.25s ease, border-color 0.25s ease',
+            }}
+            onMouseEnter={e => { e.currentTarget.style.borderColor = 'var(--accent)'; }}
+            onMouseLeave={e => { e.currentTarget.style.borderColor = 'var(--border-light)'; }}
+          >
+            <span
+              style={{
+                fontSize: 15,
+                display: 'inline-block',
+                transition: 'transform 0.4s ease',
+                transform: isDark ? 'rotate(0deg)' : 'rotate(20deg)',
+              }}
+            >
+              {isDark ? '🌙' : '☀️'}
+            </span>
+            <span style={{ fontSize: 11 }}>
+              {isDark ? 'Dark' : 'Light'}
+            </span>
+          </button>
           <div
             className="topbar-avatar"
             title={isGuest ? 'Guest User' : currentUser?.full_name}
