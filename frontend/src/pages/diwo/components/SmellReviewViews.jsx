@@ -24,17 +24,22 @@
  * disagree and switching views keeps every tick.
  *
  * File wise selects whole FILES into `selected`. Its findings are shown in full
- * and can be opened in the source, but carry no checkbox: offering one would
- * promise a partial-file selection the mode cannot express or send.
+ * and can be opened in the source, but cannot be ticked individually: doing so
+ * would promise a partial-file selection the mode cannot express or send.
+ *
+ * CHECKBOXES LIVE ON GROUPS ONLY. A finding line is selected by clicking it,
+ * and says so with a tinted background and an accent stripe down its left
+ * edge. The line already carries a severity, an entity, a path, a message, a
+ * capability and two figures; a checkbox and an icon in front of all that made
+ * the one thing a developer scans for — which line is this — the hardest thing
+ * on the row to find.
  *
  * Impact
  * ------
- * Every finding shows its impact inline — capability, quality points, risk,
- * effort — with no click required, and a SELECTED finding expands that into the
- * full picture: what selecting it buys, what skipping it costs, and why. The
- * impact used to live behind a chip that opened a modal, which meant the number
- * that should inform the decision was one navigation away from the checkbox
- * that makes it.
+ * Every finding states its impact on the line itself — capability, quality
+ * points, risk, effort — with no click required, and an Impact button opens the
+ * full counterfactual in a dialog: what selecting it buys, what skipping it
+ * costs, and why the number is what it is.
  */
 
 import { C, severityColor } from "../diwoTheme.jsx";
@@ -264,6 +269,11 @@ function GroupHeader({
  * opening anything, and a View action that opens the file at that exact line.
  * `selectable` is false in File wise, where the row is evidence rather than a
  * control.
+ *
+ * Marked with a plain dot rather than the smell's glyph. The glyph belongs on
+ * the GROUP heading, where it names a type once for the whole list; repeating
+ * it on every occurrence of that same type said nothing new forty lines
+ * running, and competed with the severity word next to it.
  */
 function FindingRow({
   row, selected, selectable, onToggle, onView, onShowImpact, record, indent = 54,
@@ -276,22 +286,23 @@ function FindingRow({
       style={{
         padding: `8px 14px 8px ${indent}px`,
         borderTop: `1px solid ${C.border}`,
-        background: selected ? `${C.accent}0a` : "transparent",
+        background: selected ? `${C.accent}12` : "transparent",
+        // With no checkbox on the row, this stripe is what says "selected", so
+        // it is louder than the tint it used to sit beside.
+        boxShadow: selected ? `inset 3px 0 0 ${C.accent}` : "none",
         cursor: selectable ? "pointer" : "default",
       }}
     >
-      <div style={{ display: "flex", alignItems: "flex-start", gap: 10 }}>
-        {selectable && (
-          <span style={{ marginTop: 1, flexShrink: 0 }}>
-            <TriCheckbox state={selected ? "all" : "none"} size={13} />
-          </span>
-        )}
-
-        <Glyph
-          icon={smellIcon(smell.type, smell.category)}
-          tone={severityColor(smell.severity)}
-          label={smell.type || "code smell"}
-          size={19}
+      <div style={{ display: "flex", alignItems: "flex-start", gap: 9 }}>
+        {/* A bullet, not a grade. The severity sits in words immediately after
+            it, in its own colour, so this marks the line without competing to
+            describe it. */}
+        <span
+          aria-hidden="true"
+          style={{
+            width: 6, height: 6, borderRadius: "50%", flexShrink: 0,
+            background: C.danger, marginTop: 6,
+          }}
         />
 
         <div style={{ flex: 1, minWidth: 0 }}>
@@ -341,8 +352,10 @@ function FindingRow({
                 title={`Open the full impact of this ${smell.type || "finding"}`}
                 style={{
                   padding: "1px 8px", borderRadius: 20, cursor: "pointer",
-                  background: "transparent", color: C.textMuted,
-                  border: `1px solid ${C.border}`, fontSize: 9.5, fontWeight: 700,
+                  // Amber, tinted the same way every other chip on the row is,
+                  // so it reads as one of them rather than as a stray colour.
+                  background: `${C.warn}14`, color: C.warn,
+                  border: `1px solid ${C.warn}55`, fontSize: 9.5, fontWeight: 700,
                 }}
               >
                 Impact ↗

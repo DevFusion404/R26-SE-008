@@ -29,8 +29,11 @@ const eq = (label, actual, expected) =>
   ok(label, actual === expected, `expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}`);
 
 // ── Lookup ───────────────────────────────────────────────────────────────────
-eq("a known type gets its own glyph", smellIcon("MagicNumber"), "🔢");
-eq("nesting is a matryoshka", smellIcon("DeepNesting"), "🪆");
+// Asserted against the TABLE rather than against particular glyphs. Which
+// glyph a type carries is a design choice that gets revised; that the lookup
+// returns exactly what the table holds is the contract.
+eq("a known type returns its table entry", smellIcon("MagicNumber"), SMELL_ICON.MagicNumber);
+eq("and so does another", smellIcon("DeepNesting"), SMELL_ICON.DeepNesting);
 eq("the C alias matches its Java twin", smellIcon("LongFunction"), smellIcon("LongMethod"));
 
 eq(
@@ -40,11 +43,12 @@ eq(
 );
 eq("an unknown type with no category gets the neutral glyph", smellIcon("SomeNewDetector"), DEFAULT_ICON);
 eq("an unknown CATEGORY also degrades", smellIcon("X", "Not A Category"), DEFAULT_ICON);
-eq("a known type beats the category it was given", smellIcon("MagicNumber", "Bloaters"), "🔢");
+eq("a known type beats the category it was given",
+   smellIcon("MagicNumber", "Bloaters"), SMELL_ICON.MagicNumber);
 eq("a missing type is not a crash", smellIcon(undefined), DEFAULT_ICON);
 eq("nor is a null one", smellIcon(null, null), DEFAULT_ICON);
 
-eq("categories resolve", categoryIcon("Couplers"), "🔗");
+eq("categories resolve", categoryIcon("Couplers"), CATEGORY_ICON.Couplers);
 eq("an unmapped category degrades", categoryIcon("Nonsense"), DEFAULT_ICON);
 eq("no category at all degrades", categoryIcon(undefined), DEFAULT_ICON);
 
@@ -58,20 +62,19 @@ ok(
   Object.values(CATEGORY_ICON).every((v) => typeof v === "string" && v.length > 0),
 );
 
-// Distinctness is the point of the change: identical glyphs on two types would
-// put the dotted-circle problem back, one level down. LongFunction is the C
-// alias of LongMethod and is meant to share.
-const dupes = Object.entries(SMELL_ICON).reduce((acc, [type, icon]) => {
-  (acc[icon] = acc[icon] || []).push(type);
+// Smell types are free to share a glyph — the table currently marks all of
+// them the same way on purpose, with the type NAME doing the identifying. The
+// categories are what must stay distinguishable, since their chips sit side by
+// side in the overview bar with nothing else to separate them.
+const catDupes = Object.entries(CATEGORY_ICON).reduce((acc, [name, icon]) => {
+  (acc[icon] = acc[icon] || []).push(name);
   return acc;
 }, {});
-const collisions = Object.entries(dupes)
-  .filter(([, types]) => types.length > 1)
-  .filter(([, types]) => !(types.length === 2 && types.includes("LongMethod") && types.includes("LongFunction")));
+const catCollisions = Object.entries(catDupes).filter(([, names]) => names.length > 1);
 ok(
-  "no two unrelated smell types share a glyph",
-  collisions.length === 0,
-  collisions.map(([icon, types]) => `${icon} = ${types.join(", ")}`).join(" | "),
+  "no two categories share a glyph",
+  catCollisions.length === 0,
+  catCollisions.map(([icon, names]) => `${icon} = ${names.join(", ")}`).join(" | "),
 );
 
 // ── Agreement with the backend taxonomy ──────────────────────────────────────

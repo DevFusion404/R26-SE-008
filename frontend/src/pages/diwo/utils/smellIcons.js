@@ -10,10 +10,15 @@
  * already states the severity in words, so scanning a list of thirty groups
  * meant reading thirty names with no visual anchor to tell them apart.
  *
- * These glyphs are chosen to say something about the smell rather than to
- * decorate it: nesting is a matryoshka, shotgun surgery is an explosion, a
- * temporary field is an hourglass, dead code is a coffin. A developer who has
- * seen a type once should recognise it by shape the next time.
+ * SMELL TYPES currently all carry the same marker: the heading names the type
+ * in words right beside it, and a different picture on each of thirty-one types
+ * asked the reader to learn a second vocabulary for something already written
+ * out. CATEGORIES do get distinct glyphs — the overview chips sit side by side
+ * with only the glyph and the name to tell them apart.
+ *
+ * The per-type table is kept whole rather than collapsed to a constant, so a
+ * type still resolves individually and giving one its own marker again is a
+ * one-line change. The commented block above it is the previous set.
  *
  * THE KEYS ARE CUQA'S OWN TYPE NAMES. They mirror SMELL_CATEGORY_MAP in
  * cuqa_agent/src/report_generator.py and FALLBACK_CATEGORY in
@@ -28,55 +33,99 @@
  */
 
 /** Type -> glyph. Keys are CUQA's type names, verbatim. */
+// export const SMELL_ICON = {
+//   // ── Bloaters ──────────────────────────────────────────────────────────────
+//   LongMethod: "📏",
+//   LongFunction: "📏",
+//   LargeClass: "🧱",
+//   TooManyParameters: "🎛",
+//   PrimitiveObsession: "🔤",
+//   DataClumps: "🧺",
+
+//   // ── Object-Orientation Abusers ────────────────────────────────────────────
+//   SwitchStatements: "🔀",
+//   RefusedBequest: "🧬",
+//   TemporaryField: "⏳",
+//   AlternativeClassesWithDifferentInterfaces: "🔌",
+
+//   // ── Change Preventers ─────────────────────────────────────────────────────
+//   DuplicateCode: "👯",
+//   DivergentChange: "🔱",
+//   ShotgunSurgery: "💥",
+//   ParallelInheritanceHierarchies: "🪜",
+
+//   // ── Dispensables ──────────────────────────────────────────────────────────
+//   DeadCode: "⚰️",
+//   UnreachableCode: "🚧",
+//   UnusedVariable: "🗑️",
+//   LazyClass: "💤",
+//   Comments: "💬",
+//   SpeculativeGenerality: "🔮",
+//   DataClass: "📦",
+
+//   // ── Couplers ──────────────────────────────────────────────────────────────
+//   FeatureEnvy: "👀",
+//   InappropriateIntimacy: "💞",
+//   MessageChains: "⛓️",
+//   MiddleMan: "📮",
+
+//   // ── Security / Language-Specific ──────────────────────────────────────────
+//   UnsafeFunctionUsage: "☠️",
+//   DeepNesting: "🪆",
+//   GlobalVariable: "🌐",
+//   LargeHeaderFile: "📚",
+//   BareExcept: "🕳️",
+//   MagicNumber: "🔢",
+// };
 export const SMELL_ICON = {
   // ── Bloaters ──────────────────────────────────────────────────────────────
-  LongMethod: "📏",
-  LongFunction: "📏",
-  LargeClass: "🧱",
-  TooManyParameters: "🎛",
-  PrimitiveObsession: "🔤",
-  DataClumps: "🧺",
+  LongMethod: "⛔",
+  LongFunction: "⛔",
+  LargeClass: "⛔",
+  TooManyParameters: "⛔",
+  PrimitiveObsession: "⛔",
+  DataClumps: "⛔",
 
   // ── Object-Orientation Abusers ────────────────────────────────────────────
-  SwitchStatements: "🔀",
-  RefusedBequest: "🧬",
-  TemporaryField: "⏳",
-  AlternativeClassesWithDifferentInterfaces: "🔌",
+  SwitchStatements: "⛔",
+  RefusedBequest: "⛔",
+  TemporaryField: "⛔",
+  AlternativeClassesWithDifferentInterfaces: "⛔",
 
   // ── Change Preventers ─────────────────────────────────────────────────────
-  DuplicateCode: "👯",
-  DivergentChange: "🔱",
-  ShotgunSurgery: "💥",
-  ParallelInheritanceHierarchies: "🪜",
+  DuplicateCode: "⛔",
+  DivergentChange: "⛔",
+  ShotgunSurgery: "⛔",
+  ParallelInheritanceHierarchies: "⛔",
 
   // ── Dispensables ──────────────────────────────────────────────────────────
-  DeadCode: "⚰️",
-  UnreachableCode: "🚧",
-  UnusedVariable: "🗑️",
-  LazyClass: "💤",
-  Comments: "💬",
-  SpeculativeGenerality: "🔮",
-  DataClass: "📦",
+  DeadCode: "⛔",
+  UnreachableCode: "⛔",
+  UnusedVariable: "⛔",
+  LazyClass: "⛔",
+  Comments: "⛔",
+  SpeculativeGenerality: "⛔",
+  DataClass: "⛔",
 
   // ── Couplers ──────────────────────────────────────────────────────────────
-  FeatureEnvy: "👀",
-  InappropriateIntimacy: "💞",
-  MessageChains: "⛓️",
-  MiddleMan: "📮",
+  FeatureEnvy: "⛔",
+  InappropriateIntimacy: "⛔",
+  MessageChains: "⛔",
+  MiddleMan: "⛔",
 
   // ── Security / Language-Specific ──────────────────────────────────────────
-  UnsafeFunctionUsage: "☠️",
-  DeepNesting: "🪆",
-  GlobalVariable: "🌐",
-  LargeHeaderFile: "📚",
-  BareExcept: "🕳️",
-  MagicNumber: "🔢",
+  UnsafeFunctionUsage: "⛔",
+  DeepNesting: "⛔",
+  GlobalVariable: "⛔",
+  LargeHeaderFile: "⛔",
+  BareExcept: "⛔",
+  MagicNumber: "⛔",
 };
 
 /** Category -> glyph, for the Category wise headers and the overview chips. */
 export const CATEGORY_ICON = {
-  Bloaters: "🎈",
-  "Object-Orientation Abusers": "🧬",
+  Bloaters: "📦",
+  "Object-Orientation Abusers": "🧩",
   "Change Preventers": "🔒",
   Dispensables: "🗑️",
   Couplers: "🔗",
@@ -88,7 +137,7 @@ export const CATEGORY_ICON = {
 export const DEFAULT_ICON = "🧩";
 
 /** A file with findings in it — File wise headers. */
-export const FILE_ICON = "📄";
+export const FILE_ICON = "📁";
 
 /**
  * The glyph for one smell type.

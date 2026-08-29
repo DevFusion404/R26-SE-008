@@ -87,7 +87,17 @@ const REVIEW_MODES = [
   { key: "category", label: "Category wise" },
 ];
 
-/** Segmented control. Only the active segment is teal. */
+/**
+ * The orange the active review mode is painted in.
+ *
+ * Named here rather than pulled from the theme: the palette's amber (C.warn)
+ * means medium severity everywhere else on this page, and the mode switch is
+ * not a severity. Same family, different job, so it gets its own constant
+ * instead of borrowing one whose meaning is already spoken for.
+ */
+const MODE_ACTIVE = "#ccbbbc";
+
+/** Segmented control. Only the active segment is filled. */
 export function ModeSwitch({ mode, onChange, counts }) {
   return (
     <div>
@@ -115,8 +125,8 @@ export function ModeSwitch({ mode, onChange, counts }) {
               style={{
                 display: "flex", alignItems: "center", gap: 7,
                 padding: "7px 15px", borderRadius: 7, border: "none", cursor: "pointer",
-                background: active ? C.accent : "transparent",
-                color: active ? "#000" : C.textMuted,
+                background: active ? MODE_ACTIVE : "transparent",
+                color: active ? "#0d0f14" : C.textMuted,
                 fontSize: 12, fontWeight: 700, transition: "all 0.15s",
               }}
             >
@@ -149,138 +159,170 @@ export function SearchAndSeverity({
   onExpandAll, onCollapseAll, visibleCount, selectedCount, groupCount = 0,
   anyOpen = false,
 }) {
+  const noun = GROUP_NOUN[mode] || "group";
+
   return (
-    <div style={{
-      display: "flex", gap: 12, alignItems: "flex-end", flexWrap: "wrap",
-      marginBottom: 14,
-    }}>
-      <div style={{ flex: "1 1 260px", minWidth: 0 }}>
-        <div style={{
-          fontSize: 10.5, color: C.textMuted, textTransform: "uppercase",
-          letterSpacing: 0.9, fontWeight: 700, marginBottom: 7,
-        }}>
-          Search
-        </div>
-        <input
-          value={search}
-          onChange={(e) => onSearch(e.target.value)}
-          placeholder={PLACEHOLDER[mode] || PLACEHOLDER.smell}
-          aria-label="Search findings"
-          style={{
-            width: "100%", padding: "9px 13px", borderRadius: 9,
-            background: C.panel, border: `1px solid ${C.border}`,
-            color: C.text, fontSize: 12.5, outline: "none", boxSizing: "border-box",
-          }}
-        />
-      </div>
-
-      <div>
-        <div style={{
-          fontSize: 10.5, color: C.textMuted, textTransform: "uppercase",
-          letterSpacing: 0.9, fontWeight: 700, marginBottom: 7,
-        }}>
-          Severity
-        </div>
-        <div style={{ display: "flex", gap: 6 }}>
-          {["all", "high", "medium", "low"].map((level) => {
-            const active = severity === level;
-            const tone = SEVERITY_TONE[level];
-            return (
-              <button
-                key={level}
-                onClick={() => onSeverity(level)}
-                aria-pressed={active}
-                style={{
-                  padding: "8px 14px", borderRadius: 8, cursor: "pointer",
-                  fontSize: 11.5, fontWeight: 700, textTransform: "capitalize",
-                  background: active ? tone : C.panel,
-                  color: active ? (level === "medium" || level === "all" ? "#000" : "#fff") : C.textMuted,
-                  border: `1px solid ${active ? tone : C.border}`,
-                }}
-              >
-                {level}
-              </button>
-            );
-          })}
-        </div>
-      </div>
-
-      {/* Two bulk verdicts, phrased the way the stage phrases them: a finding
-          is either sent to planning or it is not. Both act on what the current
-          filters SHOW, so neither can silently touch something off screen. */}
-      <div style={{ display: "flex", gap: 8 }}>
+    <>
+      {/* ── The two bulk verdicts, on their own line ───────────────────────
+          Lifted out of the filter strip because they are not filters. Select
+          all and Reject all are the only controls on this page that change
+          what gets sent to the planning agent, and they were sitting fourth
+          in a row of look-at-it controls, styled like them. They are solid
+          buttons now, above the line rather than in it. */}
+      <div style={{
+        display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap",
+        marginBottom: 12, padding: "10px 14px", borderRadius: 10,
+        background: C.panel, border: `1px solid ${C.border}`,
+      }}>
         <button
           onClick={onSelectAll}
           disabled={!visibleCount}
-          title={`Select the ${visibleCount} finding(s) the current filters show`}
+          title={`Send every ${noun === "file" ? "file" : "finding"} the current filters show to planning — ${visibleCount} item(s)`}
           style={{
-            padding: "9px 15px", borderRadius: 8,
+            display: "inline-flex", alignItems: "center", gap: 7,
+            padding: "9px 18px", borderRadius: 9, border: "none",
+            fontSize: 12.5, fontWeight: 700,
             cursor: visibleCount ? "pointer" : "not-allowed",
-            background: visibleCount ? `${C.accent}14` : C.panel,
-            color: visibleCount ? C.accent : C.textMuted,
-            border: `1px solid ${visibleCount ? `${C.accent}55` : C.border}`,
-            fontSize: 11.5, fontWeight: 700,
+            background: visibleCount ? C.accent : C.border,
+            color: visibleCount ? "#000" : C.textMuted,
           }}
         >
+          <span aria-hidden="true" style={{ fontWeight: 900 }}>✓</span>
           Select all
+          {visibleCount > 0 && (
+            <span style={{ fontFamily: "monospace", opacity: 0.7 }}>({visibleCount})</span>
+          )}
         </button>
+
         <button
           onClick={onRejectAll}
           disabled={!selectedCount}
           title={
             selectedCount
-              ? `Deselect the ${selectedCount} currently selected item(s) — nothing is sent to planning`
+              ? `Clear all ${selectedCount} selected item(s) — nothing is sent to planning`
               : "Nothing is selected"
           }
           style={{
-            padding: "9px 15px", borderRadius: 8,
+            display: "inline-flex", alignItems: "center", gap: 7,
+            padding: "9px 18px", borderRadius: 9,
+            fontSize: 12.5, fontWeight: 700,
             cursor: selectedCount ? "pointer" : "not-allowed",
-            background: selectedCount ? `${C.danger}12` : C.panel,
+            background: selectedCount ? `${C.danger}1a` : C.bg,
             color: selectedCount ? C.danger : C.textMuted,
-            border: `1px solid ${selectedCount ? `${C.danger}50` : C.border}`,
-            fontSize: 11.5, fontWeight: 700,
+            border: `1px solid ${selectedCount ? C.danger : C.border}`,
           }}
         >
+          <span aria-hidden="true" style={{ fontWeight: 900 }}>✕</span>
           Reject all
+          {selectedCount > 0 && (
+            <span style={{ fontFamily: "monospace", opacity: 0.75 }}>({selectedCount})</span>
+          )}
         </button>
+
+        <span style={{ fontSize: 11, color: C.textMuted, marginLeft: "auto" }}>
+          {selectedCount > 0
+            ? `${selectedCount} selected of ${visibleCount} shown`
+            : `${visibleCount} ${noun}${visibleCount === 1 ? "" : "s"} shown · nothing selected yet`}
+        </span>
       </div>
 
-      {/* Expanding is not a decision — nothing here is sent anywhere — so
-          these stay neutral and never borrow the teal that means "selected".
-          They are next to the verdicts because both answer "act on the whole
-          list", which is the moment a developer looks for either. */}
-      {(onExpandAll || onCollapseAll) && (
-        <div style={{ display: "flex", gap: 8 }}>
-          <button
-            onClick={onExpandAll}
-            disabled={!groupCount}
-            title={
-              groupCount
-                ? `Open every ${GROUP_NOUN[mode] || "group"} and everything nested inside it`
-                : "Nothing to expand"
-            }
-            style={neutralButton(Boolean(groupCount))}
-          >
-            Expand all
-          </button>
-          <button
-            onClick={onCollapseAll}
-            disabled={!anyOpen}
-            title={anyOpen ? "Collapse everything back to the group headings" : "Nothing is expanded"}
-            style={neutralButton(anyOpen)}
-          >
-            Hide all
-          </button>
+      {/* ── Ways of looking: search, severity, and the accordion ─────────── */}
+      <div style={{
+        display: "flex", gap: 12, alignItems: "flex-end", flexWrap: "wrap",
+        marginBottom: 14,
+      }}>
+        <div style={{ flex: "1 1 260px", minWidth: 0 }}>
+          <div style={{
+            fontSize: 10.5, color: C.textMuted, textTransform: "uppercase",
+            letterSpacing: 0.9, fontWeight: 700, marginBottom: 7,
+          }}>
+            Search
+          </div>
+          <input
+            value={search}
+            onChange={(e) => onSearch(e.target.value)}
+            placeholder={PLACEHOLDER[mode] || PLACEHOLDER.smell}
+            aria-label="Search findings"
+            style={{
+              width: "100%", padding: "9px 13px", borderRadius: 9,
+              background: C.panel, border: `1px solid ${C.border}`,
+              color: C.text, fontSize: 12.5, outline: "none", boxSizing: "border-box",
+            }}
+          />
         </div>
-      )}
-    </div>
+
+        <div>
+          <div style={{
+            fontSize: 10.5, color: C.textMuted, textTransform: "uppercase",
+            letterSpacing: 0.9, fontWeight: 700, marginBottom: 7,
+          }}>
+            Severity
+          </div>
+          <div style={{ display: "flex", gap: 6 }}>
+            {["all", "high", "medium", "low"].map((level) => {
+              const active = severity === level;
+              const tone = SEVERITY_TONE[level];
+              return (
+                <button
+                  key={level}
+                  onClick={() => onSeverity(level)}
+                  aria-pressed={active}
+                  style={{
+                    padding: "8px 14px", borderRadius: 8, cursor: "pointer",
+                    fontSize: 11.5, fontWeight: 700, textTransform: "capitalize",
+                    background: active ? tone : C.panel,
+                    color: active ? (level === "medium" || level === "all" ? "#000" : "#fff") : C.textMuted,
+                    border: `1px solid ${active ? tone : C.border}`,
+                  }}
+                >
+                  {level}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        {(onExpandAll || onCollapseAll) && (
+          <div>
+            <div style={{
+              fontSize: 10.5, color: C.textMuted, textTransform: "uppercase",
+              letterSpacing: 0.9, fontWeight: 700, marginBottom: 7,
+            }}>
+              Accordion
+            </div>
+            <div style={{ display: "flex", gap: 6 }}>
+              <button
+                onClick={onExpandAll}
+                disabled={!groupCount}
+                title={
+                  groupCount
+                    ? `Open every ${noun} and everything nested inside it`
+                    : "Nothing to expand"
+                }
+                style={neutralButton(Boolean(groupCount))}
+              >
+                Expand all
+              </button>
+              <button
+                onClick={onCollapseAll}
+                disabled={!anyOpen}
+                title={anyOpen ? "Collapse everything back to the group headings" : "Nothing is expanded"}
+                style={neutralButton(anyOpen)}
+              >
+                Hide all
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+    </>
   );
 }
 
 const GROUP_NOUN = { file: "file", smell: "smell type", category: "category" };
 
 const neutralButton = (enabled) => ({
-  padding: "9px 15px", borderRadius: 8,
+  padding: "8px 14px", borderRadius: 8,
   cursor: enabled ? "pointer" : "not-allowed",
   background: C.panel,
   color: enabled ? C.textSub : C.textMuted,

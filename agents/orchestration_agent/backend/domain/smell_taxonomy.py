@@ -39,7 +39,8 @@ from collections import Counter
 
 __all__ = [
     "UNCATEGORIZED", "CATEGORY_ORDER", "CATEGORY_PRIORITY",
-    "category_of", "group_by_type", "group_by_category", "build_taxonomy",
+    "category_of", "group_by_type", "group_by_category", "category_catalog",
+    "build_taxonomy",
 ]
 
 UNCATEGORIZED = "Uncategorized"
@@ -194,9 +195,10 @@ def group_by_type(smells):
 def group_by_category(smells):
     """One row per CATEGORY, holding its deduplicated type rows.
 
-    Categories with no findings are omitted. CUQA's own overview keeps them at
-    zero for schema stability, but Stage 1 is a worklist: an empty category is
-    a row the developer cannot act on.
+    Categories with no findings are omitted: this list is the WORKLIST, and an
+    empty category is a row the developer cannot act on. `category_catalog`
+    below is the complete list, for the overview bar that reports what the
+    repository does and does not have.
     """
     by_type = group_by_type(smells)
 
@@ -240,6 +242,44 @@ def group_by_category(smells):
     ]
 
 
+def category_catalog(by_category):
+    """Every category in CUQA's taxonomy, whether this workflow has one or not.
+
+    The overview bar answers "what KIND of problem does this repository have",
+    and a bar that lists only the categories with findings cannot answer the
+    other half of that question. Six chips of which four read zero says "this
+    repository has Bloaters and Magic Numbers and nothing else"; two chips say
+    only "here are two categories", and leave the developer to remember which
+    of CUQA's six they are not looking at.
+
+    So the ZERO ROWS ARE THE POINT — they are evidence, not padding.
+
+    `count`, `type_count` and `file_count` come from the worklist rows when the
+    category is present and are a true 0 when it is not. `present` says which,
+    so the UI never has to infer it from a count that could legitimately be 0.
+
+    Order follows CATEGORY_ORDER, which mirrors CUQA's own, and any category
+    CUQA produced that this order does not know about still ships, after the
+    known ones — the same rule `group_by_category` uses, so the bar and the
+    accordion list categories in the same sequence.
+    """
+    present = {row["category"]: row for row in (by_category or [])}
+
+    def entry(name, row):
+        return {
+            "category": name,
+            "priority": (row or {}).get("priority") or CATEGORY_PRIORITY.get(name, "low"),
+            "count": (row or {}).get("count", 0),
+            "type_count": (row or {}).get("type_count", 0),
+            "file_count": (row or {}).get("file_count", 0),
+            "present": row is not None,
+        }
+
+    catalog = [entry(name, present.pop(name, None)) for name in CATEGORY_ORDER]
+    catalog.extend(entry(name, present[name]) for name in sorted(present))
+    return catalog
+
+
 def build_taxonomy(smells):
     """The whole Stage 1 grouping payload for one workflow."""
     smells = [s for s in (smells or []) if isinstance(s, dict)]
@@ -249,8 +289,12 @@ def build_taxonomy(smells):
     return {
         "total_smells": len(smells),
         "type_count": len(by_type),
+        # Categories the workflow ACTUALLY has. The header reports this, so
+        # "2 categories" stays a true statement about the repository even
+        # though the bar below it shows all seven chips.
         "category_count": len(by_category),
         "categories": by_category,
+        "catalog": category_catalog(by_category),
         "types": by_type,
         "severities": dict(Counter(
             (s.get("severity") or "unknown").lower() for s in smells
