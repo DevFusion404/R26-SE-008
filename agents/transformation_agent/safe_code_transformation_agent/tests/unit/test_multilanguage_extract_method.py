@@ -321,7 +321,7 @@ int process(int values[], int count, struct Totals *totals) {
     assert "struct Totals *totals" in transformed
     assert "free(" not in transformed
     assert "malloc(" not in transformed
-    assert metadata["outputs"] == ["observed"]
+    assert metadata["outputs"] == []
     assert SyntaxValidator().validate(
         language="c",
         source_code=transformed,
@@ -457,3 +457,240 @@ def test_planner_accepts_semantic_extract_method_without_line_numbers():
     assert parameters["method_signature"] == "process(int,int)"
     assert parameters["start_line"] is None
     assert parameters["end_line"] is None
+
+
+def test_c_extract_method_collision_avoidance_and_compiler_verification():
+    source = '''#include <stdio.h>
+
+void helper(void) {
+    printf("Existing helper\\n");
+}
+
+int calculate(int x, int y) {
+    int a = x + 10;
+    int b = y + 20;
+    int c = a * b;
+    int res = c + 5;
+    return res;
+}
+'''
+    transformed, count, metadata = extract_c_method(
+        source,
+        new_method_name="helper",
+        method_name="calculate",
+        start_line=8,
+        end_line=11,
+    )
+    assert count == 1
+    assert "static void helper_1(" in transformed
+    assert "helper_1(" in transformed
+    assert metadata["status"] == "success"
+    assert SyntaxValidator().validate(
+        language="c",
+        source_code=transformed,
+        require_compilation=True,
+        timeout_seconds=10,
+    ).passed is True
+
+
+def test_c_extract_method_long_function_threshold_and_compiler_status(monkeypatch):
+    # Construct a function with 45 lines
+    lines = ["int calculate_long(int x) {", "    int total = x;"]
+    for i in range(40):
+        lines.append(f"    total += {i};")
+    lines.append("    return total;")
+    lines.append("}")
+    source = "\n".join(lines)
+
+    transformed, count, metadata = extract_c_method(
+        source,
+        new_method_name="process_chunk",
+        method_name="calculate_long",
+    )
+    assert count == 1
+    assert metadata["status"] == "success"
+    assert metadata["validation"]["long_method_reduction"] == "PASS"
+    assert metadata["validation"]["smell_reduction"] == "PASS"
+    assert metadata["after_loc"] <= 40
+
+    # Simulate C compiler being unavailable
+    monkeypatch.setattr("shutil.which", lambda cmd: None)
+    _, _, unavail_meta = extract_c_method(
+        source,
+        new_method_name="process_chunk_alt",
+        method_name="calculate_long",
+    )
+    assert unavail_meta["validation"]["compilation"] == "UNAVAILABLE"
+    assert unavail_meta["validation"]["compilation"] != "PASS"
+
+
+def test_c_extract_method_forwarding_existing_pointer_parameters():
+    source = '''#include <stdio.h>
+
+static void helper_one(int val, int *total_out) {
+    int sub1 = val * 2;
+    int sub2 = val * 3;
+    int sub3 = val * 4;
+    *total_out = sub1 + sub2 + sub3;
+    printf("Total calculated\\n");
+}
+
+int calculate(int x) {
+    int total = 0;
+    helper_one(x, &total);
+    return total;
+}
+'''
+    transformed, count, metadata = extract_c_method(
+        source,
+        new_method_name="helper_inner",
+        method_name="helper_one",
+        start_line=4,
+        end_line=7,
+    )
+    assert count == 1
+    assert "static void helper_inner(" in transformed
+    assert "int *total_out" in transformed
+    assert "helper_inner(" in transformed
+    assert "int (*total_out);" not in transformed
+    assert "&(*total_out)" not in transformed
+    assert metadata["status"] == "success"
+    assert SyntaxValidator().validate(
+        language="c",
+        source_code=transformed,
+        require_compilation=True,
+        timeout_seconds=10,
+    ).passed is True
+
+
+def test_c_extract_method_no_redeclared_pointer_local_or_nested_address_of_deref():
+    source = '''#include <stdio.h>
+
+static void helper(int input, int *total_out) {
+    int temp1 = input * 2;
+    int temp2 = input * 3;
+    int temp3 = input * 4;
+    *total_out = temp1 + temp2 + temp3;
+    printf("Result: %d\\n", *total_out);
+}
+
+int main(void) {
+    int sum = 0;
+    helper(10, &sum);
+    return 0;
+}
+'''
+    transformed, count, metadata = extract_c_method(
+        source,
+        new_method_name="another_helper",
+        method_name="helper",
+        start_line=4,
+        end_line=7,
+    )
+    assert count == 1
+    assert "int (*total_out);" not in transformed
+    assert "&(*total_out)" not in transformed
+    assert "another_helper(" in transformed
+    assert "total_out" in transformed
+    assert metadata["status"] == "success"
+    assert SyntaxValidator().validate(
+        language="c",
+        source_code=transformed,
+        require_compilation=True,
+        timeout_seconds=10,
+    ).passed is True
+
+
+def test_c_extract_method_rewrites_scalar_output_address_uses_to_output_pointer():
+    source = '''static void add_input(int input, int *total_out) {
+    *total_out += input;
+}
+
+int process(int input) {
+    int total = 0;
+    int bonus = input + 1;
+    total += bonus;
+    add_input(input, &total);
+    return total;
+}
+'''
+    transformed, count, metadata = extract_c_method(
+        source,
+        new_method_name="process_total",
+        method_name="process",
+        start_line=7,
+        end_line=9,
+    )
+
+    assert count == 1
+    assert "static void process_total(int input, int *total_out)" in transformed
+    assert "add_input(input, total_out);" in transformed
+    assert "add_input(input, &(*total_out));" not in transformed
+    assert "process_total(input, &total);" in transformed
+    assert metadata["status"] == "success"
+    assert SyntaxValidator().validate(
+        language="c",
+        source_code=transformed,
+        require_compilation=True,
+        timeout_seconds=10,
+    ).passed is True
+
+
+def test_c_extract_method_removes_uninitialized_output_declaration_from_helper():
+    source = '''int process(int input) {
+    int total;
+    total = input;
+    total += 1;
+    return total;
+}
+'''
+    transformed, count, metadata = extract_c_method(
+        source,
+        new_method_name="process_total",
+        method_name="process",
+        start_line=2,
+        end_line=4,
+    )
+
+    assert count == 1
+    assert "static void process_total(int input, int *total_out)" in transformed
+    assert "int (*total_out);" not in transformed
+    assert "int total;\n    process_total(input, &total);" in transformed
+    assert metadata["status"] == "success"
+    assert SyntaxValidator().validate(
+        language="c",
+        source_code=transformed,
+        require_compilation=True,
+        timeout_seconds=10,
+    ).passed is True
+
+
+def test_c_extract_method_preserves_initializer_assignment_operator_for_output():
+    source = '''int process(int input) {
+    int total = input;
+    total += 1;
+    total += input;
+    int observed = total;
+    return observed;
+}
+'''
+    transformed, count, metadata = extract_c_method(
+        source,
+        new_method_name="process_total",
+        method_name="process",
+        start_line=2,
+        end_line=4,
+    )
+
+    assert count == 1
+    assert "(*total_out) = input;" in transformed
+    assert "(*total_out)  input;" not in transformed
+    assert "int total;\n    process_total(input, &total);" in transformed
+    assert metadata["outputs"] == ["total"]
+    assert metadata["status"] == "success"
+    assert SyntaxValidator().validate(
+        language="c",
+        source_code=transformed,
+        require_compilation=True,
+        timeout_seconds=10,
+    ).passed is True
