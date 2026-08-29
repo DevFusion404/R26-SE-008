@@ -37,6 +37,15 @@ class RefactoringAction:
             "_",
             str(self.action_type).strip().lower(),
         )
+        # RDP has used both the technical action name and the display name for
+        # this safety refactoring.  Keep a single internal operation so direct
+        # API callers do not lose the action before it reaches the transformer.
+        if self.action_type in {
+            "replace_bare_except",
+            "replace_bare_except_with_specific_exception",
+            "replace_bare_except_with_specific_exceptions",
+        }:
+            self.action_type = "narrow_exception_handler"
         if self.action_type not in SUPPORTED_ACTIONS:
             raise ContractValidationError(
                 f"Unsupported action_type '{self.action_type}'. Supported: {sorted(SUPPORTED_ACTIONS)}"
@@ -60,6 +69,91 @@ class RefactoringAction:
             r"[\s-]+", "_", str(data.get("action_type") or "").strip().lower()
         )
         source_refactoring = str(data.get("source_refactoring") or "").strip().lower()
+        bare_except_refactorings = {
+            "replace bare except with specific exception",
+            "replace bare except with specific exceptions",
+            "replace bare except",
+            "replace_bare_except",
+            "replace_bare_except_with_specific_exception",
+        }
+        if normalized_action_type == "noop" and source_refactoring in bare_except_refactorings:
+            # Recover plans normalized by an older PlannerAdapter before the
+            # request reaches SCTVA.  The engine still decides whether a
+            # specific exception is provable from the current source AST.
+            data = dict(data)
+            data["action_type"] = "narrow_exception_handler"
+            parameters.setdefault("original_exception_type", "")
+            parameters.setdefault("exception_smell", "bare_except")
+            parameters["promoted_from_noop"] = True
+
+            legacy_step = parameters.get("legacy_step")
+            legacy_step = legacy_step if isinstance(legacy_step, dict) else {}
+            legacy_params = legacy_step.get("parameters")
+            legacy_params = legacy_params if isinstance(legacy_params, dict) else {}
+            legacy_target = legacy_step.get("target")
+            legacy_target = legacy_target if isinstance(legacy_target, dict) else {}
+            legacy_location = legacy_step.get("location")
+            legacy_location = legacy_location if isinstance(legacy_location, dict) else {}
+            direct_target = data.get("target")
+            direct_target = direct_target if isinstance(direct_target, dict) else {}
+
+            def first_text(*values: Any) -> str:
+                for value in values:
+                    if isinstance(value, str) and value.strip():
+                        return value.strip()
+                return ""
+
+            method = first_text(
+                parameters.get("source_method"),
+                parameters.get("method"),
+                legacy_target.get("method"),
+                legacy_target.get("function"),
+                legacy_params.get("source_method"),
+                legacy_params.get("method"),
+                direct_target.get("method"),
+                direct_target.get("function"),
+            )
+            source_class = first_text(
+                parameters.get("source_class"),
+                parameters.get("class_name"),
+                legacy_target.get("class"),
+                legacy_params.get("source_class"),
+                legacy_params.get("class_name"),
+                direct_target.get("class"),
+            )
+            source_file = first_text(
+                parameters.get("source_file"),
+                legacy_target.get("file"),
+                legacy_target.get("source_file"),
+                legacy_params.get("source_file"),
+                legacy_location.get("file"),
+                legacy_location.get("source_file"),
+                direct_target.get("file"),
+                direct_target.get("source_file"),
+                data.get("source_file"),
+            )
+            source_line = parameters.get("source_line")
+            if not isinstance(source_line, (int, float)):
+                for source in (legacy_target, legacy_params, legacy_location, direct_target, data):
+                    value = source.get("source_line") if isinstance(source, dict) else None
+                    if isinstance(value, (int, float)):
+                        source_line = int(value)
+                        break
+                    lines = source.get("lines") if isinstance(source, dict) else None
+                    if isinstance(lines, list) and lines and isinstance(lines[0], (int, float)):
+                        source_line = int(lines[0])
+                        break
+
+            if method:
+                parameters["method"] = method
+                parameters["source_method"] = method
+            if source_class:
+                parameters["class_name"] = source_class
+                parameters["source_class"] = source_class
+            if source_file:
+                parameters["source_file"] = source_file
+            if isinstance(source_line, (int, float)):
+                parameters["source_line"] = int(source_line)
         if normalized_action_type in {"inline_class", "inline_python_class"} or (
             normalized_action_type == "noop" and source_refactoring == "inline class"
         ):

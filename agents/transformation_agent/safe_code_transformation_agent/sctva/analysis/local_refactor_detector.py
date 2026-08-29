@@ -171,10 +171,10 @@ class LocalRefactorDetector:
                 add(action)
 
         # Broad exception handlers are an exception-handling smell, not dead
-        # code.  Only emit an action when SCTVA can select a concrete narrow
-        # type from an explicit throw/raise in the guarded block.  A bare
-        # Python ``except:`` is the one safe, well-defined special case: it is
-        # narrowed to ``Exception`` so control-flow exceptions are not hidden.
+        # code.  Bare ``except:`` handlers are sent through the same
+        # evidence-based resolver as broad handlers.  It may leave an action
+        # review-required, but it must never silently turn a bare handler into
+        # a generic ``except Exception`` and call that a refactoring.
         for action in self._detect_exception_handler_smells(language, file_name, source_code):
             add(action)
 
@@ -224,19 +224,42 @@ class LocalRefactorDetector:
         except SyntaxError:
             return
 
+        parents = {
+            child: parent
+            for parent in ast.walk(tree)
+            for child in ast.iter_child_nodes(parent)
+        }
+
+        def handler_context(handler: ast.ExceptHandler) -> tuple[str, str]:
+            class_name = ""
+            method_name = ""
+            current: ast.AST | None = handler
+            while current is not None:
+                current = parents.get(current)
+                if isinstance(current, (ast.FunctionDef, ast.AsyncFunctionDef)) and not method_name:
+                    method_name = current.name
+                if isinstance(current, ast.ClassDef) and not class_name:
+                    class_name = current.name
+            return class_name, method_name
+
         for try_node in (node for node in ast.walk(tree) if isinstance(node, ast.Try)):
             raised_types = self._python_risky_exception_types(tree, try_node)
             for handler in try_node.handlers:
                 original_type = self._python_exception_name(handler.type)
                 if handler.type is None:
+                    source_class, source_method = handler_context(handler)
                     yield self._internal_action(
                         ACTION_NARROW_EXCEPTION_HANDLER,
                         file_name=file_name,
                         reason="bare Python except handler",
                         parameters={
                             "source_line": int(getattr(handler, "lineno", 0) or 0),
+                            "source_class": source_class,
+                            "class_name": source_class,
+                            "source_method": source_method,
+                            "method": source_method,
                             "original_exception_type": "",
-                            "target_exception_type": "Exception",
+                            "target_exception_type": "",
                             "handler_name": str(handler.name or ""),
                             "exception_smell": "bare_except",
                         },
@@ -435,6 +458,32 @@ class LocalRefactorDetector:
         source_path = str(params.get("source_file") or params.get("file") or "").replace("\\", "/").lower()
         source_file = source_path.rsplit("/", 1)[-1]
         source_line = params.get("source_line")
+        if action.action_type == ACTION_NARROW_EXCEPTION_HANDLER:
+            source_method = str(
+                params.get("source_method")
+                or params.get("method")
+                or params.get("method_name")
+                or ""
+            ).strip()
+            source_class = str(
+                params.get("source_class")
+                or params.get("class_name")
+                or ""
+            ).strip()
+            if source_method:
+                return (
+                    action.action_type,
+                    source_file,
+                    source_class,
+                    source_method,
+                    str(params.get("handler_name") or ""),
+                )
+            return (
+                action.action_type,
+                source_file,
+                source_line,
+                str(params.get("handler_name") or ""),
+            )
         if action.action_type in {ACTION_EXTRACT_CONSTANT, ACTION_INTRODUCE_CONSTANT} and source_line:
             return (action.action_type, source_file, source_line)
         if action.action_type == ACTION_REMOVE_DEAD_CODE and source_line:
