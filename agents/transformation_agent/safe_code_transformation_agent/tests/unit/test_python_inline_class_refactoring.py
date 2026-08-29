@@ -336,7 +336,7 @@ def test_inline_class_inheritance_requires_review():
     assert transformed == source
     assert replacements == 0
     assert metadata["status"] == "review_required"
-    assert metadata["reason"] == "INHERITANCE_OR_METACLASS_UNSUPPORTED"
+    assert metadata["reason"] == "INHERITANCE_COLLAPSE_REQUIRES_REPOSITORY_PROOF"
 
 
 def test_inline_class_dynamic_getattr_requires_review():
@@ -593,7 +593,7 @@ def test_existing_but_unsafe_inline_class_requires_review_without_target_not_fou
     assert result["success"] is False
     assert result["plan_compliance"]["inline_class"] == "REVIEW_REQUIRED"
     metadata = result["safety_report"]["transformation_log"][0]["metadata"]
-    assert metadata["reason"] == "INHERITANCE_OR_METACLASS_UNSUPPORTED"
+    assert metadata["reason"] == "INHERITANCE_COLLAPSE_REQUIRES_REPOSITORY_PROOF"
     assert metadata["target_resolution"] == "explicit_plan_target"
     assert any(
         "Inline Class requires review" in message
@@ -858,6 +858,173 @@ def test_structural_validation_reports_incorrect_inline_class_terminal_destinati
     validation = result.details["inline_class_validation"][0]
     assert validation["passed"] is False
     assert validation["reason"] == "TERMINAL_DESTINATION_NOT_FOUND"
+
+
+def test_inline_class_resolves_nested_class_by_qualified_identity():
+    source = '''class Outer:
+    class Helper:
+        def __init__(self, code):
+            self.code = code
+'''
+    resolution = python_inline_class.resolve_python_inline_class_target(
+        source,
+        class_to_inline="Outer.Helper",
+    )
+    strategy = python_inline_class.select_python_inline_class_strategy(
+        source,
+        class_to_inline="Outer.Helper",
+    )
+
+    assert resolution["status"] == "success"
+    assert resolution["class_to_inline"] == "Outer.Helper"
+    assert resolution["qualified_class_name"] == "Outer.Helper"
+    assert strategy["status"] == "review_required"
+    assert strategy["reason"] == "NESTED_CLASS_REQUIRES_UNAMBIGUOUS_OWNER_MIGRATION"
+
+
+def test_inline_class_rejects_ambiguous_nested_short_name():
+    source = '''class First:
+    class Meta:
+        pass
+
+
+class Second:
+    class Meta:
+        pass
+'''
+    resolution = python_inline_class.resolve_python_inline_class_target(
+        source,
+        class_to_inline="Meta",
+    )
+
+    assert resolution["status"] == "review_required"
+    assert resolution["reason"] == "AMBIGUOUS_QUALIFIED_INLINE_CLASS_TARGET"
+
+
+def test_inline_class_strategy_reports_inheritance_semantics_precisely():
+    inheritance = '''class Base:
+    pass
+
+
+class Child(Base):
+    pass
+'''
+    multiple = '''class Left:
+    pass
+
+
+class Right:
+    pass
+
+
+class Combined(Left, Right):
+    pass
+'''
+    super_source = '''class Base:
+    pass
+
+
+class Child(Base):
+    def __init__(self):
+        super().__init__()
+'''
+
+    assert python_inline_class.select_python_inline_class_strategy(
+        inheritance, class_to_inline="Base"
+    )["reason"] == "SUBCLASS_HIERARCHY_REQUIRES_REVIEW"
+    assert python_inline_class.select_python_inline_class_strategy(
+        multiple, class_to_inline="Combined"
+    )["reason"] == "MULTIPLE_INHERITANCE_REQUIRES_REVIEW"
+    assert python_inline_class.select_python_inline_class_strategy(
+        super_source, class_to_inline="Child"
+    )["reason"] == "SUPER_CALL_SEMANTICS_REQUIRE_REVIEW"
+
+
+def test_inline_class_collapses_proven_empty_marker_subclass_and_updates_calls():
+    source = '''class Base:
+    def __init__(self, value):
+        self.value = value
+
+
+class Marker(Base):
+    pass
+
+
+def run():
+    return Marker("ok").value
+'''
+    transformed, replacements, metadata = python_inline_class.apply_owned_inline_class(
+        source,
+        class_to_inline="Marker",
+    )
+
+    assert metadata["status"] == "success", metadata
+    assert metadata["inline_mode"] == "inheritance_collapse"
+    assert replacements == 2
+    assert "class Marker" not in transformed
+    assert 'return Base("ok").value' in transformed
+    assert _run(source, "run") == _run(transformed, "run")
+
+
+def test_inline_class_strategy_preserves_decorator_metaclass_and_framework_identity():
+    decorated = '''@tracked
+class Decorated:
+    pass
+'''
+    metaclass = '''class Managed(metaclass=RegistryMeta):
+    pass
+'''
+    registered = '''class Plugin:
+    pass
+
+
+registry.register(Plugin)
+'''
+
+    assert python_inline_class.select_python_inline_class_strategy(
+        decorated, class_to_inline="Decorated"
+    )["reason"] == "DECORATOR_SEMANTICS_REQUIRE_REVIEW"
+    assert python_inline_class.select_python_inline_class_strategy(
+        metaclass, class_to_inline="Managed"
+    )["reason"] == "METACLASS_SEMANTICS_REQUIRE_REVIEW"
+    assert python_inline_class.select_python_inline_class_strategy(
+        registered, class_to_inline="Plugin"
+    )["reason"] == "FRAMEWORK_CLASS_IDENTITY_REQUIRED"
+
+
+def test_inline_class_strategy_detects_reflection_before_transforming():
+    source = '''class Plugin:
+    pass
+
+
+resolved = getattr(registry, "Plugin")
+'''
+    strategy = python_inline_class.select_python_inline_class_strategy(
+        source,
+        class_to_inline="Plugin",
+    )
+
+    assert strategy["status"] == "review_required"
+    assert strategy["reason"] == "DYNAMIC_CLASS_REFERENCE_REQUIRES_REVIEW"
+
+
+def test_inline_class_repository_model_records_qualified_classes_and_import_evidence():
+    model = python_inline_class.build_python_inline_repository_model([
+        {
+            "file_name": "domain/address.py",
+            "language": "python",
+            "source_code": "class Address:\n    pass\n",
+        },
+        {
+            "file_name": "consumer.py",
+            "language": "python",
+            "source_code": "from domain.address import Address\n",
+        },
+    ])
+
+    assert model["status"] == "success"
+    assert model["classes"][0]["qualified_name"] == "address.Address"
+    assert model["classes"][0]["source_file"] == "domain/address.py"
 
 
 def test_owned_lazy_class_structural_validation_passes():
@@ -1244,3 +1411,90 @@ def test_empty_class_cleanup_is_blocked_by_repository_reference():
     assert logs[0].metadata["status"] == "review_required"
     assert logs[0].metadata["reason"] == "EXTERNAL_REPOSITORY_REFERENCE"
     assert logs[0].metadata["reference_file"] == "consumer.py"
+
+
+def test_inline_class_collapses_exact_forwarding_subclass():
+    source = '''class Base:
+    def __init__(self, value):
+        self.value = value
+
+
+class Alias(Base):
+    def __init__(self, value):
+        super().__init__(value)
+
+
+def run():
+    return Alias("ok").value
+'''
+    transformed, replacements, metadata = python_inline_class.apply_owned_inline_class(
+        source,
+        class_to_inline="Alias",
+    )
+
+    assert metadata["status"] == "success", metadata
+    assert metadata["inline_mode"] == "inheritance_collapse"
+    assert replacements == 2
+    assert "class Alias" not in transformed
+    assert 'return Base("ok").value' in transformed
+    assert _run(source, "run") == _run(transformed, "run")
+
+
+def test_inline_class_does_not_collapse_inherited_configuration_class():
+    source = '''class Base:
+    def __init__(self, value):
+        self.value = value
+
+
+class Configured(Base):
+    def __init__(self, value):
+        super().__init__(value)
+
+    class Meta:
+        model = "Example"
+'''
+    strategy = python_inline_class.select_python_inline_class_strategy(
+        source,
+        class_to_inline="Configured",
+    )
+
+    assert strategy["status"] == "not_applicable"
+    assert strategy["reason"] == "INHERITANCE_CLASS_HAS_CONFIGURATION_OR_STATE"
+
+
+def test_inline_class_marks_external_base_behavior_as_not_applicable():
+    source = '''from framework.backends import BaseBackend
+
+
+class CustomBackend(BaseBackend):
+    def authenticate(self, request):
+        return request.user
+'''
+    strategy = python_inline_class.select_python_inline_class_strategy(
+        source,
+        class_to_inline="CustomBackend",
+    )
+
+    assert strategy["status"] == "not_applicable"
+    assert strategy["reason"] == "EXTERNAL_BASE_CLASS_CONTRACT_REQUIRED"
+
+
+def test_inline_class_shared_base_requires_hierarchy_refactoring_not_inline():
+    source = '''class Base:
+    pass
+
+
+class First(Base):
+    pass
+
+
+class Second(Base):
+    pass
+'''
+    strategy = python_inline_class.select_python_inline_class_strategy(
+        source,
+        class_to_inline="Base",
+    )
+
+    assert strategy["status"] == "not_applicable"
+    assert strategy["reason"] == "BASE_CLASS_SHARED_BY_MULTIPLE_SUBCLASSES"

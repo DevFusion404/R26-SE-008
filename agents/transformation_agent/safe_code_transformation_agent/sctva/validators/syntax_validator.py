@@ -135,6 +135,79 @@ class SyntaxValidator:
             duration_ms=duration_ms,
         )
 
+
+    def validate_python_project(
+        self,
+        sources: list[dict],
+        *,
+        timeout_seconds: int,
+    ) -> ValidationStepResult:
+        """Parse and compile every Python module in a candidate repository.
+
+        Python's normal ``compile`` step intentionally does not import peer
+        modules, so this method is side-effect free.  Cross-file semantic
+        invariants (for example stale class imports after repository Inline
+        Class) are checked by the transaction coordinator in addition to this
+        syntax pass.
+        """
+        start_iso = utc_now_iso()
+        started = time.perf_counter()
+        details = {
+            "checks": ["python_repository_parse", "python_repository_compile"],
+            "warnings": [],
+            "diagnostics": [],
+            "validated_files": [],
+        }
+
+        for item in sources:
+            file_name = str(item.get("file_name") or "")
+            source = str(item.get("source_code") or "")
+            normalized = file_name.replace("\\", "/").lower()
+            language = str(item.get("language") or "").strip().lower()
+            if language and language != "python" and not normalized.endswith(".py"):
+                continue
+            if not language and file_name and not normalized.endswith(".py"):
+                continue
+            local = self.validate(
+                language="python",
+                source_code=source,
+                require_compilation=False,
+                timeout_seconds=timeout_seconds,
+            )
+            if not local.passed:
+                message = (
+                    f"Python repository validation failed in {file_name}: "
+                    f"{local.message}"
+                )
+                details["diagnostics"].append({
+                    "severity": "error",
+                    "file": file_name,
+                    "message": local.message,
+                    "details": local.details,
+                })
+                return ValidationStepResult(
+                    name="python_repository_syntax",
+                    passed=False,
+                    score=0.0,
+                    message=message,
+                    details=details,
+                    started_at=start_iso,
+                    finished_at=utc_now_iso(),
+                    duration_ms=int((time.perf_counter() - started) * 1000),
+                )
+            details["validated_files"].append(file_name)
+
+        return ValidationStepResult(
+            name="python_repository_syntax",
+            passed=True,
+            score=1.0,
+            message="Python repository parse/compile validation passed.",
+            details=details,
+            started_at=start_iso,
+            finished_at=utc_now_iso(),
+            duration_ms=int((time.perf_counter() - started) * 1000),
+        )
+
     def validate_java_project(
         self,
         sources: list[dict],
