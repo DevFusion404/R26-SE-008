@@ -36,6 +36,7 @@ from domain.planning_recommendation import (
     preferences_for_strategy, strategy_from_preferences,
 )
 from domain.selection_optimizer import DEFAULT_BUDGET_MINUTES, PRESETS
+from domain.smell_taxonomy import build_taxonomy
 from services.archive_service import archive_path
 from services.planning_recommendation_service import enrich_plan_with_recommendations
 from services.planning_service import generate_updated_plan_report
@@ -243,6 +244,48 @@ def smell_selection_pass(wf_id):
     payload["selection_mode"] = selection_mode
     payload["selected_ids"] = selected_ids
     return jsonify(payload)
+
+@workflow_bp.route("/workflows/<wf_id>/smell-categories", methods=["GET"])
+def smell_categories(wf_id):
+    """The workflow's smells grouped by CUQA category and by smell type.
+
+    Stage 1 renders the Code Smell Category Overview from this, and drives its
+    category-wise and type-wise selection modes from the `smell_ids` each row
+    carries — the very ids /smell-selection-pass and /select-smells resolve, so
+    ticking a category here and committing it later cannot disagree.
+
+    Served from the workflow's OWN stored smells rather than by proxying CUQA:
+      * the browser never talks to CUQA directly — every agent hand-off goes
+        through this orchestrator, which is the whole point of the agent;
+      * CUQA's `code_smell_overview` describes the repository as analysed,
+        while this describes the smells this workflow actually holds. After a
+        filtered re-entry those are different sets, and showing CUQA's counts
+        above the workflow's checkboxes would be showing two different truths
+        one under the other.
+
+    CUQA remains the authority on the taxonomy itself: the category on each
+    smell is the one CUQA stamped, carried through the normalizer.
+    """
+    wf = get_workflow(wf_id)
+    if not wf:
+        return err("Workflow not found.", 404)
+
+    smells = parse_json_field(wf, "smells_json") or []
+    taxonomy = build_taxonomy(smells)
+
+    # CUQA's repository-level block, passed through for reference when the
+    # report is stored. Deliberately a SEPARATE field: it counts the repository,
+    # not this workflow, and merging the two would hide that.
+    report = parse_json_field(wf, "cuqa_report_json") or {}
+    overview = (report.get("summary") or {}).get("code_smell_overview")
+
+    return jsonify({
+        "workflow_id": wf_id,
+        **taxonomy,
+        "cuqa_repository_overview": overview if isinstance(overview, dict) else None,
+        "source": "workflow_smells",
+    })
+
 
 @workflow_bp.route("/workflows/<wf_id>/save-updated-report", methods=["POST"])
 def save_updated_report(wf_id):
