@@ -23,7 +23,7 @@
  * This module is transport only — no workflow rules, no shaping.
  */
 
-import { normalizeCuqaReport, detectPrimaryLanguage } from "../utils/cuqaReport";
+import { detectPrimaryLanguage } from "../utils/cuqaReport";
 import { getEnv } from "../../../config/env";
 
 // ─── Base URLs ───────────────────────────────────────────────────────────────
@@ -38,7 +38,9 @@ export const DIWO_BASE = getEnv('VITE_DIWO_API_URL', getEnv('VITE_API_URL', 'htt
  */
 export const CUQA_BASE = getEnv('VITE_CUQA_AGENT_API_URL', getEnv('VITE_CUQA_API_URL', 'http://localhost:8080')).replace(/\/+$/, "");
 
-export const CUQA_QUALITY_REPORT_URL = `${CUQA_BASE}/api/quality-report`;
+// No CUQA endpoint URL is exported any more: the browser has no reason to
+// hold one. CUQA_BASE survives only so an error can NAME the agent the
+// orchestrator could not reach.
 
 // ─── Transport ───────────────────────────────────────────────────────────────
 
@@ -86,53 +88,18 @@ function cuqaError(message, { status = 0, cuqaUrl = CUQA_BASE, reachable = false
 }
 
 /**
- * Call the CUQA agent directly. Used when the DIWO backend is unreachable so
- * the Code Smell Review stage still shows Agent 1 output (read-only: without a
- * DIWO workflow the selection cannot be persisted).
- */
-async function fetchQualityReportDirect({ filePath, signal }) {
-  let res;
-  try {
-    res = await fetch(CUQA_QUALITY_REPORT_URL, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(filePath ? { file_path: filePath } : {}),
-      signal,
-    });
-  } catch (e) {
-    if (e.name === "AbortError") throw e;
-    throw cuqaError(
-      `Neither the DIWO backend (${DIWO_BASE}) nor the CUQA agent ` +
-        `(${CUQA_QUALITY_REPORT_URL}) could be reached. Start the CUQA agent with: ` +
-        `uvicorn main:app --port 8080 (from agents/cuqa_agent/src).`,
-      { status: 503 }
-    );
-  }
-
-  const json = await readJson(res);
-  if (!res.ok) {
-    throw cuqaError(
-      json.detail || json.error || `CUQA agent returned HTTP ${res.status}.`,
-      { status: res.status, cuqaUrl: CUQA_QUALITY_REPORT_URL, reachable: true }
-    );
-  }
-
-  const report = normalizeCuqaReport(json);
-  return {
-    report,
-    smells: [],
-    language: detectPrimaryLanguage(report),
-    reportType: report.report_type,
-    via: "cuqa-direct",
-    cuqaUrl: CUQA_BASE,
-  };
-}
-
-/**
- * Fetch the CUQA quality report — DIWO proxy first, direct CUQA as fallback.
+ * Fetch the CUQA quality report — through the orchestrator, and only through it.
  *
  * Resolves to { report, smells, language, reportType, via, cuqaUrl }.
- * `smells` is the flat DIWO smell list; it is empty on the direct route.
+ *
+ * There used to be a direct browser -> CUQA fallback here for when the DIWO
+ * backend was down. It is gone on purpose. The orchestration agent is the one
+ * hand-off point between the browser and the other three agents, and a bypass
+ * that only opens when the orchestrator is unavailable is the worst version of
+ * that rule: it produces a Stage 1 that looks normal but has no workflow behind
+ * it, so nothing can be selected, persisted or planned, and the report shown is
+ * one the orchestrator never saw. An honest error naming the backend to start
+ * is more useful than a screen that cannot do anything.
  */
 export async function fetchQualityReport({ filePath = null, signal } = {}) {
   let res;
@@ -145,8 +112,12 @@ export async function fetchQualityReport({ filePath = null, signal } = {}) {
     });
   } catch (e) {
     if (e.name === "AbortError") throw e;
-    // DIWO backend itself is down — try Agent 1 directly.
-    return fetchQualityReportDirect({ filePath, signal });
+    throw cuqaError(
+      `The DIWO orchestration backend (${DIWO_BASE}) could not be reached. ` +
+        "Every agent hand-off — including the CUQA quality report — goes through " +
+        "it, so start it first: cd agents/orchestration_agent/backend && python app.py",
+      { status: 503, cuqaUrl: CUQA_BASE }
+    );
   }
 
   const json = await readJson(res);
@@ -191,25 +162,14 @@ export async function fetchCuqaStatus({ signal } = {}) {
     if (e.name === "AbortError") throw e;
   }
 
-  // DIWO backend unavailable — ask CUQA directly.
-  try {
-    const res = await fetch(`${CUQA_BASE}/api/files`, { signal });
-    const json = await readJson(res);
-    if (!res.ok) {
-      return { ...offline, reachable: true, message: json.detail || "No repository loaded in CUQA." };
-    }
-    return {
-      reachable: true,
-      repo_loaded: Boolean((json.files || []).length),
-      repo_name: json.repo_name || null,
-      file_count: json.total ?? (json.files || []).length,
-      cuqa_url: CUQA_BASE,
-      message: "CUQA workspace loaded.",
-    };
-  } catch (e) {
-    if (e.name === "AbortError") throw e;
-    return offline;
-  }
+  // The orchestrator could not answer. There is deliberately no second attempt
+  // straight at CUQA: "is CUQA up" asked around the orchestrator can come back
+  // yes while the workflow behind this page is unreachable, which is a worse
+  // answer than no answer.
+  return {
+    ...offline,
+    message: `The DIWO orchestration backend (${DIWO_BASE}) is not reachable, so the CUQA agent's status is unknown.`,
+  };
 }
 
 // ─── Workflow lifecycle ──────────────────────────────────────────────────────
@@ -265,6 +225,18 @@ export async function previewSmellSelection(workflowId, body) {
  */
 export const selectSmells = (workflowId, body) =>
   api.post(`/workflows/${workflowId}/select-smells`, body);
+
+/**
+ * GET /workflows/<id>/smell-categories — the workflow's smells grouped by
+ * CUQA's category taxonomy and, inside each, deduplicated by smell type.
+ *
+ * Served by the ORCHESTRATOR from the workflow's own smells. Stage 1 never
+ * calls the CUQA agent for this: CUQA owns the taxonomy, the orchestrator owns
+ * which smells this workflow holds, and the counts on screen have to match the
+ * checkboxes underneath them.
+ */
+export const fetchSmellCategories = (workflowId, { signal } = {}) =>
+  api.get(`/workflows/${workflowId}/smell-categories`, { signal });
 
 /** POST /workflows/<id>/reset-to-smell-review */
 export const resetToSmellReview = (workflowId, body = {}) =>
