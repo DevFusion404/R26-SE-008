@@ -123,6 +123,7 @@ class PlannerAdapter:
                             "parameters": {
                                 "reason": "unsupported_refactoring",
                                 "refactoring": step.get("refactoring"),
+                                "legacy_step": step,
                             },
                             "source_step_id": step.get("step_id"),
                             "source_refactoring": step.get("refactoring"),
@@ -811,6 +812,8 @@ class PlannerAdapter:
                     "source_line": source_line,
                     "method": target.get("method") or params.get("method"),
                     "class_name": target.get("class") or params.get("source_class"),
+                    "source_method": target.get("method") or params.get("method"),
+                    "source_class": target.get("class") or params.get("source_class"),
                     "source_file": target.get("file") or params.get("source_file"),
                     "original_exception_type": "" if is_bare_except else str(
                         params.get("original_exception_type") or "Exception"
@@ -818,7 +821,7 @@ class PlannerAdapter:
                     "target_exception_type": str(
                         params.get("target_exception_type")
                         or params.get("narrow_exception_type")
-                        or ("Exception" if is_bare_except else "")
+                        or ""
                     ),
                     "handler_name": str(
                         params.get("handler_name") or params.get("exception_variable") or ""
@@ -865,15 +868,53 @@ class PlannerAdapter:
             "exception overreach",
             "narrow exception handling",
             "narrow exception handler",
+            "replace bare except",
+            "replace bare except with specific exception",
+            "replace bare except with specific exceptions",
+            "replace_bare_except",
+            "replace_bare_except_with_specific_exception",
             "replace broad exception handling",
             "replace broad exception with specific exception",
             "replace broad exception with specific exceptions",
             "replace broad exception handler",
         }:
             source_line = self._source_line_from_step(step, params=params, target=target)
-            original_type = params.get("original_exception_type") or params.get("exception_type") or "Exception"
+            source_file = self._source_file_from_step(step, params=params, target=target)
+            source_method = str(
+                target.get("method")
+                or target.get("function")
+                or target.get("name")
+                or params.get("source_method")
+                or params.get("method")
+                or params.get("method_name")
+                or params.get("function")
+                or params.get("function_name")
+                or ""
+            ).strip()
+            # For exception-handler refactoring an explicit class name that
+            # matches the Python filename (for example Model in model.py) is
+            # perfectly valid.  Do not apply the stale filename-class heuristic
+            # used by some older refactorings here.
+            source_class = str(
+                target.get("class")
+                or params.get("source_class")
+                or params.get("class_name")
+                or ""
+            ).strip()
+            is_bare_except = ref_key in {
+                "replace bare except",
+                "replace bare except with specific exception",
+                "replace bare except with specific exceptions",
+                "replace_bare_except",
+                "replace_bare_except_with_specific_exception",
+            }
+            original_type = (
+                ""
+                if is_bare_except
+                else params.get("original_exception_type") or params.get("exception_type") or "Exception"
+            )
             target_type = params.get("target_exception_type") or params.get("narrow_exception_type")
-            if source_line is None and not target.get("method"):
+            if source_line is None and not source_method:
                 raise PlannerAdapterError(
                     "narrow_exception_handler mapping requires a source line or target method"
                 )
@@ -881,12 +922,15 @@ class PlannerAdapter:
                 "action_type": ACTION_NARROW_EXCEPTION_HANDLER,
                 "parameters": {
                     "source_line": source_line,
-                    "method": target.get("method") or params.get("method"),
-                    "class_name": target.get("class") or params.get("source_class"),
-                    "source_file": target.get("file") or params.get("source_file"),
+                    "method": source_method,
+                    "source_method": source_method,
+                    "class_name": source_class,
+                    "source_class": source_class,
+                    "source_file": source_file,
                     "original_exception_type": str(original_type),
                     "target_exception_type": str(target_type or ""),
                     "handler_name": str(params.get("handler_name") or params.get("exception_variable") or ""),
+                    "exception_smell": "bare_except" if is_bare_except else "exception_overreach",
                 },
             }
 

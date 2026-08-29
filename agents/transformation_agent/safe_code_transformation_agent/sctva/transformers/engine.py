@@ -1089,6 +1089,7 @@ class TransformationEngine:
                             source_file=str(action.parameters.get("source_file") or ""),
                             current_file_name=current_file_name,
                             source_resolution_error=str(action.parameters.get("source_resolution_error") or ""),
+                            smell=str(action.parameters.get("smell") or ""),
                         )
                     elif language == "c":
                         current_code, replacements, action_metadata = c_extract_method.apply_extract_method(
@@ -1280,7 +1281,8 @@ class TransformationEngine:
                     if language != "python":
                         raise ValueError("inline_python_class requires a Python source file.")
                     class_to_inline = str(
-                        action.parameters.get("class_to_inline")
+                        action.parameters.get("qualified_class_name")
+                        or action.parameters.get("class_to_inline")
                         or action.parameters.get("source_class")
                         or ""
                     ).strip()
@@ -2008,22 +2010,64 @@ class TransformationEngine:
                             ),
                         })
                     elif legacy_exception_action is not None:
-                        current_code, replacements = python_transformers.apply_narrow_exception_handler(
-                            current_code,
-                            source_line=source_line,
-                            original_exception_type=str(
-                                legacy_exception_action.get("original_exception_type") or ""
-                            ),
-                            target_exception_type=str(
-                                legacy_exception_action.get("target_exception_type") or ""
-                            ),
-                            handler_name=str(legacy_exception_action.get("handler_name") or ""),
+                        legacy_original_type = str(
+                            legacy_exception_action.get("original_exception_type") or ""
                         )
+                        if not legacy_original_type:
+                            resolution = python_transformers.resolve_bare_exception_handler(
+                                current_code,
+                                source_line=source_line,
+                                handler_name=str(
+                                    legacy_exception_action.get("handler_name") or ""
+                                ),
+                                target_exception_type=str(
+                                    legacy_exception_action.get("target_exception_type") or ""
+                                ),
+                            )
+                            action_metadata.update({
+                                "refactoring": "Replace Bare Except with Specific Exception",
+                                **resolution,
+                            })
+                            if resolution.get("status") == "success":
+                                legacy_exception_action.update({
+                                    "source_line": int(resolution["handler_line"]),
+                                    "handler_name": str(resolution.get("handler_name") or ""),
+                                    "original_handler": "bare_except",
+                                    "target_exception_type": str(
+                                        resolution["replacement_exception"]
+                                    ),
+                                    "replacement_exception": str(
+                                        resolution["replacement_exception"]
+                                    ),
+                                    "exception_resolution_strategy": str(
+                                        resolution.get("exception_resolution_strategy") or ""
+                                    ),
+                                })
+                        if action_metadata.get("status") in {None, "success"}:
+                            current_code, replacements = python_transformers.apply_narrow_exception_handler(
+                                current_code,
+                                source_line=int(
+                                    legacy_exception_action.get("source_line") or source_line or 0
+                                ) or None,
+                                original_exception_type=legacy_original_type,
+                                target_exception_type=str(
+                                    legacy_exception_action.get("target_exception_type") or ""
+                                ),
+                                handler_name=str(legacy_exception_action.get("handler_name") or ""),
+                            )
                         if replacements:
                             action_metadata["reclassified_action_type"] = ACTION_NARROW_EXCEPTION_HANDLER
                             action_metadata["effective_action_parameters"] = dict(
                                 legacy_exception_action
                             )
+                            if legacy_exception_action.get("original_handler") == "bare_except":
+                                action_metadata.update({
+                                    "status": "pass",
+                                    "final_decision": "PASS",
+                                    "replacement_exception": str(
+                                        legacy_exception_action.get("replacement_exception") or ""
+                                    ),
+                                })
                             action_metadata["reclassification_reason"] = (
                                 "RDP Remove Dead Code targeted a live broad exception handler."
                             )
@@ -2194,7 +2238,83 @@ class TransformationEngine:
                         action.parameters.get("target_exception_type") or ""
                     ).strip()
                     handler_name = str(action.parameters.get("handler_name") or "").strip()
-                    if not target_exception_type and language in {"python", "java"}:
+                    is_python_bare_except = (
+                        language == "python"
+                        and not original_exception_type
+                    )
+                    if is_python_bare_except:
+                        resolution = python_transformers.resolve_bare_exception_handler(
+                            current_code,
+                            source_line=source_line,
+                            source_class=str(
+                                action.parameters.get("source_class")
+                                or action.parameters.get("class_name")
+                                or ""
+                            ).strip(),
+                            source_method=str(
+                                action.parameters.get("source_method")
+                                or action.parameters.get("method")
+                                or ""
+                            ).strip(),
+                            handler_name=handler_name,
+                            target_exception_type=target_exception_type,
+                        )
+                        action_metadata = {
+                            "refactoring": "Replace Bare Except with Specific Exception",
+                            "source_file": str(
+                                action.parameters.get("source_file") or current_file_name
+                            ),
+                            **resolution,
+                        }
+                        if resolution.get("status") == "success":
+                            warnings = [
+                                warning
+                                for warning in warnings
+                                if "mapped to noop" not in str(warning).lower()
+                                and "unsupported refactoring" not in str(warning).lower()
+                            ]
+                            source_line = int(resolution["handler_line"])
+                            target_exception_type = str(
+                                resolution["replacement_exception"]
+                            )
+                            handler_name = str(resolution.get("handler_name") or "")
+                            action.parameters.update({
+                                "source_line": source_line,
+                                "source_class": str(resolution.get("source_class") or ""),
+                                "source_method": str(resolution.get("source_method") or ""),
+                                "qualified_source_method": str(
+                                    resolution.get("qualified_source_method") or ""
+                                ),
+                                "handler_name": handler_name,
+                                "original_handler": "bare_except",
+                                "original_handler_type": "bare_except",
+                                "resolved_handler_line": source_line,
+                                "handler_index": resolution.get("handler_index", 0),
+                                "target_exception_type": target_exception_type,
+                                "replacement_exception": target_exception_type,
+                                "exception_resolution_strategy": str(
+                                    resolution.get("exception_resolution_strategy") or ""
+                                ),
+                                "target_resolution": str(
+                                    resolution.get("target_resolution") or ""
+                                ),
+                            })
+                        else:
+                            action_metadata["final_decision"] = (
+                                "NOT_APPLICABLE"
+                                if resolution.get("status") == "not_applicable"
+                                else "REVIEW_REQUIRED"
+                            )
+                            warnings.append(
+                                "Replace Bare Except with Specific Exception requires review: "
+                                f"{resolution.get('reason') or 'SPECIFIC_EXCEPTION_TYPE_NOT_PROVEN'}."
+                            )
+
+                    if (
+                        not target_exception_type
+                        and language in {"python", "java"}
+                        and not is_python_bare_except
+                    ):
                         target_exception_type = self._infer_exception_target_from_source(
                             language=language,
                             source_code=current_code,
@@ -2202,14 +2322,31 @@ class TransformationEngine:
                             original_exception_type=original_exception_type,
                             handler_name=handler_name,
                         )
-                    if language == "python":
+                    if language == "python" and (
+                        not is_python_bare_except
+                        or action_metadata.get("status") == "success"
+                    ):
                         current_code, replacements = python_transformers.apply_narrow_exception_handler(
                             current_code,
                             source_line=source_line,
                             original_exception_type=original_exception_type,
                             target_exception_type=target_exception_type,
                             handler_name=handler_name,
+                            source_class=str(action.parameters.get("source_class") or "").strip(),
+                            source_method=str(action.parameters.get("source_method") or action.parameters.get("method") or "").strip(),
                         )
+                        if replacements and is_python_bare_except:
+                            action_metadata.update({
+                                "status": "pass",
+                                "final_decision": "PASS",
+                                "replacement_exception": target_exception_type,
+                                "resolved_handler": {
+                                    "line": source_line,
+                                    "class": str(action.parameters.get("source_class") or ""),
+                                    "method": str(action.parameters.get("source_method") or action.parameters.get("method") or ""),
+                                    "name": handler_name,
+                                },
+                            })
                     elif language == "java":
                         current_code, replacements = java_transformers.apply_narrow_exception_handler(
                             current_code,
@@ -2218,7 +2355,7 @@ class TransformationEngine:
                             target_exception_type=target_exception_type,
                             handler_name=handler_name,
                         )
-                    else:
+                    elif language == "c":
                         warnings.append(
                             "Exception handler narrowing is not applicable to C because C has no try/catch handlers."
                         )
@@ -2264,6 +2401,16 @@ class TransformationEngine:
                 )
 
             if replacements == 0 and action.action_type == ACTION_NARROW_EXCEPTION_HANDLER:
+                if (
+                    language == "python"
+                    and str(action.parameters.get("original_handler") or "") == "bare_except"
+                    and str(action_metadata.get("status") or "").lower() == "success"
+                ):
+                    action_metadata.update({
+                        "status": "review_required",
+                        "final_decision": "REVIEW_REQUIRED",
+                        "reason": "TARGETED_BARE_EXCEPT_REWRITE_NOT_APPLIED",
+                    })
                 warnings.append(
                     "Exception handler narrowing skipped: SCTVA could not prove a unique safe target exception type."
                 )
