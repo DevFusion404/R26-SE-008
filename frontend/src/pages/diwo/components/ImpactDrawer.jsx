@@ -20,6 +20,7 @@
 
 import { useEffect } from "react";
 import { C, Badge, severityColor } from "../diwoTheme.jsx";
+import { smellIcon } from "../utils/smellIcons";
 
 const RISK_COLOR = { low: C.low, medium: C.warn, high: C.danger };
 const PRESSURE_COLOR = { low: C.textMuted, medium: C.warn, high: C.danger };
@@ -66,10 +67,21 @@ export default function ImpactDrawer({ record, smell, onClose, onToggleSmell, is
         }}>
           <div style={{ flex: 1, minWidth: 0 }}>
             <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 5 }}>
-              <div style={{
-                width: 8, height: 8, borderRadius: "50%",
-                background: severityColor(record.severity),
-              }} />
+              {/* The same glyph the list uses, so the dialog is recognisably
+                  about the row that opened it. */}
+              <span
+                role="img"
+                aria-label={record.smell_type}
+                style={{
+                  width: 24, height: 24, borderRadius: 7, flexShrink: 0, lineHeight: 1,
+                  display: "inline-flex", alignItems: "center", justifyContent: "center",
+                  fontSize: 14,
+                  background: `${severityColor(record.severity)}1e`,
+                  border: `1px solid ${severityColor(record.severity)}55`,
+                }}
+              >
+                {smellIcon(record.smell_type, smell?.category)}
+              </span>
               <span style={{ fontSize: 15, fontWeight: 800, color: C.text }}>
                 {record.smell_type}
               </span>
