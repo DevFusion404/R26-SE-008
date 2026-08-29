@@ -9,6 +9,11 @@ from dataclasses import dataclass
 from typing import Any, Iterable, Sequence
 
 from .extract_method_common import MAX_EXTRACTED_PARAMETERS, MIN_EXTRACTED_LOC, nonblank_loc
+from .python_ast_fingerprints import (
+    literal_constant_bindings,
+    meaningful_top_level_statements,
+    statement_records,
+)
 
 
 REVIEW_REQUIRED = "review_required"
@@ -162,6 +167,15 @@ def apply_extract_method(
 
     selected_start = min(item.lineno for item in selected)
     selected_end = max(getattr(item, "end_lineno", item.lineno) for item in selected)
+    constant_bindings = literal_constant_bindings(tree)
+    selected_statement_records = statement_records(
+        selected,
+        constant_bindings=constant_bindings,
+    )
+    caller_statement_records = statement_records(
+        meaningful_top_level_statements(target.node, exclude_direct_returns=True),
+        constant_bindings=constant_bindings,
+    )
     metadata.update({
         "status": "success",
         "reason": "extract_method_applied",
@@ -171,6 +185,10 @@ def apply_extract_method(
         "inputs": flow.inputs,
         "outputs": flow.outputs,
         "locals": flow.locals,
+        "selected_ast_statements": selected_statement_records,
+        "pre_extraction_caller_ast_statements": caller_statement_records,
+        "selected_top_level_statement_count": len(selected_statement_records),
+        "statement_identity": "normalized_python_ast",
         "before_loc": before_metrics["loc"],
         "after_loc": after_metrics["loc"],
         "before_metrics": before_metrics,

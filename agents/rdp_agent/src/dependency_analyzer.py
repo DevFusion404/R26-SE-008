@@ -60,6 +60,84 @@ class DependencyAnalyzer:
             severity_order if severity_order is not None else SEVERITY_ORDER
         )
 
+    def resolve_plan_conflicts(
+        self,
+        selections: List[Tuple[CodeSmell, Dict[str, Any]]],
+    ) -> List[Tuple[CodeSmell, Dict[str, Any]]]:
+        """Resolve entity-level refactoring conflicts before building final plan.
+
+        1. If an entity (function, class, or variable) is scheduled for 'Remove Dead Code'
+           (or addresses a 'Dead Code' / 'UnreachableCode' smell), ALL other non-deletion
+           refactorings ('Move Method', 'Extract Method', 'Introduce Constant', 'Inline Class',
+           'Rename Method', etc.) targeting that same entity are pruned. 'Remove Dead Code' takes priority.
+        2. Deduplicates duplicate refactorings targeting the exact same entity.
+
+        Args:
+            selections: List of (smell, candidate) tuples.
+
+        Returns:
+            Filtered list of (smell, candidate) tuples with conflicts resolved.
+        """
+        if not selections:
+            return []
+
+        # 1. Collect entities marked for dead code removal
+        dead_entities: set = set()
+        for smell, candidate in selections:
+            if candidate.get("name") == "Remove Dead Code" or smell.type in ("Dead Code", "DeadCode", "UnreachableCode"):
+                ent = (
+                    smell.location.get("method")
+                    or smell.location.get("class")
+                    or smell.location.get("entity")
+                )
+                if ent and ent != "unknown":
+                    dead_entities.add(ent)
+
+        filtered: List[Tuple[CodeSmell, Dict[str, Any]]] = []
+        seen_entity_refactorings: set = set()
+
+        for smell, candidate in selections:
+            c_name = candidate.get("name", "")
+            ent = (
+                smell.location.get("method")
+                or smell.location.get("class")
+                or smell.location.get("entity")
+            )
+
+            # If entity is scheduled for deletion as Dead Code, ignore any non-deletion refactorings
+            if ent and ent in dead_entities and c_name != "Remove Dead Code" and smell.type not in ("Dead Code", "DeadCode", "UnreachableCode"):
+                logger.warning(
+                    "Pruned conflicting step '%s' for entity '%s' because the entity is scheduled for Remove Dead Code.",
+                    c_name,
+                    ent,
+                )
+                continue
+
+            # Deduplicate identical refactoring on the same entity
+            if ent:
+                dedup_key = (ent, c_name)
+                if dedup_key in seen_entity_refactorings:
+                    logger.warning("Deduplicating duplicate refactoring '%s' for entity '%s'.", c_name, ent)
+                    continue
+                seen_entity_refactorings.add(dedup_key)
+
+            filtered.append((smell, candidate))
+
+        # Deduplicate Duplicate Code groups: generate only ONE shared helper per duplicate_group
+        seen_dup_groups: set = set()
+        final_filtered: List[Tuple[CodeSmell, Dict[str, Any]]] = []
+        for smell, candidate in filtered:
+            dup_group = getattr(smell, "duplicate_group", None) or smell.location.get("duplicate_group")
+            if dup_group and isinstance(dup_group, list):
+                group_key = tuple(sorted(dup_group))
+                if group_key in seen_dup_groups:
+                    logger.warning("Deduplicating shared helper step for duplicate_group %s.", group_key)
+                    continue
+                seen_dup_groups.add(group_key)
+            final_filtered.append((smell, candidate))
+
+        return final_filtered
+
     def sequence_steps(
         self,
         selections: List[Tuple[CodeSmell, Dict[str, Any]]],

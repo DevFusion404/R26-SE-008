@@ -74,6 +74,85 @@ def _parse_literal_values_from_hint(hint: str) -> List[Any]:
     return values
 
 
+def _action_method_name(action: RefactoringAction) -> str:
+    return str(
+        action.parameters.get("method")
+        or action.parameters.get("method_name")
+        or action.parameters.get("function")
+        or action.parameters.get("function_name")
+        or action.parameters.get("source_method")
+        or ""
+    ).strip()
+
+
+def _action_source_class(action: RefactoringAction) -> str:
+    return str(
+        action.parameters.get("source_class")
+        or action.parameters.get("target_class")
+        or action.parameters.get("class_name")
+        or action.parameters.get("class")
+        or ""
+    ).strip()
+
+
+def _same_java_method_target(
+    extract_action: RefactoringAction,
+    parameter_action: RefactoringAction,
+) -> bool:
+    extract_method = _action_method_name(extract_action)
+    parameter_method = _action_method_name(parameter_action)
+    if not extract_method or extract_method != parameter_method:
+        return False
+    extract_class = _action_source_class(extract_action)
+    parameter_class = _action_source_class(parameter_action)
+    if extract_class and parameter_class and extract_class != parameter_class:
+        return False
+    extract_file = str(extract_action.parameters.get("source_file") or "").replace("\\", "/").lower()
+    parameter_file = str(parameter_action.parameters.get("source_file") or "").replace("\\", "/").lower()
+    if extract_file and parameter_file and extract_file != parameter_file:
+        return False
+    return True
+
+
+def _java_extract_action_kwargs(
+    action: RefactoringAction,
+    *,
+    current_file_name: str,
+    project_source_files: Sequence[Any] | None,
+) -> dict[str, Any]:
+    start_line = action.parameters.get("start_line")
+    end_line = action.parameters.get("end_line")
+    if isinstance(start_line, str) and start_line.strip().isdigit():
+        start_line = int(start_line.strip())
+    if isinstance(end_line, str) and end_line.strip().isdigit():
+        end_line = int(end_line.strip())
+    return {
+        "new_method_name": str(
+            action.parameters.get("new_method_name")
+            or action.parameters.get("extracted_method_name")
+            or action.parameters.get("new_function_name")
+            or action.parameters.get("extracted_function_name")
+            or ""
+        ).strip(),
+        "method_name": _action_method_name(action),
+        "source_class": _action_source_class(action),
+        "method_signature": str(
+            action.parameters.get("method_signature")
+            or action.parameters.get("function_signature")
+            or action.parameters.get("signature")
+            or ""
+        ).strip(),
+        "start_line": start_line if isinstance(start_line, int) else None,
+        "end_line": end_line if isinstance(end_line, int) else None,
+        "source_file": str(action.parameters.get("source_file") or ""),
+        "current_file_name": current_file_name,
+        "source_resolution_error": str(
+            action.parameters.get("source_resolution_error") or ""
+        ),
+        "project_source_files": project_source_files,
+    }
+
+
 class TransformationEngine:
     """Applies refactoring actions and records detailed audit logs."""
 
@@ -436,7 +515,109 @@ class TransformationEngine:
                 if exception_action is not None:
                     legacy_exception_anchors[action_index] = exception_action
 
-        for idx, action in enumerate(actions, start=1):
+        execution_actions = list(enumerate(actions, start=1))
+        dependency_resolutions: Dict[int, Dict[str, Any]] = {}
+        if language == "java":
+            reordered: list[tuple[int, RefactoringAction]] = []
+            cursor = 0
+            while cursor < len(execution_actions):
+                extract_index, extract_action = execution_actions[cursor]
+                if (
+                    extract_action.action_type == ACTION_EXTRACT_METHOD
+                    and cursor + 1 < len(execution_actions)
+                ):
+                    parameter_index, parameter_action = execution_actions[cursor + 1]
+                    if (
+                        parameter_action.action_type in {
+                            ACTION_INTRODUCE_PARAMETER_OBJECT,
+                            ACTION_INTRODUCE_JAVA_PARAMETER_OBJECT,
+                        }
+                        and _same_java_method_target(extract_action, parameter_action)
+                    ):
+                        try:
+                            _, _, blocked_metadata = java_extract_method.apply_extract_method(
+                                source_code,
+                                **_java_extract_action_kwargs(
+                                    extract_action,
+                                    current_file_name=current_file_name,
+                                    project_source_files=project_source_files,
+                                ),
+                            )
+                            parameterized_code, parameter_count, parameter_metadata = (
+                                java_parameter_object.apply_introduce_parameter_object(
+                                    source_code,
+                                    method=_action_method_name(parameter_action),
+                                    parameter_object_name=str(
+                                        parameter_action.parameters.get("parameter_object_name")
+                                        or parameter_action.parameters.get("new_class_name")
+                                        or parameter_action.parameters.get("parameter_class_name")
+                                        or ""
+                                    ).strip(),
+                                    source_class=_action_source_class(parameter_action),
+                                    source_file=str(
+                                        parameter_action.parameters.get("source_file") or ""
+                                    ),
+                                    current_file_name=current_file_name,
+                                    parameter_name=str(
+                                        parameter_action.parameters.get("parameter_name")
+                                        or "params"
+                                    ).strip(),
+                                    project_source_files=project_source_files,
+                                    source_resolution_error=str(
+                                        parameter_action.parameters.get("source_resolution_error")
+                                        or ""
+                                    ),
+                                )
+                            )
+                            _, retry_count, retry_metadata = (
+                                java_extract_method.apply_extract_method(
+                                    parameterized_code,
+                                    **_java_extract_action_kwargs(
+                                        extract_action,
+                                        current_file_name=current_file_name,
+                                        project_source_files=project_source_files,
+                                    ),
+                                )
+                            )
+                        except (TypeError, ValueError):
+                            blocked_metadata = {}
+                            parameter_count = 0
+                            parameter_metadata = {}
+                            retry_count = 0
+                            retry_metadata = {}
+                        if (
+                            blocked_metadata.get("reason") == "TOO_MANY_PARAMETERS"
+                            and parameter_count == 1
+                            and parameter_metadata.get("status") == "success"
+                            and retry_count == 1
+                            and retry_metadata.get("status") == "success"
+                        ):
+                            resolution = {
+                                "initial_status": "DEFERRED_DEPENDENCY",
+                                "blocking_reason": "TOO_MANY_PARAMETERS",
+                                "dependency_action_index": parameter_index,
+                                "dependency_action_type": parameter_action.action_type,
+                                "retry_status": "PROVEN_SAFE",
+                                "target_method": _action_method_name(extract_action),
+                                "target_class": _action_source_class(extract_action),
+                            }
+                            dependency_resolutions[extract_index] = resolution
+                            dependency_resolutions[parameter_index] = {
+                                "unblocks_action_index": extract_index,
+                                "unblocks_action_type": ACTION_EXTRACT_METHOD,
+                                "target_method": _action_method_name(extract_action),
+                            }
+                            reordered.extend([
+                                (parameter_index, parameter_action),
+                                (extract_index, extract_action),
+                            ])
+                            cursor += 2
+                            continue
+                reordered.append((extract_index, extract_action))
+                cursor += 1
+            execution_actions = reordered
+
+        for idx, action in execution_actions:
             warnings = list(action.warnings)
             replacements = 0
             action_metadata: Dict[str, Any] = {}
@@ -932,6 +1113,7 @@ class TransformationEngine:
                             source_file=str(action.parameters.get("source_file") or ""),
                             current_file_name=current_file_name,
                             source_resolution_error=str(action.parameters.get("source_resolution_error") or ""),
+                            project_source_files=project_source_files,
                         )
                     else:
                         raise ValueError(
@@ -1353,9 +1535,14 @@ class TransformationEngine:
                     elif action.action_type == ACTION_EXTRACT_JAVA_CLASS:
                         if language != "java":
                             raise ValueError("extract_java_class requires a Java source file.")
+                        java_state = {
+                            "repository_original_code": source_code,
+                            "prior_transformations": self._accepted_action_history(logs),
+                        }
                         current_code, replacements, action_metadata = java_extract_class.apply_extract_class(
                             current_code,
                             **extract_kwargs,
+                            **java_state,
                         )
                     elif action.action_type == ACTION_EXTRACT_C_COMPONENT:
                         if language != "c":
@@ -1370,9 +1557,14 @@ class TransformationEngine:
                             **extract_kwargs,
                         )
                     elif action.action_type == ACTION_EXTRACT_CLASS and language == "java":
+                        java_state = {
+                            "repository_original_code": source_code,
+                            "prior_transformations": self._accepted_action_history(logs),
+                        }
                         current_code, replacements, action_metadata = java_extract_class.apply_extract_class(
                             current_code,
                             **extract_kwargs,
+                            **java_state,
                         )
                     elif action.action_type == ACTION_EXTRACT_CLASS and language == "c":
                         current_code, replacements, action_metadata = c_extract_class.apply_extract_component(
@@ -1493,6 +1685,30 @@ class TransformationEngine:
                             safe_alternative,
                             source_line,
                         )
+
+                elif action.action_type in {
+                    "replace_nested_conditional_with_guard_clauses",
+                    "replace_conditional_with_guard_clauses",
+                    "simplify_conditional_loop",
+                    "guard_clauses",
+                }:
+                    method_name = str(action.parameters.get("method") or action.parameters.get("target_method") or "").strip()
+                    source_line = action.parameters.get("source_line")
+                    source_line = int(source_line) if isinstance(source_line, (int, float)) else None
+                    if language == "c":
+                        current_code, replacements, action_metadata = c_transformers.apply_replace_nested_conditional_with_guard_clauses(
+                            current_code,
+                            method_name,
+                            source_line,
+                        )
+                        if replacements == 0:
+                            warnings.append(
+                                "Replace Nested Conditional with Guard Clauses: Review Required (cannot be safely transformed automatically)."
+                            )
+                        else:
+                            warnings.append(
+                                f"Replace Nested Conditional with Guard Clauses applied to function {method_name or 'target'}."
+                            )
 
                 elif action.action_type in {ACTION_ENCAPSULATE_VARIABLE, ACTION_ENCAPSULATE_C_VARIABLE}:
                     variable_name = str(action.parameters.get("variable_name") or "").strip()
@@ -1836,6 +2052,13 @@ class TransformationEngine:
                         str(source_file_resolution.get("resolved") or ""),
                     )
 
+            dependency_resolution = dependency_resolutions.get(idx)
+            if dependency_resolution:
+                action_metadata["dependency_resolution"] = dict(
+                    dependency_resolution
+                )
+                action_metadata["execution_order_resolved"] = True
+
             if (
                 language == "python"
                 and action.action_type in {
@@ -1900,3 +2123,21 @@ class TransformationEngine:
                 global_warnings.extend(warnings)
 
         return current_code, logs, global_warnings
+
+    @staticmethod
+    def _accepted_action_history(
+        logs: Sequence[TransformationLogEntry],
+    ) -> list[Dict[str, Any]]:
+        return [
+            {
+                "action_index": entry.action_index,
+                "action_type": entry.action_type,
+                "replacements_count": entry.replacements_count,
+                "status": str(entry.metadata.get("status") or "success"),
+                "reason": str(entry.metadata.get("reason") or ""),
+            }
+            for entry in logs
+            if entry.replacements_count > 0
+            and str(entry.metadata.get("status") or "success").lower()
+            in {"success", "pass", "accepted", "already_applied"}
+        ]

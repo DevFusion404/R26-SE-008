@@ -37,7 +37,7 @@ from urllib.parse import urlparse
 from pydantic import BaseModel, HttpUrl
 
 import requests
-from fastapi import FastAPI, File, Form, UploadFile, HTTPException
+from fastapi import FastAPI, File, Form, UploadFile, HTTPException, Body
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, HttpUrl
@@ -57,6 +57,7 @@ if str(SRC_DIR) not in sys.path:
 from ast_parser import parse_source, detect_language
 from ast_visualizer import enrich_ast, build_summary
 from report_generator import generate_file_report, generate_repo_report, build_repo_name_index
+from repository_understanding import analyze_repository_overview
 
 # ---------------------------------------------------------------------------
 # FastAPI Application Initialization & CORS Configuration
@@ -497,6 +498,7 @@ def parse_ast(payload: dict):
     return {
         "parsed": parsed,
         "summary": summary,
+        "source_code": source,   # raw file content — used by transformation agent for zip download
     }
 
 
@@ -566,6 +568,44 @@ def list_files():
     }
 
 
+# ── 7. Repository Understanding Overview ──────────────────────────────────────
+
+@app.get("/api/repository-overview")
+def repository_overview():
+    """
+    Generate a beginner-friendly structural understanding of the loaded repository.
+
+    Derives a complete, evidence-based overview using only static analysis
+    (no external LLM or API calls required).  Returns:
+      - Repository statistics (files, LOC, directories, languages)
+      - Language distribution with percentages
+      - Detected build tools, dependency managers, CI/CD, deployment tools
+      - Likely application entry points with confidence and evidence
+      - Important directories with role classification
+      - Structurally important files
+      - Recommended newcomer reading path
+      - Static module dependency graph (nodes + edges, capped at 50 nodes)
+      - Architectural pattern clues with evidence
+      - Subproject / monorepo detection
+
+    Part of CUQA's Code Understanding responsibility (distinct from Quality
+    Assessment which is handled by /api/quality-report).
+    """
+    if not _workspace["root"]:
+        raise HTTPException(400, "No repository loaded. Upload a ZIP or provide a GitHub URL first.")
+
+    try:
+        overview = analyze_repository_overview(
+            root=_workspace["root"],
+            repo_name=_workspace["repo_name"] or "unknown",
+            source_files=_workspace["files"],
+        )
+    except Exception as exc:
+        raise HTTPException(500, f"Repository analysis failed: {exc}")
+
+    return overview
+
+
 # ── 7. Update Workspace Files ────────────────────────────────────────────────
 
 class WorkspaceFileUpdate(BaseModel):
@@ -607,11 +647,123 @@ def update_workspace(payload: WorkspaceUpdateRequest):
     }
 
 
+# ── 8. Fetch Raw Source Files ────────────────────────────────────────────────
+
+class SourceFilesRequest(BaseModel):
+    file_paths: list[str]
+
+class SingleSourceFileRequest(BaseModel):
+    file_path: str
+
+@app.post("/api/source-files")
+@app.post("/api/cuqa/source-files")
+def fetch_source_files(raw_payload: dict = Body(...)):
+    """
+    Return raw source code content for a list of workspace file paths.
+    Used by downstream Transformation (SCTVA) and Orchestration (DIWO) Agents.
+    """
+    if not _workspace["root"]:
+        raise HTTPException(400, "No repository loaded.")
+
+    file_paths = raw_payload.get("file_paths")
+    if not isinstance(file_paths, list):
+        raise HTTPException(400, "file_paths must be a list of string paths.")
+
+    found_files = []
+    missing_files = []
+
+    for rel_path in file_paths:
+        clean_path = str(rel_path).strip()
+        if not clean_path:
+            continue
+        try:
+            full_path = _safe_resolve_path(_workspace["root"], clean_path)
+            if os.path.isfile(full_path):
+                with open(full_path, "r", encoding="utf-8", errors="replace") as f:
+                    content = f.read()
+                found_files.append({
+                    "file_name": clean_path,
+                    "file_path": clean_path,
+                    "language": detect_language(clean_path),
+                    "source_code": content,
+                    "source_mode": "raw",
+                })
+            else:
+                missing_files.append(clean_path)
+        except Exception:
+            missing_files.append(clean_path)
+
+    return {
+        "files": found_files,
+        "imported": len(found_files),
+        "total": len(file_paths),
+        "missing": missing_files,
+        "source": "cuqa_workspace",
+    }
+
+
+@app.post("/api/source-file")
+@app.post("/api/cuqa/source-file")
+def fetch_single_source_file_post(payload: SingleSourceFileRequest):
+    """Return raw source code content for a single workspace file path (POST)."""
+    if not _workspace["root"]:
+        raise HTTPException(400, "No repository loaded.")
+
+    clean_path = payload.file_path.strip()
+    if not clean_path:
+        raise HTTPException(400, "file_path is required.")
+
+    full_path = _safe_resolve_path(_workspace["root"], clean_path)
+    if not os.path.isfile(full_path):
+        raise HTTPException(404, f"File not found in workspace: {clean_path}")
+
+    with open(full_path, "r", encoding="utf-8", errors="replace") as f:
+        content = f.read()
+
+    return {
+        "file_name": clean_path,
+        "file_path": clean_path,
+        "language": detect_language(clean_path),
+        "source_code": content,
+        "source_mode": "raw",
+    }
+
+
+@app.get("/api/raw-source")
+@app.get("/api/source-file")
+@app.get("/api/cuqa/raw-source")
+@app.get("/api/cuqa/source-file")
+def fetch_single_source_file_get(file_path: str = ""):
+    """Return raw source code content for a single workspace file path (GET query param)."""
+    if not _workspace["root"]:
+        raise HTTPException(400, "No repository loaded.")
+
+    clean_path = file_path.strip()
+    if not clean_path:
+        raise HTTPException(400, "file_path parameter is required.")
+
+    full_path = _safe_resolve_path(_workspace["root"], clean_path)
+    if not os.path.isfile(full_path):
+        raise HTTPException(404, f"File not found in workspace: {clean_path}")
+
+    with open(full_path, "r", encoding="utf-8", errors="replace") as f:
+        content = f.read()
+
+    return {
+        "file_name": clean_path,
+        "file_path": clean_path,
+        "language": detect_language(clean_path),
+        "source_code": content,
+        "source_mode": "raw",
+    }
+
+
 # ---------------------------------------------------------------------------
 # Run directly
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=8080, reload=True, reload_dirs=[str(SRC_DIR)])
+
 
 

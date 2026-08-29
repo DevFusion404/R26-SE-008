@@ -59,17 +59,10 @@ class CodeSmell:
         Returns:
             A new ``CodeSmell`` instance.
         """
-        # Ensure location dict has required fields
-        location = data.get("location", {})
+        location = dict(data.get("location", {}))
         if not isinstance(location, dict):
             location = {}
-        
-        # Set defaults for missing location fields
-        location.setdefault("file", "unknown")
-        location.setdefault("class", "unknown")
-        location.setdefault("method", "unknown")
-        location.setdefault("lines", [])
-        
+
         return cls(
             id=data["id"],
             type=data["type"],
@@ -101,6 +94,7 @@ class QualityReport:
     smells: List[CodeSmell]
     metrics_summary: Dict[str, Any] = field(default_factory=dict)
     file_name: Optional[str] = None
+    source_files: List[Dict[str, Any]] = field(default_factory=list, repr=False)
 
     def to_dict(self) -> Dict[str, Any]:
         """Serialize to a plain dictionary."""
@@ -128,11 +122,18 @@ class QualityReport:
         """
         smells = [CodeSmell.from_dict(s) for s in data.get("smells", [])]
         target = data.get("target") or data.get("file_name", "unknown")
+        source_files = data.get("source_files")
+        if not isinstance(source_files, list):
+            source_files = []
+
         return cls(
             target=target,
             smells=smells,
             metrics_summary=data.get("metrics_summary", {}),
             file_name=data.get("file_name"),
+            source_files=[
+                dict(item) for item in source_files if isinstance(item, dict)
+            ],
         )
 
 

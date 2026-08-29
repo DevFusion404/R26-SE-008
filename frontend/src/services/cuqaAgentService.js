@@ -157,6 +157,45 @@ class CUQAAgentService {
     }
     return data;
   }
+
+  /**
+   * Get a beginner-friendly structural overview of the loaded repository.
+   * Uses only static analysis (entry points, dependencies, LOC, architecture clues).
+   * @returns {Promise<object>} Full repository understanding model
+   */
+  static async getRepositoryOverview() {
+    const url = this.getEndpointUrl('repositoryOverview');
+    const response = await fetch(url, {
+      method: 'GET',
+    });
+
+    const data = await response.json();
+    if (!response.ok) {
+      throw new Error(data.detail || 'Failed to fetch repository overview.');
+    }
+    return data;
+  }
+
+  /**
+   * Update/overwrite workspace source files with refactored content.
+   * @param {Array<{file_path: string, content: string}>} files
+   * @returns {Promise<{status: string, updated_files: number, errors: Array}>}
+   */
+  static async updateWorkspace(files) {
+    const url = this.getEndpointUrl('updateWorkspace') ||
+      `${this.getEndpointUrl('health').replace('/api/health', '')}/api/update-workspace`;
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ files }),
+    });
+
+    const data = await response.json();
+    if (!response.ok) {
+      throw new Error(data.detail || 'Failed to update workspace files.');
+    }
+    return data;
+  }
 }
 
 export default CUQAAgentService;

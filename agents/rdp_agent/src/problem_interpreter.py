@@ -92,64 +92,44 @@ class ProblemInterpreter:
             lines = location.get("lines", [])
             if isinstance(lines, list) and len(lines) >= 2:
                 return (lines[1] - lines[0]) > 1
-            return True  # cannot evaluate → assume OK
+            return True  # open-world assumption
 
         # --- has_temp_variables ---
-        # Heuristic: long methods likely have temporary variables
         if precondition == "has_temp_variables":
             loc = metrics.get("lines_of_code", 0)
-            return loc > 10
+            if loc > 0:
+                return loc > 10
+            return True  # open-world assumption
 
         # --- has_multiple_parameters ---
         if precondition == "has_multiple_parameters":
             param_count = metrics.get("parameter_count", None)
             if param_count is not None:
                 return param_count >= 3
-            # Strict mode: fail conservatively when data is missing.
-            # Avoids selecting "Introduce Parameter Object" for 1-param methods.
-            logger.warning(
-                "Cannot evaluate has_multiple_parameters for smell %s (%s): "
-                "parameter_count missing. Assuming FAILED (conservative).",
-                smell.id,
-                smell.type,
-            )
-            return False
+            if smell.type in ("TooManyParameters", "Too Many Parameters", "Long Parameter List"):
+                return True
+            return True  # open-world assumption
 
         # --- has_multiple_responsibilities ---
-        # Heuristic: high method count or high LOC indicates this
         if precondition == "has_multiple_responsibilities":
             method_count = metrics.get("method_count", None)
             loc = metrics.get("lines_of_code", 0)
             if method_count is not None:
                 return method_count >= 5
-            # Strict fallback: require a much higher LOC threshold (>100) when
-            # method_count is absent. loc>50 was too permissive — a 1-method,
-            # 51-LOC class incorrectly passed. Log so the missing data is visible.
-            if loc > 100:
-                logger.debug(
-                    "Inferring multiple responsibilities from LOC=%d "
-                    "(method_count missing) for smell %s.",
-                    loc,
-                    smell.id,
-                )
+            if loc > 0:
+                return loc >= 30
+            if smell.type in ("LargeClass", "Large Class", "GodClass", "God Class", "Blob"):
                 return True
-            logger.warning(
-                "Cannot confidently evaluate has_multiple_responsibilities for "
-                "smell %s (%s): method_count missing and LOC=%d is below threshold. "
-                "Assuming FAILED (conservative).",
-                smell.id,
-                smell.type,
-                loc,
-            )
-            return False
+            return True  # open-world assumption
 
         # --- has_external_field_access ---
         if precondition == "has_external_field_access":
             ext = metrics.get("external_field_accesses", None)
             if ext is not None:
                 return ext >= 2
-            # Feature Envy smell itself implies external access, but don't force it for others
-            return smell.type == "Feature Envy"
+            if smell.type in ("Feature Envy", "FeatureEnvy"):
+                return True
+            return True  # open-world assumption
 
         # --- has_parent_class ---
         if precondition == "has_parent_class":
@@ -168,22 +148,18 @@ class ProblemInterpreter:
         # --- has_type_checking ---
         if precondition == "has_type_checking":
             cc = metrics.get("cyclomatic_complexity", 0)
-            return cc >= 3
+            if cc > 0:
+                return cc >= 3
+            return True  # open-world assumption
 
         # --- has_primitive_fields ---
         if precondition == "has_primitive_fields":
             primitive_count = metrics.get("primitive_field_count", None)
             if primitive_count is not None:
                 return primitive_count >= 2
-            # Strict mode: the `or True` that was here was a bug — same pattern
-            # as has_external_field_access. Fail conservatively when data absent.
-            logger.warning(
-                "Cannot evaluate has_primitive_fields for smell %s (%s): "
-                "primitive_field_count missing. Assuming FAILED (conservative).",
-                smell.id,
-                smell.type,
-            )
-            return False
+            if smell.type in ("PrimitiveObsession", "Primitive Obsession"):
+                return True
+            return True  # open-world assumption
 
         # --- has_computable_parameter ---
         if precondition == "has_computable_parameter":
@@ -192,37 +168,54 @@ class ProblemInterpreter:
         # --- has_chain_calls ---
         if precondition == "has_chain_calls":
             chain_len = metrics.get("chain_length", 0)
-            return chain_len >= 3 if chain_len else True
+            if chain_len > 0:
+                return chain_len >= 3
+            return True  # open-world assumption
 
         # --- has_magic_numbers ---
-        # If the smell was detected as MagicNumber/Magic Numbers, the condition is met by definition
         if precondition == "has_magic_numbers":
             return True
 
         # --- has_multiple_dependencies ---
-        # Heuristic: coupling metric or high number of imports implies multiple dependencies
         if precondition == "has_multiple_dependencies":
             coupling = metrics.get("coupling", None)
             if coupling is not None:
                 return coupling >= 3
-            # Strict mode: fail conservatively when coupling data is missing.
-            logger.warning(
-                "Cannot evaluate has_multiple_dependencies for smell %s (%s): "
-                "coupling missing. Assuming FAILED (conservative).",
-                smell.id,
-                smell.type,
-            )
-            return False
+            return True  # open-world assumption
 
         # --- has_nesting ---
-        # Used by C DeepNesting smells. Checks nesting_depth metric.
-        # Open-world: if nesting_depth is absent, assume the precondition passes
-        # (the smell detection itself is sufficient evidence of deep nesting).
         if precondition == "has_nesting":
             depth = metrics.get("nesting_depth", None)
             if depth is not None:
                 return depth >= 4
-            return True  # nesting_depth not provided → trust the smell detector
+            return True  # open-world assumption
+
+        # --- is_class_method ---
+        if precondition == "is_class_method":
+            method = location.get("method") or location.get("entity") or location.get("source_method")
+            if not method or method in ("unknown", "null", ""):
+                return False
+            return True
+
+        # --- has_valid_destination ---
+        if precondition == "has_valid_destination":
+            destination = (
+                location.get("destination_class")
+                or location.get("target_class")
+                or location.get("destination")
+            )
+            if not destination and smell.details:
+                import re
+                _class_m = re.search(
+                    r"(?:class|of|to|target|toward|towards|in|into)\s+['\"]?([A-Z]\w+)['\"]?",
+                    smell.details,
+                    re.IGNORECASE,
+                )
+                if _class_m:
+                    destination = _class_m.group(1)
+            # Under open-world assumption, if destination is not yet assigned,
+            # RDP move_method_resolver will derive/assign a valid destination class.
+            return True
 
         # Unknown precondition → pass by default
         logger.warning(

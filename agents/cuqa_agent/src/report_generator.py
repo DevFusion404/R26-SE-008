@@ -37,7 +37,39 @@ try:
     )
     _C_HELPERS_AVAILABLE = True
 except ImportError:
-    _C_HELPERS_AVAILABLE = False
+    try:
+        from .c_ast_parser import (
+            _find_functions_regex,
+            _find_global_vars_regex,
+            _count_code_lines,
+            _strip_comments,
+            _strip_string_literals,
+            _INCLUDE_RE,
+            _UNSAFE_CALL_RE,
+            _NUMERIC_LIT_RE,
+            _max_nesting_depth,
+            _estimate_cyclomatic,
+            analyze_c_magic_numbers,
+        )
+        _C_HELPERS_AVAILABLE = True
+    except ImportError:
+        try:
+            from agents.cuqa_agent.src.c_ast_parser import (
+                _find_functions_regex,
+                _find_global_vars_regex,
+                _count_code_lines,
+                _strip_comments,
+                _strip_string_literals,
+                _INCLUDE_RE,
+                _UNSAFE_CALL_RE,
+                _NUMERIC_LIT_RE,
+                _max_nesting_depth,
+                _estimate_cyclomatic,
+                analyze_c_magic_numbers,
+            )
+            _C_HELPERS_AVAILABLE = True
+        except ImportError:
+            _C_HELPERS_AVAILABLE = False
 
 
 
@@ -1334,7 +1366,10 @@ def _c_metrics(source: str, filename: str) -> dict:
         "blank_lines": blank,
         "comment_lines": min(comment, loc),  # cap at total lines
         "functions": functions,
+        "function_count": functions,
+        "method_count": functions,
         "classes": 0,  # C has no classes
+        "class_count": 0,
         # C-specific extras (RDP-compatible: optional fields)
         "include_count": include_count,
         "global_variables": global_vars,
@@ -1342,18 +1377,20 @@ def _c_metrics(source: str, filename: str) -> dict:
     }
 
 
-def _analyze_c_smells(source: str, filename: str) -> list[dict]:
+def _analyze_c_smells(source: str, filename: str, repo_ref_index: set[str] | None = None) -> list[dict]:
     """
-    Detect C code smells using regex heuristics.
+    Detect C code smells using AST and regex heuristics.
 
     Rules:
       1. LongFunction         - function body > 40 lines            [high]
       2. TooManyParameters    - function with > 5 params             [medium]
-      3. DeepNesting          - nesting depth > 4                    [high]
-      4. MagicNumber          - numeric literals not in {0,1,-1,2}  [low]
-      5. UnsafeFunctionUsage  - gets/strcpy/strcat/sprintf/scanf     [high]
-      6. GlobalVariable       - global variable declaration          [medium]
-      7. LargeHeaderFile      - .h file > 300 lines                  [medium]
+      3. DeepNesting          - function nesting depth > 4           [high]
+      4. DuplicateCode        - structurally identical functions     [medium]
+      5. DeadCode             - unused static or unreferenced func   [medium]
+      6. MagicNumber          - un-aliased numeric literals          [low]
+      7. UnsafeFunctionUsage  - gets/strcpy/strcat/sprintf/scanf     [high]
+      8. GlobalVariable       - global variable declaration          [medium]
+      9. LargeHeaderFile      - .h file > 300 lines                  [medium]
     """
     if not _C_HELPERS_AVAILABLE:
         return []
@@ -1363,6 +1400,9 @@ def _analyze_c_smells(source: str, filename: str) -> list[dict]:
 
     source_lines = source.splitlines()
     funcs = _find_functions_regex(source)
+    clean_no_comments = _strip_comments(source)
+    clean = _strip_string_literals(clean_no_comments)
+
     for fn in funcs:
         body_lines = _count_code_lines(source_lines, fn["start_line"] + 1, fn["end_line"])
         if body_lines > 40:
@@ -1382,24 +1422,82 @@ def _analyze_c_smells(source: str, filename: str) -> list[dict]:
                 "entity": fn["name"],
             })
 
-    # ── 3: DeepNesting ────────────────────────────────────────────────────────
-    max_depth = _max_nesting_depth(source)
-    if max_depth > 4:
-        smells.append({
-            "type": "DeepNesting",
-            "message": f"Maximum nesting depth is {max_depth} (>4)",
-            "line": None,
-            "severity": "high",
-            "entity": filename,
-        })
+        # ── DeepNesting per function ─────────────────────────────────────────
+        fn_text_lines = source_lines[fn["start_line"] - 1 : fn["end_line"]]
+        fn_source = "\n".join(fn_text_lines)
+        fn_depth = _max_nesting_depth(fn_source)
+        if fn_depth > 4:
+            smells.append({
+                "type": "DeepNesting",
+                "message": f"Maximum nesting depth in function '{fn['name']}' is {fn_depth} (>4)",
+                "line": fn["line"],
+                "severity": "high",
+                "entity": fn["name"],
+            })
 
-    # ── 4: MagicNumber ────────────────────────────────────────────────────────
+        # ── DeadCode per function ────────────────────────────────────────────
+        fn_name = fn["name"]
+        fn_header = fn_source.split("{")[0]
+        if fn_name != "main":
+            is_static = "static" in fn_header
+            # Remove own definition from search text
+            other_text = clean.replace(fn_header, "", 1)
+            is_called_locally = bool(re.search(rf"\b{re.escape(fn_name)}\b", other_text))
+            if is_static:
+                if not is_called_locally:
+                    smells.append({
+                        "type": "DeadCode",
+                        "message": f"Unused static function '{fn_name}' is never called",
+                        "line": fn["line"],
+                        "severity": "medium",
+                        "entity": fn_name,
+                    })
+            elif repo_ref_index is not None:
+                is_called_repo = fn_name in repo_ref_index or is_called_locally
+                if not is_called_repo:
+                    smells.append({
+                        "type": "DeadCode",
+                        "message": f"C function '{fn_name}' is never referenced or called in repository",
+                        "line": fn["line"],
+                        "severity": "medium",
+                        "entity": fn_name,
+                    })
+
+    # ── DuplicateCode for C functions ─────────────────────────────────────────
+    body_hashes: dict[str, list[tuple[str, int]]] = defaultdict(list)
+    for fn in funcs:
+        fn_text_lines = source_lines[fn["start_line"] - 1 : fn["end_line"]]
+        fn_source = "\n".join(fn_text_lines)
+        fn_clean = _strip_string_literals(_strip_comments(fn_source))
+        # Normalize identifiers and whitespace
+        normalized = re.sub(r"\b[A-Za-z_]\w*\b", "VAR", fn_clean)
+        normalized = re.sub(r"\s+", " ", normalized).strip()
+        if len(normalized) > 25:
+            h = hashlib.md5(normalized.encode()).hexdigest()
+            body_hashes[h].append((fn["name"], fn["line"]))
+
+    reported_dups: set[tuple] = set()
+    for h, duplicate_funcs in body_hashes.items():
+        if len(duplicate_funcs) >= 2:
+            key = tuple(sorted(f[0] for f in duplicate_funcs))
+            if key not in reported_dups:
+                reported_dups.add(key)
+                names = [f[0] for f in duplicate_funcs]
+                for fname, fline in duplicate_funcs:
+                    smells.append({
+                        "type": "DuplicateCode",
+                        "message": f"C function '{fname}' is structurally identical to {names}",
+                        "line": fline,
+                        "severity": "medium",
+                        "entity": fname,
+                        "duplicate_group": names,
+                    })
+
+    # ── MagicNumber ────────────────────────────────────────────────────────
     c_magic_smells = analyze_c_magic_numbers(source, filename)
     smells.extend(c_magic_smells)
-    clean = _strip_string_literals(_strip_comments(source))
 
-
-    # ── 5: UnsafeFunctionUsage ────────────────────────────────────────────────
+    # ── UnsafeFunctionUsage ────────────────────────────────────────────────
     for m in _UNSAFE_CALL_RE.finditer(clean):
         fn_name = m.group("fn")
         line_no = clean[: m.start()].count("\n") + 1
@@ -1411,7 +1509,7 @@ def _analyze_c_smells(source: str, filename: str) -> list[dict]:
             "entity": fn_name,
         })
 
-    # ── 6: GlobalVariable ────────────────────────────────────────────────────
+    # ── GlobalVariable ────────────────────────────────────────────────────
     for gv in _find_global_vars_regex(source):
         smells.append({
             "type": "GlobalVariable",
@@ -1421,7 +1519,7 @@ def _analyze_c_smells(source: str, filename: str) -> list[dict]:
             "entity": gv["name"],
         })
 
-    # ── 7: LargeHeaderFile ───────────────────────────────────────────────────
+    # ── LargeHeaderFile ───────────────────────────────────────────────────
     if ext == ".h":
         loc = len(source.splitlines())
         if loc > 300:
@@ -1545,7 +1643,7 @@ def generate_file_report(
         metrics = _java_metrics(source, filename)
         language = "java"
     elif ext in (".c", ".h"):
-        smells = _analyze_c_smells(source, filename)
+        smells = _analyze_c_smells(source, filename, repo_ref_index=repo_ref_index)
         metrics = _c_metrics(source, filename)
         language = "c"
     else:

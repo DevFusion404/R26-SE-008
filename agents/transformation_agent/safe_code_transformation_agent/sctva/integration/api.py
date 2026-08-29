@@ -180,7 +180,11 @@ def _find_cuqa_workspace_file(relative_path: str) -> Path | None:
     return None
 
 
-def _find_cuqa_workspace_files(relative_paths: list[Any]) -> dict[str, Path]:
+def _find_cuqa_workspace_files(
+    relative_paths: list[Any],
+    *,
+    workspace_roots: list[Path] | None = None,
+) -> dict[str, Path]:
     """Resolve many CUQA workspace paths with one workspace scan.
 
     Large CUQA imports can include hundreds of files. Calling rglob once per
@@ -201,7 +205,7 @@ def _find_cuqa_workspace_files(relative_paths: list[Any]) -> dict[str, Path]:
     if not safe_paths:
         return {}
 
-    roots = _cuqa_workspace_candidates()
+    roots = workspace_roots if workspace_roots is not None else _cuqa_workspace_candidates()
     found: dict[str, Path] = {}
 
     for safe_path in safe_paths:
@@ -267,8 +271,10 @@ def create_sctva_blueprint() -> Blueprint:
     agent = SafeCodeTransformationValidationAgent()
     adapter = PlannerAdapter()
 
-    @bp.get("/sctva/health")
+    @bp.route("/sctva/health", methods=["GET", "OPTIONS"])
     def sctva_health() -> Any:
+        if request.method == "OPTIONS":
+            return jsonify({"status": "ok"}), 200
         return jsonify(
             {
                 "status": "ok",
@@ -288,8 +294,10 @@ def create_sctva_blueprint() -> Blueprint:
             }
         ), 200
 
-    @bp.post("/sctva/cuqa-sources")
+    @bp.route("/sctva/cuqa-sources", methods=["POST", "OPTIONS"])
     def sctva_cuqa_sources() -> Any:
+        if request.method == "OPTIONS":
+            return jsonify({"status": "ok"}), 200
         try:
             payload = request.get_json(silent=True)
             if not isinstance(payload, dict):
@@ -303,7 +311,11 @@ def create_sctva_blueprint() -> Blueprint:
             missing = []
             max_file_bytes = 5 * 1024 * 1024
             requested_paths = raw_paths[:1000]
-            resolved_paths = _find_cuqa_workspace_files(requested_paths)
+            workspace_roots = _cuqa_workspace_candidates()
+            resolved_paths = _find_cuqa_workspace_files(
+                requested_paths,
+                workspace_roots=workspace_roots,
+            )
 
             for raw_path in requested_paths:
                 safe_path = _safe_relative_source_path(raw_path)
@@ -342,13 +354,16 @@ def create_sctva_blueprint() -> Blueprint:
                     "imported": len(files),
                     "total": len(raw_paths),
                     "source": "cuqa_temp_workspace",
+                    "workspace_candidates_scanned": len(workspace_roots),
                 }
             ), 200
         except Exception as exc:
             return jsonify({"error": f"Unable to import CUQA workspace sources: {exc}"}), 500
 
-    @bp.post("/sctva/execute")
+    @bp.route("/sctva/execute", methods=["POST", "OPTIONS"])
     def sctva_execute() -> Any:
+        if request.method == "OPTIONS":
+            return jsonify({"status": "ok"}), 200
         try:
             payload = request.get_json(silent=True)
             if not isinstance(payload, dict):
@@ -366,8 +381,10 @@ def create_sctva_blueprint() -> Blueprint:
         except Exception as exc:
             return jsonify({"error": f"Internal execution error: {exc}"}), 500
 
-    @bp.post("/sctva/execute_from_rdp")
+    @bp.route("/sctva/execute_from_rdp", methods=["POST", "OPTIONS"])
     def sctva_execute_from_rdp() -> Any:
+        if request.method == "OPTIONS":
+            return jsonify({"status": "ok"}), 200
         try:
             payload = request.get_json(silent=True)
             if not isinstance(payload, dict):

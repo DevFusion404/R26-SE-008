@@ -28,7 +28,13 @@ from ..constants import (
 )
 from ..transformers import c_transformers, java_transformers, python_transformers
 from ..transformers import java_hide_delegate, python_hide_delegate, python_replace_conditional
+from ..transformers import java_extract_method
 from ..transformers.java_extract_class import _parse_java_class, declared_class_names
+from ..transformers.python_ast_fingerprints import (
+    literal_constant_bindings,
+    meaningful_top_level_statements,
+    statement_records,
+)
 from ..transformers.python_move_method_validation import validate_python_move_method
 from ..utils.io_helpers import utc_now_iso
 from ..utils.metrics import (
@@ -37,34 +43,6 @@ from ..utils.metrics import (
     jaccard_similarity,
     normalized_count_similarity,
 )
-
-
-class _PythonExtractMethodStructuralNormalizer(ast.NodeTransformer):
-    """Treat SCTVA-introduced constants as their original literal values.
-
-    Extract Method is checked after the whole RDP plan has run. A later
-    Introduce Constant action may replace ``75`` inside the extracted helper
-    with ``CONSTANT_75``. That is an intentional follow-up refactoring, not a
-    loss of the extracted grading logic.
-    """
-
-    _CONSTANT_NAME = re.compile(r"^CONSTANT_[A-Za-z0-9_]+$")
-
-    def visit_Constant(self, node: ast.Constant) -> ast.AST:
-        if isinstance(node.value, (int, float, complex)) and not isinstance(node.value, bool):
-            return ast.copy_location(
-                ast.Name(id="__sctva_literal__", ctx=ast.Load()),
-                node,
-            )
-        return node
-
-    def visit_Name(self, node: ast.Name) -> ast.AST:
-        if self._CONSTANT_NAME.match(node.id):
-            return ast.copy_location(
-                ast.Name(id="__sctva_literal__", ctx=node.ctx),
-                node,
-            )
-        return node
 
 
 class _PythonMoveMethodStructuralNormalizer(ast.NodeTransformer):
@@ -173,13 +151,21 @@ class StructuralValidator:
             if action.action_type == ACTION_NARROW_EXCEPTION_HANDLER
         ]
         extract_method_checks = [
-            self._validate_python_extract_method_action(
-                original_code=original_code,
-                transformed_code=transformed_code,
-                action=action,
+            (
+                self._validate_python_extract_method_action(
+                    original_code=original_code,
+                    transformed_code=transformed_code,
+                    action=action,
+                )
+                if language == "python"
+                else self._validate_java_extract_method_action(
+                    original_code=original_code,
+                    transformed_code=transformed_code,
+                    action=action,
+                )
             )
             for action in actions or []
-            if language == "python" and action.action_type == ACTION_EXTRACT_METHOD
+            if language in {"python", "java"} and action.action_type == ACTION_EXTRACT_METHOD
         ]
         move_method_checks = [
             self._validate_python_move_method_action(
@@ -787,6 +773,30 @@ class StructuralValidator:
             return all(values) if isinstance(node.op, ast.And) else any(values)
         return None
 
+    @staticmethod
+    def _python_literal_assignment_names(statement: ast.AST) -> list[str]:
+        if isinstance(statement, ast.Assign):
+            targets = statement.targets
+            value = statement.value
+        elif isinstance(statement, ast.AnnAssign) and statement.value is not None:
+            targets = [statement.target]
+            value = statement.value
+        else:
+            return []
+
+        try:
+            ast.literal_eval(value)
+        except (ValueError, TypeError, SyntaxError, MemoryError, RecursionError):
+            return []
+
+        names: list[str] = []
+        for target in targets:
+            if isinstance(target, ast.Name):
+                names.append(target.id)
+            else:
+                return []
+        return names
+
     def _python_dead_target(
         self,
         tree: ast.Module,
@@ -1056,6 +1066,51 @@ class StructuralValidator:
             )
         return {"passed": False, "reason": "unsupported_language"}
 
+    def _validate_java_extract_method_action(
+        self,
+        *,
+        original_code: str,
+        transformed_code: str,
+        action: RefactoringAction,
+    ) -> Dict[str, Any]:
+        params = action.parameters or {}
+        applied = params.get("applied_transformation_metadata")
+        applied = applied if isinstance(applied, dict) else {}
+        source_class = str(
+            applied.get("source_class")
+            or params.get("source_class")
+            or params.get("target_class")
+            or ""
+        ).strip()
+        source_method = str(
+            applied.get("source_method")
+            or params.get("method")
+            or params.get("method_name")
+            or ""
+        ).strip()
+        extracted_method = str(
+            applied.get("extracted_method")
+            or params.get("new_method_name")
+            or params.get("extracted_method_name")
+            or ""
+        ).strip()
+        if not all((source_class, source_method, extracted_method)):
+            return {"passed": False, "reason": "missing_java_extract_method_metadata"}
+        result = java_extract_method.validate_java_extract_method_result(
+            original_code,
+            transformed_code,
+            source_class=source_class,
+            source_method=source_method,
+            extracted_method=extracted_method,
+        )
+        compilation = applied.get("compilation_validation")
+        compilation = compilation if isinstance(compilation, dict) else {}
+        result["compilation_validation"] = compilation
+        if compilation.get("status") == "LOCAL_SOURCE_COMPILATION_ERROR":
+            result["passed"] = False
+            result["reason"] = "LOCAL_SOURCE_COMPILATION_ERROR"
+        return result
+
     def _validate_python_extract_method_action(
         self,
         *,
@@ -1085,6 +1140,8 @@ class StructuralValidator:
             or params.get("class_name")
             or ""
         ).strip()
+        applied = params.get("applied_transformation_metadata")
+        applied = applied if isinstance(applied, dict) else {}
         if not method_name or not helper_name:
             return {"passed": False, "reason": "missing_method_or_helper_name"}
 
@@ -1106,19 +1163,14 @@ class StructuralValidator:
         if before_target is None or after_target is None or helper is None:
             return {"passed": False, "reason": "target_or_requested_helper_not_found"}
 
-        before_body = self._meaningful_python_body_dumps(before_target)
-        after_body = self._meaningful_python_body_dumps(after_target)
-        helper_body = self._meaningful_python_body_dumps(helper)
-        moved_dumps = (before_body & helper_body) - after_body
-        # A direct ``return value`` in both routines is output plumbing for a
-        # successful extraction, not duplicated business logic. Compare the
-        # executable body without direct returns for the duplication check.
-        duplicated_dumps = (
-            self._meaningful_python_body_dumps(helper, exclude_direct_returns=True)
-            & self._meaningful_python_body_dumps(
-                after_target,
-                exclude_direct_returns=True,
-            )
+        statement_validation = self._python_extract_method_statement_validation(
+            before_tree=before_tree,
+            after_tree=after_tree,
+            before_target=before_target,
+            after_target=after_target,
+            helper=helper,
+            helper_name=helper_name,
+            applied_metadata=applied,
         )
         helper_calls = [
             node
@@ -1156,10 +1208,16 @@ class StructuralValidator:
         after_metrics = self._python_extract_method_metrics(after_target)
         checks = {
             "requested_new_method_exists": helper.name == helper_name,
-            "helper_contains_real_moved_logic": bool(moved_dumps),
+            "helper_contains_real_moved_logic": statement_validation[
+                "helper_contains_selected_logic"
+            ],
             "original_calls_new_method": bool(helper_calls),
-            "extracted_statements_removed_from_original": bool(moved_dumps),
-            "no_logic_duplicated": not bool(duplicated_dumps),
+            "extracted_statements_removed_from_original": statement_validation[
+                "selected_statements_removed_from_caller"
+            ],
+            "no_logic_duplicated": not bool(
+                statement_validation["duplicated_statements"]
+            ),
             "original_method_loc_reduced": after_metrics["loc"] < before_metrics["loc"],
             "original_method_complexity_not_increased": (
                 after_metrics["complexity"] <= before_metrics["complexity"]
@@ -1174,10 +1232,192 @@ class StructuralValidator:
             "helper": helper_name,
             "before_metrics": before_metrics,
             "after_metrics": after_metrics,
-            "moved_top_level_statement_count": len(moved_dumps),
-            "duplicated_top_level_statement_count": len(duplicated_dumps),
+            "moved_top_level_statement_count": statement_validation[
+                "moved_top_level_statement_count"
+            ],
+            "duplicated_top_level_statement_count": len(
+                statement_validation["duplicated_statements"]
+            ),
+            "duplicated_statements": statement_validation["duplicated_statements"],
+            "selected_ast_statements": statement_validation["selected_ast_statements"],
+            "statement_identity_source": statement_validation["statement_identity_source"],
             "checks": checks,
         }
+
+    @staticmethod
+    def _python_extract_method_statement_validation(
+        *,
+        before_tree: ast.Module,
+        after_tree: ast.Module,
+        before_target: ast.FunctionDef | ast.AsyncFunctionDef,
+        after_target: ast.FunctionDef | ast.AsyncFunctionDef,
+        helper: ast.FunctionDef | ast.AsyncFunctionDef,
+        helper_name: str,
+        applied_metadata: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Prove selected top-level statements moved exactly once."""
+        before_bindings = literal_constant_bindings(before_tree)
+        after_bindings = literal_constant_bindings(after_tree)
+        before_records = statement_records(
+            meaningful_top_level_statements(
+                before_target,
+                exclude_direct_returns=True,
+            ),
+            constant_bindings=before_bindings,
+        )
+        helper_records = statement_records(
+            meaningful_top_level_statements(
+                helper,
+                exclude_direct_returns=True,
+            ),
+            constant_bindings=after_bindings,
+        )
+        caller_statements = [
+            statement
+            for statement in meaningful_top_level_statements(
+                after_target,
+                exclude_direct_returns=True,
+            )
+            if not StructuralValidator._python_helper_interface_statement(
+                statement,
+                helper_name,
+            )
+        ]
+        caller_records = statement_records(
+            caller_statements,
+            constant_bindings=after_bindings,
+        )
+
+        selected_records = applied_metadata.get("selected_ast_statements")
+        pre_extraction_records = applied_metadata.get(
+            "pre_extraction_caller_ast_statements"
+        )
+        tracked = (
+            isinstance(selected_records, list)
+            and bool(selected_records)
+            and all(isinstance(item, dict) for item in selected_records)
+            and isinstance(pre_extraction_records, list)
+            and all(isinstance(item, dict) for item in pre_extraction_records)
+        )
+        if tracked:
+            selected_records = [dict(item) for item in selected_records]
+            pre_extraction_records = [dict(item) for item in pre_extraction_records]
+            identity_source = "transformer_selected_ast_nodes"
+        else:
+            # Direct validator callers and legacy logs do not have extraction
+            # metadata. Infer only top-level statements present in both the
+            # original caller and helper; nested child nodes are never added.
+            before_counts = Counter(
+                item["normalized_fingerprint"] for item in before_records
+            )
+            helper_counts = Counter(
+                item["normalized_fingerprint"] for item in helper_records
+            )
+            inferred_counts = before_counts & helper_counts
+            selected_records = []
+            remaining = Counter(inferred_counts)
+            for record in before_records:
+                fingerprint = record["normalized_fingerprint"]
+                if remaining[fingerprint] <= 0:
+                    continue
+                selected_records.append(dict(record))
+                remaining[fingerprint] -= 1
+            pre_extraction_records = before_records
+            identity_source = "legacy_top_level_ast_inference"
+
+        selected_counts = Counter(
+            item.get("normalized_fingerprint")
+            for item in selected_records
+            if item.get("normalized_fingerprint")
+        )
+        pre_counts = Counter(
+            item.get("normalized_fingerprint")
+            for item in pre_extraction_records
+            if item.get("normalized_fingerprint")
+        )
+        helper_counts = Counter(
+            item["normalized_fingerprint"] for item in helper_records
+        )
+        caller_counts = Counter(
+            item["normalized_fingerprint"] for item in caller_records
+        )
+
+        helper_contains_selected = bool(selected_counts) and all(
+            helper_counts[fingerprint] >= count
+            for fingerprint, count in selected_counts.items()
+        )
+        duplicated: list[Dict[str, Any]] = []
+        selected_by_fingerprint = {
+            fingerprint: next(
+                item
+                for item in selected_records
+                if item.get("normalized_fingerprint") == fingerprint
+            )
+            for fingerprint in selected_counts
+        }
+        helper_lines = {
+            fingerprint: next(
+                (
+                    int(item.get("line") or 0)
+                    for item in helper_records
+                    if item.get("normalized_fingerprint") == fingerprint
+                ),
+                0,
+            )
+            for fingerprint in selected_counts
+        }
+        for fingerprint, selected_count in selected_counts.items():
+            expected_remaining = max(pre_counts[fingerprint] - selected_count, 0)
+            matching_caller = [
+                item
+                for item in caller_records
+                if item.get("normalized_fingerprint") == fingerprint
+            ]
+            duplicate_count = max(len(matching_caller) - expected_remaining, 0)
+            if duplicate_count <= 0:
+                continue
+            selected_record = selected_by_fingerprint[fingerprint]
+            for caller_record in matching_caller[-duplicate_count:]:
+                duplicated.append({
+                    "original_ast_type": selected_record.get("ast_type", ""),
+                    "caller_line": int(caller_record.get("line") or 0),
+                    "helper_line": helper_lines[fingerprint],
+                    "normalized_fingerprint": fingerprint,
+                    "reason": "selected_extracted_statement_still_remains_in_caller",
+                })
+
+        selected_removed = bool(selected_counts) and not duplicated
+        moved_count = sum(
+            min(count, helper_counts[fingerprint])
+            for fingerprint, count in selected_counts.items()
+        )
+        return {
+            "helper_contains_selected_logic": helper_contains_selected,
+            "selected_statements_removed_from_caller": selected_removed,
+            "moved_top_level_statement_count": moved_count,
+            "duplicated_statements": duplicated,
+            "selected_ast_statements": selected_records,
+            "statement_identity_source": identity_source,
+        }
+
+    @staticmethod
+    def _python_helper_interface_statement(
+        statement: ast.stmt,
+        helper_name: str,
+    ) -> bool:
+        """Recognize invocation/return plumbing introduced at the call site."""
+        if not isinstance(statement, (ast.Expr, ast.Assign, ast.AnnAssign, ast.Return)):
+            return False
+        return any(
+            isinstance(node, ast.Call)
+            and (
+                isinstance(node.func, ast.Name)
+                and node.func.id == helper_name
+                or isinstance(node.func, ast.Attribute)
+                and node.func.attr == helper_name
+            )
+            for node in ast.walk(statement)
+        )
 
     @staticmethod
     def _find_python_extract_method_target(
@@ -1224,27 +1464,6 @@ class StructuralValidator:
                 and node.name == method_name
             ]
         return candidates[0] if len(candidates) == 1 else None
-
-    @staticmethod
-    def _meaningful_python_body_dumps(
-        function: ast.FunctionDef | ast.AsyncFunctionDef,
-        *,
-        exclude_direct_returns: bool = False,
-    ) -> set[str]:
-        body = list(function.body)
-        if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant) and isinstance(body[0].value.value, str):
-            body = body[1:]
-        if exclude_direct_returns:
-            body = [statement for statement in body if not isinstance(statement, ast.Return)]
-        return {
-            ast.dump(
-                _PythonExtractMethodStructuralNormalizer().visit(
-                    copy.deepcopy(statement)
-                ),
-                include_attributes=False,
-            )
-            for statement in body
-        }
 
     @staticmethod
     def _python_extract_method_metrics(

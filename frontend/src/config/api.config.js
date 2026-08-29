@@ -37,6 +37,7 @@ const API_CONFIG = {
       parseAst: '/api/parse-ast',
       qualityReport: '/api/quality-report',
       files: '/api/files',
+      repositoryOverview: '/api/repository-overview',
     },
     timeout: 120000, // 2 minutes for analysis
   },
