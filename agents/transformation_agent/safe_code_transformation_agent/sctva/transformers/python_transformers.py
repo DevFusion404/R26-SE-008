@@ -1350,6 +1350,382 @@ def apply_remove_dead_code(
     )
 
 
+def resolve_bare_exception_handler(
+    source_code: str,
+    *,
+    source_line: Optional[int] = None,
+    source_class: str = "",
+    source_method: str = "",
+    handler_name: str = "",
+    target_exception_type: str = "",
+    require_specific_exception: bool = True,
+) -> dict[str, Any]:
+    """Resolve one current-AST bare handler and a *proven* replacement type.
+
+    Line numbers and class/method names from RDP are hints: preceding SCTVA
+    actions can legitimately move a handler.  A target is accepted only when
+    exactly one bare handler remains after applying every usable hint.
+    """
+    try:
+        tree = ast.parse(source_code)
+    except SyntaxError:
+        return {"status": "review_required", "reason": "PYTHON_PARSE_FAILED"}
+
+    parents = {
+        child: parent
+        for parent in ast.walk(tree)
+        for child in ast.iter_child_nodes(parent)
+    }
+
+    def context(handler: ast.ExceptHandler) -> tuple[str, str, ast.Try | None]:
+        class_name = ""
+        method_name = ""
+        current: ast.AST | None = handler
+        parent_try: ast.Try | None = None
+        while current is not None:
+            current = parents.get(current)
+            if isinstance(current, ast.Try) and parent_try is None:
+                parent_try = current
+            if isinstance(current, (ast.FunctionDef, ast.AsyncFunctionDef)) and not method_name:
+                method_name = current.name
+            if isinstance(current, ast.ClassDef) and not class_name:
+                class_name = current.name
+        return class_name, method_name, parent_try
+
+    def method_context(method: ast.AST) -> tuple[str, str]:
+        class_name = ""
+        current: ast.AST | None = method
+        while current is not None:
+            current = parents.get(current)
+            if isinstance(current, ast.ClassDef):
+                class_name = current.name
+                break
+        return class_name, str(getattr(method, "name", "") or "")
+
+    def handler_belongs_to(handler: ast.ExceptHandler, method: ast.AST) -> bool:
+        current: ast.AST | None = handler
+        while current is not None:
+            if current is method:
+                return True
+            current = parents.get(current)
+        return False
+
+    bare_handlers = [
+        handler
+        for handler in ast.walk(tree)
+        if isinstance(handler, ast.ExceptHandler) and handler.type is None
+    ]
+    if not bare_handlers:
+        return {"status": "not_applicable", "reason": "BARE_EXCEPT_TARGET_NOT_FOUND"}
+
+    method_nodes = [
+        node for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    ]
+    selected_method: ast.AST | None = None
+    target_resolution = "file_bare_handler_fallback"
+    explicit_matches = [
+        method for method in method_nodes
+        if method_context(method) == (source_class, source_method)
+    ] if source_class and source_method else []
+    method_matches = [
+        method for method in method_nodes
+        if str(getattr(method, "name", "") or "") == source_method
+    ] if source_method else []
+    line_matches = [
+        method for method in method_nodes
+        if source_line is not None
+        and int(getattr(method, "lineno", 0) or 0) <= source_line <= int(
+            getattr(method, "end_lineno", 0) or 0
+        )
+    ]
+
+    if len(explicit_matches) == 1:
+        selected_method = explicit_matches[0]
+        target_resolution = "explicit_class_and_method"
+    elif len(method_matches) == 1:
+        selected_method = method_matches[0]
+        target_resolution = "explicit_method_current_ast"
+    elif line_matches:
+        # Nested callables can share a line range. The innermost enclosing
+        # callable is the handler's semantic owner.
+        selected_method = min(
+            line_matches,
+            key=lambda method: int(getattr(method, "end_lineno", 0) or 0)
+            - int(getattr(method, "lineno", 0) or 0),
+        )
+        target_resolution = "current_ast_enclosing_method_from_line"
+    elif len(explicit_matches) > 1 or len(method_matches) > 1:
+        return {
+            "status": "review_required",
+            "reason": "AMBIGUOUS_SOURCE_METHOD",
+            "candidate_count": len(explicit_matches) or len(method_matches),
+        }
+
+    candidates = (
+        [handler for handler in bare_handlers if handler_belongs_to(handler, selected_method)]
+        if selected_method is not None
+        else list(bare_handlers)
+    )
+    if handler_name:
+        matches = [handler for handler in candidates if str(handler.name or "") == handler_name]
+        if matches:
+            candidates = matches
+    if source_line is not None:
+        matches = [handler for handler in candidates if handler.lineno == source_line]
+        if matches:
+            candidates = matches
+
+    if len(candidates) != 1:
+        return {
+            "status": "review_required",
+            "reason": "AMBIGUOUS_BARE_EXCEPT_TARGET" if len(candidates) > 1 else "BARE_EXCEPT_TARGET_NOT_FOUND",
+            "candidate_count": len(candidates),
+            "target_resolution": target_resolution,
+        }
+
+    handler = candidates[0]
+    resolved_class, resolved_method, try_node = context(handler)
+    target_metadata = {
+        "original_handler": "bare_except",
+        "source_class": resolved_class,
+        "source_method": resolved_method,
+        "qualified_source_method": (
+            f"{resolved_class}.{resolved_method}"
+            if resolved_class and resolved_method else resolved_method
+        ),
+        "handler_line": handler.lineno,
+        "resolved_handler_line": handler.lineno,
+        "handler_index": (
+            try_node.handlers.index(handler) if try_node is not None else 0
+        ),
+        "try_line": int(getattr(try_node, "lineno", 0) or 0),
+        "handler_name": str(handler.name or ""),
+        "original_handler_type": "bare_except",
+        "target_resolution": target_resolution,
+    }
+
+    # Some callers only need stable target identity for de-duplication or to
+    # repair a legacy planner action.  Do not make target resolution depend on
+    # whether the exception type has already been proven.
+    if not require_specific_exception:
+        return {
+            "status": "success",
+            **target_metadata,
+            "replacement_exception": "",
+            "exception_resolution_strategy": "target_only",
+        }
+
+    replacement = str(target_exception_type or "").strip()
+    strategy = "explicit_plan_exception_type" if replacement else ""
+    if replacement in {"Exception", "BaseException"}:
+        replacement = ""
+        strategy = ""
+
+    if not replacement and try_node is not None:
+        mysql_error = _python_mysql_error_for_try(tree, try_node)
+        if mysql_error:
+            mysql_exception_types = {
+                mysql_error,
+                *_python_database_row_access_exceptions(try_node),
+            }
+            replacement = _python_exception_tuple_text(
+                sorted(mysql_exception_types)
+            )
+            strategy = "import_and_try_body_context"
+
+    if not replacement and try_node is not None:
+        inferred = sorted({
+            exception_type
+            for _, exception_types in _python_try_risky_statement_exceptions(tree, try_node)
+            for exception_type in exception_types
+            if exception_type not in {"Exception", "BaseException"}
+        })
+        if len(inferred) == 1:
+            replacement = inferred[0]
+            strategy = "try_body_ast_exception_evidence"
+
+    if not _valid_python_exception_type(replacement):
+        return {
+            "status": "review_required",
+            "reason": "SPECIFIC_EXCEPTION_TYPE_NOT_PROVEN",
+            "source_class": resolved_class,
+            "source_method": resolved_method,
+            "handler_line": handler.lineno,
+        }
+
+    return {
+        "status": "success",
+        **target_metadata,
+        "replacement_exception": replacement,
+        "exception_resolution_strategy": strategy,
+    }
+
+
+def _python_mysql_error_for_try(tree: ast.Module, try_node: ast.Try) -> str:
+    """Return a MySQL error class only with import and DB-operation evidence."""
+    imported_error_names: set[str] = set()
+    for node in tree.body:
+        if isinstance(node, ast.ImportFrom) and str(node.module or "").startswith("mysql.connector"):
+            for alias in node.names:
+                if alias.name in {"Error", "DatabaseError", "InterfaceError"}:
+                    imported_error_names.add(alias.asname or alias.name)
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == "mysql.connector":
+                    imported_error_names.add(f"{alias.asname or 'mysql'}.connector.Error")
+
+    if not imported_error_names:
+        return ""
+    calls = {
+        _python_call_name(node.func).lower()
+        for statement in try_node.body
+        for node in ast.walk(statement)
+        if isinstance(node, ast.Call)
+    }
+    database_operations = {
+        "connect", "cursor", "execute", "executemany", "fetchone",
+        "fetchall", "fetchmany", "commit", "rollback", "close",
+    }
+    proven_database_receivers = _python_database_receivers_before_try(tree, try_node)
+    has_database_operation = any(
+        call.startswith("mysql.connector.")
+        or (
+            call.split(".")[-1] in database_operations
+            and (
+                call.rsplit(".", 1)[0] in proven_database_receivers
+                or any(
+                    token in call
+                    for token in ("db", "database", "conn", "connection", "cursor")
+                )
+            )
+        )
+        for call in calls
+    )
+    return sorted(imported_error_names)[0] if has_database_operation else ""
+
+
+def _python_database_row_access_exceptions(try_node: ast.Try) -> set[str]:
+    """Return locally provable row-access failures inside a DB try block.
+
+    ``cursor.fetchone()`` commonly feeds an indexed row immediately afterward.
+    Even when the database call itself is covered by the connector's ``Error``
+    class, a missing row can make the value non-subscriptable and an incomplete
+    sequence can make the index invalid.  Keeping those locally visible failure
+    modes in the narrowed handler avoids changing a legacy login/fallback path
+    into an uncaught ``TypeError``/``IndexError``.
+    """
+
+    fetched_names: set[str] = set()
+    for statement in try_node.body:
+        if not isinstance(statement, (ast.Assign, ast.AnnAssign)):
+            continue
+        value = statement.value
+        if not isinstance(value, ast.Call):
+            continue
+        call_name = _python_call_name(value.func).lower()
+        if call_name.rsplit(".", 1)[-1] != "fetchone":
+            continue
+        targets = list(statement.targets) if isinstance(statement, ast.Assign) else [statement.target]
+        for target in targets:
+            if isinstance(target, ast.Name):
+                fetched_names.add(target.id)
+
+    if not fetched_names:
+        return set()
+
+    for statement in try_node.body:
+        for node in ast.walk(statement):
+            if (
+                isinstance(node, ast.Subscript)
+                and isinstance(node.value, ast.Name)
+                and node.value.id in fetched_names
+            ):
+                return {"IndexError", "TypeError"}
+    return set()
+
+
+def _python_database_receivers_before_try(
+    tree: ast.Module,
+    try_node: ast.Try,
+) -> set[str]:
+    """Prove local names/attributes that hold DB connections or cursors.
+
+    Real legacy code frequently creates a cursor before the ``try`` block and
+    then uses a short variable such as ``cur`` inside the protected body.  A
+    name-only heuristic therefore misses valid database evidence.  This helper
+    follows simple assignment lineage such as::
+
+        cur = self.conn.cursor()
+        try:
+            cur.execute(...)
+
+    Only direct assignments before the target try are used; no speculative
+    interprocedural type inference is performed.
+    """
+
+    parents = {
+        child: parent
+        for parent in ast.walk(tree)
+        for child in ast.iter_child_nodes(parent)
+    }
+
+    owner: ast.AST | None = try_node
+    while owner is not None:
+        owner = parents.get(owner)
+        if isinstance(owner, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Module)):
+            break
+
+    statements = list(getattr(owner, "body", []) or [])
+    known: set[str] = set()
+
+    def assigned_names(statement: ast.AST) -> list[str]:
+        targets: list[ast.expr] = []
+        if isinstance(statement, ast.Assign):
+            targets = list(statement.targets)
+        elif isinstance(statement, ast.AnnAssign):
+            targets = [statement.target]
+        result: list[str] = []
+        for target in targets:
+            name = _python_call_name(target)
+            if name:
+                result.append(name.lower())
+        return result
+
+    for statement in statements:
+        if statement is try_node:
+            break
+        if not isinstance(statement, (ast.Assign, ast.AnnAssign)):
+            continue
+        value = statement.value
+        if value is None:
+            continue
+        value_name = _python_call_name(value).lower()
+        value_is_db = False
+        if isinstance(value, ast.Call):
+            call_name = _python_call_name(value.func).lower()
+            leaf = call_name.rsplit(".", 1)[-1]
+            receiver = call_name.rsplit(".", 1)[0] if "." in call_name else ""
+            value_is_db = (
+                call_name.startswith("mysql.connector.")
+                or leaf in {"connect", "cursor"}
+                and (
+                    receiver in known
+                    or any(
+                        token in receiver
+                        for token in ("db", "database", "conn", "connection", "cursor")
+                    )
+                )
+            )
+        elif value_name:
+            value_is_db = value_name in known
+
+        if value_is_db:
+            known.update(assigned_names(statement))
+
+    return known
+
+
 def apply_narrow_exception_handler(
     source_code: str,
     *,
@@ -1357,6 +1733,8 @@ def apply_narrow_exception_handler(
     original_exception_type: str = "",
     target_exception_type: str = "",
     handler_name: str = "",
+    source_class: str = "",
+    source_method: str = "",
 ) -> Tuple[str, int]:
     """Narrow broad Python exception handling.
 
@@ -1372,20 +1750,36 @@ def apply_narrow_exception_handler(
     except SyntaxError:
         return source_code, 0
 
+    # Bare handlers need a specific, evidence-backed type.  This resolution is
+    # separate from broad ``except Exception`` narrowing, which can split a
+    # try body when there are multiple independently-provable operations.
+    if not original_exception_type:
+        resolution = resolve_bare_exception_handler(
+            source_code,
+            source_line=source_line,
+            source_class=source_class,
+            source_method=source_method,
+            handler_name=handler_name,
+            target_exception_type=target_exception_type,
+        )
+        if resolution.get("status") != "success":
+            return source_code, 0
+        source_line = int(resolution["handler_line"])
+        handler_name = str(resolution.get("handler_name") or "")
+        target_exception_type = str(resolution["replacement_exception"])
+
     candidates: list[tuple[ast.Try, ast.ExceptHandler]] = []
     for try_node in (node for node in ast.walk(tree) if isinstance(node, ast.Try)):
-        if try_node.orelse or try_node.finalbody or len(try_node.handlers) != 1:
-            continue
-        handler = try_node.handlers[0]
-        handler_type = _python_exception_expression_name(handler.type)
-        if original_exception_type:
-            if handler_type != original_exception_type:
+        for handler in try_node.handlers:
+            handler_type = _python_exception_expression_name(handler.type)
+            if original_exception_type:
+                if handler_type != original_exception_type:
+                    continue
+            elif handler.type is not None:
                 continue
-        elif handler.type is not None:
-            continue
-        if handler_name and str(handler.name or "") != handler_name:
-            continue
-        candidates.append((try_node, handler))
+            if handler_name and str(handler.name or "") != handler_name:
+                continue
+            candidates.append((try_node, handler))
 
     if source_line is not None:
         line_matches = [
@@ -1416,6 +1810,9 @@ def apply_narrow_exception_handler(
         and len(try_node.body) > 1
         and bool(risky_statements)
         and _python_try_body_is_safe_to_split(try_node)
+        and not try_node.orelse
+        and not try_node.finalbody
+        and len(try_node.handlers) == 1
     )
     if can_split:
         transformed = _split_python_overreaching_try(
@@ -2713,21 +3110,39 @@ def resolve_inline_class_target(
         tree = ast.parse(source_code)
     except SyntaxError:
         return {"status": "review_required", "reason": "SOURCE_PARSE_FAILED"}
+    # Explicit RDP targets are resolved by qualified class identity first.
+    # This accepts ``Class``, ``Outer.Inner`` and module-qualified forms while
+    # refusing ambiguous short names instead of silently selecting a top-level
+    # class with the same spelling.
+    from . import python_inline_class
+
     classes = [node for node in tree.body if isinstance(node, ast.ClassDef)]
     class_names = {node.name for node in classes}
     requested = str(class_to_inline or "").strip()
-    exact_matches = [node for node in classes if node.name == requested]
-    if requested and len(exact_matches) == 1:
-        return {
+    explicit = python_inline_class.resolve_python_inline_class_target(
+        source_code,
+        class_to_inline=requested,
+    ) if requested else {}
+    if requested and explicit.get("status") == "success":
+        result = {
             "status": "success",
-            "class_to_inline": requested,
+            "class_to_inline": str(explicit["class_to_inline"]),
             "strategy": "explicit_plan_target",
             "target_resolution": "explicit_plan_target",
         }
-    if len(exact_matches) > 1:
+        # Retain the established compact response for top-level classes while
+        # carrying qualified evidence when a nested/module-qualified target
+        # actually needs it.
+        if "." in str(explicit.get("class_to_inline") or "") or "." in requested:
+            result["qualified_class_name"] = str(
+                explicit.get("qualified_class_name") or ""
+            )
+            result["class_model"] = dict(explicit.get("class_model") or {})
+        return result
+    if requested and explicit.get("status") == "review_required":
         return {
             "status": "review_required",
-            "reason": "DUPLICATE_EXPLICIT_CLASS_TARGET",
+            "reason": str(explicit.get("reason") or "DUPLICATE_EXPLICIT_CLASS_TARGET"),
             "target_resolution": "explicit_plan_target_ambiguous",
         }
 
@@ -2779,12 +3194,13 @@ def apply_inline_class(
     project_source_files: Sequence[dict[str, Any]] | None = None,
     current_file_name: str = "",
 ) -> Tuple[str, int, dict[str, Any]]:
-    """Inline a small, statically-contained Python helper class.
+    """Inline a Python class using the safest supported strategy.
 
-    Only module-local helper classes are accepted.  The class is converted to
-    module functions and every proven construction/call/field reference is
-    updated atomically.  Any dynamic, inherited, or unresolved usage returns
-    ``review_required`` before the source is changed.
+    Supported cases include owned-composition helpers, small module-local
+    helpers, empty/transparent local inheritance aliases, and prior-lineage
+    cleanup.  Distinct framework/configuration classes are intentionally
+    reported as not applicable, while genuinely ambiguous dynamic/inheritance
+    cases remain review-required.
     """
 
     def review(reason: str) -> Tuple[str, int, dict[str, Any]]:
@@ -2800,7 +3216,40 @@ def apply_inline_class(
     )
     if resolution.get("status") != "success":
         return review(str(resolution.get("reason") or "INLINE_CLASS_TARGET_NOT_FOUND"))
-    class_to_inline = str(resolution["class_to_inline"])
+    from . import python_inline_class
+
+    strategy = python_inline_class.select_python_inline_class_strategy(
+        source_code,
+        class_to_inline=str(resolution["class_to_inline"]),
+        project_source_files=project_source_files or [],
+        current_file_name=current_file_name,
+    )
+    if strategy.get("status") != "success":
+        return source_code, 0, {
+            "status": str(strategy.get("status") or "review_required"),
+            "reason": str(strategy.get("reason") or "INLINE_CLASS_REVIEW_REQUIRED"),
+            "class_to_inline": str(resolution["class_to_inline"]),
+            "qualified_class_name": str(strategy.get("qualified_class_name") or ""),
+            "strategy": str(strategy.get("strategy") or ""),
+            "class_model": dict(strategy.get("class_model") or {}),
+            "reference_files": list(strategy.get("reference_files") or []),
+        }
+
+    # Direct callers of python_transformers.apply_inline_class must receive the
+    # same inheritance support as the TransformationEngine.  Previously only
+    # the engine's owned-composition pre-pass could reach the inheritance
+    # collapse implementation, so direct calls silently fell back to the old
+    # module-function transformer.
+    if strategy.get("strategy") == "simple_inheritance_collapse":
+        return python_inline_class.apply_owned_inline_class(
+            source_code,
+            class_to_inline=str(strategy.get("class_name") or resolution["class_to_inline"]),
+            project_source_files=project_source_files or [],
+            current_file_name=current_file_name,
+            prior_transformations=prior_transformations or [],
+        )
+
+    class_to_inline = str(strategy.get("class_name") or resolution["class_to_inline"])
     if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", class_to_inline):
         return review("INVALID_CLASS_TARGET")
     try:
@@ -2815,9 +3264,6 @@ def apply_inline_class(
     if len(classes) != 1:
         return review("TARGET_CLASS_NOT_FOUND")
     class_node = classes[0]
-    if class_node.bases or class_node.keywords or class_node.decorator_list:
-        return review("INHERITANCE_OR_METACLASS_UNSUPPORTED")
-
     # A preceding Move Method can leave its old source class as only a
     # docstring/pass statement.  Resolve that current symbol state before the
     # normal Inline Class strategies: an empty class is not a missing target.
@@ -3493,20 +3939,43 @@ def _apply_inline_class_into_owner(
 def _inline_owner_constructor_field_parameters(
     constructor: ast.FunctionDef,
 ) -> tuple[list[str], str]:
+    """Return owner-constructor field mappings for Inline Class.
+
+    A constructor containing only a docstring and/or ``pass`` is a valid
+    stateless constructor.  Older logic required at least one argument after
+    ``self`` and treated ``pass`` as executable state, which incorrectly
+    rejected harmless lazy classes such as ``Main`` and ``Database``.
+    """
+
     if (
         constructor.decorator_list
         or constructor.args.posonlyargs
         or constructor.args.vararg
         or constructor.args.kwonlyargs
-        or len(constructor.args.args) < 2
+        or len(constructor.args.args) < 1
         or constructor.args.args[0].arg != "self"
     ):
         return [], "CONSTRUCTOR_SIGNATURE_UNSUPPORTED"
+
     parameters = [argument.arg for argument in constructor.args.args[1:]]
     fields: list[str] = []
     body = list(constructor.body)
-    if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant) and isinstance(body[0].value.value, str):
+
+    if (
+        body
+        and isinstance(body[0], ast.Expr)
+        and isinstance(body[0].value, ast.Constant)
+        and isinstance(body[0].value.value, str)
+    ):
         body = body[1:]
+
+    # ``pass`` carries no state and no side effect.  Ignore it when deciding
+    # whether the constructor is safe to inline.
+    body = [statement for statement in body if not isinstance(statement, ast.Pass)]
+
+    if not parameters and not body:
+        return [], ""
+
     for statement in body:
         if not (
             isinstance(statement, ast.Assign)
@@ -3519,6 +3988,7 @@ def _inline_owner_constructor_field_parameters(
         ):
             return [], "CONSTRUCTOR_STATE_UNSUPPORTED"
         fields.append(statement.targets[0].attr)
+
     if len(fields) != len(parameters) or len(set(fields)) != len(fields):
         return [], "CONSTRUCTOR_FIELD_MAPPING_UNSUPPORTED"
     return fields, ""
@@ -3634,6 +4104,13 @@ def _render_inlined_owner_method(
 def _inline_class_constructor_fields(
     constructor: ast.FunctionDef | None,
 ) -> tuple[dict[str, str], str]:
+    """Extract safe literal constructor state for module-function Inline Class.
+
+    ``__init__(self): pass`` is intentionally treated as an empty/stateless
+    constructor.  Complex statements, calls, control flow, or non-literal
+    field values remain review-required through the existing error codes.
+    """
+
     if constructor is None:
         return {}, ""
     if (
@@ -3645,10 +4122,25 @@ def _inline_class_constructor_fields(
         or constructor.args.args[0].arg != "self"
     ):
         return {}, "CONSTRUCTOR_SIGNATURE_UNSUPPORTED"
+
     fields: dict[str, str] = {}
     body = list(constructor.body)
-    if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant) and isinstance(body[0].value.value, str):
+
+    if (
+        body
+        and isinstance(body[0], ast.Expr)
+        and isinstance(body[0].value, ast.Constant)
+        and isinstance(body[0].value.value, str)
+    ):
         body = body[1:]
+
+    # ``pass`` is syntactic filler only; it does not represent constructor
+    # state and must not cause CONSTRUCTOR_STATE_UNSUPPORTED.
+    body = [statement for statement in body if not isinstance(statement, ast.Pass)]
+
+    if not body:
+        return {}, ""
+
     for statement in body:
         if not (
             isinstance(statement, ast.Assign)

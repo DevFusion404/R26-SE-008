@@ -140,12 +140,36 @@ class StructuralValidator:
             for action in actions or []
             if action.action_type == ACTION_REMOVE_DEAD_CODE
         ]
+        expected_bare_except_targets = [
+            {
+                "qualified_source_method": str(
+                    (action.parameters or {}).get("qualified_source_method") or ""
+                ),
+                "resolved_handler_line": int(
+                    (action.parameters or {}).get("resolved_handler_line")
+                    or (action.parameters or {}).get("source_line")
+                    or 0
+                ),
+            }
+            for action in actions or []
+            if action.action_type == ACTION_NARROW_EXCEPTION_HANDLER
+            and str((action.parameters or {}).get("original_handler") or "") == "bare_except"
+        ]
         exception_handler_checks = [
             self._validate_narrow_exception_handler_action(
                 language=language,
                 original_code=original_code,
                 transformed_code=transformed_code,
-                action=action,
+                action=RefactoringAction(
+                    action_type=action.action_type,
+                    parameters={
+                        **(action.parameters or {}),
+                        "_expected_bare_except_targets": expected_bare_except_targets,
+                    },
+                    source_step_id=action.source_step_id,
+                    source_refactoring=action.source_refactoring,
+                    warnings=list(action.warnings),
+                ),
             )
             for action in actions or []
             if action.action_type == ACTION_NARROW_EXCEPTION_HANDLER
@@ -257,6 +281,22 @@ class StructuralValidator:
             # every accepted State(N-1) -> State(N) deletion.  A small module
             # can legitimately have low whole-file similarity after its only
             # dead declaration is removed; do not override that stronger proof.
+            score = max(score, threshold)
+        if extract_method_checks and all(item.get("passed") for item in extract_method_checks):
+            # Extract Method intentionally relocates statements into a new helper.
+            # The dedicated proof validates the exact moved AST statements, the
+            # replacement call, data-flow interface, owner scope and absence of
+            # duplicated logic.  That semantic contract is stronger than a
+            # generic whole-file similarity score on small source files.
+            score = max(score, threshold)
+        if inline_class_checks and all(item.get("passed") for item in inline_class_checks):
+            # Inline Class intentionally changes the declaration shape (for
+            # example class -> module function or owned-class merge).  The
+            # dedicated AST contract below proves class removal, method/state
+            # preservation and call-site cleanup more precisely than generic
+            # whole-file similarity.  Do not reject a semantically complete
+            # Inline Class solely because that expected shape change lowers the
+            # normalized similarity score on a small file.
             score = max(score, threshold)
         passed = score >= threshold and specific_passed
         message = (
@@ -1249,27 +1289,30 @@ class StructuralValidator:
         """Prove that Python Extract Method moved real logic, not a wrapper."""
 
         params = action.parameters or {}
+        applied = params.get("applied_transformation_metadata")
+        applied = applied if isinstance(applied, dict) else {}
         method_name = str(
-            params.get("method")
+            applied.get("source_method")
+            or params.get("method")
             or params.get("method_name")
             or params.get("function")
             or params.get("function_name")
             or ""
         ).strip()
         helper_name = str(
-            params.get("new_method_name")
+            applied.get("extracted_method")
+            or params.get("new_method_name")
             or params.get("new_function_name")
             or params.get("extracted_method_name")
             or ""
         ).strip()
         source_class = str(
-            params.get("source_class")
+            applied.get("source_class")
+            or params.get("source_class")
             or params.get("target_class")
             or params.get("class_name")
             or ""
         ).strip()
-        applied = params.get("applied_transformation_metadata")
-        applied = applied if isinstance(applied, dict) else {}
         if not method_name or not helper_name:
             return {"passed": False, "reason": "missing_method_or_helper_name"}
 
@@ -1279,17 +1322,29 @@ class StructuralValidator:
         except SyntaxError:
             return {"passed": False, "reason": "parse_failed"}
 
-        before_target = self._find_python_extract_method_target(
+        before_target, before_owner = self._find_python_extract_method_target_with_owner(
             before_tree, method_name, source_class
         )
-        after_target = self._find_python_extract_method_target(
+        after_target, after_owner = self._find_python_extract_method_target_with_owner(
             after_tree, method_name, source_class
         )
-        helper = self._find_python_extract_method_target(
+        helper, helper_owner = self._find_python_extract_method_target_with_owner(
             after_tree, helper_name, source_class
         )
         if before_target is None or after_target is None or helper is None:
-            return {"passed": False, "reason": "target_or_requested_helper_not_found"}
+            return {
+                "passed": False,
+                "reason": "target_or_requested_helper_not_found",
+                "method": method_name,
+                "helper": helper_name,
+                "requested_source_class": source_class,
+                "resolved_before_owner": before_owner,
+                "resolved_after_owner": after_owner,
+                "resolved_helper_owner": helper_owner,
+                "target_found_before": before_target is not None,
+                "target_found_after": after_target is not None,
+                "helper_found_after": helper is not None,
+            }
 
         statement_validation = self._python_extract_method_statement_validation(
             before_tree=before_tree,
@@ -1327,15 +1382,20 @@ class StructuralValidator:
             for node in ast.walk(helper)
         )
         returned_value_is_used = not helper_returns_value or any(
-            isinstance(node, (ast.Assign, ast.AnnAssign, ast.NamedExpr))
+            isinstance(
+                node,
+                (ast.Assign, ast.AnnAssign, ast.NamedExpr, ast.Return, ast.Yield, ast.YieldFrom),
+            )
             and any(call is child for child in ast.walk(node))
             for call in helper_calls
             for node in ast.walk(after_target)
         )
+        same_owner_scope = before_owner == after_owner == helper_owner
         before_metrics = self._python_extract_method_metrics(before_target)
         after_metrics = self._python_extract_method_metrics(after_target)
         checks = {
             "requested_new_method_exists": helper.name == helper_name,
+            "source_and_helper_owner_scope_preserved": same_owner_scope,
             "helper_contains_real_moved_logic": statement_validation[
                 "helper_contains_selected_logic"
             ],
@@ -1358,6 +1418,8 @@ class StructuralValidator:
             "language": "python",
             "method": method_name,
             "helper": helper_name,
+            "source_class": before_owner,
+            "helper_owner_class": helper_owner,
             "before_metrics": before_metrics,
             "after_metrics": after_metrics,
             "moved_top_level_statement_count": statement_validation[
@@ -1553,45 +1615,66 @@ class StructuralValidator:
         method_name: str,
         source_class: str,
     ) -> ast.FunctionDef | ast.AsyncFunctionDef | None:
+        target, _ = StructuralValidator._find_python_extract_method_target_with_owner(
+            tree,
+            method_name,
+            source_class,
+        )
+        return target
+
+    @staticmethod
+    def _find_python_extract_method_target_with_owner(
+        tree: ast.Module,
+        method_name: str,
+        source_class: str,
+    ) -> tuple[ast.FunctionDef | ast.AsyncFunctionDef | None, str]:
+        """Resolve a unique Python routine and preserve its actual owner scope.
+
+        Planner class hints are advisory.  When the hint is empty or stale,
+        recover only when the method/function name resolves to exactly one
+        top-level function or direct class method in the module.  Ambiguous
+        names are intentionally rejected rather than guessed.
+        """
+
         if source_class:
             owner = next(
                 (
-                    node for node in tree.body
+                    node
+                    for node in tree.body
                     if isinstance(node, ast.ClassDef) and node.name == source_class
                 ),
                 None,
             )
-            candidates = [] if owner is None else [
-                node for node in owner.body
-                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-                and node.name == method_name
-            ]
-            if len(candidates) == 1:
-                return candidates[0]
+            if owner is not None:
+                candidates = [
+                    node
+                    for node in owner.body
+                    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                    and node.name == method_name
+                ]
+                if len(candidates) == 1:
+                    return candidates[0], owner.name
+                if len(candidates) > 1:
+                    return None, owner.name
 
-            # RDP occasionally places the Python module filename in
-            # ``source_class``. Recover only a unique routine across the
-            # parsed module; do not guess when two real methods share a name.
-            candidates = [
-                node for node in tree.body
-                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-                and node.name == method_name
-            ]
-            candidates.extend(
-                member
-                for owner in tree.body
-                if isinstance(owner, ast.ClassDef)
-                for member in owner.body
-                if isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef))
-                and member.name == method_name
-            )
-        else:
-            candidates = [
-                node for node in tree.body
-                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-                and node.name == method_name
-            ]
-        return candidates[0] if len(candidates) == 1 else None
+        candidates: list[tuple[ast.FunctionDef | ast.AsyncFunctionDef, str]] = []
+        candidates.extend(
+            (node, "")
+            for node in tree.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name == method_name
+        )
+        candidates.extend(
+            (member, owner.name)
+            for owner in tree.body
+            if isinstance(owner, ast.ClassDef)
+            for member in owner.body
+            if isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and member.name == method_name
+        )
+        if len(candidates) != 1:
+            return None, ""
+        return candidates[0]
 
     @staticmethod
     def _python_extract_method_metrics(
@@ -2069,7 +2152,7 @@ class StructuralValidator:
             return {
                 "passed": False,
                 "language": "python",
-                "inline_mode": "owner_class",
+                "inline_mode": inline_mode or "owner_class",
                 "class_to_inline": class_name,
                 "immediate_destination_class": immediate_destination_class,
                 "terminal_destination_class": terminal_destination_class,
@@ -2460,6 +2543,13 @@ class StructuralValidator:
         except SyntaxError:
             return {"passed": False, "reason": "parse_failed"}
 
+        if str(params.get("original_handler") or "") == "bare_except":
+            return self._validate_python_bare_except_replacement(
+                before_tree,
+                after_tree,
+                params,
+            )
+
         original_handlers = sorted(
             (node for node in ast.walk(before_tree) if isinstance(node, ast.ExceptHandler)),
             key=lambda node: (node.lineno, node.col_offset),
@@ -2569,6 +2659,153 @@ class StructuralValidator:
             "target_kind": "except_handler",
             "expected_exception_types": sorted(expected_targets),
             "transformed_exception_types": sorted(transformed_types),
+            "checks": checks,
+        }
+
+    def _validate_python_bare_except_replacement(
+        self,
+        before_tree: ast.Module,
+        after_tree: ast.Module,
+        params: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Validate a header-only bare-except replacement without weakening scope checks."""
+        expected = self._python_expected_exception_types(
+            str(params.get("replacement_exception") or params.get("target_exception_type") or "")
+        )
+        raw_line = params.get("source_line")
+        source_line = int(raw_line) if isinstance(raw_line, (int, float)) else None
+        before_handlers = sorted(
+            (node for node in ast.walk(before_tree) if isinstance(node, ast.ExceptHandler)),
+            key=lambda node: (node.lineno, node.col_offset),
+        )
+        after_handlers = sorted(
+            (node for node in ast.walk(after_tree) if isinstance(node, ast.ExceptHandler)),
+            key=lambda node: (node.lineno, node.col_offset),
+        )
+        candidates = [handler for handler in before_handlers if handler.type is None]
+        if source_line is not None:
+            line_matches = [handler for handler in candidates if handler.lineno == source_line]
+            if line_matches:
+                candidates = line_matches
+        if len(candidates) != 1:
+            return {
+                "passed": False,
+                "reason": "original_bare_handler_not_found",
+                "candidate_count": len(candidates),
+            }
+
+        original_handler = candidates[0]
+        original_try = self._python_parent_try(before_tree, original_handler)
+        original_index = (
+            original_try.handlers.index(original_handler)
+            if original_try is not None else -1
+        )
+        original_body = [ast.dump(item, include_attributes=False) for item in original_handler.body]
+        target_after = None
+        if original_try is not None:
+            before_try_body = [ast.dump(item, include_attributes=False) for item in original_try.body]
+            before_else = [ast.dump(item, include_attributes=False) for item in original_try.orelse]
+            before_finally = [ast.dump(item, include_attributes=False) for item in original_try.finalbody]
+            for candidate_try in (node for node in ast.walk(after_tree) if isinstance(node, ast.Try)):
+                if (
+                    [ast.dump(item, include_attributes=False) for item in candidate_try.body] == before_try_body
+                    and [ast.dump(item, include_attributes=False) for item in candidate_try.orelse] == before_else
+                    and [ast.dump(item, include_attributes=False) for item in candidate_try.finalbody] == before_finally
+                    and len(candidate_try.handlers) == len(original_try.handlers)
+                ):
+                    target_after = candidate_try.handlers[original_index]
+                    after_try = candidate_try
+                    break
+        else:
+            after_try = None
+
+        def descriptor(handler: ast.ExceptHandler) -> tuple[tuple[str, ...], str, tuple[str, ...]]:
+            return (
+                tuple(sorted(self._python_exception_type_names(handler))),
+                str(handler.name or ""),
+                tuple(ast.dump(item, include_attributes=False) for item in handler.body),
+            )
+
+        other_handlers_unchanged = False
+        if original_try is not None and after_try is not None:
+            before_other = [
+                descriptor(handler)
+                for index, handler in enumerate(original_try.handlers)
+                if index != original_index
+            ]
+            after_other = [
+                descriptor(handler)
+                for index, handler in enumerate(after_try.handlers)
+                if index != original_index
+            ]
+            other_handlers_unchanged = before_other == after_other
+
+        before_bare = sum(handler.type is None for handler in before_handlers)
+        after_bare = sum(handler.type is None for handler in after_handlers)
+        before_parents = {
+            child: parent
+            for parent in ast.walk(before_tree)
+            for child in ast.iter_child_nodes(parent)
+        }
+        after_parents = {
+            child: parent
+            for parent in ast.walk(after_tree)
+            for child in ast.iter_child_nodes(parent)
+        }
+
+        def bare_identity(
+            handler: ast.ExceptHandler,
+            parents: Dict[ast.AST, ast.AST],
+        ) -> tuple[str, int]:
+            class_name = ""
+            method_name = ""
+            current: ast.AST | None = handler
+            while current is not None:
+                current = parents.get(current)
+                if isinstance(current, (ast.FunctionDef, ast.AsyncFunctionDef)) and not method_name:
+                    method_name = current.name
+                if isinstance(current, ast.ClassDef) and not class_name:
+                    class_name = current.name
+            qualified = f"{class_name}.{method_name}" if class_name and method_name else method_name
+            return qualified, int(getattr(handler, "lineno", 0) or 0)
+
+        expected_targets = {
+            (
+                str(item.get("qualified_source_method") or ""),
+                int(item.get("resolved_handler_line") or 0),
+            )
+            for item in params.get("_expected_bare_except_targets") or []
+            if isinstance(item, dict)
+        }
+        unrelated_bare_handlers_unchanged = all(
+            identity in expected_targets
+            or any(bare_identity(after, after_parents) == identity for after in after_handlers if after.type is None)
+            for identity in (
+                bare_identity(handler, before_parents)
+                for handler in before_handlers
+                if handler.type is None and handler is not original_handler
+            )
+        )
+        checks = {
+            "bare_except_existed_before": original_handler.type is None,
+            "targeted_handler_exists_after": target_after is not None,
+            "targeted_handler_uses_expected_specific_exception": bool(target_after)
+            and self._python_exception_type_names(target_after) == expected,
+            "handler_body_preserved": bool(target_after)
+            and [ast.dump(item, include_attributes=False) for item in target_after.body] == original_body,
+            "other_handlers_unchanged": other_handlers_unchanged,
+            "try_body_unchanged": after_try is not None,
+            "else_and_finally_unchanged": after_try is not None,
+            "no_additional_bare_except_introduced": after_bare <= before_bare - 1,
+            "unrelated_bare_handlers_unchanged_or_independently_planned": unrelated_bare_handlers_unchanged,
+            "python_syntax_valid": True,
+        }
+        return {
+            "passed": all(checks.values()),
+            "language": "python",
+            "target_kind": "bare_except_handler",
+            "replacement_exception": str(params.get("replacement_exception") or params.get("target_exception_type") or ""),
+            "exception_resolution_strategy": str(params.get("exception_resolution_strategy") or ""),
             "checks": checks,
         }
 
