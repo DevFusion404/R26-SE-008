@@ -31,6 +31,8 @@ import {
   countDecisions, decideGroup, distributionDelta, forcedManualOnlySteps,
   groupBreakdown, isAutoSelectable, isOverride, manualSteps, planSummary,
   rejectAll, selectAll, selectRecommended, stepIdentity, summarizeSteps,
+  activeBulkVerdict, approvalState, fileOf, groupStepsByFile,
+  groupStepsByMethod, methodOf, methodOptions,
 } from "./planningSelection.js";
 
 let failures = 0;
@@ -295,6 +297,127 @@ console.log("\nStrategy consequence");
         distributionDelta(balanced, { ...balanced }) === null);
   check("an unchanged distribution is reported as unchanged",
         distributionDelta(balanced, { ...balanced, developer_strategy: "max_improvement" }).moved === false);
+}
+
+// ── Grouping the plan ────────────────────────────────────────────────────────
+console.log("\nGrouping the plan");
+{
+  const step = (id, refactoring, file, impact) => ({
+    step_id: id, refactoring, impact, target: { file },
+  });
+
+  // Two methods, three files, deliberately interleaved so first-seen order and
+  // sorted-by-size order differ.
+  const plan = [
+    step(1, "Extract Method", "src/Order.java", "high"),
+    step(2, "Rename Variable", "src/Order.java", "low"),
+    step(3, "Extract Method", "src/Cart.java", "medium"),
+    step(4, "Extract Method", "src/Pay.java", "low"),
+    step(5, "Rename Variable", "src/Cart.java", "low"),
+  ];
+
+  eq("a step's file is read from its target", fileOf(plan[0]), "src/Order.java");
+  eq("a step with no target is module level", fileOf({ step_id: 9 }), "(module level)");
+  eq("a step's method is its refactoring", methodOf(plan[0]), "Extract Method");
+  eq("a step with no refactoring is not blank", methodOf({ step_id: 9 }), "(unspecified)");
+
+  const byFile = groupStepsByFile(plan);
+  eq("one group per file", byFile.length, 3);
+  eq("in the order the plan sequenced them",
+     byFile.map((g) => g.key), ["src/Order.java", "src/Cart.java", "src/Pay.java"]);
+  eq("each carries its steps", byFile[0].stepCount, 2);
+  eq("and how many methods it needs", byFile[0].methodCount, 2);
+
+  const byMethod = groupStepsByMethod(plan);
+  eq("one group per method", byMethod.length, 2);
+  eq("in plan order, not alphabetical",
+     byMethod.map((g) => g.key), ["Extract Method", "Rename Variable"]);
+  eq("Extract Method holds three steps", byMethod[0].stepCount, 3);
+  eq("across three files", byMethod[0].fileCount, 3);
+  eq("Rename Variable holds two", byMethod[1].stepCount, 2);
+  eq("across two files", byMethod[1].fileCount, 2);
+  eq("the worst impact in the group leads it", byMethod[0].worstImpact, "high");
+  eq("and a group of low steps says low", byMethod[1].worstImpact, "low");
+
+  // Approval state — only APPROVE counts as selected.
+  const none = approvalState(plan, {});
+  check("nothing approved is none", none.none && !none.all && !none.partial);
+  eq("but the total is still known", none.total, 5);
+
+  const some = approvalState(plan, { 1: APPROVE, 2: REJECT, 3: MANUAL });
+  eq("only approvals count as selected", some.selected, 1);
+  check("which is a partial selection", some.partial && !some.all && !some.none);
+
+  const every = approvalState(plan, { 1: APPROVE, 2: APPROVE, 3: APPROVE, 4: APPROVE, 5: APPROVE });
+  check("all approved is all", every.all && !every.partial && !every.none);
+
+  eq("an empty group is neither all nor partial",
+     [approvalState([], {}).all, approvalState([], {}).partial], [false, false]);
+
+  // Dropdown options.
+  const options = methodOptions(plan, { 1: APPROVE, 3: APPROVE, 4: APPROVE });
+  eq("one option per method", options.length, 2);
+  eq("largest first, so the bulk decision is at the top",
+     options.map((o) => o.key), ["Extract Method", "Rename Variable"]);
+  eq("counts are named for what the shared dropdown renders",
+     [options[0].findingCount, options[0].fileCount], [3, 3]);
+  check("a fully approved method reads as fully selected", options[0].selection.all);
+  check("an untouched one reads as empty", options[1].selection.none);
+  check("the option carries its steps, for the bulk verdict",
+        options[0].steps.length === 3);
+
+  // Degenerate input must not throw — the plan can be empty or malformed.
+  eq("no steps, no groups", groupStepsByMethod([]).length, 0);
+  eq("null is not a crash", groupStepsByFile(null).length, 0);
+  eq("and neither is a null option list", methodOptions(null).length, 0);
+  eq("a step with neither file nor method still groups",
+     groupStepsByMethod([{ step_id: 1 }])[0].key, "(unspecified)");
+}
+
+// ── Which bulk verdict is in force ───────────────────────────────────────────
+// The bar highlights one of these buttons, so a wrong answer here is a page
+// telling the developer they did something they did not do.
+console.log("\nActive bulk verdict");
+{
+  const mk = (id, auto) => ({
+    step_id: id,
+    decision_support: { category: auto ? "recommended" : "review", auto_select_eligible: auto },
+  });
+  const plan = [mk(1, true), mk(2, true), mk(3, false), mk(4, false)];
+
+  eq("nothing decided is no verdict", activeBulkVerdict(plan, {}), null);
+  eq("every step approved is 'all'",
+     activeBulkVerdict(plan, { 1: APPROVE, 2: APPROVE, 3: APPROVE, 4: APPROVE }), "all");
+  eq("every step rejected is 'reject'",
+     activeBulkVerdict(plan, { 1: REJECT, 2: REJECT, 3: REJECT, 4: REJECT }), "reject");
+  eq("exactly the recommended set is 'recommended'",
+     activeBulkVerdict(plan, { 1: APPROVE, 2: APPROVE }), "recommended");
+
+  // The strictness that matters: one extra approval is no longer "recommended".
+  eq("one hand-picked extra drops the claim",
+     activeBulkVerdict(plan, { 1: APPROVE, 2: APPROVE, 3: APPROVE }), null);
+  eq("approving only half the recommended set is not it either",
+     activeBulkVerdict(plan, { 1: APPROVE }), null);
+  eq("a rejection alongside it drops the claim",
+     activeBulkVerdict(plan, { 1: APPROVE, 2: APPROVE, 3: REJECT }), null);
+  eq("and so does a manual mark",
+     activeBulkVerdict(plan, { 1: APPROVE, 2: APPROVE, 3: MANUAL }), null);
+  eq("approving the wrong two is not the recommendation",
+     activeBulkVerdict(plan, { 3: APPROVE, 4: APPROVE }), null);
+
+  // A plan whose recommended set is everything reports the stronger fact.
+  const allGreen = [mk(1, true), mk(2, true)];
+  eq("all-approved wins over recommended when they coincide",
+     activeBulkVerdict(allGreen, { 1: APPROVE, 2: APPROVE }), "all");
+
+  // A plan DIWO recommends nothing in can never read "recommended".
+  const noGreen = [mk(1, false), mk(2, false)];
+  eq("no recommended steps, no recommended verdict",
+     activeBulkVerdict(noGreen, { 1: APPROVE }), null);
+
+  eq("an empty plan has no verdict", activeBulkVerdict([], {}), null);
+  eq("null is not a crash", activeBulkVerdict(null, {}), null);
+  eq("and neither are absent decisions", activeBulkVerdict(plan), null);
 }
 
 console.log(`\n${failures === 0 ? "All checks passed." : `${failures} check(s) FAILED.`}\n`);

@@ -80,25 +80,38 @@ import PlanningRecommendationBadge from "../components/PlanningRecommendationBad
 import PlanStepDrawer from "../components/PlanStepDrawer";
 import { StepFacts } from "../components/PlanConsequencePreview";
 import OverrideConfirmDialog from "../components/OverrideConfirmDialog";
+import QuickSelectDropdown from "../components/QuickSelectDropdown";
 import {
   APPROVE, REJECT, MANUAL,
-  CATEGORY_ORDER, MANUAL_ONLY, NOT_RECOMMENDED, OVERRIDE_REASONS,
+  CATEGORY_ORDER, MANUAL_ONLY, NOT_RECOMMENDED, REVIEW, OVERRIDE_REASONS,
+  activeBulkVerdict,
   actionModel, approveRecommendedIn, carryDecisions, categoryOf, categoryStyle,
-  countDecisions, decideGroup, distributionDelta, groupBreakdown, isOverride,
-  planSummary, rejectAll, selectAll, selectRecommended, supportOf,
+  countDecisions, decideGroup, distributionDelta, groupBreakdown, groupStepsByFile,
+  groupStepsByMethod, isOverride, methodOf, methodOptions, planSummary, rejectAll,
+  selectAll, selectRecommended, supportOf,
 } from "../utils/planningDecisionSupport";
 
 /**
- * One accent colour for every file header.
+ * The three arrangements of one plan.
  *
- * This used to be hashed from the path, giving each file its own colour out of
- * eight. On a plan touching several files that painted a column of unrelated
- * greens, ambers and reds down the page — the same four colours the
- * recommendation badges use to mean something specific. A file header is
- * structure, not status, so it takes one neutral accent and leaves the palette
- * to the signal that needs it.
+ *   Recommendation   what DIWO makes of each step   (the default — the verdict
+ *                    is the reason this stage exists)
+ *   File wise        which files the plan touches
+ *   Plan method wise which refactorings it applies, across the repository
+ *
+ * Plan method is the axis a long plan actually needs. Forty steps are usually
+ * six or seven methods, and "I trust Extract Method, I want to read every Move
+ * Class myself" is a real position a reviewer holds before opening the plan.
+ * Grouped by recommendation those steps are scattered across four sections.
  */
-const FILE_ACCENT = C.info;
+const REVIEW_MODES = [
+  { key: "recommendation", label: "Recommendation wise" },
+  { key: "file", label: "File wise" },
+  { key: "method", label: "Plan method wise" },
+];
+
+/** Matches Stage 1's mode switch, which is the same control doing the same job. */
+const MODE_ACTIVE = "#f97316";
 
 const STATUS_FILTERS = [
   { value: "all", label: "All" },
@@ -126,7 +139,26 @@ export default function RefactoringPlanApprovalPage({
   const [filter, setFilter] = useState("all");
   const [categoryFilter, setCategoryFilter] = useState("any");
   const [impactFilter, setImpactFilter] = useState("any");
+  // Which refactoring method the list is narrowed to — "Extract Method",
+  // "Rename Variable". A fourth axis rather than a mode, because "the Extract
+  // Methods I have not decided yet" is a question, and folding it into the
+  // grouping would make asking it impossible.
+  const [methodFilter, setMethodFilter] = useState("any");
   const [groupMode, setGroupMode] = useState("recommendation");
+  /**
+   * Which file rows are unfolded, keyed `<section>:<file>`.
+   *
+   * Files start CLOSED. A plan of 134 steps rendered as 134 open cards is a
+   * page nobody reads to the end of — the file list is the map, and the steps
+   * are what you open once you have chosen where to look. Keying by section as
+   * well as path keeps the same file independent under two different methods.
+   */
+  const [openFiles, setOpenFiles] = useState(() => new Set());
+  /** Which method sections are unfolded. Recommendation sections never close. */
+  const [openSections, setOpenSections] = useState(() => new Set());
+  // Keeps the first method section open until the developer touches one, so
+  // the mode does not open onto a wall of closed headers.
+  const [autoOpenSection, setAutoOpenSection] = useState(true);
   const [strategy, setStrategy] = useState("balanced");
   // The step whose explanation dialog is open, by step_id. One at a time — the
   // same shape Stage 1 uses for its impact drawer.
@@ -209,6 +241,34 @@ export default function RefactoringPlanApprovalPage({
       return;
     }
     decide(id, val);
+  };
+
+  /**
+   * Unfold or fold one file row.
+   *
+   * A pure updater, and `setOpenFiles` is never called from inside another
+   * updater — React invokes updaters more than once, and a toggle applied
+   * twice is a toggle that never happened.
+   */
+  const toggleFile = (key) => {
+    setOpenFiles((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  };
+
+  /** Unfold or fold one method section. */
+  const toggleSection = (key) => {
+    setOpenSections((prev) => {
+      const next = new Set(prev);
+      if (autoOpenSection && firstSectionKey) next.add(firstSectionKey);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+    setAutoOpenSection(false);
   };
 
   /** Every step in a group takes the same verdict; re-clicking clears it. */
@@ -301,18 +361,39 @@ export default function RefactoringPlanApprovalPage({
   const matchesImpact = (step) =>
     impactFilter === "any" || (step.impact || step.expected_impact) === impactFilter;
 
-  const filtered = steps.filter(
-    (step) => matchesStatus(step) && matchesCategory(step) && matchesImpact(step));
+  const matchesMethod = (step) =>
+    methodFilter === "any" || methodOf(step) === methodFilter;
+
+  const filtered = steps.filter((step) =>
+    matchesStatus(step) && matchesCategory(step) && matchesImpact(step)
+    && matchesMethod(step));
 
   // Counts for the recommendation pills, taken over the WHOLE plan rather than
   // the filtered set: a filter row whose numbers change as you filter cannot
   // tell you what is there to filter for.
   const planBreakdown = groupBreakdown(steps);
+  const counts = countDecisions(steps, decisions);
+
+  const activeBulk = activeBulkVerdict(steps, decisions);
   const anyFilterActive =
-    filter !== "all" || categoryFilter !== "any" || impactFilter !== "any";
+    filter !== "all" || categoryFilter !== "any" || impactFilter !== "any"
+    || methodFilter !== "any";
+
+  // Built from every step, not the filtered ones: this dropdown is how a
+  // developer reaches a method the current filter is hiding.
+  const planMethodOptions = methodOptions(steps, decisions);
 
   const sections = buildSections(filtered, groupMode);
-  const counts = countDecisions(steps, decisions);
+  const firstSectionKey = sections[0]?.key || null;
+
+  // Method sections fold; recommendation sections do not. The recommendation
+  // grouping IS the verdict this stage exists to show, and a closed verdict is
+  // a page that opens onto nothing.
+  const sectionsFold = groupMode === "method";
+  const effectiveOpenSections = autoOpenSection && firstSectionKey
+    ? new Set([...openSections, firstSectionKey])
+    : openSections;
+
   const { approved, rejected, manual, pending } = counts;
   const canProceed = approved > 0 && pending === 0;
 
@@ -411,14 +492,92 @@ export default function RefactoringPlanApprovalPage({
         onStrategyChange={applyStrategy}
         strategyBusy={loading}
         strategyDelta={strategyDelta}
-        onSelectRecommended={applySelectRecommended}
-        onSelectAll={applySelectAll}
-        onRejectAll={applyRejectAll}
-        onClearSelection={clearDecisions}
         activeFilter={categoryFilter}
         onFilterCategory={(category) =>
           setCategoryFilter((prev) => (prev === category ? "any" : category))}
         planSource={planMeta?.plan_source}
+      />
+
+      {/* ── How to read the plan, and what to do with all of it ───────────
+          Two controls the reviewer reaches for before any individual step: the
+          arrangement, and the bulk verdict. Both were buried — the arrangement
+          in a dropdown among the filters, the bulk actions inside the summary
+          card — which made the page read as one long undifferentiated strip of
+          controls. Stage 1 puts the same two things here, in this order. */}
+      <div style={{
+        display: "flex", gap: 16, alignItems: "flex-end",
+        flexWrap: "wrap", marginBottom: 12,
+      }}>
+        <div>
+          <ControlLabel>Review mode</ControlLabel>
+          <div
+            role="tablist"
+            style={{
+              display: "inline-flex", gap: 4, padding: 4,
+              background: C.panel, border: `1px solid ${C.border}`, borderRadius: 10,
+            }}
+          >
+            {REVIEW_MODES.map((m) => {
+              const active = m.key === groupMode;
+              return (
+                <button
+                  key={m.key}
+                  role="tab"
+                  aria-selected={active}
+                  onClick={() => setGroupMode(m.key)}
+                  style={{
+                    display: "flex", alignItems: "center", gap: 7,
+                    padding: "7px 15px", borderRadius: 7, border: "none", cursor: "pointer",
+                    background: active ? MODE_ACTIVE : "transparent",
+                    color: active ? "#0d0f14" : C.textMuted,
+                    fontSize: 12, fontWeight: 700, transition: "all 0.15s",
+                  }}
+                >
+                  {m.label}
+                  <span style={{ fontSize: 10, opacity: 0.8, fontFamily: "monospace" }}>
+                    {m.key === "file"
+                      ? groupStepsByFile(steps).length
+                      : m.key === "method"
+                        ? planMethodOptions.length
+                        : groupBreakdown(steps).counts
+                          ? Object.values(groupBreakdown(steps).counts).filter(Boolean).length
+                          : 0}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        {/* Approve every step of one method, or go and read them. The checkbox
+            decides, the label navigates — two intents, two targets, the same
+            contract Stage 1's quick-select uses. */}
+        <div>
+          <ControlLabel>Quick selection</ControlLabel>
+          <QuickSelectDropdown
+            label="Plan method"
+            options={planMethodOptions}
+            searchPlaceholder="Search refactoring methods…"
+            emptyLabel="This plan applies no methods"
+            onToggleOption={(option) => decideAllIn(option.steps, APPROVE)}
+            onNavigateOption={(option) => {
+              setGroupMode("method");
+              setMethodFilter(option.key);
+            }}
+            onClear={() => setDecisions({})}
+          />
+        </div>
+      </div>
+
+      <PlanBulkBar
+        totalSteps={steps.length}
+        counts={counts}
+        breakdown={planBreakdown}
+        activeBulk={activeBulk}
+        onSelectRecommended={applySelectRecommended}
+        onSelectAll={applySelectAll}
+        onRejectAll={applyRejectAll}
+        onClear={clearDecisions}
       />
 
       {/* ── Filters ─────────────────────────────────────────────────────────
@@ -447,15 +606,6 @@ export default function RefactoringPlanApprovalPage({
 
           <div style={{ marginLeft: "auto", display: "flex", gap: 8, alignItems: "center" }}>
             <select
-              value={groupMode}
-              onChange={(e) => setGroupMode(e.target.value)}
-              aria-label="Group plan steps by"
-              style={{ padding: "5px 10px", borderRadius: 8, fontSize: 11, background: C.panel, color: C.text, border: `1px solid ${C.border}` }}
-            >
-              <option value="recommendation">Group: recommendation</option>
-              <option value="file">Group: file</option>
-            </select>
-            <select
               value={impactFilter}
               onChange={(e) => setImpactFilter(e.target.value)}
               aria-label="Filter by expected impact"
@@ -480,7 +630,12 @@ export default function RefactoringPlanApprovalPage({
           <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
             <span style={{ width: 74, flexShrink: 0 }} />
             <button
-              onClick={() => { setFilter("all"); setCategoryFilter("any"); setImpactFilter("any"); }}
+              onClick={() => {
+                setFilter("all");
+                setCategoryFilter("any");
+                setImpactFilter("any");
+                setMethodFilter("any");
+              }}
               style={{
                 padding: "3px 11px", borderRadius: 20, fontSize: 10.5, fontWeight: 600,
                 cursor: "pointer", background: "none", color: C.textMuted,
@@ -489,6 +644,26 @@ export default function RefactoringPlanApprovalPage({
             >
               Clear filters
             </button>
+            {methodFilter !== "any" && (
+              <span style={{
+                display: "inline-flex", alignItems: "center", gap: 7,
+                padding: "3px 11px", borderRadius: 20,
+                background: `${MODE_ACTIVE}18`, border: `1px solid ${MODE_ACTIVE}55`,
+                fontSize: 10.5, color: MODE_ACTIVE, fontWeight: 700,
+              }}>
+                Method: {methodFilter}
+                <button
+                  onClick={() => setMethodFilter("any")}
+                  aria-label="Clear the plan method filter"
+                  style={{
+                    background: "none", border: "none", color: "inherit",
+                    cursor: "pointer", padding: 0, fontWeight: 800, lineHeight: 1,
+                  }}
+                >
+                  ✕
+                </button>
+              </span>
+            )}
             <span style={{ fontSize: 10.5, color: C.textMuted }}>
               Filters only change what is shown — no decision is altered.
             </span>
@@ -517,7 +692,11 @@ export default function RefactoringPlanApprovalPage({
           <CategorySection
             key={section.key}
             section={section}
-            grouped={groupMode === "recommendation"}
+            grouped={groupMode !== "file"}
+            open={!sectionsFold || effectiveOpenSections.has(section.key)}
+            onToggleOpen={() => toggleSection(section.key)}
+            openFiles={openFiles}
+            onToggleFile={toggleFile}
             decisions={decisions}
             overrideReasons={overrideReasons}
             onDecide={requestDecision}
@@ -533,7 +712,9 @@ export default function RefactoringPlanApprovalPage({
       {filtered.length > 0 && (
         <div style={{ marginTop: 10, fontSize: 11, color: C.textMuted }}>
           Showing {filtered.length} step{filtered.length > 1 ? "s" : ""} in {sections.length}{" "}
-          {groupMode === "recommendation" ? "recommendation group" : "file"}
+          {groupMode === "recommendation"
+            ? "recommendation group"
+            : groupMode === "method" ? "plan method" : "file"}
           {sections.length > 1 ? "s" : ""}
           {filtered.length < steps.length && ` (${steps.length - filtered.length} hidden by the current filter)`}.
         </div>
@@ -671,28 +852,35 @@ export default function RefactoringPlanApprovalPage({
  * The file level is preserved inside the category sections either way, so the
  * path is never lost.
  */
+/**
+ * The plan, arranged the way the developer asked for.
+ *
+ * Every mode ends at the same leaf — a step, in a file, with its recommendation
+ * — so switching arrangement never changes what is on screen, only how it is
+ * stacked. File and method grouping both come from planningSelection, which is
+ * where Stage 1's equivalents live too, so the two stages cannot drift into
+ * grouping "the same" thing differently.
+ */
 function buildSections(steps, mode) {
-  const byFile = (list) => {
-    const groups = [];
-    const index = new Map();
-    list.forEach((step) => {
-      const file = step.target?.file || "(module level)";
-      let group = index.get(file);
-      if (!group) {
-        group = { file, steps: [] };
-        index.set(file, group);
-        groups.push(group);
-      }
-      group.steps.push(step);
-    });
-    return groups;
-  };
+  const asFiles = (list) => groupStepsByFile(list).map((g) => ({ file: g.key, steps: g.steps }));
 
   if (mode === "file") {
-    return byFile(steps).map((group) => ({
+    return asFiles(steps).map((group) => ({
       key: `file:${group.file}`,
       category: null,
       files: [group],
+      steps: group.steps,
+    }));
+  }
+
+  if (mode === "method") {
+    // A method spans files, so its section keeps the file split inside it —
+    // the same file → steps structure every other mode ends at.
+    return groupStepsByMethod(steps).map((group) => ({
+      key: `method:${group.key}`,
+      category: null,
+      method: group.key,
+      files: asFiles(group.steps),
       steps: group.steps,
     }));
   }
@@ -706,11 +894,223 @@ function buildSections(steps, mode) {
       return {
         key: `cat:${category || "unassessed"}`,
         category,
-        files: byFile(inCategory),
+        files: asFiles(inCategory),
         steps: inCategory,
       };
     })
     .filter(Boolean);
+}
+
+/** The small uppercase caption every control on this page sits under. */
+function ControlLabel({ children }) {
+  return (
+    <div style={{
+      fontSize: 10.5, color: C.textMuted, textTransform: "uppercase",
+      letterSpacing: 0.9, fontWeight: 700, marginBottom: 7,
+    }}>
+      {children}
+    </div>
+  );
+}
+
+/**
+ * The bulk verdicts, on their own line.
+ *
+ * They used to live inside the decision-summary card, where they read as part
+ * of the assessment rather than as the thing that acts on it. These are the
+ * only controls on the page that decide the fate of every step at once, so
+ * they get the row Stage 1 gives them.
+ *
+ * SELECT RECOMMENDED IS STILL THE PRIMARY ACTION. It is filled and first;
+ * Select all is outlined and second. That ordering is the whole point of the
+ * decision-support work — a page whose easiest click approves everything makes
+ * the recommendation decorative.
+ *
+ * Select all and Reject all keep their two-step confirmation. A single click
+ * that approves twelve steps DIWO has opinions about should cost one more
+ * click than following the recommendation, and a mis-click here is expensive
+ * to notice: the decisions look deliberate afterwards.
+ */
+function PlanBulkBar({
+  totalSteps, counts, breakdown, activeBulk,
+  onSelectRecommended, onSelectAll, onRejectAll, onClear,
+}) {
+  const [confirming, setConfirming] = useState(null);   // "all" | "reject" | null
+  const { approved, rejected, manual, pending } = counts;
+  const decided = approved + rejected + manual;
+  const autoSelectable = breakdown?.autoSelectable || 0;
+  const nonGreen = breakdown?.nonGreen || 0;
+
+  // What "select all" would sweep up beyond the recommendation, spelled out
+  // from the backend's own category counts rather than summarised as a number.
+  const flagged = [
+    breakdown?.counts?.[REVIEW] ? `${breakdown.counts[REVIEW]} to review carefully` : null,
+    breakdown?.counts?.[NOT_RECOMMENDED]
+      ? `${breakdown.counts[NOT_RECOMMENDED]} not recommended` : null,
+    breakdown?.counts?.[MANUAL_ONLY] ? `${breakdown.counts[MANUAL_ONLY]} manual-only` : null,
+    breakdown?.unassessed ? `${breakdown.unassessed} not assessed` : null,
+  ].filter(Boolean).join(", ");
+
+  const armed = (kind, run) => () => {
+    if (confirming === kind) {
+      run();
+      setConfirming(null);
+      return;
+    }
+    setConfirming(kind);
+  };
+
+  return (
+    <div style={{
+      display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap",
+      marginBottom: 12, padding: "10px 14px", borderRadius: 10,
+      background: C.panel, border: `1px solid ${C.border}`,
+    }}>
+      <button
+        onClick={onSelectRecommended}
+        disabled={!autoSelectable}
+        title={autoSelectable
+          ? `Approve the ${autoSelectable} step(s) DIWO recommends. Review, not-recommended and manual-only steps are left for you.`
+          : "DIWO recommends no step in this plan for automatic approval"}
+        aria-pressed={activeBulk === "recommended"}
+        style={{
+          display: "inline-flex", alignItems: "center", gap: 7,
+          padding: "9px 18px", borderRadius: 9,
+          fontSize: 12.5, fontWeight: 700,
+          cursor: autoSelectable ? "pointer" : "not-allowed",
+          // Filled only while the plan actually stands in this state. Once the
+          // developer has approved everything, "Select recommended" is no
+          // longer what is in force, and leaving it lit says otherwise.
+          background: !autoSelectable
+            ? C.border
+            : activeBulk === "recommended" ? C.accent : `${C.accent}14`,
+          color: !autoSelectable
+            ? C.textMuted
+            : activeBulk === "recommended" ? "#000" : C.accent,
+          border: `1px solid ${autoSelectable ? (activeBulk === "recommended" ? C.accent : `${C.accent}55`) : C.border}`,
+          transition: "all 0.2s",
+        }}
+      >
+        <span aria-hidden="true" style={{ fontWeight: 900 }}>✓</span>
+        Select recommended
+        {autoSelectable > 0 && (
+          <span style={{ fontFamily: "monospace", opacity: 0.7 }}>({autoSelectable})</span>
+        )}
+      </button>
+
+      <button
+        onClick={armed("all", onSelectAll)}
+        onBlur={() => setConfirming((c) => (c === "all" ? null : c))}
+        disabled={!totalSteps}
+        title={`Approve all ${totalSteps} step(s), including the ones DIWO advised against`}
+        aria-pressed={activeBulk === "all"}
+        style={{
+          display: "inline-flex", alignItems: "center", gap: 7,
+          padding: "9px 16px", borderRadius: 9,
+          fontSize: 12.5, fontWeight: 700,
+          cursor: totalSteps ? "pointer" : "not-allowed",
+          background: confirming === "all"
+            ? `${C.warn}1e`
+            : activeBulk === "all" ? C.accent : C.bg,
+          color: confirming === "all"
+            ? C.warn
+            : activeBulk === "all" ? "#000" : C.textSub,
+          border: `1px solid ${confirming === "all" ? C.warn : activeBulk === "all" ? C.accent : C.border}`,
+          transition: "all 0.2s",
+        }}
+      >
+        {confirming === "all" ? "Confirm — approve all anyway" : `Select all ${totalSteps}`}
+      </button>
+
+      <button
+        onClick={armed("reject", onRejectAll)}
+        onBlur={() => setConfirming((c) => (c === "reject" ? null : c))}
+        disabled={!totalSteps}
+        aria-pressed={activeBulk === "reject"}
+        title={`Reject all ${totalSteps} step(s). Nothing is submitted — a fully rejected plan cannot be forwarded.`}
+        style={{
+          display: "inline-flex", alignItems: "center", gap: 7,
+          padding: "9px 16px", borderRadius: 9,
+          fontSize: 12.5, fontWeight: 700,
+          cursor: totalSteps ? "pointer" : "not-allowed",
+          background: confirming === "reject"
+            ? `${C.danger}1e`
+            : activeBulk === "reject" ? C.danger : C.bg,
+          color: activeBulk === "reject" && confirming !== "reject"
+            ? "#fff"
+            : totalSteps ? C.danger : C.textMuted,
+          border: `1px solid ${totalSteps ? C.danger : C.border}`,
+          transition: "all 0.2s",
+        }}
+      >
+        <span aria-hidden="true" style={{ fontWeight: 900 }}>✕</span>
+        {confirming === "reject" ? "Confirm — reject all" : `Reject all ${totalSteps}`}
+      </button>
+
+      {decided > 0 && (
+        <button
+          onClick={onClear}
+          title="Clear every decision and start the review again"
+          style={{
+            padding: "9px 14px", borderRadius: 9, cursor: "pointer",
+            background: "transparent", color: C.textMuted,
+            border: `1px solid ${C.border}`, fontSize: 11.5, fontWeight: 700,
+          }}
+        >
+          Clear decisions
+        </button>
+      )}
+
+      <span style={{ marginLeft: "auto", fontSize: 11, color: C.textMuted }}>
+        {decided === 0
+          ? `${totalSteps} step${totalSteps === 1 ? "" : "s"} · none decided yet`
+          : `${approved} approved · ${rejected} rejected · ${manual} manual · ${pending} pending`}
+      </span>
+
+      {/* Armed, not done. Says exactly what the second click will overwrite —
+          the figure that matters is how many deliberate decisions are about to
+          be replaced, which the button label cannot carry. */}
+      {confirming === "reject" && (
+        <div style={{
+          flexBasis: "100%", marginTop: 2, padding: "9px 13px", borderRadius: 8,
+          background: `${C.danger}0d`, border: `1px solid ${C.danger}40`,
+          fontSize: 11.5, color: C.textSub, lineHeight: 1.55,
+        }}>
+          <b style={{ color: C.danger }}>✕ This rejects all {totalSteps} step(s)</b>
+          {approved > 0 || manual > 0
+            ? `, including the ${[
+                approved > 0 ? `${approved} you approved` : null,
+                manual > 0 ? `${manual} marked for manual work` : null,
+              ].filter(Boolean).join(" and ")}`
+            : ""}
+          . Nothing is sent anywhere — a plan with no approved step cannot be
+          forwarded at all. Click again to confirm.
+        </div>
+      )}
+
+      {confirming === "all" && (
+        <div style={{
+          flexBasis: "100%", marginTop: 2, padding: "9px 13px", borderRadius: 8,
+          background: `${C.warn}0d`, border: `1px solid ${C.warn}40`,
+          fontSize: 11.5, color: C.textSub, lineHeight: 1.55,
+        }}>
+          {nonGreen > 0 ? (
+            <>
+              <b style={{ color: C.warn }}>
+                ⚠ This also approves {nonGreen} step{nonGreen === 1 ? "" : "s"} DIWO flagged
+              </b>
+              {flagged ? ` — ${flagged}` : ""}. Click again to confirm.
+            </>
+          ) : (
+            <>
+              <b style={{ color: C.warn }}>Approves all {totalSteps} step(s)</b>, including
+              any you have already decided. Click again to confirm.
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  );
 }
 
 // ─── Sub-components ──────────────────────────────────────────────────────────
@@ -726,12 +1126,14 @@ function buildSections(steps, mode) {
  * of the page.
  */
 function CategorySection({
-  section, grouped, decisions, overrideReasons,
+  section, grouped, open = true, onToggleOpen,
+  openFiles, onToggleFile, decisions, overrideReasons,
   onDecide, onDecideAllIn, onApproveRecommendedIn, onExplain, onOverrideReason,
 }) {
   const style = categoryStyle(section.category);
   const total = section.steps.length;
   const counts = countDecisions(section.steps, decisions);
+  const isMethod = Boolean(section.method);
 
   const bulk = [];
   if (section.category === MANUAL_ONLY) {
@@ -746,7 +1148,80 @@ function CategorySection({
 
   return (
     <div style={{ flexShrink: 0 }}>
-      {grouped && (
+      {/* ── A plan method ──────────────────────────────────────────────────
+          The refactoring itself is the heading, and the files it touches are
+          folded underneath. Choosing the method first is how a reviewer who
+          trusts Extract Method and distrusts Move Class actually works: the
+          decision is about the transformation, and the files are where it
+          lands. */}
+      {isMethod && (
+        <button
+          type="button"
+          onClick={onToggleOpen}
+          aria-expanded={open}
+          style={{
+            display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap",
+            width: "100%", textAlign: "left", cursor: "pointer",
+            padding: "10px 14px", marginBottom: 8, borderRadius: 9,
+            background: open ? `${MODE_ACTIVE}12` : C.panel,
+            border: `1px solid ${open ? `${MODE_ACTIVE}55` : C.border}`,
+          }}
+        >
+          <span aria-hidden="true" style={{
+            color: C.textMuted, fontSize: 11, flexShrink: 0,
+            display: "inline-block",
+            transform: open ? "rotate(90deg)" : "none", transition: "transform 0.18s ease",
+          }}>
+            ›
+          </span>
+          <span aria-hidden="true" style={{ fontSize: 13 }}>🛠</span>
+          <span style={{ fontSize: 13, fontWeight: 800, color: C.text }}>
+            {section.method}
+          </span>
+          <span style={{
+            fontFamily: "monospace", fontSize: 12, fontWeight: 800, color: MODE_ACTIVE,
+            background: `${MODE_ACTIVE}18`, padding: "1px 8px", borderRadius: 20,
+          }}>
+            {total}
+          </span>
+          <span style={{ fontSize: 11, color: C.textMuted }}>
+            {section.files.length} file{section.files.length === 1 ? "" : "s"}
+          </span>
+
+          <CategoryDots steps={section.steps} />
+
+          <span style={{
+            marginLeft: "auto", fontSize: 10.5, color: C.textMuted,
+            display: "flex", gap: 9, flexShrink: 0,
+          }}>
+            {counts.approved > 0 && <span style={{ color: C.accent }}>{counts.approved} approved</span>}
+            {counts.manual > 0 && <span style={{ color: C.info }}>{counts.manual} manual</span>}
+            {counts.rejected > 0 && <span style={{ color: C.danger }}>{counts.rejected} rejected</span>}
+            {counts.pending > 0 && <span style={{ color: C.warn }}>{counts.pending} pending</span>}
+          </span>
+
+          {/* A method-wide verdict. Stops the click reaching the header so
+              deciding does not also fold what you were reading. */}
+          <span style={{ display: "flex", gap: 7, flexShrink: 0 }} onClick={(e) => e.stopPropagation()}>
+            <BulkVerdict
+              label={`All ✓`}
+              title={`Approve all ${total} ${section.method} step(s)`}
+              tone={C.accent}
+              filled={counts.approved === total}
+              onClick={(e) => { e.stopPropagation(); onDecideAllIn(section.steps, APPROVE); }}
+            />
+            <BulkVerdict
+              label="All ✕"
+              title={`Reject all ${total} ${section.method} step(s)`}
+              tone={C.danger}
+              filled={counts.rejected === total}
+              onClick={(e) => { e.stopPropagation(); onDecideAllIn(section.steps, REJECT); }}
+            />
+          </span>
+        </button>
+      )}
+
+      {grouped && !isMethod && (
         <div style={{
           display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap",
           padding: "9px 14px", marginBottom: 8, borderRadius: 9,
@@ -793,11 +1268,16 @@ function CategorySection({
         </div>
       )}
 
-      <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-        {section.files.map((group) => (
+      <div style={{
+        display: "flex", flexDirection: "column", gap: 10,
+        paddingLeft: isMethod ? 14 : 0,
+      }}>
+        {open && section.files.map((group) => (
           <PlanFileGroup
             key={group.file}
             group={group}
+            open={openFiles?.has(`${section.key}:${group.file}`)}
+            onToggleOpen={() => onToggleFile(`${section.key}:${group.file}`)}
             showBreakdown={!grouped}
             decisions={decisions}
             overrideReasons={overrideReasons}
@@ -906,31 +1386,134 @@ function RecommendationFilterBar({ value, onChange, breakdown, total }) {
 
 /** The file path banner heading each group. Sticky, so the path stays visible
  *  while scrolling a file with many steps. */
-function FilePathBar({ file, color, children }) {
+/**
+ * The recommendation mix of a set of steps, as coloured dots.
+ *
+ * A collapsed row has to say what is inside it, and "🔵 Manual Refactoring
+ * Suggested 🟡 Review Carefully" spends most of a line restating two labels
+ * the reader already knows. The dot carries the category; the number carries
+ * the count; the tooltip and the aria-label carry the name in full, so nothing
+ * depends on colour alone.
+ */
+function CategoryDots({ steps }) {
+  const breakdown = groupBreakdown(steps);
+  const present = CATEGORY_ORDER.filter((c) => breakdown.counts[c] > 0);
+  if (present.length === 0 && !breakdown.unassessed) return null;
+
+  return (
+    <span style={{ display: "inline-flex", alignItems: "center", gap: 7, flexShrink: 0 }}>
+      {present.map((category) => {
+        const style = categoryStyle(category);
+        return (
+          <span
+            key={category}
+            title={`${breakdown.counts[category]} × ${style.label}`}
+            aria-label={`${breakdown.counts[category]} ${style.label}`}
+            style={{ display: "inline-flex", alignItems: "center", gap: 4 }}
+          >
+            <span aria-hidden="true" style={{
+              width: 8, height: 8, borderRadius: "50%", background: style.color,
+            }} />
+            <span style={{
+              fontSize: 10.5, fontWeight: 700, color: style.color, fontFamily: "monospace",
+            }}>
+              {breakdown.counts[category]}
+            </span>
+          </span>
+        );
+      })}
+      {breakdown.unassessed > 0 && (
+        <span
+          title={`${breakdown.unassessed} × not assessed by DIWO`}
+          aria-label={`${breakdown.unassessed} not assessed`}
+          style={{ display: "inline-flex", alignItems: "center", gap: 4 }}
+        >
+          <span aria-hidden="true" style={{
+            width: 8, height: 8, borderRadius: "50%", border: `1.5px solid ${C.textMuted}`,
+          }} />
+          <span style={{ fontSize: 10.5, fontWeight: 700, color: C.textMuted, fontFamily: "monospace" }}>
+            {breakdown.unassessed}
+          </span>
+        </span>
+      )}
+    </span>
+  );
+}
+
+/** An All ✓ / All ✕ button. Filled once the whole group carries that verdict. */
+function BulkVerdict({ label, title, tone, filled, onClick }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      title={`${title} — a local decision; nothing is submitted`}
+      style={{
+        padding: "6px 13px", borderRadius: 7, fontSize: 12, fontWeight: 700,
+        cursor: "pointer", border: `1px solid ${tone}40`,
+        background: filled ? tone : `${tone}14`,
+        color: filled ? (tone === C.danger ? "#fff" : "#000") : tone,
+        transition: "all 0.2s",
+      }}
+    >
+      {label}
+    </button>
+  );
+}
+
+/**
+ * The header of one file row.
+ *
+ * Deliberately UNCOLOURED. It used to carry a blue tint, a 4px left bar and a
+ * 2px bottom rule, which framed every file in the palette's informational
+ * colour — on a plan touching a dozen files that is a dozen blue frames
+ * competing with the recommendation dots and the approve/reject state, which
+ * are the two things on the row that actually mean something. A file heading
+ * is structure, not status; the folder icon and the path say what it is.
+ *
+ * The only rule left is a hairline under an OPEN row, separating the heading
+ * from the steps it revealed. A closed row needs no rule — the card's own
+ * border already ends it.
+ */
+function FilePathBar({ file, open, onToggleOpen, children }) {
   return (
     <div style={{
       display: "flex", alignItems: "center", gap: 10, padding: "10px 16px",
-      background: `${color}12`,
-      borderBottom: `2px solid ${color}`,
-      borderLeft: `4px solid ${color}`,
+      background: "transparent",
+      borderBottom: open ? `1px solid ${C.border}` : "none",
       position: "sticky", top: 0, zIndex: 1,
     }}>
-      <span style={{
-        fontSize: 13, fontWeight: 700, color, letterSpacing: 1,
-        textTransform: "uppercase", flexShrink: 0,
-      }}>
-        File
-      </span>
-      <span
-        title={file}
+      {/* The path and the icon are the expander. "FILE" in front of a path
+          spent a word saying what the path already says; a folder icon says
+          the same thing in the space of a character. */}
+      <button
+        type="button"
+        onClick={onToggleOpen}
+        aria-expanded={open}
+        title={`${open ? "Hide" : "Show"} the planned steps for ${file}`}
         style={{
-          fontSize: 14, fontWeight: 700, color: C.text, fontFamily: "monospace",
-          overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
-          minWidth: 0, flexShrink: 1,
+          display: "flex", alignItems: "center", gap: 9, minWidth: 0,
+          flexShrink: 1, background: "none", border: "none", padding: 0,
+          cursor: "pointer", textAlign: "left", color: "inherit",
         }}
       >
-        {file}
-      </span>
+        <span aria-hidden="true" style={{
+          color: C.textMuted, fontSize: 11, flexShrink: 0, display: "inline-block",
+          transform: open ? "rotate(90deg)" : "none", transition: "transform 0.18s ease",
+        }}>
+          ›
+        </span>
+        <span aria-hidden="true" style={{ fontSize: 14, flexShrink: 0 }}>📁</span>
+        <span
+          title={file}
+          style={{
+            fontSize: 14, fontWeight: 700, color: C.text, fontFamily: "monospace",
+            overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+            minWidth: 0,
+          }}
+        >
+          {file}
+        </span>
+      </button>
       {children}
     </div>
   );
@@ -947,7 +1530,7 @@ function FilePathBar({ file, color, children }) {
  * equally safe when one of them is manual-only.
  */
 function PlanFileGroup({
-  group, showBreakdown, decisions, overrideReasons,
+  group, showBreakdown, open = false, onToggleOpen, decisions, overrideReasons,
   onDecide, onDecideAllIn, onApproveRecommendedIn, onExplain, onOverrideReason,
 }) {
   const total = group.steps.length;
@@ -968,8 +1551,15 @@ function PlanFileGroup({
       boxShadow: counts.pending === 0 && counts.approved > 0 ? `0 0 12px ${C.accentGlow}` : "none",
       transition: "all 0.2s",
     }}>
-      <FilePathBar file={group.file} color={FILE_ACCENT}>
+      <FilePathBar
+        file={group.file}
+        open={open}
+        onToggleOpen={onToggleOpen}
+      >
         <Badge label={`${total} step${total > 1 ? "s" : ""}`} color={C.info} />
+        {/* What kinds of recommendation this file holds, without spending a
+            line on their names. */}
+        <CategoryDots steps={group.steps} />
         <span style={{ marginLeft: "auto", fontSize: 11, flexShrink: 0, display: "flex", gap: 10, alignItems: "center" }}>
           <span style={{ color: counts.approved > 0 ? C.accent : C.textMuted }}>{counts.approved}/{total} approved</span>
           {counts.manual > 0 && <span style={{ color: C.info }}>{counts.manual} manual</span>}
@@ -980,7 +1570,7 @@ function PlanFileGroup({
           {/* Primary: only what DIWO can vouch for. */}
           {breakdown.autoSelectable > 0 && breakdown.autoSelectable < total && (
             <button
-              onClick={() => onApproveRecommendedIn(group.steps)}
+              onClick={(e) => { e.stopPropagation(); onApproveRecommendedIn(group.steps); }}
               title={`Approve the ${breakdown.autoSelectable} recommended step(s) in this file, leaving the rest for you to read`}
               style={{
                 padding: "6px 13px", borderRadius: 7, fontSize: 12, fontWeight: 700,
@@ -991,41 +1581,29 @@ function PlanFileGroup({
               ✓ Approve {breakdown.autoSelectable} recommended
             </button>
           )}
-          <button
-            onClick={() => onDecideAllIn(group.steps, APPROVE)}
-            title={
-              breakdown.mixed
-                ? `Approve all ${total} step(s) for this file — they do NOT all carry the same recommendation`
-                : `Approve all ${total} step(s) planned for this file`
-            }
-            style={{
-              padding: "6px 13px", borderRadius: 7, fontSize: 12, fontWeight: 700, cursor: "pointer",
-              border: `1px solid ${C.accent}40`,
-              background: allApproved ? C.accent : `${C.accent}14`, color: allApproved ? "#000" : C.accent,
-              transition: "all 0.2s",
-            }}
-          >
-            All ✓
-          </button>
-          <button
-            onClick={() => onDecideAllIn(group.steps, REJECT)}
+          <BulkVerdict
+            label="All ✓"
+            tone={C.accent}
+            filled={allApproved}
+            title={breakdown.mixed
+              ? `Approve all ${total} step(s) for this file — they do NOT all carry the same recommendation`
+              : `Approve all ${total} step(s) planned for this file`}
+            onClick={(e) => { e.stopPropagation(); onDecideAllIn(group.steps, APPROVE); }}
+          />
+          <BulkVerdict
+            label="All ✕"
+            tone={C.danger}
+            filled={allRejected}
             title={`Reject all ${total} step(s) planned for this file`}
-            style={{
-              padding: "6px 13px", borderRadius: 7, fontSize: 12, fontWeight: 700, cursor: "pointer",
-              border: `1px solid ${C.danger}40`,
-              background: allRejected ? C.danger : `${C.danger}14`, color: allRejected ? "#fff" : C.danger,
-              transition: "all 0.2s",
-            }}
-          >
-            All ✕
-          </button>
+            onClick={(e) => { e.stopPropagation(); onDecideAllIn(group.steps, REJECT); }}
+          />
         </div>
       </FilePathBar>
 
       {/* What "All ✓" is actually about to approve. Only needed when the file
           groups steps of different categories together — inside a category
           section they are all the same by construction. */}
-      {showBreakdown && breakdown.mixed && (
+      {open && showBreakdown && breakdown.mixed && (
         <div style={{
           display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap",
           padding: "7px 16px", background: `${C.warn}0a`,
@@ -1045,7 +1623,7 @@ function PlanFileGroup({
       )}
 
       <div style={{ display: "flex", flexDirection: "column" }}>
-        {group.steps.map((step, rowIdx) => (
+        {open && group.steps.map((step, rowIdx) => (
           <PlanStepCard
             key={step.step_id}
             step={step}
