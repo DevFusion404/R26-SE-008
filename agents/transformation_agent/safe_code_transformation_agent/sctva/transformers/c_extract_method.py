@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 import re
+import shutil
+import subprocess
+import tempfile
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Sequence
 
 from .c_extract_class import CFunction, _parse_c_module
@@ -40,6 +44,7 @@ class CFlow:
     locals: list[str]
     declarations: dict[str, str]
     defined_before: set[str]
+    pointer_like: set[str]
 
 
 def target_match_count(
@@ -69,8 +74,9 @@ def apply_extract_method(
     metadata = _base_metadata(method_name, new_method_name, source_class, source_file or current_file_name)
     if source_resolution_error:
         return _review(source_code, source_resolution_error, metadata)
-    if not _identifier(method_name) or not _identifier(new_method_name):
+    if not _identifier(method_name):
         return _review(source_code, "INVALID_FUNCTION_TARGET_OR_NAME", metadata)
+
     targets = _resolve_targets(source_code, method_name, method_signature)
     if not targets:
         return _review(source_code, "FUNCTION_TARGET_NOT_FOUND", metadata)
@@ -78,16 +84,29 @@ def apply_extract_method(
         return _review(source_code, "AMBIGUOUS_FUNCTION_TARGET", metadata)
     function = targets[0]
     model = _parse_c_module(source_code)
+
+    # Automatically derive or disambiguate helper name if missing or conflicting
+    if not _identifier(new_method_name):
+        new_method_name = f"extracted_{method_name}"
+
     helper_collisions = model.functions_by_name.get(new_method_name, [])
     if helper_collisions:
         if re.search(rf"\b{re.escape(new_method_name)}\s*\(", function.body):
             metadata.update({"status": ALREADY_APPLIED, "reason": "ALREADY_APPLIED", "plan_compliance": "PASS"})
             return source_code, 0, metadata
-        return _review(source_code, "EXTRACTED_FUNCTION_NAME_COLLISION", metadata)
+        # Try appending suffix if name collision exists
+        counter = 1
+        alt_name = f"{new_method_name}_{counter}"
+        while model.functions_by_name.get(alt_name):
+            counter += 1
+            alt_name = f"{new_method_name}_{counter}"
+        new_method_name = alt_name
+        metadata["extracted_method"] = new_method_name
 
     statements = direct_c_like_statements(function.body, body_offset=function.open_brace + 1)
-    if len(statements) < 3:
+    if len(statements) < 2:
         return _review(source_code, "FUNCTION_HAS_NO_MEANINGFUL_EXTRACTABLE_BLOCK", metadata)
+
     parameter_declarations = _c_parameter_declarations(function.params_raw)
     before_metrics = _function_metrics(source_code, function)
     candidate = _select_candidate(
@@ -100,12 +119,11 @@ def apply_extract_method(
     )
     if candidate is None:
         return _review(source_code, "NO_SAFE_COHESIVE_BLOCK", {**metadata, "before_metrics": before_metrics})
+
     selected, flow = candidate
     parameter_count = len(flow.inputs) + len(flow.outputs)
     if parameter_count > MAX_EXTRACTED_PARAMETERS:
         return _review(source_code, "TOO_MANY_PARAMETERS", {**metadata, "before_metrics": before_metrics})
-    if any("[" in flow.declarations[name] for name in flow.outputs):
-        return _review(source_code, "ARRAY_OUTPUT_REQUIRES_REVIEW", {**metadata, "before_metrics": before_metrics})
 
     transformed = _rewrite(
         source_code,
@@ -114,22 +132,39 @@ def apply_extract_method(
         flow=flow,
         new_method_name=new_method_name,
     )
+
     transformed_targets = _resolve_targets(transformed, method_name, method_signature)
     transformed_model = _parse_c_module(transformed)
     if len(transformed_targets) != 1:
         return _review(source_code, "POST_TRANSFORM_TARGET_VALIDATION_FAILED", {**metadata, "before_metrics": before_metrics})
+
     after_function = transformed_targets[0]
     after_metrics = _function_metrics(transformed, after_function)
     helper_matches = transformed_model.functions_by_name.get(new_method_name, [])
+
+    # Check extracted helper metrics to ensure it does NOT introduce a LongFunction smell (>40 LOC)
+    helper_loc = _line_of(transformed, helper_matches[0].end - 1) - _line_of(transformed, helper_matches[0].start) + 1 if helper_matches else 0
+
     structural_passed = len(helper_matches) == 1 and re.search(
         rf"\b{re.escape(new_method_name)}\s*\(", after_function.body
     ) is not None
-    reduction_passed = _meaningfully_reduced(before_metrics, after_metrics, selected)
-    if not structural_passed or not reduction_passed:
-        reason = "EXTRACT_FUNCTION_STRUCTURE_NOT_PROVEN" if not structural_passed else "LONG_FUNCTION_NOT_REDUCED"
+    reduction_passed = _meaningfully_reduced(before_metrics, after_metrics, selected, threshold=40)
+    helper_smell_free = helper_loc <= 40
+
+    if not structural_passed or not reduction_passed or not helper_smell_free:
+        reason = "EXTRACT_FUNCTION_STRUCTURE_NOT_PROVEN" if not structural_passed else ("HELPER_LONG_FUNCTION_SMELL" if not helper_smell_free else "LONG_FUNCTION_NOT_REDUCED")
         return _review(
             source_code,
             reason,
+            {**metadata, "before_metrics": before_metrics, "after_metrics": after_metrics},
+        )
+
+    # Compiler validation using GCC/Clang if available
+    compile_status, compile_msg = _verify_c_compilation(transformed)
+    if compile_status == "FAIL":
+        return _review(
+            source_code,
+            f"COMPILATION_FAILED: {compile_msg}",
             {**metadata, "before_metrics": before_metrics, "after_metrics": after_metrics},
         )
 
@@ -149,14 +184,17 @@ def apply_extract_method(
         "after_loc": after_metrics["loc"],
         "before_metrics": before_metrics,
         "after_metrics": after_metrics,
+        "compiler_validation": compile_msg,
         "validation": {
             "target_resolution": "PASS",
             "data_flow": "PASS",
             "structural": "PASS",
-            "no_severe_new_smell": "PASS",
-            "long_method_reduction": "PASS",
+            "no_severe_new_smell": "PASS" if helper_smell_free else "FAIL",
+            "long_method_reduction": "PASS" if reduction_passed else "FAIL",
+            "smell_reduction": "PASS" if reduction_passed else "FAIL",
+            "compilation": compile_status,
         },
-        "behavioral_safety": "PENDING_PIPELINE_VALIDATION",
+        "behavioral_safety": "PASSED_COMPILER_AND_STRUCTURAL_VALIDATION" if compile_status == "PASS" else "STRUCTURAL_VALIDATION_ONLY",
     })
     return transformed, 1, metadata
 
@@ -186,7 +224,9 @@ def _select_candidate(
     *,
     start_line: int | None,
     end_line: int | None,
+    target_loc_threshold: int = 40,
 ) -> tuple[list[StatementSpan], CFlow] | None:
+    before_loc = _line_of(source_code, function.end - 1) - _line_of(source_code, function.start) + 1
     windows = candidate_windows(
         statements,
         start_line=start_line,
@@ -215,11 +255,39 @@ def _select_candidate(
             continue
         loc = nonblank_loc(text)
         complexity = control_complexity(text)
-        if loc < MIN_EXTRACTED_LOC and complexity <= 1:
+        if not (start_line and end_line) and loc < MIN_EXTRACTED_LOC and complexity <= 1:
             continue
-        hint_bonus = 20 if start_line and end_line and _line_of(source_code, window[0].start) <= end_line and _line_of(source_code, window[-1].end - 1) >= start_line else 0
+
+        estimated_after_loc = before_loc - loc + 2
+        estimated_helper_loc = loc + 3
+
+        threshold_reducing_bonus = 0.0
+        if before_loc > target_loc_threshold:
+            if estimated_after_loc <= target_loc_threshold and estimated_helper_loc <= target_loc_threshold:
+                threshold_reducing_bonus = 1000.0
+            elif estimated_after_loc <= target_loc_threshold:
+                threshold_reducing_bonus = 500.0
+            else:
+                threshold_reducing_bonus = -500.0
+
+        hint_bonus = 0.0
+        if start_line and end_line:
+            w_start = _line_of(source_code, window[0].start)
+            w_end = _line_of(source_code, max(window[-1].start, window[-1].end - 2))
+            if w_start >= start_line and w_end <= end_line:
+                hint_bonus = 2000.0
+            elif w_start <= end_line and w_end >= start_line:
+                hint_bonus = 100.0
+
         cohesion = len(set(flow.inputs) & identifiers(text)) + len(flow.outputs)
-        score = hint_bonus + complexity * 4 + loc + cohesion - (len(flow.inputs) + len(flow.outputs)) * 0.5
+        score = (
+            threshold_reducing_bonus
+            + hint_bonus
+            + complexity * 4.0
+            + loc * 2.0
+            + cohesion
+            - (len(flow.inputs) + len(flow.outputs)) * 0.5
+        )
         scored.append((score, list(window), flow))
     if not scored:
         return None
@@ -241,15 +309,24 @@ def _c_flow(
     selected_declarations = _c_local_declarations(selected_text)
     declarations = {**parameter_declarations, **before_declarations, **selected_declarations}
     defined_before = set(parameter_declarations) | set(before_declarations)
+    pointer_like = {
+        name
+        for name, declaration in declarations.items()
+        if _is_pointer_like_declaration(declaration)
+    }
     reads = _c_reads(selected_text)
-    writes = _c_writes(selected_text) | set(selected_declarations)
+    direct_writes = _c_writes(selected_text)
+    address_writes = _c_address_output_writes(selected_text, declarations)
+    writes = direct_writes | address_writes | set(selected_declarations)
     reads_after = _c_reads(after_text)
-    outputs = sorted(writes & reads_after)
+    if direct_writes & reads_after & pointer_like:
+        return None
+    outputs = sorted(name for name in (writes & reads_after) if name not in pointer_like)
     inputs = sorted((reads & defined_before) - set(outputs))
     locals_only = sorted(writes - set(outputs))
     if any(name not in declarations for name in [*inputs, *outputs]):
         return None
-    return CFlow(inputs, outputs, locals_only, declarations, defined_before)
+    return CFlow(inputs, outputs, locals_only, declarations, defined_before, pointer_like)
 
 
 def _c_parameter_declarations(params_raw: str) -> dict[str, str]:
@@ -314,16 +391,31 @@ def _c_local_declarations(text: str) -> dict[str, str]:
 
 def _c_writes(text: str) -> set[str]:
     masked = mask_c_like(text)
-    writes = {
-        match.group(1)
-        for match in re.finditer(
-            r"(?<![A-Za-z0-9_])([A-Za-z_][A-Za-z0-9_]*)"
-            r"(?:\s*(?:\.|->)\s*[A-Za-z_][A-Za-z0-9_]*)?\s*"
-            r"(?:\+\+|--|[+\-*/%&|^]?=(?!=))",
-            masked,
-        )
-    }
-    writes.update(match.group(1) for match in re.finditer(r"(?:\+\+|--)\s*([A-Za-z_][A-Za-z0-9_]*)", masked))
+    writes = set()
+    # Match direct variable assignments (e.g. x = ..., x += ...)
+    # Negative lookbehind ensures x is not a struct member (obj.x or obj->x)
+    # Negative lookahead ensures x is not followed by . or -> or [
+    for match in re.finditer(
+        r"(?<![A-Za-z0-9_.*&>])([A-Za-z_][A-Za-z0-9_]*)\s*(?![.\-\[\w])(?:\+\+|--|[+\-*/%&|^]?=(?!=))",
+        masked,
+    ):
+        var = match.group(1)
+        if var not in _C_KEYWORDS:
+            writes.add(var)
+    for match in re.finditer(r"(?<![A-Za-z0-9_.*&>])(?:\+\+|--)\s*([A-Za-z_][A-Za-z0-9_]*)", masked):
+        var = match.group(1)
+        if var not in _C_KEYWORDS:
+            writes.add(var)
+    return writes
+
+
+def _c_address_output_writes(text: str, declarations: dict[str, str]) -> set[str]:
+    masked = mask_c_like(text)
+    writes: set[str] = set()
+    for match in re.finditer(r"&\s*([A-Za-z_][A-Za-z0-9_]*)\b", masked):
+        name = match.group(1)
+        if name in declarations and name not in _C_KEYWORDS and not _is_pointer_like_declaration(declarations[name]):
+            writes.add(name)
     return writes
 
 
@@ -349,20 +441,29 @@ def _rewrite(
     line_start = source_code.rfind("\n", 0, raw_start) + 1
     start = line_start if not source_code[line_start:raw_start].strip() else raw_start
     selected_text = source_code[start:end]
-    newly_declared_outputs = [name for name in flow.outputs if name not in flow.defined_before]
+
+    scalar_outputs = list(flow.outputs)
+
+    newly_declared_outputs = [
+        name for name in scalar_outputs if name not in flow.defined_before
+    ]
     for name in newly_declared_outputs:
         selected_text = _remove_selected_declaration(selected_text, name)
-    replacement_names = {name: f"(*{name}_out)" for name in flow.outputs}
-    selected_text = _replace_identifiers(selected_text, replacement_names)
+
+    output_parameters = _output_parameter_names(flow)
+    selected_text = _rewrite_scalar_output_uses(selected_text, output_parameters)
+
     if selected_text and not selected_text.endswith(("\n", "\r")):
         selected_text += "\n"
 
     input_params = [flow.declarations[name].format(name=name) for name in flow.inputs]
-    output_params = [
-        _pointer_declaration(flow.declarations[name], f"{name}_out")
-        for name in flow.outputs
+    new_output_params = [
+        _pointer_declaration(flow.declarations[name], output_parameters[name])
+        for name in scalar_outputs
     ]
-    params = ", ".join([*input_params, *output_params]) or "void"
+
+    params_list = [*input_params, *new_output_params]
+    params = ", ".join(params_list) or "void"
     helper = f"static void {new_method_name}({params}) {{\n{selected_text}}}\n\n"
 
     declaration_line = ""
@@ -375,7 +476,11 @@ def _rewrite(
             )
             + ";\n"
         )
-    args = [*flow.inputs, *(f"&{name}" for name in flow.outputs)]
+
+    args = [
+        *flow.inputs,
+        *(f"&{name}" for name in scalar_outputs),
+    ]
     call = f"{body_indent}{new_method_name}({', '.join(args)});"
     if source_code[end - 1:end] == "\n":
         call += "\n"
@@ -386,29 +491,64 @@ def _rewrite(
 def _remove_selected_declaration(text: str, name: str) -> str:
     masked = mask_c_like(text)
     match = re.search(
-        rf"(?m)^(?P<indent>[ \t]*)(?:(?:const|volatile|signed|unsigned|short|long|struct\s+\w+|union\s+\w+|enum\s+\w+|[A-Za-z_]\w*)\s+)+(?:\*\s*)*\b{re.escape(name)}\b\s*(?==)",
+        rf"(?m)^(?P<indent>[ \t]*)(?:(?:const|volatile|signed|unsigned|short|long|struct\s+\w+|union\s+\w+|enum\s+\w+|[A-Za-z_]\w*)\s+)+(?:\*\s*)*\b{re.escape(name)}\b\s*(?P<tail>=|;)",
         masked,
     )
     if not match:
         return text
-    return text[:match.start()] + match.group("indent") + name + " " + text[match.end():]
+    if match.group("tail") == ";":
+        line_end = text.find("\n", match.end())
+        end = len(text) if line_end < 0 else line_end + 1
+        return text[:match.start()] + text[end:]
+    return text[:match.start()] + match.group("indent") + name + " " + text[match.start("tail"):]
 
 
-def _replace_identifiers(text: str, replacements: dict[str, str]) -> str:
-    if not replacements:
+def _rewrite_scalar_output_uses(text: str, output_parameters: dict[str, str]) -> str:
+    if not output_parameters:
         return text
     masked = mask_c_like(text)
     edits: list[tuple[int, int, str]] = []
+    covered: list[tuple[int, int]] = []
+
+    for match in re.finditer(r"&\s*([A-Za-z_][A-Za-z0-9_]*)\b", masked):
+        name = match.group(1)
+        output_parameter = output_parameters.get(name)
+        if output_parameter:
+            edits.append((match.start(), match.end(), output_parameter))
+            covered.append((match.start(), match.end()))
+
     for match in re.finditer(r"\b[A-Za-z_][A-Za-z0-9_]*\b", masked):
-        replacement = replacements.get(match.group(0))
-        if replacement:
-            edits.append((match.start(), match.end(), replacement))
+        name = match.group(0)
+        output_parameter = output_parameters.get(name)
+        if not output_parameter or any(start <= match.start() < end for start, end in covered):
+            continue
+        edits.append((match.start(), match.end(), f"(*{output_parameter})"))
     return apply_edits(text, edits)
+
+
+def _output_parameter_names(flow: CFlow) -> dict[str, str]:
+    unavailable = set(flow.declarations)
+    names: dict[str, str] = {}
+    for output in flow.outputs:
+        candidate = f"{output}_out"
+        suffix = 2
+        while candidate in unavailable:
+            candidate = f"{output}_out_{suffix}"
+            suffix += 1
+        names[output] = candidate
+        unavailable.add(candidate)
+    return names
 
 
 def _pointer_declaration(template: str, name: str) -> str:
     rendered = template.format(name=f"*{name}")
     return re.sub(r"\*\s*\*", "**", rendered)
+
+
+def _is_pointer_like_declaration(template: str) -> bool:
+    before_name = template.split("{name}", 1)[0] if "{name}" in template else template
+    after_name = template.split("{name}", 1)[1] if "{name}" in template else ""
+    return "*" in before_name or "[" in after_name
 
 
 def _function_metrics(source_code: str, function: CFunction) -> dict[str, int]:
@@ -422,15 +562,18 @@ def _function_metrics(source_code: str, function: CFunction) -> dict[str, int]:
     }
 
 
-def _meaningfully_reduced(before: dict[str, int], after: dict[str, int], selected: Sequence[StatementSpan]) -> bool:
+def _meaningfully_reduced(
+    before: dict[str, int],
+    after: dict[str, int],
+    selected: Sequence[StatementSpan],
+    threshold: int = 40,
+) -> bool:
     selected_loc = sum(nonblank_loc(item.text) for item in selected)
-    return (
-        selected_loc >= MIN_EXTRACTED_LOC
-        and after["loc"] <= before["loc"] - 2
-        and after["statement_count"] < before["statement_count"]
-        and after["complexity"] <= before["complexity"]
-        and after["responsibility_count"] < before["responsibility_count"]
-    )
+    if selected_loc < MIN_EXTRACTED_LOC:
+        return False
+    if before["loc"] > threshold:
+        return after["loc"] <= threshold
+    return after["loc"] < before["loc"]
 
 
 def _brace_nesting(text: str) -> int:
@@ -482,3 +625,30 @@ def _review(source_code: str, reason: str, metadata: dict[str, Any]) -> tuple[st
         "final_decision": "REVIEW_REQUIRED",
         "behavioral_safety": "NOT_EVALUATED_NO_CHANGE",
     }
+
+
+def _verify_c_compilation(source_code: str, timeout_seconds: int = 10) -> tuple[str, str]:
+    compiler = shutil.which("gcc") or shutil.which("clang")
+    if not compiler:
+        return "UNAVAILABLE", "C compiler not available; compile check skipped."
+
+    source_code = source_code.lstrip("\ufeff")
+    with tempfile.TemporaryDirectory() as temp_dir:
+        c_file = Path(temp_dir) / "sctva_temp.c"
+        c_file.write_text(source_code, encoding="utf-8")
+
+        compile_args = [compiler, "-std=c11", "-fsyntax-only", "-I", str(temp_dir), str(c_file)]
+        try:
+            proc = subprocess.run(
+                compile_args,
+                capture_output=True,
+                text=True,
+                timeout=timeout_seconds,
+            )
+            if proc.returncode != 0:
+                stderr = (proc.stderr or proc.stdout or "").strip()
+                return "FAIL", f"C compile check failed ({compiler}): {stderr}"
+        except Exception as exc:
+            return "FAIL", f"C compile check error: {exc}"
+
+    return "PASS", f"{compiler} compile check passed."
