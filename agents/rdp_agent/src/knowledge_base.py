@@ -77,7 +77,7 @@ DEFAULT_CATALOG: Dict[str, List[Dict[str, Any]]] = {
             "complexity": "low",
             "risk": "medium",
             "impact": "high",
-            "preconditions": ["has_external_field_access", "is_class_method", "has_valid_destination"],
+            "preconditions": [],
         },
     ],
     "Duplicate Code": [

@@ -134,7 +134,7 @@ def candidate_windows(
             candidates.append(hinted)
 
     count = len(statements)
-    max_width = min(4, max(1, count - 1))
+    max_width = min(35, max(1, count - 1))
     for width in range(max_width, 1, -1):
         for start in range(0, count - width + 1):
             candidates.append(list(statements[start:start + width]))

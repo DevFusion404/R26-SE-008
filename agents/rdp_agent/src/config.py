@@ -26,6 +26,12 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "complexity_weight": 0.2,
         "risk_weight": 0.4,
         "impact_weight": 0.4,
+        "impact_prediction_weight": 0.3,
+        "ml_prediction_weight": 0.25,
+        "mcda_quality_weight": 0.40,
+        "mcda_complexity_weight": 0.25,
+        "mcda_risk_weight": 0.20,
+        "mcda_dependency_weight": 0.15,
     },
     "severity_order": {
         "critical": 4,

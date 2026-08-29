@@ -133,12 +133,11 @@ export default function DependencyOverview({ graph = {}, summary = {} }) {
 
       {/* SVG Graph */}
       <div
-        style={{
-          width: '100%', height: Math.min(svgH, 420),
-          background: 'var(--bg-base)', borderRadius: 8,
-          border: '1px solid var(--border)', overflow: 'hidden',
-          cursor: 'grab',
-        }}
+        style={{ width: '100%', height: Math.min(svgH, 420),
+        background: 'var(--bg-surface)', borderRadius: 8,
+        border: '1px solid var(--border)', overflow: 'hidden',
+        cursor: 'grab',
+      }}
         onMouseDown={onMouseDown}
         onMouseMove={onMouseMove}
         onMouseUp={onMouseUp}
@@ -151,14 +150,14 @@ export default function DependencyOverview({ graph = {}, summary = {} }) {
             {/* Edges */}
             <defs>
               <marker id="arrowhead" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
-                <polygon points="0 0, 8 3, 0 6" fill="#1e3a5f" />
+                <polygon points="0 0, 8 3, 0 6" fill="var(--border-light)" />
               </marker>
             </defs>
             {edgeCoords.map(e => (
               <line
                 key={e.id}
                 x1={e.x1} y1={e.y1} x2={e.x2} y2={e.y2}
-                stroke="#1e3a5f"
+                stroke="var(--border)"
                 strokeWidth={1.5}
                 markerEnd="url(#arrowhead)"
                 opacity={0.7}
@@ -183,7 +182,7 @@ export default function DependencyOverview({ graph = {}, summary = {} }) {
                   <rect
                     width={NODE_W} height={NODE_H}
                     rx={6} ry={6}
-                    fill={isHovered ? `${cfg.color}22` : '#0f1f35'}
+                    fill={isHovered ? `${cfg.color}22` : 'var(--bg-elevated)'}
                     stroke={cfg.stroke}
                     strokeWidth={isHovered ? 2 : 1.5}
                     style={{ filter: isHovered ? `drop-shadow(0 0 6px ${cfg.glow})` : 'none' }}
@@ -191,7 +190,7 @@ export default function DependencyOverview({ graph = {}, summary = {} }) {
                   <text
                     x={NODE_W / 2} y={NODE_H / 2 - 3}
                     textAnchor="middle"
-                    fill={isHovered ? cfg.color : '#cbd5e1'}
+                    fill={isHovered ? cfg.color : 'var(--text-primary)'}
                     fontSize={9.5}
                     fontFamily="'JetBrains Mono', 'Fira Code', monospace"
                     fontWeight={600}
