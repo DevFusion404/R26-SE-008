@@ -149,7 +149,16 @@ export default function App() {
     setPipelineState('rdp_done');
   }
 
+  const GATED_DOWNSTREAM_AGENTS = ['rdp', 'transform', 'orchestrate'];
+  const isDetectionDone = repoLoaded && !!cuqaReport;
+
   function navigate(id) {
+    if (id === 'cuqa' && !repoLoaded) {
+      return; // Lock CUQA Agent until repository is uploaded/linked
+    }
+    if (GATED_DOWNSTREAM_AGENTS.includes(id) && !isDetectionDone) {
+      return; // Lock downstream agents until code smell analysis completes
+    }
     localStorage.setItem('rfiq_active_page', id);
     setPage(id);
   }
@@ -166,6 +175,7 @@ export default function App() {
           repoMeta={repoMeta}
           analysisConfig={repoConfig}
           onSendToRdp={handleSendToRdp}
+          onReportReady={(rep) => setCuqaReport(rep)}
           onNavigate={navigate}
           pipelineState={pipelineState}
           onPipelineStateChange={setPipelineState}
@@ -325,23 +335,39 @@ export default function App() {
 
           {/* Main nav items */}
           {NAV_MAIN.map(item => {
-            const isActive = page === item.id;
-            const isAgentReady = repoLoaded && ['cuqa'].includes(item.id);
+            const isActive          = page === item.id;
+            const isCuqaGated       = item.id === 'cuqa' && !repoLoaded;
+            const isDownstreamGated = GATED_DOWNSTREAM_AGENTS.includes(item.id) && !isDetectionDone;
+            const isDisabled        = isCuqaGated || isDownstreamGated;
+            const isAgentReady      = repoLoaded && ['cuqa'].includes(item.id);
             // Pipeline status dot colours
-            const rdpPulsing = item.id === 'rdp' && pipelineState === 'rdp_running';
-            const rdpDone    = item.id === 'rdp' && pipelineState === 'rdp_done';
+            const rdpPulsing        = item.id === 'rdp' && pipelineState === 'rdp_running';
+            const rdpDone           = item.id === 'rdp' && pipelineState === 'rdp_done';
+
+            const tooltipText = isCuqaGated
+              ? 'CUQA Agent — Please upload or link a repository in Repository Input first'
+              : isDownstreamGated
+              ? `${item.label} — Upload repository & run CUQA code smell analysis first`
+              : item.label;
 
             return (
               <div
                 key={item.id}
                 id={`nav-${item.id}`}
-                className={`sidebar-item ${isActive ? 'active' : ''}`}
-                onClick={() => navigate(item.id)}
-                style={isAgentReady && !isActive ? { color: 'var(--accent)', opacity: 0.9 } : {}}
-                title={item.label}
+                className={`sidebar-item ${isActive ? 'active' : ''} ${isDisabled ? 'disabled' : ''}`}
+                onClick={() => !isDisabled && navigate(item.id)}
+                style={isDisabled
+                  ? { opacity: 0.35, cursor: 'not-allowed', filter: 'grayscale(0.6)' }
+                  : isAgentReady && !isActive ? { color: 'var(--accent)', opacity: 0.9 } : {}
+                }
+                title={tooltipText}
               >
                 <span className="s-icon">{item.icon}</span>
                 <span>{item.label}</span>
+                {/* Lock icon for gated agents before unlock condition */}
+                {isDisabled && (
+                  <span style={{ marginLeft: 'auto', fontSize: 10, opacity: 0.6 }} title={tooltipText}>🔒</span>
+                )}
                 {/* CUQA ready dot */}
                 {item.id === 'cuqa' && repoLoaded && !isActive && (
                   <span style={{
