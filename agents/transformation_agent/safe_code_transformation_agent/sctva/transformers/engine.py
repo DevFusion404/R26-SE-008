@@ -747,8 +747,18 @@ class TransformationEngine:
                             or action.action_type
                         ),
                         "source_file": str(action.parameters.get("source_file") or ""),
-                        "target_resolution": "stale_rdp_target_guard",
+                        "target_resolution": action.parameters.get(
+                            "target_resolution"
+                        ) or "stale_rdp_target_guard",
                     }
+                    for key in (
+                        "target_kind",
+                        "suggested_refactoring",
+                        "source_class_resolved",
+                        "destination_class_resolved",
+                    ):
+                        if key in action.parameters:
+                            action_metadata[key] = action.parameters[key]
                     # Do not add a human-facing warning here.  The detailed
                     # transformation log retains the reason and status.
                     warnings = []
@@ -767,12 +777,37 @@ class TransformationEngine:
                         ),
                         "requested_action_type": action.action_type,
                         "source_file": str(action.parameters.get("source_file") or ""),
-                        "target_resolution": "failed_after_plan_and_source_analysis",
+                        "target_resolution": action.parameters.get(
+                            "move_method_target_resolution"
+                        ) or "failed_after_plan_and_source_analysis",
                     }
-                    warnings.append(
-                        f"RDP {action.action_type} target resolution requires review: "
-                        f"{action_metadata['reason']}."
+                    for key in ("target_kind", "suggested_refactoring"):
+                        if action.parameters.get(key):
+                            action_metadata[key] = action.parameters[key]
+                    for key in (
+                        "source_class_resolved",
+                        "destination_class_resolved",
+                    ):
+                        if key in action.parameters:
+                            action_metadata[key] = bool(action.parameters[key])
+                    resolution_metadata = action.parameters.get(
+                        "move_method_target_resolution"
                     )
+                    if isinstance(resolution_metadata, dict):
+                        for key in (
+                            "source_class_resolved",
+                            "destination_class_resolved",
+                            "target_kind",
+                            "suggested_refactoring",
+                        ):
+                            if key in resolution_metadata:
+                                action_metadata[key] = resolution_metadata[key]
+                    action_metadata.setdefault("replacements_count", 0)
+                    if unresolved_status != "not_applicable":
+                        warnings.append(
+                            f"RDP {action.action_type} target resolution requires review: "
+                            f"{action_metadata['reason']}."
+                        )
                 elif action.action_type == ACTION_NOOP:
                     # Older/upstream PlannerAdapter versions may already have
                     # converted a malformed Feature-Envy Move Method step to
@@ -805,11 +840,16 @@ class TransformationEngine:
                         source_line = int(source_line) if isinstance(source_line, (int, float)) else None
                         resolution = python_transformers.resolve_move_method_target(
                             current_code,
-                            method_name=str(action.parameters.get("method") or ""),
+                            method_name=str(
+                                action.parameters.get("method")
+                                or action.parameters.get("source_method")
+                                or ""
+                            ),
                             source_class=str(action.parameters.get("source_class") or ""),
                             destination_class=str(action.parameters.get("destination_class") or ""),
                             destination_parameter=str(action.parameters.get("destination_parameter") or ""),
                             source_line=source_line,
+                            allow_unique_inference=True,
                         )
                         if resolution.get("status") == "success":
                             effective_params = {
@@ -985,10 +1025,51 @@ class TransformationEngine:
                                 current_code, literal_value, name, source_line
                             )
                         else:
-                            current_code, step_replacements = java_transformers.apply_extract_constant(
-                                current_code, literal_value, name, source_line
+                            current_code, step_replacements, introduce_metadata = (
+                                java_transformers.apply_introduce_constant(
+                                    current_code,
+                                    literal_value,
+                                    name,
+                                    source_line,
+                                    reference_source_code=source_code,
+                                )
                             )
+                            literal_results = action_metadata.setdefault(
+                                "literal_results", []
+                            )
+                            literal_results.append(dict(introduce_metadata))
+                            # Keep the single-literal action metadata easy to
+                            # consume in reports while retaining per-literal
+                            # evidence for the rare multi-value plan step.
+                            if len(literal_values) == 1:
+                                action_metadata.update(introduce_metadata)
                         replacements += step_replacements
+
+                    if language == "java" and literal_values:
+                        literal_results = action_metadata.get("literal_results") or []
+                        if replacements <= 0 and literal_results and all(
+                            str(item.get("status") or "").lower()
+                            == "not_applicable"
+                            for item in literal_results
+                        ):
+                            action_metadata["status"] = "not_applicable"
+                            if len(literal_results) == 1:
+                                action_metadata.setdefault(
+                                    "reason", literal_results[0].get("reason")
+                                )
+                            else:
+                                action_metadata["reason"] = (
+                                    "ALL_INTRODUCE_CONSTANT_TARGETS_NOT_APPLICABLE"
+                                )
+                            action_metadata["final_status"] = "NOT_APPLICABLE"
+                            action_metadata["final_decision"] = "NOT_APPLICABLE"
+                        elif replacements > 0:
+                            action_metadata.setdefault("status", "success")
+                            action_metadata.setdefault(
+                                "reason", "introduce_constant_applied"
+                            )
+                            action_metadata["final_status"] = "PASS"
+                            action_metadata["final_decision"] = "ACCEPT"
 
                 elif action.action_type == ACTION_REPLACE_LITERAL:
                     if "old_literal" not in action.parameters or "new_literal" not in action.parameters:
@@ -1064,10 +1145,13 @@ class TransformationEngine:
                     ).strip()
                     start_line = action.parameters.get("start_line")
                     end_line = action.parameters.get("end_line")
+                    source_line = action.parameters.get("source_line")
                     if isinstance(start_line, str) and start_line.strip().isdigit():
                         start_line = int(start_line.strip())
                     if isinstance(end_line, str) and end_line.strip().isdigit():
                         end_line = int(end_line.strip())
+                    if isinstance(source_line, str) and source_line.strip().isdigit():
+                        source_line = int(source_line.strip())
                     if not method_name:
                         raise ValueError("extract_method requires a semantic method/function target.")
                     if not new_method_name:
@@ -1076,6 +1160,8 @@ class TransformationEngine:
                         start_line = None
                     if not isinstance(end_line, int):
                         end_line = None
+                    if not isinstance(source_line, int):
+                        source_line = None
 
                     if language == "python":
                         current_code, replacements, action_metadata = python_extract_method.apply_extract_method(
@@ -1113,6 +1199,7 @@ class TransformationEngine:
                             method_signature=method_signature,
                             start_line=start_line,
                             end_line=end_line,
+                            source_line=source_line,
                             source_file=str(action.parameters.get("source_file") or ""),
                             current_file_name=current_file_name,
                             source_resolution_error=str(action.parameters.get("source_resolution_error") or ""),
@@ -1138,7 +1225,11 @@ class TransformationEngine:
                 elif action.action_type == ACTION_MOVE_PYTHON_METHOD:
                     if language != "python":
                         raise ValueError("move_python_method requires a Python source file.")
-                    method_name = str(action.parameters.get("method") or "").strip()
+                    method_name = str(
+                        action.parameters.get("method")
+                        or action.parameters.get("source_method")
+                        or ""
+                    ).strip()
                     source_class = str(action.parameters.get("source_class") or "").strip()
                     destination_class = str(action.parameters.get("destination_class") or "").strip()
                     destination_parameter = str(
@@ -1175,7 +1266,14 @@ class TransformationEngine:
                             )
                         action_metadata["reclassified_action_type"] = ACTION_MOVE_PYTHON_METHOD
                         action_metadata["effective_action_parameters"] = effective_params
-                    if move_status not in {"success", "already_applied"}:
+                    if move_status == "not_applicable":
+                        # A module-level function or a missing class pair is
+                        # structurally outside Move Method. Preserve the safe
+                        # classification without presenting it as a failed
+                        # or review-required refactoring.
+                        action_metadata.setdefault("target_kind", "CLASS_METHOD")
+                        action_metadata.setdefault("suggested_refactoring", "")
+                    elif move_status not in {"success", "already_applied"}:
                         warnings.append(
                             "Feature Envy Move Method requires review: "
                             f"{action_metadata.get('reason', 'unsafe move candidate')}."

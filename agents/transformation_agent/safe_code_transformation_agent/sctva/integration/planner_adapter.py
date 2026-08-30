@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from typing import Any, Dict, List, Optional
 
+from ..contracts import normalize_move_method_parameters
 from ..constants import (
     ACTION_ENCAPSULATE_C_VARIABLE,
     ACTION_ENCAPSULATE_VARIABLE,
@@ -230,6 +231,13 @@ class PlannerAdapter:
             target = {"function": target}
         if not isinstance(target, dict):
             raise PlannerAdapterError("'target' must be an object or symbol name when provided")
+
+        if ref_key in {"move method", "feature envy"}:
+            params = normalize_move_method_parameters({
+                **step,
+                "parameters": params,
+                "target": target,
+            })
 
         action: Optional[Dict[str, Any]] = None
 
@@ -474,11 +482,11 @@ class PlannerAdapter:
             # SCTVA recover the concrete method/classes from the Python AST.
             source_file = self._source_file_from_step(step, params=params, target=target)
             method = (
-                target.get("method")
-                or target.get("function")
+                params.get("source_method")
                 or params.get("method")
                 or params.get("method_name")
-                or params.get("source_method")
+                or target.get("method")
+                or target.get("function")
                 or ""
             )
             source_class = self._semantic_class_hint(
@@ -554,9 +562,10 @@ class PlannerAdapter:
             if not action:
                 action = {
                 "action_type": ACTION_MOVE_PYTHON_METHOD,
-                "parameters": {
-                    "method": str(method),
-                    "source_class": str(source_class),
+                    "parameters": {
+                        "method": str(method),
+                        "source_method": str(method),
+                        "source_class": str(source_class),
                     "destination_class": str(destination_class),
                     "destination_parameter": str(params.get("destination_parameter") or ""),
                     "source_file": source_file,
