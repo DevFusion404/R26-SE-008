@@ -20,6 +20,71 @@ def _new_request_id() -> str:
     return "sctva_" + datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f")
 
 
+def _normalize_execute_from_rdp_payload(
+    payload: dict[str, Any],
+    *,
+    adapter: PlannerAdapter,
+) -> dict[str, Any]:
+    """Normalize raw RDP plans before SCTVA contract parsing.
+
+    The RDP endpoint historically bypassed :class:`PlannerAdapter` and sent the
+    incoming payload straight to ``agent.execute``.  That is safe only when the
+    caller already supplies SCTVA ``actions``.  Raw RDP plans use ``steps`` and
+    keep Move Method fields under ``step.parameters``; bypassing the adapter can
+    therefore drop ``source_class``, ``source_method``, ``destination_class`` and
+    line hints before the transformer sees them.
+
+    This helper supports both contracts:
+
+    * raw RDP payloads (``plan``/``rdp_plan``/``refactoring_plan.steps``), and
+    * already-normalized SCTVA payloads (``refactoring_plan.actions``).
+
+    When a raw plan is present it is authoritative for planner semantics and is
+    normalized exactly once.  Source code/source files and execution options are
+    preserved unchanged.
+    """
+
+    normalized_payload = dict(payload)
+
+    raw_plan: dict[str, Any] | None = None
+    for key in ("plan", "rdp_plan", "planner_output", "generatedPlan", "latestPlan"):
+        candidate = payload.get(key)
+        if isinstance(candidate, dict) and isinstance(candidate.get("steps"), list):
+            raw_plan = candidate
+            break
+
+    if raw_plan is None:
+        candidate = payload.get("refactoring_plan")
+        if isinstance(candidate, dict) and isinstance(candidate.get("steps"), list):
+            raw_plan = candidate
+
+    # Already-normalized SCTVA requests must remain backward compatible.
+    if raw_plan is None:
+        return normalized_payload
+
+    request_id = str(payload.get("request_id") or _new_request_id()).strip()
+    correlation_id = str(
+        payload.get("correlation_id")
+        or raw_plan.get("plan_id")
+        or request_id
+    ).strip()
+
+    normalized_plan = adapter.normalize_plan(
+        raw_plan,
+        correlation_id=correlation_id,
+    )
+
+    normalized_payload["request_id"] = request_id
+    normalized_payload["refactoring_plan"] = normalized_plan
+
+    # Raw planner wrappers are no longer needed after normalization.  Removing
+    # them prevents downstream code from accidentally consulting stale values.
+    for key in ("plan", "rdp_plan", "planner_output", "generatedPlan", "latestPlan"):
+        normalized_payload.pop(key, None)
+
+    return normalized_payload
+
+
 def _remove_legacy_result_artifacts() -> None:
     """Remove old SCTVA disk artifacts without touching unrelated files."""
     results_dir = Path(__file__).resolve().parents[2] / "results"
@@ -390,31 +455,18 @@ def create_sctva_blueprint() -> Blueprint:
             if not isinstance(payload, dict):
                 return jsonify({"error": "Invalid JSON payload."}), 400
 
-            # RDP adapter flow (disabled for manual plan input). Keep for future use.
-            # planner_output = payload.get("plan")
-            # language = str(payload.get("language", "")).strip().lower()
-            # source_code = payload.get("source_code")
-            # if not isinstance(planner_output, dict):
-            #     return jsonify({"error": "Field 'plan' must be an object."}), 400
-            # if language not in {"python", "java"}:
-            #     return jsonify({"error": "Field 'language' must be 'python' or 'java'."}), 400
-            # if not isinstance(source_code, str) or not source_code.strip():
-            #     return jsonify({"error": "Field 'source_code' must be a non-empty string."}), 400
-            # request_id = str(payload.get("request_id") or _new_request_id())
-            # execution_options = payload.get("execution_options")
-            # correlation_id = payload.get("correlation_id") or planner_output.get("plan_id")
-            # sctva_request = adapter.build_request_from_rdp(
-            #     request_id=request_id,
-            #     language=language,
-            #     source_code=source_code,
-            #     planner_output=planner_output,
-            #     execution_options=execution_options,
-            #     correlation_id=str(correlation_id),
-            # )
-            # result = agent.execute(sctva_request)
+            # IMPORTANT: raw RDP plans use ``steps`` and keep semantic target
+            # fields inside each step's ``parameters`` object.  Always pass that
+            # shape through PlannerAdapter before the SCTVA contract/engine.
+            # Already-normalized requests containing ``refactoring_plan.actions``
+            # are left untouched for backward compatibility.
+            sctva_payload = _normalize_execute_from_rdp_payload(
+                payload,
+                adapter=adapter,
+            )
 
             _remove_legacy_result_artifacts()
-            result = agent.execute(payload)
+            result = agent.execute(sctva_payload)
             _remove_legacy_result_artifacts()
             result["artifact_persistence"] = {
                 "mode": "browser_storage",

@@ -317,11 +317,23 @@ class SafeCodeTransformationValidationAgent:
             )
             for res in file_results if isinstance(res, dict)
         )
+        safely_not_applicable_files = sum(
+            1
+            for res in file_results
+            if isinstance(res, dict) and res.get("status") == "NOT_APPLICABLE"
+        )
         if rollback_occurred or any(res.get("rollback_occurred") for res in file_results if isinstance(res, dict)):
             overall_status = "FAILED"
         elif has_review_global:
             overall_status = "REVIEW_REQUIRED"
-        elif success and files_succeeded == files_total and files_total > 0:
+        elif safely_not_applicable_files == files_total and files_total > 0:
+            overall_status = "NOT_APPLICABLE"
+        elif (
+            success
+            and files_succeeded == files_total
+            and files_applied == files_total
+            and files_total > 0
+        ):
             overall_status = "FULL_SUCCESS"
         elif files_succeeded > 0 or total_replacements > 0:
             overall_status = "PARTIAL_SUCCESS"
@@ -1318,8 +1330,24 @@ class SafeCodeTransformationValidationAgent:
         total_replacements = sum(
             entry.replacements_count for entry in transformation_log
         )
+        safely_not_applicable_logs = [
+            entry
+            for entry in transformation_log
+            if entry.action_type != ACTION_NOOP
+            and str(entry.metadata.get("status") or "").lower()
+            in {"not_applicable", "already_applied", "satisfied"}
+        ]
+        all_executable_actions_safely_not_applicable = (
+            bool(executable_actions)
+            and len(safely_not_applicable_logs) == len(executable_actions)
+        )
+
         if not transformation_attempted:
-            if executable_actions:
+            if all_executable_actions_safely_not_applicable:
+                transform_warnings.append(
+                    "No source-code change was required: every executable action was safely classified as not applicable or already satisfied."
+                )
+            elif executable_actions:
                 transform_warnings.append(
                     "No source-code change was applied: every executable action produced zero replacements."
                 )
@@ -1504,8 +1532,13 @@ class SafeCodeTransformationValidationAgent:
             rollback_reason=rollback_reason,
             transformation_log=transformation_log,
             validation_steps=[syntax_step, structural_step, behavioral_step, invariant_step],
-            extra_warnings=transform_warnings,
+            extra_warnings=(
+                []
+                if all_executable_actions_safely_not_applicable
+                else transform_warnings
+            ),
             transformation_applied=transformation_applied,
+            not_applicable=all_executable_actions_safely_not_applicable,
         )
 
         safety_report.human_messages.append(
@@ -1717,9 +1750,7 @@ class SafeCodeTransformationValidationAgent:
                 "not every requested action was safely applied."
             )
 
-        success = (
-            transformation_applied
-            and
+        validation_passed = (
             (not rollback_occurred)
             and syntax_step.passed
             and structural_step.passed
@@ -1730,6 +1761,10 @@ class SafeCodeTransformationValidationAgent:
             and global_variable_plan_complete
             and hide_delegate_plan_complete
             and polymorphism_plan_complete
+        )
+        success = validation_passed and (
+            transformation_applied
+            or all_executable_actions_safely_not_applicable
         )
 
         result = SCTVAResult(
@@ -1800,6 +1835,8 @@ class SafeCodeTransformationValidationAgent:
             file_status = "FAILED"
         elif has_review:
             file_status = "REVIEW_REQUIRED"
+        elif all_executable_actions_safely_not_applicable and not transformation_applied:
+            file_status = "NOT_APPLICABLE"
         elif success:
             file_status = "FULL_SUCCESS"
         elif total_replacements > 0:
@@ -2417,14 +2454,18 @@ class SafeCodeTransformationValidationAgent:
 
             matches: list[tuple[SourceFileContract, dict[str, Any]]] = []
             failures: list[tuple[str, str]] = []
+            non_applicable_resolutions: list[dict[str, Any]] = []
             for entry in candidate_entries:
                 resolution = python_transformers.resolve_move_method_target(
                     entry.source_code,
-                    method_name=str(params.get("method") or ""),
+                    method_name=str(
+                        params.get("method") or params.get("source_method") or ""
+                    ),
                     source_class=str(params.get("source_class") or ""),
                     destination_class=str(params.get("destination_class") or ""),
                     destination_parameter=str(params.get("destination_parameter") or ""),
                     source_line=source_line,
+                    allow_unique_inference=params.get("promoted_from_noop") is True,
                 )
                 if resolution.get("status") == "success":
                     matches.append((entry, resolution))
@@ -2433,6 +2474,11 @@ class SafeCodeTransformationValidationAgent:
                         str(resolution.get("status") or "review_required"),
                         str(resolution.get("reason") or "MOVE_METHOD_TARGET_NOT_FOUND"),
                     ))
+                    if resolution.get("status") == "not_applicable":
+                        non_applicable_resolutions.append({
+                            **resolution,
+                            "source_file": entry.file_name,
+                        })
 
             if len(matches) != 1:
                 failure_reasons = [reason for _, reason in failures]
@@ -2451,17 +2497,35 @@ class SafeCodeTransformationValidationAgent:
                     or any(status == "review_required" for status, _ in failures)
                     else "not_applicable"
                 )
+                if params["source_resolution_status"] == "not_applicable" and non_applicable_resolutions:
+                    resolved = non_applicable_resolutions[0]
+                    params["target_kind"] = str(
+                        resolved.get("target_kind") or "CLASS_METHOD"
+                    )
+                    params["suggested_refactoring"] = str(
+                        resolved.get("suggested_refactoring") or ""
+                    )
+                    params["source_class_resolved"] = bool(
+                        resolved.get("source_class_resolved", False)
+                    )
+                    params["destination_class_resolved"] = bool(
+                        resolved.get("destination_class_resolved", False)
+                    )
+                    params["move_method_target_resolution"] = resolved
                 continue
 
             entry, resolution = matches[0]
             requested = {
-                "method": str(params.get("method") or ""),
+                "method": str(
+                    params.get("method") or params.get("source_method") or ""
+                ),
                 "source_class": str(params.get("source_class") or ""),
                 "destination_class": str(params.get("destination_class") or ""),
                 "destination_parameter": str(params.get("destination_parameter") or ""),
             }
             params["source_file"] = entry.file_name
             params["method"] = str(resolution["method"])
+            params["source_method"] = str(resolution["method"])
             params["source_class"] = str(resolution["source_class"])
             params["destination_class"] = str(resolution["destination_class"])
             params["destination_parameter"] = str(resolution["destination_parameter"])
@@ -3054,11 +3118,19 @@ class SafeCodeTransformationValidationAgent:
                 params["not_applicable_to_source"] = True
                 params["not_applicable_reason"] = reason
                 params["not_applicable_action_type"] = planned.action_type
-                params["target_resolution"] = {
-                    "status": "not_applicable",
-                    "strategy": "stale_rdp_target_guard",
-                    "reason": reason,
-                }
+                existing_resolution = params.get("move_method_target_resolution")
+                if isinstance(existing_resolution, dict):
+                    # Preserve the AST decision made by the language-specific
+                    # resolver.  Replacing it with a generic stale-target
+                    # marker loses useful classification such as MODULE_FUNCTION
+                    # and MOVE_FUNCTION in the final safety report.
+                    params["target_resolution"] = existing_resolution
+                else:
+                    params["target_resolution"] = {
+                        "status": "not_applicable",
+                        "strategy": "stale_rdp_target_guard",
+                        "reason": reason,
+                    }
                 params.pop("unresolved_legacy_target", None)
 
                 # Compatibility warnings from old adapters are implementation

@@ -17,6 +17,148 @@ class ContractValidationError(ValueError):
     """Raised when input payload violates the expected schema."""
 
 
+def normalize_move_method_parameters(action: Dict[str, Any]) -> Dict[str, Any]:
+    """Normalize Move Method fields from every supported RDP/SCTVA shape.
+
+    RDP plans normally store semantic targets under ``step.parameters`` while
+    some orchestration layers flatten or partially normalize those steps before
+    SCTVA receives them.  Older compatibility actions can also retain the raw
+    planner step under ``legacy_step``/``rdp_step``.  Resolve all of those
+    locations into one canonical parameter dictionary *before* AST resolution.
+
+    Planner evidence is never authoritative about symbol existence; this
+    function only preserves the requested values.  The Python AST resolver is
+    still the source of truth for whether the requested class/method actually
+    exists.
+    """
+
+    parameters = action.get("parameters")
+    normalized = dict(parameters) if isinstance(parameters, dict) else {}
+    raw_target = action.get("target")
+    target = dict(raw_target) if isinstance(raw_target, dict) else {}
+
+    def as_dict(value: Any) -> Dict[str, Any]:
+        return dict(value) if isinstance(value, dict) else {}
+
+    # Compatibility/orchestration layers sometimes keep the original RDP step
+    # rather than its fields.  Search these containers before declaring a target
+    # missing.  Also inspect copies nested inside the existing parameters dict.
+    raw_steps: List[Dict[str, Any]] = []
+    for key in ("legacy_step", "rdp_step", "planner_step", "raw_step", "source_step"):
+        for container in (action, normalized):
+            candidate = container.get(key) if isinstance(container, dict) else None
+            if isinstance(candidate, dict):
+                raw_steps.append(candidate)
+
+    step_parameters = [as_dict(step.get("parameters")) for step in raw_steps]
+    step_targets = [as_dict(step.get("target")) for step in raw_steps]
+
+    def first_text(*values: Any) -> str:
+        for value in values:
+            if value is None:
+                continue
+            text = str(value).strip()
+            if text:
+                return text
+        return ""
+
+    source_file = first_text(
+        action.get("source_file"),
+        normalized.get("source_file"),
+        target.get("source_file"),
+        target.get("file"),
+        *(params.get("source_file") for params in step_parameters),
+        *(step_target.get("source_file") for step_target in step_targets),
+        *(step_target.get("file") for step_target in step_targets),
+    )
+    source_class = first_text(
+        action.get("source_class"),
+        normalized.get("source_class"),
+        target.get("source_class"),
+        target.get("class"),
+        *(params.get("source_class") for params in step_parameters),
+        *(params.get("class_name") for params in step_parameters),
+        *(step_target.get("source_class") for step_target in step_targets),
+        *(step_target.get("class") for step_target in step_targets),
+    )
+    source_method = first_text(
+        action.get("source_method"),
+        action.get("method"),
+        normalized.get("source_method"),
+        normalized.get("method"),
+        target.get("source_method"),
+        target.get("method"),
+        target.get("function"),
+        target.get("name"),
+        *(params.get("source_method") for params in step_parameters),
+        *(params.get("method") for params in step_parameters),
+        *(params.get("method_name") for params in step_parameters),
+        *(step_target.get("source_method") for step_target in step_targets),
+        *(step_target.get("method") for step_target in step_targets),
+        *(step_target.get("function") for step_target in step_targets),
+    )
+    destination_class = first_text(
+        action.get("destination_class"),
+        normalized.get("destination_class"),
+        target.get("destination_class"),
+        target.get("target_class"),
+        target.get("destination_type"),
+        *(params.get("destination_class") for params in step_parameters),
+        *(params.get("target_class") for params in step_parameters),
+        *(params.get("destination_type") for params in step_parameters),
+        *(step_target.get("destination_class") for step_target in step_targets),
+        *(step_target.get("target_class") for step_target in step_targets),
+    )
+    destination_parameter = first_text(
+        action.get("destination_parameter"),
+        normalized.get("destination_parameter"),
+        target.get("destination_parameter"),
+        target.get("parameter"),
+        *(params.get("destination_parameter") for params in step_parameters),
+        *(step_target.get("destination_parameter") for step_target in step_targets),
+        *(step_target.get("parameter") for step_target in step_targets),
+    )
+
+    if source_file:
+        normalized["source_file"] = source_file
+    if source_class:
+        normalized["source_class"] = source_class
+    if source_method:
+        normalized["method"] = source_method
+        normalized["source_method"] = source_method
+    if destination_class:
+        normalized["destination_class"] = destination_class
+    if destination_parameter:
+        normalized["destination_parameter"] = destination_parameter
+
+    if "source_line" not in normalized:
+        line_sources: List[Dict[str, Any]] = [action, target]
+        line_sources.extend(step_parameters)
+        line_sources.extend(step_targets)
+        for source in line_sources:
+            value = source.get("source_line") or source.get("line")
+            if isinstance(value, (int, float)):
+                normalized["source_line"] = int(value)
+                break
+            lines = source.get("lines")
+            if isinstance(lines, list) and lines and isinstance(lines[0], (int, float)):
+                normalized["source_line"] = int(lines[0])
+                break
+
+    # Keep the original requested planner values for diagnostics.  They must
+    # never silently become empty strings when the raw step actually supplied
+    # them.  The AST resolver may later mark them unresolved/not applicable.
+    if source_class:
+        normalized.setdefault("requested_source_class", source_class)
+    if source_method:
+        normalized.setdefault("requested_source_method", source_method)
+        normalized.setdefault("requested_method", source_method)
+    if destination_class:
+        normalized.setdefault("requested_destination_class", destination_class)
+
+    return normalized
+
+
 @dataclass
 class RefactoringAction:
     """Single transformation action instruction."""
@@ -68,6 +210,8 @@ class RefactoringAction:
         normalized_action_type = re.sub(
             r"[\s-]+", "_", str(data.get("action_type") or "").strip().lower()
         )
+        if normalized_action_type == "move_python_method":
+            parameters = normalize_move_method_parameters(data)
         source_refactoring = str(data.get("source_refactoring") or "").strip().lower()
         bare_except_refactorings = {
             "replace bare except with specific exception",
