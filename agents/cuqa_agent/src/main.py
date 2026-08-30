@@ -103,6 +103,7 @@ def _get_workspace_dict(session_id: str) -> dict:
     If session is 'default' and no repo is loaded in default,
     fallback to the latest active workspace so legacy / proxy callers without headers resolve.
     """
+    """Return the workspace dictionary for a given session, initializing if necessary."""
     sid = session_id or "default"
     if sid not in _workspaces:
         _workspaces[sid] = {
@@ -111,15 +112,7 @@ def _get_workspace_dict(session_id: str) -> dict:
             "repo_name": None,
             "files": [],
         }
-
-    ws = _workspaces[sid]
-    if sid == "default" and not ws.get("root"):
-        # For default/unspecified sessions only, find the most recently loaded active workspace
-        for k, candidate in reversed(list(_workspaces.items())):
-            if candidate.get("root") and os.path.exists(candidate["root"]):
-                return candidate
-
-    return ws
+    return _workspaces[sid]
 
 
 class _WorkspaceProxy:
