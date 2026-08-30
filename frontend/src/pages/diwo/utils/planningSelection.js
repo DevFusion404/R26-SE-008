@@ -162,21 +162,27 @@ export function countDecisions(steps, decisions = {}) {
 
 /**
  * "Select Recommended": approve the steps the backend marked
- * `auto_select_eligible`, and only those.
+ * `auto_select_eligible`, and REJECT every other step.
  *
- * A step the developer has ALREADY decided is left exactly as it is. A bulk
- * convenience that silently re-approves a green step they deliberately
- * rejected would overturn a decision made on purpose, and they would have no
- * way of noticing. Clearing decisions is a separate, explicit action.
+ * It used to approve the green steps and leave the rest pending, which meant
+ * the button that is meant to be the one-click path through this stage never
+ * finished the job: the footer still read "9 pending" and the plan could not
+ * be submitted until the developer decided each one by hand. Following the
+ * recommendation IS a decision about the steps it leaves out, so it is now
+ * recorded as one.
+ *
+ * A step the developer has ALREADY decided is left exactly as it is, on both
+ * branches. A bulk convenience that silently overturned a green step they
+ * deliberately rejected would undo a decision made on purpose, and they would
+ * have no way of noticing. Clearing decisions is a separate, explicit action.
  *
  * LOCAL STATE ONLY. Returns a new decision map; it calls nothing.
  */
 export function selectRecommended(steps, decisions = {}) {
   const next = { ...decisions };
   (steps || []).forEach((step) => {
-    if (!isAutoSelectable(step)) return;
     if (next[step.step_id]) return; // never overturn an existing decision
-    next[step.step_id] = APPROVE;
+    next[step.step_id] = isAutoSelectable(step) ? APPROVE : REJECT;
   });
   return next;
 }
@@ -617,7 +623,7 @@ export function methodOptions(steps, decisions = {}) {
  *
  *   "all"          every step approved
  *   "reject"       every step rejected
- *   "recommended"  exactly the auto-selectable set approved, nothing else decided
+ *   "recommended"  exactly the auto-selectable set approved, the rest rejected
  *   null           anything else — a review in progress
  *
  * DERIVED, never remembered. A flag set when the button was pressed would go
@@ -638,10 +644,15 @@ export function activeBulkVerdict(steps, decisions = {}) {
   if (counts.approved === list.length) return "all";
   if (counts.rejected === list.length) return "reject";
 
+  // The shape selectRecommended leaves behind: every green step approved and
+  // every other step rejected. Checked against the decision map rather than
+  // the counts alone, so an equal-sized but differently-composed selection
+  // does not get to claim it is the recommendation.
   const auto = list.filter(isAutoSelectable);
   if (auto.length === 0) return null;
-  if (counts.approved !== auto.length) return null;
-  if (counts.rejected > 0 || counts.manual > 0) return null;
+  if (counts.manual > 0 || counts.pending > 0) return null;
 
-  return auto.every((step) => decisions[step.step_id] === APPROVE) ? "recommended" : null;
+  return list.every((step) => (
+    decisions[step.step_id] === (isAutoSelectable(step) ? APPROVE : REJECT)
+  )) ? "recommended" : null;
 }

@@ -3,21 +3,24 @@
  * =========================
  * R26-SE-008 | Bandara S M Y M | IT22277886
  *
- *     SELECTION SUMMARY
- *     Selected findings        37 / 57
- *     Affected files                 5
- *     High severity                  2
- *     Auto-fixable                  31
- *     Advisory                       6
- *     Estimated effort         ~1h 10m
- *
- *     File-wise review
- *     Selecting a file sends every detected smell in it to planning.
+ *     SELECTION SUMMARY                                    [Clear selection]
+ *     Selected findings   Affected files   High severity   Auto-fixable   …
+ *            37 / 57                  5               2             31
  *
  * The quick view, deliberately not the detailed one. TradeOffPanel already
  * answers "what does this selection buy me" with quality capture, forgone
  * points and the optimiser; repeating any of that here would give the developer
  * two panels to reconcile. This one answers only "what have I got selected".
+ *
+ * It USED TO BE a sticky right-hand column, which cost the findings list a
+ * third of the page's width — the widest thing on the stage, and the one thing
+ * on it that is actually read line by line. It now runs full width underneath
+ * the list, laid out like the stat cards at the top of the stage, so the
+ * numbers read left-to-right instead of as a tall stack of two-word rows.
+ *
+ * The per-mode explainer card that sat under it is gone. It described the
+ * selection mode the developer had just chosen from a control three rows above,
+ * which is a caption for a decision already made.
  *
  * Auto-fixable, Advisory and Estimated effort are HIDDEN when no impact records
  * exist, rather than shown as zero. A "0 auto-fixable" on a session where
@@ -27,93 +30,60 @@
 import { C } from "../diwoTheme.jsx";
 import { formatEffort } from "../utils/smellGrouping";
 
-/** One line of the summary. `tone` is used only where severity earns it. */
-function Row({ label, value, tone, strong = false }) {
+/** One figure. `tone` is used only where severity earns it. */
+function Stat({ label, value, tone, strong = false }) {
   return (
-    <div style={{
-      display: "flex", alignItems: "baseline", justifyContent: "space-between",
-      gap: 12, padding: "6px 0",
-    }}>
-      <span style={{ fontSize: 11.5, color: C.textMuted }}>{label}</span>
-      <span style={{
-        fontSize: strong ? 14 : 12.5,
-        fontWeight: strong ? 800 : 700,
+    <div style={{ minWidth: 0 }}>
+      <div style={{
+        fontSize: 10.5, color: C.textMuted, textTransform: "uppercase",
+        letterSpacing: 0.9, fontWeight: 700,
+        overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+      }}>
+        {label}
+      </div>
+      <div style={{
+        fontSize: strong ? 22 : 18,
+        fontWeight: 800,
         color: tone || C.text,
         fontFamily: "monospace",
+        lineHeight: 1.25,
+        marginTop: 4,
       }}>
         {value}
-      </span>
+      </div>
     </div>
   );
 }
 
-const TIPS = {
-  file: {
-    title: "File-wise review",
-    body: "Selecting a file sends every detected smell in it to planning. Switch to Smell wise if you only want some findings from a file.",
-  },
-  smell: {
-    title: "Smell-wise review",
-    body: "Use this when the same smell appears across several files. Selecting the parent smell type selects all of its occurrences.",
-  },
-  category: {
-    title: "Category-wise review",
-    body: "Use this to review related smell families together. Expand a smell type when you need individual control.",
-  },
-};
-
-export default function SelectionSummaryPanel({ summary, mode, onClear }) {
-  const tip = TIPS[mode] || TIPS.smell;
+export default function SelectionSummaryPanel({ summary, onClear }) {
   const nothing = !summary || summary.selected === 0;
+  const hasImpact = summary?.autoFixable !== null && summary?.autoFixable !== undefined;
 
   return (
-    <aside style={{
-      position: "sticky", top: 12, alignSelf: "start",
-      display: "flex", flexDirection: "column", gap: 12,
+    <section style={{
+      marginTop: 14,
+      background: C.panel,
+      border: `1px solid ${nothing ? C.border : C.accent}`,
+      borderRadius: 12,
+      padding: "14px 18px",
     }}>
       <div style={{
-        background: C.panel, border: `1px solid ${nothing ? C.border : C.accent}`,
-        borderRadius: 12, padding: "16px 18px",
+        display: "flex", alignItems: "center", justifyContent: "space-between",
+        gap: 12, flexWrap: "wrap", marginBottom: 12,
       }}>
         <div style={{
           fontSize: 11, fontWeight: 700, letterSpacing: 1, textTransform: "uppercase",
-          color: C.textMuted, marginBottom: 10,
+          color: C.textMuted,
         }}>
           Selection summary
         </div>
-
-        <Row
-          label="Selected findings"
-          value={`${summary?.selected ?? 0} / ${summary?.total ?? 0}`}
-          tone={nothing ? C.textMuted : C.accent}
-          strong
-        />
-        <Row label="Affected files" value={summary?.fileCount ?? 0} />
-        {summary?.high > 0 && (
-          <Row label="High severity" value={summary.high} tone={C.danger} />
-        )}
-        {summary?.medium > 0 && (
-          <Row label="Medium severity" value={summary.medium} tone={C.warn} />
-        )}
-
-        {/* Only when the impact records actually exist. */}
-        {summary?.autoFixable !== null && summary?.autoFixable !== undefined && (
-          <>
-            <div style={{ height: 1, background: C.border, margin: "8px 0" }} />
-            <Row label="Auto-fixable" value={summary.autoFixable} tone={C.accent} />
-            <Row label="Advisory" value={summary.advisory} tone={C.warn} />
-          </>
-        )}
-        {typeof summary?.effortMinutes === "number" && (
-          <Row label="Estimated effort" value={formatEffort(summary.effortMinutes)} />
-        )}
 
         {!nothing && onClear && (
           <button
             type="button"
             onClick={onClear}
             style={{
-              width: "100%", marginTop: 12, padding: "7px 12px", borderRadius: 8,
+              padding: "6px 14px", borderRadius: 8,
               background: "none", border: `1px solid ${C.border}`,
               color: C.textMuted, fontSize: 11.5, fontWeight: 600, cursor: "pointer",
             }}
@@ -124,16 +94,34 @@ export default function SelectionSummaryPanel({ summary, mode, onClear }) {
       </div>
 
       <div style={{
-        background: C.panel, border: `1px solid ${C.border}`,
-        borderRadius: 12, padding: "13px 16px",
+        display: "grid", gap: 14,
+        gridTemplateColumns: "repeat(auto-fit, minmax(130px, 1fr))",
       }}>
-        <div style={{ fontSize: 12, fontWeight: 700, color: C.textSub, marginBottom: 5 }}>
-          {tip.title}
-        </div>
-        <div style={{ fontSize: 11.5, color: C.textMuted, lineHeight: 1.6 }}>
-          {tip.body}
-        </div>
+        <Stat
+          label="Selected findings"
+          value={`${summary?.selected ?? 0} / ${summary?.total ?? 0}`}
+          tone={nothing ? C.textMuted : C.accent}
+          strong
+        />
+        <Stat label="Affected files" value={summary?.fileCount ?? 0} />
+        {summary?.high > 0 && (
+          <Stat label="High severity" value={summary.high} tone={C.danger} />
+        )}
+        {summary?.medium > 0 && (
+          <Stat label="Medium severity" value={summary.medium} tone={C.warn} />
+        )}
+
+        {/* Only when the impact records actually exist. */}
+        {hasImpact && (
+          <>
+            <Stat label="Auto-fixable" value={summary.autoFixable} tone={C.accent} />
+            <Stat label="Advisory" value={summary.advisory} tone={C.warn} />
+          </>
+        )}
+        {typeof summary?.effortMinutes === "number" && (
+          <Stat label="Estimated effort" value={formatEffort(summary.effortMinutes)} />
+        )}
       </div>
-    </aside>
+    </section>
   );
 }
