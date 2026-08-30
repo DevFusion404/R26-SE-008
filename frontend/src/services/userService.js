@@ -134,7 +134,10 @@ class UserService {
 
       const resJson = await response.json();
       if (!response.ok) {
-        return { success: false, error: resJson.error || 'Registration failed' };
+        const errorMsg = Array.isArray(resJson.errors)
+          ? resJson.errors.join('. ')
+          : (resJson.error || 'Registration failed');
+        return { success: false, error: errorMsg };
       }
 
       return { success: true, data: resJson.data, error: null };
@@ -162,7 +165,10 @@ class UserService {
 
       const resJson = await response.json();
       if (!response.ok) {
-        return { success: false, error: resJson.error || 'Login failed' };
+        const errorMsg = Array.isArray(resJson.errors)
+          ? resJson.errors.join('. ')
+          : (resJson.error || 'Invalid email or password');
+        return { success: false, error: errorMsg };
       }
 
       const data = resJson.data || {};

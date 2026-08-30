@@ -16,6 +16,10 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config.supabase_client import supabase
 
+import logging
+
+logger = logging.getLogger("user_management.service")
+
 JWT_SECRET = os.getenv("JWT_SECRET", "super-secret-jwt-key-change-in-production")
 PROFILES_TABLE = "profiles"
 
@@ -37,7 +41,8 @@ def _extract_role_from_profile(user_id: str) -> str:
     try:
         resp = supabase.table(PROFILES_TABLE).select("role").eq("id", user_id).single().execute()
         return resp.data.get("role", "user") if resp.data else "user"
-    except Exception:
+    except Exception as exc:
+        logger.warning(f"Failed to fetch role from profile for user {user_id}: {exc}")
         return "user"
 
 
@@ -64,6 +69,7 @@ def register(email: str, password: str, full_name: str, role: str = "user") -> d
         })
 
         if not auth_resp.user:
+            logger.error("Supabase Auth sign_up succeeded but returned no user object.")
             return _err("Registration failed: no user returned from Supabase Auth.")
 
         user = auth_resp.user
@@ -80,8 +86,10 @@ def register(email: str, password: str, full_name: str, role: str = "user") -> d
         profile_resp = supabase.table(PROFILES_TABLE).insert(profile_data).execute()
 
         if not profile_resp.data:
+            logger.error(f"Profile creation failed in table '{PROFILES_TABLE}' for user_id {user_id}")
             return _err("User registered in Auth but profile creation failed.")
 
+        logger.info(f"Successfully registered user {email} (ID: {user_id})")
         return _ok({
             "user": {
                 "id": user_id,
@@ -97,6 +105,7 @@ def register(email: str, password: str, full_name: str, role: str = "user") -> d
 
     except Exception as exc:
         msg = str(exc)
+        logger.error(f"Supabase Auth registration exception for {email}: {msg}", exc_info=True)
         if "already registered" in msg.lower() or "already exists" in msg.lower():
             return _err("An account with this email already exists.")
         return _err(f"Registration error: {msg}")

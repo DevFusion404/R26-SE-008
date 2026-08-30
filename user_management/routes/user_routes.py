@@ -1,4 +1,4 @@
-﻿"""
+"""
 routes/user_routes.py
 Flask Blueprint for user management endpoints.
 Prefix: /api/auth
@@ -13,6 +13,9 @@ from models.user_model import (
 )
 import services.user_service as user_service
 
+import logging
+
+logger = logging.getLogger("user_management.routes")
 user_bp = Blueprint("user_bp", __name__, url_prefix="/api/auth")
 
 
@@ -38,6 +41,7 @@ def register():
     # Validate input
     validation = validate_register_data(data)
     if not validation["valid"]:
+        logger.warning(f"[REGISTER FAILED - 400] Input validation errors: {validation['errors']}")
         return jsonify({"success": False, "errors": validation["errors"]}), 400
 
     result = user_service.register(
@@ -48,8 +52,10 @@ def register():
     )
 
     if not result["success"]:
+        logger.warning(f"[REGISTER FAILED - 400] Service error: {result.get('error')}")
         return jsonify(result), 400
 
+    logger.info(f"[REGISTER SUCCESS - 201] User created: {data['email']}")
     return jsonify(result), 201
 
 
@@ -60,6 +66,7 @@ def login():
 
     validation = validate_login_data(data)
     if not validation["valid"]:
+        logger.warning(f"[LOGIN FAILED - 400] Input validation errors: {validation['errors']}")
         return jsonify({"success": False, "errors": validation["errors"]}), 400
 
     result = user_service.login(
@@ -68,8 +75,10 @@ def login():
     )
 
     if not result["success"]:
+        logger.warning(f"[LOGIN FAILED - 401] Email: {data.get('email')} | Error: {result.get('error')}")
         return jsonify(result), 401
 
+    logger.info(f"[LOGIN SUCCESS - 200] Logged in: {data.get('email')}")
     return jsonify(result), 200
 
 
