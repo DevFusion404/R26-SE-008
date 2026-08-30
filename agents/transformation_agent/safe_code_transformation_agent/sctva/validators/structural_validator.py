@@ -594,8 +594,8 @@ class StructuralValidator:
         transformed_summary = summarize_c_source(transformed)
         comparison = compare_c_static_summaries(original, transformed, [])
 
-        orig_signatures = set(original_summary.get("function_signatures", []))
-        trans_signatures = set(transformed_summary.get("function_signatures", []))
+        orig_signatures = set(original_summary.get("canonical_function_signatures", []))
+        trans_signatures = set(transformed_summary.get("canonical_function_signatures", []))
         signature_similarity = jaccard_similarity(orig_signatures, trans_signatures)
 
         function_count_similarity = normalized_count_similarity(

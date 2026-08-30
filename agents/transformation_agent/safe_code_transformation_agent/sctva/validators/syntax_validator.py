@@ -42,6 +42,10 @@ class SyntaxValidator:
         """,
         re.VERBOSE,
     )
+    _C_COMPILER_DIAGNOSTIC_RE = re.compile(
+        r"^(?P<file>.+?):(?P<line>\d+)(?::(?P<column>\d+))?:\s*"
+        r"(?P<severity>fatal error|error|warning|note):\s*(?P<message>.*)$"
+    )
 
     def validate(
         self,
@@ -93,14 +97,21 @@ class SyntaxValidator:
                     passed, message = self._validate_c(source_code, details)
 
                 if passed and require_compilation:
-                    details["checks"].append("c_compile_only")
-                    compile_passed, compile_msg = self._optional_c_compile_check(source_code, timeout_seconds)
-                    if not compile_passed:
+                    details["checks"].append("c_compiler_syntax_only")
+                    compiler_result = self._compile_c_sources(
+                        [{"file_name": "sctva_temp.c", "source_code": source_code}],
+                        timeout_seconds=timeout_seconds,
+                    )
+                    details["compiler_validation"] = compiler_result["status"]
+                    details["compiler"] = compiler_result.get("compiler")
+                    details["compiler_details"] = compiler_result
+                    if compiler_result["status"] == "FAIL":
                         passed = False
-                        message = compile_msg
-                        details["diagnostics"].append({"severity": "error", "message": compile_msg})
-                    elif "skipped" in compile_msg.lower():
-                        details["warnings"].append(compile_msg)
+                        message = compiler_result["message"]
+                        details["diagnostics"].extend(compiler_result["diagnostics"])
+                    elif compiler_result["status"] == "UNAVAILABLE":
+                        message = "C syntax validation passed; compiler validation unavailable."
+                        details["warnings"].append(compiler_result["message"])
 
             else:
                 passed = False
@@ -296,6 +307,92 @@ class SyntaxValidator:
 
         return ValidationStepResult(
             name="java_repository_syntax",
+            passed=passed,
+            score=1.0 if passed else 0.0,
+            message=message,
+            details=details,
+            started_at=start_iso,
+            finished_at=utc_now_iso(),
+            duration_ms=int((time.perf_counter() - started) * 1000),
+        )
+
+    def validate_c_project(
+        self,
+        sources: list[dict],
+        *,
+        require_compilation: bool,
+        timeout_seconds: int,
+    ) -> ValidationStepResult:
+        """Validate an in-memory C repository, including quoted local headers."""
+
+        start_iso = utc_now_iso()
+        started = time.perf_counter()
+        details = {
+            "checks": ["c_repository_lexical_validation"],
+            "warnings": [],
+            "diagnostics": [],
+            "validated_files": [],
+        }
+        prepared: list[dict] = []
+
+        for item in sources:
+            file_name = str(item.get("file_name") or item.get("file_path") or "")
+            source = str(item.get("source_code") or "")
+            normalized = file_name.replace("\\", "/").lower()
+            language = str(item.get("language") or "").strip().lower()
+            if language and language != "c" and not normalized.endswith((".c", ".h")):
+                continue
+            if not language and file_name and not normalized.endswith((".c", ".h")):
+                continue
+
+            local = self.validate(
+                language="c",
+                source_code=source,
+                require_compilation=False,
+                timeout_seconds=timeout_seconds,
+            )
+            if not local.passed:
+                message = f"C repository lexical validation failed in {file_name}: {local.message}"
+                details["diagnostics"].append({
+                    "severity": "error",
+                    "file": file_name,
+                    "message": local.message,
+                    "details": local.details,
+                })
+                return ValidationStepResult(
+                    name="c_repository_syntax",
+                    passed=False,
+                    score=0.0,
+                    message=message,
+                    details=details,
+                    started_at=start_iso,
+                    finished_at=utc_now_iso(),
+                    duration_ms=int((time.perf_counter() - started) * 1000),
+                )
+            prepared.append({"file_name": file_name, "source_code": source})
+            details["validated_files"].append(file_name)
+
+        message = "C repository lexical validation passed."
+        passed = True
+        if require_compilation:
+            details["checks"].append("c_repository_compiler_syntax_only")
+            compiler_result = self._compile_c_sources(
+                prepared,
+                timeout_seconds=timeout_seconds,
+            )
+            details["compiler_validation"] = compiler_result["status"]
+            details["compiler"] = compiler_result.get("compiler")
+            details["compiler_details"] = compiler_result
+            details["diagnostics"].extend(compiler_result["diagnostics"])
+            if compiler_result["status"] == "FAIL":
+                passed = False
+                message = compiler_result["message"]
+            elif compiler_result["status"] == "UNAVAILABLE":
+                message = "C repository lexical validation passed; compiler validation unavailable."
+                details["warnings"].append(compiler_result["message"])
+
+        return ValidationStepResult(
+            name="c_repository_syntax",
             passed=passed,
             score=1.0 if passed else 0.0,
             message=message,
@@ -978,28 +1075,175 @@ class SyntaxValidator:
 
     @staticmethod
     def _optional_c_compile_check(source: str, timeout_seconds: int) -> tuple[bool, str]:
-        compiler = shutil.which("gcc") or shutil.which("clang")
+        """Compatibility wrapper for callers that only need pass/fail text."""
+
+        result = SyntaxValidator._compile_c_sources(
+            [{"file_name": "sctva_temp.c", "source_code": source}],
+            timeout_seconds=timeout_seconds,
+        )
+        return result["status"] != "FAIL", result["message"]
+
+    @staticmethod
+    def _find_c_compiler() -> tuple[str | None, str | None]:
+        for compiler_name in ("gcc", "clang"):
+            executable = shutil.which(compiler_name)
+            if executable:
+                return compiler_name, executable
+        return None, None
+
+    @staticmethod
+    def _safe_c_workspace_path(file_name: str, index: int) -> Path:
+        raw_parts = str(file_name or "").replace("\\", "/").split("/")
+        parts = [
+            re.sub(r"[^A-Za-z0-9_.-]", "_", part)
+            for part in raw_parts
+            if part and part not in {".", ".."}
+        ]
+        if not parts:
+            return Path(f"sctva_source_{index}.c")
+        path = Path(*parts)
+        if path.suffix.lower() not in {".c", ".h"}:
+            path = path.with_suffix(".c")
+        return path
+
+    @classmethod
+    def _parse_c_compiler_diagnostics(
+        cls,
+        output: str,
+        path_map: dict[str, str],
+    ) -> list[dict]:
+        diagnostics: list[dict] = []
+        for raw_line in str(output or "").splitlines():
+            match = cls._C_COMPILER_DIAGNOSTIC_RE.match(raw_line.strip())
+            if match is None:
+                continue
+            compiler_path = str(Path(match.group("file")))
+            original_file = path_map.get(compiler_path, match.group("file"))
+            diagnostic = {
+                "severity": match.group("severity"),
+                "file": original_file,
+                "line": int(match.group("line")),
+                "message": match.group("message").strip(),
+            }
+            if match.group("column"):
+                diagnostic["column"] = int(match.group("column"))
+            diagnostics.append(diagnostic)
+        if not diagnostics and output.strip():
+            diagnostics.append({"severity": "error", "message": output.strip()})
+        return diagnostics
+
+    @classmethod
+    def _compile_c_sources(
+        cls,
+        sources: list[dict],
+        *,
+        timeout_seconds: int,
+    ) -> dict:
+        """Compile in-memory C translation units with GCC/Clang syntax-only mode."""
+
+        compiler_name, compiler = cls._find_c_compiler()
         if not compiler:
-            return True, "C compiler not available; compile check skipped."
+            return {
+                "status": "UNAVAILABLE",
+                "compiler": None,
+                "reason": "C_COMPILER_NOT_AVAILABLE",
+                "message": "C compiler validation unavailable: neither gcc nor clang was found.",
+                "diagnostics": [],
+                "validated_translation_units": [],
+            }
 
-        source = source.lstrip("\ufeff")
+        prepared = [
+            item
+            for item in sources
+            if str(item.get("file_name") or item.get("file_path") or "").lower().endswith((".c", ".h"))
+        ]
+        if not prepared:
+            return {
+                "status": "UNAVAILABLE",
+                "compiler": compiler_name,
+                "reason": "NO_C_SOURCE_FILES",
+                "message": "C compiler validation unavailable: no C source or header files were provided.",
+                "diagnostics": [],
+                "validated_translation_units": [],
+            }
 
-        temp_dir = _make_syntax_temp_dir("c")
+        temp_dir = _make_syntax_temp_dir("c_project")
+        path_map: dict[str, str] = {}
+        written: list[tuple[str, Path]] = []
         try:
-            c_file = temp_dir / "sctva_temp.c"
-            c_file.write_text(source, encoding="utf-8")
+            used_paths: set[Path] = set()
+            for index, item in enumerate(prepared, start=1):
+                original_name = str(item.get("file_name") or item.get("file_path") or f"source_{index}.c")
+                destination = temp_dir / cls._safe_c_workspace_path(original_name, index)
+                while destination in used_paths:
+                    destination = destination.with_name(
+                        f"{destination.stem}_{index}{destination.suffix}"
+                    )
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.write_text(
+                    str(item.get("source_code") or "").lstrip("\ufeff"),
+                    encoding="utf-8",
+                )
+                used_paths.add(destination)
+                path_map[str(destination)] = original_name
+                written.append((original_name, destination))
 
-            compile_args = [compiler, "-std=c11", "-fsyntax-only", "-I", str(temp_dir), str(c_file)]
-            proc = subprocess.run(
-                compile_args,
-                capture_output=True,
-                text=True,
-                timeout=timeout_seconds,
-            )
-            if proc.returncode != 0:
-                stderr = (proc.stderr or proc.stdout or "").strip()
-                return False, f"C compile check failed: {stderr}"
+            include_dirs = sorted({temp_dir, *(path.parent for _, path in written)}, key=str)
+            include_args = [arg for directory in include_dirs for arg in ("-I", str(directory))]
+            translation_units = [
+                (name, path) for name, path in written if path.suffix.lower() == ".c"
+            ]
+            # A header-only payload has no translation unit.  This still gives
+            # the compiler a chance to catch declaration syntax without ever
+            # linking or executing anything.
+            if not translation_units:
+                translation_units = [(name, path) for name, path in written if path.suffix.lower() == ".h"]
+
+            validated: list[str] = []
+            for original_name, unit in translation_units:
+                command = [compiler, "-std=c11", "-fsyntax-only", *include_args]
+                if unit.suffix.lower() == ".h":
+                    command.extend(["-x", "c-header"])
+                command.append(str(unit))
+                try:
+                    proc = subprocess.run(
+                        command,
+                        capture_output=True,
+                        text=True,
+                        timeout=timeout_seconds,
+                    )
+                except subprocess.TimeoutExpired:
+                    return {
+                        "status": "FAIL",
+                        "compiler": compiler_name,
+                        "reason": "C_COMPILER_TIMEOUT",
+                        "message": f"{compiler_name} syntax-only validation timed out for {original_name}.",
+                        "diagnostics": [{
+                            "severity": "error",
+                            "file": original_name,
+                            "message": "C compiler syntax-only validation timed out.",
+                        }],
+                        "validated_translation_units": validated,
+                    }
+                output = (proc.stderr or proc.stdout or "").strip()
+                if proc.returncode != 0:
+                    return {
+                        "status": "FAIL",
+                        "compiler": compiler_name,
+                        "reason": "C_COMPILER_SYNTAX_ERROR",
+                        "message": f"{compiler_name} syntax-only validation failed for {original_name}.",
+                        "diagnostics": cls._parse_c_compiler_diagnostics(output, path_map),
+                        "validated_translation_units": validated,
+                    }
+                validated.append(original_name)
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 
-        return True, f"{compiler} compile check passed."
+        return {
+            "status": "PASS",
+            "compiler": compiler_name,
+            "reason": "C_COMPILER_SYNTAX_ONLY_PASSED",
+            "message": f"C compiler validation passed with {compiler_name}.",
+            "diagnostics": [],
+            "validated_translation_units": validated,
+        }
