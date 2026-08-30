@@ -23,11 +23,13 @@ configuration, is what takes effect. See .env.example.
 import os
 from pathlib import Path
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Paths
-# ─────────────────────────────────────────────────────────────────────────────
+from dotenv import load_dotenv
+
 
 BACKEND_DIR = Path(__file__).resolve().parent
+
+# Load local backend environment configuration.
+load_dotenv(BACKEND_DIR / ".env")
 
 #: Generated data lives under runtime/ so it is never mixed with source.
 #: DIWO_RUNTIME_DIR redirects the whole tree, which is how the tests keep their
