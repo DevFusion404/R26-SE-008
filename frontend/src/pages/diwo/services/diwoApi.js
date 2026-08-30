@@ -24,6 +24,7 @@
  */
 
 import { detectPrimaryLanguage } from "../utils/cuqaReport";
+import { getSessionHeaders } from "../../../services/cuqaAgentService";
 import { getEnv } from "../../../config/env";
 
 // ─── Base URLs ───────────────────────────────────────────────────────────────
@@ -61,7 +62,7 @@ export const api = {
   async post(path, body) {
     const res = await fetch(`${DIWO_BASE}${path}`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: getSessionHeaders({ "Content-Type": "application/json" }),
       body: JSON.stringify(body),
     });
     const json = await res.json();
@@ -69,7 +70,10 @@ export const api = {
     return json;
   },
   async get(path, { signal } = {}) {
-    const res = await fetch(`${DIWO_BASE}${path}`, { signal });
+    const res = await fetch(`${DIWO_BASE}${path}`, {
+      signal,
+      headers: getSessionHeaders(),
+    });
     const json = await res.json();
     if (!res.ok) throw new Error(json.error || `HTTP ${res.status}`);
     return json;
@@ -106,7 +110,7 @@ export async function fetchQualityReport({ filePath = null, signal } = {}) {
   try {
     res = await fetch(`${DIWO_BASE}/cuqa/quality-report`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: getSessionHeaders({ "Content-Type": "application/json" }),
       body: JSON.stringify(filePath ? { file_path: filePath } : {}),
       signal,
     });
@@ -156,7 +160,10 @@ export async function fetchCuqaStatus({ signal } = {}) {
   };
 
   try {
-    const res = await fetch(`${DIWO_BASE}/cuqa/status`, { signal });
+    const res = await fetch(`${DIWO_BASE}/cuqa/status`, {
+      signal,
+      headers: getSessionHeaders(),
+    });
     if (res.ok) return await res.json();
   } catch (e) {
     if (e.name === "AbortError") throw e;

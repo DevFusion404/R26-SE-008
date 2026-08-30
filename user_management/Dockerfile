@@ -1,67 +1,104 @@
-﻿# Build & Run Instructions
-# -------------------------------------------------------------
-# Build:
-#   docker build -t user-management-service .
-#
-# Run:
-#   docker run -p 5005:5005 \
-#     --env-file .env \
-#     user-management-service
-# -------------------------------------------------------------
+# ============================================================
+# User Management Service - Azure & Production Dockerfile
+# Python 3.11-slim + Flask + Gunicorn + Supabase Auth
+# ============================================================
 
-# Stage 1 — Builder
+
+# ------------------------------------------------------------
+# Stage 1 - Builder
+# Installs Python packages into /install/packages to keep the
+# final runtime image lean and secure.
+# ------------------------------------------------------------
 FROM python:3.11-slim AS builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN python -m pip install --no-cache-dir --upgrade \
+    pip \
+    setuptools \
+    wheel
 
 WORKDIR /install
 
-# Copy requirements file first to utilize build caching
+# Copy requirements file first to maximize build caching
 COPY requirements.txt .
 
-# Install dependencies under the prefix path /install/packages
-RUN pip install --no-cache-dir --prefix=/install/packages -r requirements.txt
+# Install all dependencies into a standalone prefix directory
+RUN python -m pip install --no-cache-dir \
+    --prefix=/install/packages \
+    -r requirements.txt
 
 
-# -------------------------------------------------------------
-# Stage 2 — Runtime
-# Copy over dependencies and application code.
-# -------------------------------------------------------------
+# ------------------------------------------------------------
+# Stage 2 - Runtime
+# Lightweight production image containing only runtime dependencies.
+# ------------------------------------------------------------
 FROM python:3.11-slim AS runtime
 
-# Create a non-root user for security
+# ------------------------------------------------------------
+# Create non-root application user for container security
+# ------------------------------------------------------------
 RUN groupadd --gid 1002 usermgt && \
-    useradd  --uid 1002 --gid usermgt --shell /bin/sh --create-home usermgt
+    useradd \
+        --uid 1002 \
+        --gid 1002 \
+        --shell /bin/sh \
+        --create-home \
+        usermgt
 
+# Application working directory
 WORKDIR /app
 
-# Copy python packages installed in the builder stage
+# ------------------------------------------------------------
+# Copy installed Python packages from builder stage
+# ------------------------------------------------------------
 COPY --from=builder /install/packages /usr/local
 
-# Copy application files
-COPY --chown=usermgt:usermgt app.py .
+# ------------------------------------------------------------
+# Copy application source code
+# ------------------------------------------------------------
 COPY --chown=usermgt:usermgt config/ ./config/
-COPY --chown=usermgt:usermgt routes/ ./routes/
-COPY --chown=usermgt:usermgt services/ ./services/
 COPY --chown=usermgt:usermgt middleware/ ./middleware/
 COPY --chown=usermgt:usermgt models/ ./models/
+COPY --chown=usermgt:usermgt routes/ ./routes/
+COPY --chown=usermgt:usermgt services/ ./services/
+COPY --chown=usermgt:usermgt app.py ./
+COPY --chown=usermgt:usermgt requirements.txt ./
 
-# Production environment variables
-ENV FLASK_ENV=production
-ENV FLASK_APP=app.py
+# ------------------------------------------------------------
+# Python / Flask runtime configuration
+# ------------------------------------------------------------
+# Ensure stdout and stderr are unbuffered for immediate Azure log streaming
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONDONTWRITEBYTECODE=1
 
-# Expose the API port
-EXPOSE 5005
+ENV FLASK_ENV=production
+ENV FLASK_APP=app.py
 
-# Switch to the non-root user
+# Default service port
+ENV PORT=5005
+
+# ------------------------------------------------------------
+# Switch to non-root user
+# ------------------------------------------------------------
 USER usermgt
 
-# Serve the application using gunicorn
+# ------------------------------------------------------------
+# Expose container port
+# ------------------------------------------------------------
+EXPOSE 5005
+
+# ------------------------------------------------------------
+# Start application via Gunicorn WSGI server
+# ------------------------------------------------------------
 CMD ["python", "-m", "gunicorn", \
      "--bind", "0.0.0.0:5005", \
-     "--workers", "4", \
-     "--threads", "2", \
-     "--timeout", "60", \
+     "--workers", "2", \
+     "--threads", "4", \
+     "--timeout", "120", \
      "--access-logfile", "-", \
      "--error-logfile", "-", \
-     "app:app"]
+     "--capture-output", \
+     "app:create_app()"]
