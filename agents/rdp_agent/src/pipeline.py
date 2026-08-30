@@ -218,29 +218,9 @@ class RDPAgent:
                 preconditions = c.get("preconditions", [])
                 semantic_resolution = None
                 if c.get("name") == "Move Method":
-                    if smell.type in ("Feature Envy", "FeatureEnvy"):
-                        passed = True
-                        preconditions = []
-                        semantic_resolution = move_method_resolver.resolve(smell, c)
-                        if not isinstance(semantic_resolution, dict) or semantic_resolution.get("status") != "success":
-                            loc = smell.location or {}
-                            method_name = loc.get("method") or loc.get("entity") or "move_target"
-                            source_cls = loc.get("class") or loc.get("source_class") or "SourceClass"
-                            dest_cls = loc.get("destination_class") or loc.get("target_class") or f"{method_name.capitalize()}Helper"
-                            semantic_resolution = {
-                                "status": "success",
-                                "reason": "FEATURE_ENVY_ALWAYS_ALLOWS_MOVE_METHOD",
-                                "final_decision": "RECOMMENDED",
-                                "source_file": loc.get("file") or getattr(report, "target", ""),
-                                "source_class": source_cls,
-                                "source_method": method_name,
-                                "method": method_name,
-                                "destination_class": dest_cls,
-                                "destination_parameter": "target",
-                            }
-                    else:
-                        semantic_resolution = move_method_resolver.resolve(smell, c)
-                        passed = semantic_resolution.get("status") == "success"
+                    preconditions = []
+                    semantic_resolution = move_method_resolver.resolve(smell, c)
+                    passed = isinstance(semantic_resolution, dict) and semantic_resolution.get("status") == "success"
                 else:
                     passed = self.interpreter.check_preconditions(
                         preconditions, smell
@@ -264,7 +244,10 @@ class RDPAgent:
                     detail["move_method_planning"] = {
                         "status": semantic_resolution.get("status"),
                         "final_decision": semantic_resolution.get("final_decision"),
+                        "target_kind": semantic_resolution.get("target_kind"),
                         "reason": semantic_resolution.get("reason"),
+                        "suggested_refactoring": semantic_resolution.get("suggested_refactoring"),
+                        "move_method_applicable": semantic_resolution.get("move_method_applicable", False),
                         "source_file": semantic_resolution.get("source_file"),
                         "source_class": semantic_resolution.get("source_class"),
                         "source_method": semantic_resolution.get("source_method")
@@ -422,6 +405,8 @@ class RDPAgent:
                         "refactoring": "Move Method",
                         "final_decision": move_method_failure.get("final_decision", "REVIEW_REQUIRED"),
                         "planning_status": move_method_failure.get("status", "review_required"),
+                        "target_kind": move_method_failure.get("target_kind"),
+                        "suggested_refactoring": move_method_failure.get("suggested_refactoring"),
                     })
                 skipped_smells.append(skipped)
                 logger.warning(

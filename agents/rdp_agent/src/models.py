@@ -120,7 +120,13 @@ class QualityReport:
         Returns:
             A new ``QualityReport`` instance.
         """
-        smells = [CodeSmell.from_dict(s) for s in data.get("smells", [])]
+        raw_smells = data.get("smells") if "smells" in data else data.get("code_smells", [])
+        smells = []
+        for i, s in enumerate(raw_smells or []):
+            s_dict = dict(s)
+            if "id" not in s_dict:
+                s_dict["id"] = f"smell_{i+1:03d}"
+            smells.append(CodeSmell.from_dict(s_dict))
         target = data.get("target") or data.get("file_name", "unknown")
         source_files = data.get("source_files")
         if not isinstance(source_files, list):

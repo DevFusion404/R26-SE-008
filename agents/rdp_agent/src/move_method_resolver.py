@@ -71,10 +71,14 @@ def _is_placeholder_symbol(value: str, source_file: str = "") -> bool:
     if not value:
         return True
     lowered = value.lower()
-    if lowered in {"unknown", "null", "none", "n/a", "na"}:
+    if lowered in {"unknown", "null", "none", "n/a", "na", "sourceclass", "targetclass", "unknownclass"}:
+        return True
+    if source_file and value == _path_basename(source_file):
         return True
     stem = _path_stem(source_file)
-    return bool(stem and value in {stem, _path_basename(source_file)})
+    if stem and "_" in stem and value == stem:
+        return True
+    return False
 
 
 def _annotation_class_name(annotation: ast.AST | None, class_names: set[str]) -> str:
@@ -261,45 +265,63 @@ class MoveMethodPlanResolver:
             or (candidate or {}).get("target_class")
             or self._destination_hint_from_details(smell.details or "")
         )
-        if not requested_destination or requested_destination == requested_source:
-            if requested_method:
-                clean_m = requested_method.lstrip("_")
-                parts = clean_m.split("_")
-                title_parts = [p.capitalize() for p in parts if p]
-                base_name = "".join(title_parts) if title_parts else "Target"
-                requested_destination = f"{base_name}Helper"
-                if requested_destination == requested_source:
-                    requested_destination = f"{base_name}Target"
-            elif requested_source:
-                requested_destination = f"{requested_source}Target"
-            else:
-                requested_destination = "TargetClass"
 
+        # Handle non-Python (e.g. Java) when explicit distinct valid classes are provided
         if language and language not in _PYTHON_LANGUAGES and not source_file.endswith(".py") and language != "":
-            return self._reject(
-                "not_applicable",
-                "MOVE_METHOD_REQUIRES_PYTHON_SOURCE",
-                final_decision="NOT_RECOMMENDED",
-            )
-
-        if not self.files:
-            if requested_method and requested_source and not _is_placeholder_symbol(requested_source, source_file):
+            if (
+                requested_method
+                and requested_source
+                and requested_destination
+                and not _is_placeholder_symbol(requested_source, source_file)
+                and not _is_placeholder_symbol(requested_destination, source_file)
+                and requested_source != requested_destination
+            ):
                 return {
                     "status": "success",
                     "reason": "TARGET_PROVEN_FROM_SPECIFIED_LOCATION",
                     "final_decision": "RECOMMENDED",
+                    "target_kind": "METHOD",
                     "source_file": source_file,
                     "source_class": requested_source,
                     "source_method": requested_method,
                     "method": requested_method,
                     "destination_class": requested_destination,
                     "destination_parameter": "target",
+                    "source_class_exists": True,
+                    "destination_class_exists": True,
+                    "method_belongs_to_source_class": True,
+                    "source_and_destination_differ": True,
+                    "move_method_applicable": True,
                 }
+            return self._reject(
+                "not_applicable",
+                "MOVE_METHOD_REQUIRES_PYTHON_SOURCE",
+                final_decision="NOT_RECOMMENDED",
+                target_kind="UNKNOWN",
+                source_class=None,
+                source_method=requested_method,
+                destination_class=None,
+                move_method_applicable=False,
+                source_class_exists=False,
+                destination_class_exists=False,
+                method_belongs_to_source_class=False,
+            )
+
+        if not self.files:
             return self._reject(
                 "review_required",
                 "MOVE_METHOD_REQUIRES_REPOSITORY_AST",
                 final_decision="REVIEW_REQUIRED",
+                target_kind="UNKNOWN",
+                source_class=None,
+                source_method=requested_method,
+                destination_class=None,
+                move_method_applicable=False,
+                source_class_exists=False,
+                destination_class_exists=False,
+                method_belongs_to_source_class=False,
             )
+
         source_line = (
             _safe_int(location.get("source_line"))
             or _lines_start(location.get("lines"))
@@ -307,25 +329,6 @@ class MoveMethodPlanResolver:
         )
 
         candidate_files = [item for item in self.files if item.matches_file(source_file)]
-        if source_file and not candidate_files:
-            if requested_method and requested_source and not _is_placeholder_symbol(requested_source, source_file):
-                return {
-                    "status": "success",
-                    "reason": "TARGET_PROVEN_FROM_SPECIFIED_LOCATION",
-                    "final_decision": "RECOMMENDED",
-                    "source_file": source_file,
-                    "source_class": requested_source,
-                    "source_method": requested_method,
-                    "method": requested_method,
-                    "destination_class": requested_destination,
-                    "destination_parameter": "target",
-                }
-            return self._reject(
-                "review_required",
-                "SOURCE_FILE_NOT_FOUND",
-                final_decision="REVIEW_REQUIRED",
-                source_file=source_file,
-            )
         if not candidate_files:
             candidate_files = list(self.files)
 
@@ -339,37 +342,49 @@ class MoveMethodPlanResolver:
         if module_guard:
             return module_guard
 
-        class_names_by_file = {
-            item.file_name: set(item.classes)
-            for item in candidate_files
-        }
         all_candidate_classes = set().union(*(f.classes for f in self.files)) if self.files else set()
-        requested_source_placeholder = _is_placeholder_symbol(requested_source, source_file)
-        requested_method_placeholder = _is_placeholder_symbol(requested_method, source_file)
-        synthetic_destination = _is_synthetic_target(requested_destination, all_candidate_classes)
 
-        if requested_destination and _IDENTIFIER_RE.match(requested_destination):
-            all_candidate_classes.add(requested_destination)
-
-        if requested_source and not requested_source_placeholder and requested_source not in all_candidate_classes:
+        # Check if requested_source is a real AST class or placeholder
+        is_source_in_ast = requested_source in all_candidate_classes
+        if requested_source and not is_source_in_ast and _is_placeholder_symbol(requested_source, source_file):
+            requested_source = ""
+        elif requested_source and not is_source_in_ast:
             return self._reject(
                 "review_required",
                 "SOURCE_CLASS_NOT_FOUND",
                 final_decision="REVIEW_REQUIRED",
+                target_kind="UNKNOWN",
+                source_class=None,
+                source_method=requested_method,
+                destination_class=None,
+                move_method_applicable=False,
+                source_class_exists=False,
+                destination_class_exists=False,
+                method_belongs_to_source_class=False,
                 requested_source_class=requested_source,
             )
 
-        if (
-            requested_destination
-            and not synthetic_destination
-            and requested_destination not in all_candidate_classes
-        ):
+        # Check if requested_destination is a real AST class or placeholder
+        is_dest_in_ast = requested_destination in all_candidate_classes
+        if requested_destination and not is_dest_in_ast and (_is_placeholder_symbol(requested_destination, source_file) or _is_synthetic_target(requested_destination, all_candidate_classes)):
+            requested_destination = ""
+        elif requested_destination and not is_dest_in_ast:
             return self._reject(
                 "review_required",
                 "NO_VALID_DESTINATION_CLASS",
                 final_decision="REVIEW_REQUIRED",
+                target_kind="METHOD",
+                source_class=requested_source if requested_source in all_candidate_classes else None,
+                source_method=requested_method,
+                destination_class=None,
+                move_method_applicable=False,
+                source_class_exists=bool(requested_source and requested_source in all_candidate_classes),
+                destination_class_exists=False,
+                method_belongs_to_source_class=True,
                 requested_destination_class=requested_destination,
             )
+
+        requested_method_placeholder = _is_placeholder_symbol(requested_method, source_file)
 
         candidates: List[Dict[str, Any]] = []
         blocked_reasons: List[str] = []
@@ -377,8 +392,8 @@ class MoveMethodPlanResolver:
             file_candidates, file_blocked = self._candidates_in_file(
                 file_symbols,
                 requested_method=requested_method,
-                requested_source="" if requested_source_placeholder else requested_source,
-                requested_destination="" if synthetic_destination else requested_destination,
+                requested_source=requested_source,
+                requested_destination=requested_destination,
                 requested_method_placeholder=requested_method_placeholder,
                 source_line=source_line,
             )
@@ -395,12 +410,18 @@ class MoveMethodPlanResolver:
                 reason = "CALL_SITE_REWRITE_FAILED"
             elif "AMBIGUOUS_DESTINATION_CLASS" in blocked_reasons:
                 reason = "AMBIGUOUS_MOVE_METHOD_TARGET"
-            elif synthetic_destination:
-                reason = "NO_VALID_DESTINATION_CLASS"
             return self._reject(
                 "review_required",
                 reason,
                 final_decision="REVIEW_REQUIRED",
+                target_kind="METHOD",
+                source_class=requested_source if requested_source in all_candidate_classes else None,
+                source_method=requested_method,
+                destination_class=None,
+                move_method_applicable=False,
+                source_class_exists=bool(requested_source and requested_source in all_candidate_classes),
+                destination_class_exists=False,
+                method_belongs_to_source_class=("SOURCE_METHOD_NOT_FOUND" not in blocked_reasons),
                 requested_method=requested_method,
                 requested_source_class=requested_source,
                 requested_destination_class=requested_destination,
@@ -410,8 +431,8 @@ class MoveMethodPlanResolver:
         selected = self._select_candidate(
             candidates,
             requested_method=requested_method,
-            requested_source="" if requested_source_placeholder else requested_source,
-            requested_destination="" if synthetic_destination else requested_destination,
+            requested_source=requested_source,
+            requested_destination=requested_destination,
             source_line=source_line,
         )
         if selected is None:
@@ -419,6 +440,14 @@ class MoveMethodPlanResolver:
                 "review_required",
                 "AMBIGUOUS_MOVE_METHOD_TARGET",
                 final_decision="REVIEW_REQUIRED",
+                target_kind="METHOD",
+                source_class=requested_source if requested_source in all_candidate_classes else None,
+                source_method=requested_method,
+                destination_class=None,
+                move_method_applicable=False,
+                source_class_exists=bool(requested_source and requested_source in all_candidate_classes),
+                destination_class_exists=False,
+                method_belongs_to_source_class=True,
                 candidate_count=len(candidates),
                 requested_method=requested_method,
                 requested_source_class=requested_source,
@@ -428,23 +457,30 @@ class MoveMethodPlanResolver:
         return {
             "status": "success",
             "final_decision": "RECOMMENDED",
+            "target_kind": "METHOD",
             "reason": "VALID_CLASS_TO_CLASS_MOVE_METHOD",
+            "source_class_exists": True,
+            "destination_class_exists": True,
+            "method_belongs_to_source_class": True,
+            "source_and_destination_differ": True,
+            "move_method_applicable": True,
             **selected,
             "requested_method": requested_method,
             "requested_source_class": requested_source,
             "requested_destination_class": requested_destination,
-            "synthetic_destination_rejected": bool(synthetic_destination),
         }
 
     def validate_plan(self, parameters: Dict[str, Any]) -> Dict[str, Any]:
         """Re-check the final plan parameters before RDP emits a step."""
 
+        src_file = str(parameters.get("source_file") or "")
+        lang = parameters.get("language") or ("java" if src_file.endswith(".java") else "python")
         smell = CodeSmell(
             id=str(parameters.get("smell_id") or "move_method_plan_validation"),
             type="Feature Envy",
             location={
                 "file": parameters.get("source_file"),
-                "language": "python",
+                "language": lang,
                 "class": parameters.get("source_class"),
                 "method": parameters.get("source_method") or parameters.get("method"),
                 "destination_class": parameters.get("destination_class"),
@@ -507,38 +543,36 @@ class MoveMethodPlanResolver:
         requested_destination: str,
     ) -> Dict[str, Any] | None:
         for file_symbols in files:
+            function = None
             if requested_method and requested_method in file_symbols.module_functions:
                 function = file_symbols.module_functions[requested_method]
-                return self._reject(
-                    "not_applicable",
-                    "MODULE_LEVEL_FUNCTION_IS_NOT_MOVE_METHOD_TARGET",
-                    final_decision="NOT_RECOMMENDED",
-                    source_file=file_symbols.file_name,
-                    method=requested_method,
-                    lineno=getattr(function, "lineno", None),
-                    requested_source_class=requested_source,
-                    requested_destination_class=requested_destination,
-                )
-            if source_line is None:
-                continue
-            matches = [
-                function
-                for function in file_symbols.module_functions.values()
-                if _node_contains_line(function, source_line)
-            ]
-            if len(matches) == 1:
-                function = matches[0]
-                return self._reject(
-                    "not_applicable",
-                    "MODULE_LEVEL_FUNCTION_IS_NOT_MOVE_METHOD_TARGET",
-                    final_decision="NOT_RECOMMENDED",
-                    source_file=file_symbols.file_name,
-                    method=getattr(function, "name", requested_method),
-                    lineno=getattr(function, "lineno", None),
-                    requested_method=requested_method,
-                    requested_source_class=requested_source,
-                    requested_destination_class=requested_destination,
-                )
+            elif source_line is not None:
+                matches = [
+                    fn
+                    for fn in file_symbols.module_functions.values()
+                    if _node_contains_line(fn, source_line)
+                ]
+                if len(matches) == 1:
+                    function = matches[0]
+
+            if function is not None:
+                method_name = getattr(function, "name", requested_method)
+                return {
+                    "status": "not_applicable",
+                    "final_decision": "NOT_RECOMMENDED",
+                    "target_kind": "MODULE_FUNCTION",
+                    "source_class": None,
+                    "source_method": method_name,
+                    "destination_class": None,
+                    "move_method_applicable": False,
+                    "reason": "TARGET_IS_MODULE_FUNCTION",
+                    "suggested_refactoring": "Move Function",
+                    "source_file": file_symbols.file_name,
+                    "lineno": getattr(function, "lineno", None),
+                    "source_class_exists": False,
+                    "destination_class_exists": False,
+                    "method_belongs_to_source_class": False,
+                }
         return None
 
     def _candidates_in_file(
@@ -870,11 +904,20 @@ class MoveMethodPlanResolver:
 
     @staticmethod
     def _reject(status: str, reason: str, **extra: Any) -> Dict[str, Any]:
-        return {
+        result: Dict[str, Any] = {
             "status": status,
             "reason": reason,
-            **extra,
+            "target_kind": extra.get("target_kind", "UNKNOWN"),
+            "source_class": extra.get("source_class"),
+            "source_method": extra.get("source_method") or extra.get("method"),
+            "destination_class": extra.get("destination_class"),
+            "move_method_applicable": extra.get("move_method_applicable", False),
+            "source_class_exists": extra.get("source_class_exists", False),
+            "destination_class_exists": extra.get("destination_class_exists", False),
+            "method_belongs_to_source_class": extra.get("method_belongs_to_source_class", False),
         }
+        result.update(extra)
+        return result
 
 
 def _node_contains_line(node: ast.AST, line: int) -> bool:

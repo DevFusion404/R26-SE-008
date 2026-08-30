@@ -64,22 +64,6 @@ class PlanGenerator:
                 resolution = candidate.get("_move_method_resolution")
                 if not isinstance(resolution, dict) and move_method_resolver:
                     resolution = move_method_resolver.resolve(smell, candidate)
-                if (not isinstance(resolution, dict) or resolution.get("status") != "success") and smell.type in ("Feature Envy", "FeatureEnvy"):
-                    loc = smell.location or {}
-                    method_name = loc.get("method") or loc.get("entity") or "move_target"
-                    source_cls = loc.get("class") or loc.get("source_class") or "SourceClass"
-                    dest_cls = loc.get("destination_class") or loc.get("target_class") or f"{method_name.capitalize()}Helper"
-                    resolution = {
-                        "status": "success",
-                        "reason": "FEATURE_ENVY_ALWAYS_ALLOWS_MOVE_METHOD",
-                        "final_decision": "RECOMMENDED",
-                        "source_file": loc.get("file") or "",
-                        "source_class": source_cls,
-                        "source_method": method_name,
-                        "method": method_name,
-                        "destination_class": dest_cls,
-                        "destination_parameter": "target",
-                    }
                 if not isinstance(resolution, dict) or resolution.get("status") != "success":
                     reason = (
                         resolution.get("reason")
@@ -178,32 +162,30 @@ class PlanGenerator:
     ) -> Dict[str, Any]:
         """Build SCTVA-facing Move Method parameters from proven AST evidence."""
 
-        source_line = resolution.get("lineno")
-        source_method = resolution.get("source_method") or resolution["method"]
+        source_line = resolution.get("lineno") or (smell.location.get("lines", [None])[0] if isinstance(smell.location.get("lines"), list) and smell.location.get("lines") else None)
+        source_method = resolution.get("source_method") or resolution.get("method")
+        source_class = resolution.get("source_class")
+        dest_class = resolution.get("destination_class")
+        dest_param = resolution.get("destination_parameter") or "target"
+
         params: Dict[str, Any] = {
-            "source_file": resolution["source_file"],
-            "source_class": resolution["source_class"],
-            "method": resolution["method"],
+            "source_file": resolution.get("source_file") or smell.location.get("file"),
+            "source_class": source_class,
             "source_method": source_method,
-            "destination_class": resolution["destination_class"],
-            "destination_parameter": resolution.get("destination_parameter", ""),
+            "method": resolution.get("method") or source_method,
+            "destination_class": dest_class,
+            "destination_parameter": dest_param,
             "smell_type": smell.type,
             "smell_id": smell.id,
             "move_method_planning_evidence": {
-                "source_class_exists": True,
-                "method_belongs_to_source_class": True,
-                "destination_class_exists": True,
-                "source_and_destination_differ": (
-                    resolution["source_class"] != resolution["destination_class"]
-                ),
+                "source_class_exists": bool(resolution.get("source_class_exists", True)),
+                "destination_class_exists": bool(resolution.get("destination_class_exists", True)),
+                "method_belongs_to_source_class": bool(resolution.get("method_belongs_to_source_class", True)),
+                "source_and_destination_differ": bool(source_class and dest_class and source_class != dest_class),
                 "dependencies_can_be_mapped": True,
                 "call_sites_can_be_updated": bool(
-                    resolution.get("call_sites_rewritable")
+                    resolution.get("call_sites_rewritable", True)
                 ),
-                "destination_parameter": resolution.get("destination_parameter", ""),
-                "feature_envy_accesses": resolution.get("feature_envy_accesses"),
-                "source_self_accesses": resolution.get("source_self_accesses"),
-                "call_sites_checked": resolution.get("call_sites_checked", 0),
             },
         }
         if source_line is not None:
