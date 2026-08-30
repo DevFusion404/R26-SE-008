@@ -453,7 +453,31 @@ class LocalRefactorDetector:
         return {cls._action_key(action) for action in actions}
 
     @staticmethod
-    def _action_key(action: RefactoringAction) -> tuple[Any, ...]:
+    def _refactoring_family(action: RefactoringAction) -> str:
+        """Return a stable family name for detector-side action deduplication."""
+
+        names = (
+            action.action_type,
+            action.source_refactoring,
+        )
+        for name in names:
+            normalized = re.sub(
+                r"[^a-z0-9]+",
+                "_",
+                str(name or "").strip().lower(),
+            ).strip("_")
+            if normalized in {
+                "extract_method",
+                "extract_function",
+                "extract_c_method",
+                "extract_java_method",
+                "extract_python_method",
+            }:
+                return ACTION_EXTRACT_METHOD
+        return str(action.action_type or "").strip().lower()
+
+    @classmethod
+    def _action_key(cls, action: RefactoringAction) -> tuple[Any, ...]:
         params = action.parameters or {}
         source_path = str(params.get("source_file") or params.get("file") or "").replace("\\", "/").lower()
         source_file = source_path.rsplit("/", 1)[-1]
@@ -488,13 +512,19 @@ class LocalRefactorDetector:
             return (action.action_type, source_file, source_line)
         if action.action_type == ACTION_REMOVE_DEAD_CODE and source_line:
             return (action.action_type, source_file, source_line)
-        if action.action_type == ACTION_EXTRACT_METHOD:
+        if cls._refactoring_family(action) == ACTION_EXTRACT_METHOD:
+            method = str(
+                params.get("source_method")
+                or params.get("method")
+                or params.get("method_name")
+                or params.get("function")
+                or params.get("function_name")
+                or ""
+            ).strip()
             return (
-                action.action_type,
+                ACTION_EXTRACT_METHOD,
                 source_file,
-                params.get("method") or params.get("method_name"),
-                params.get("start_line"),
-                params.get("end_line"),
+                method,
             )
         if action.action_type == ACTION_INLINE_PYTHON_CLASS:
             return (

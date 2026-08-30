@@ -13,7 +13,11 @@ from flask import Blueprint, jsonify, request
 
 from ..constants import SUPPORTED_ACTIONS
 from ..agent import ContractValidationError, SafeCodeTransformationValidationAgent
-from .planner_adapter import PlannerAdapter, PlannerAdapterError
+from .planner_adapter import (
+    PlannerAdapter,
+    PlannerAdapterError,
+    normalize_sctva_request_payload,
+)
 
 
 def _new_request_id() -> str:
@@ -25,64 +29,44 @@ def _normalize_execute_from_rdp_payload(
     *,
     adapter: PlannerAdapter,
 ) -> dict[str, Any]:
-    """Normalize raw RDP plans before SCTVA contract parsing.
+    """Backward-compatible wrapper for the shared request normalizer."""
 
-    The RDP endpoint historically bypassed :class:`PlannerAdapter` and sent the
-    incoming payload straight to ``agent.execute``.  That is safe only when the
-    caller already supplies SCTVA ``actions``.  Raw RDP plans use ``steps`` and
-    keep Move Method fields under ``step.parameters``; bypassing the adapter can
-    therefore drop ``source_class``, ``source_method``, ``destination_class`` and
-    line hints before the transformer sees them.
-
-    This helper supports both contracts:
-
-    * raw RDP payloads (``plan``/``rdp_plan``/``refactoring_plan.steps``), and
-    * already-normalized SCTVA payloads (``refactoring_plan.actions``).
-
-    When a raw plan is present it is authoritative for planner semantics and is
-    normalized exactly once.  Source code/source files and execution options are
-    preserved unchanged.
-    """
-
-    normalized_payload = dict(payload)
-
-    raw_plan: dict[str, Any] | None = None
-    for key in ("plan", "rdp_plan", "planner_output", "generatedPlan", "latestPlan"):
-        candidate = payload.get(key)
-        if isinstance(candidate, dict) and isinstance(candidate.get("steps"), list):
-            raw_plan = candidate
-            break
-
-    if raw_plan is None:
-        candidate = payload.get("refactoring_plan")
-        if isinstance(candidate, dict) and isinstance(candidate.get("steps"), list):
-            raw_plan = candidate
-
-    # Already-normalized SCTVA requests must remain backward compatible.
-    if raw_plan is None:
-        return normalized_payload
-
-    request_id = str(payload.get("request_id") or _new_request_id()).strip()
-    correlation_id = str(
-        payload.get("correlation_id")
-        or raw_plan.get("plan_id")
-        or request_id
-    ).strip()
-
-    normalized_plan = adapter.normalize_plan(
-        raw_plan,
-        correlation_id=correlation_id,
+    normalized_payload, _ = normalize_sctva_request_payload(
+        payload,
+        adapter=adapter,
     )
-
-    normalized_payload["request_id"] = request_id
-    normalized_payload["refactoring_plan"] = normalized_plan
-
-    # Raw planner wrappers are no longer needed after normalization.  Removing
-    # them prevents downstream code from accidentally consulting stale values.
-    for key in ("plan", "rdp_plan", "planner_output", "generatedPlan", "latestPlan"):
-        normalized_payload.pop(key, None)
-
     return normalized_payload
+
+
+def _move_method_integrity_response(
+    issues: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Build a safe, report-shaped response for a lost RDP target."""
+
+    return {
+        "success": False,
+        "status": "REVIEW_REQUIRED",
+        "reason": "RDP_MOVE_METHOD_PARAMETERS_LOST",
+        "rollback_occurred": False,
+        "transformation_applied": False,
+        "normalization_diagnostics": issues,
+        "safety_report": {
+            "summary": "Transformation requires review before execution.",
+            "risk_flags": ["RDP_MOVE_METHOD_PARAMETERS_LOST"],
+            "human_messages": [
+                "Move Method planner parameters were lost before AST resolution; no source code was changed.",
+            ],
+            "transformation_log": [
+                {
+                    "action_type": "move_python_method",
+                    "status": "review_required",
+                    "reason": "RDP_MOVE_METHOD_PARAMETERS_LOST",
+                    "metadata": {"diagnostics": issues},
+                    "replacements_count": 0,
+                }
+            ],
+        },
+    }
 
 
 def _remove_legacy_result_artifacts() -> None:
@@ -433,6 +417,15 @@ def create_sctva_blueprint() -> Blueprint:
             payload = request.get_json(silent=True)
             if not isinstance(payload, dict):
                 return jsonify({"error": "Invalid JSON payload."}), 400
+            # Both public execution routes accept raw RDP ``steps`` as well as
+            # the normalized SCTVA contract.  Normalize before entering the
+            # agent so the live route cannot discard nested Move Method data.
+            payload, integrity_issues = normalize_sctva_request_payload(
+                payload,
+                adapter=adapter,
+            )
+            if integrity_issues:
+                return jsonify(_move_method_integrity_response(integrity_issues)), 200
             _remove_legacy_result_artifacts()
             result = agent.execute(payload)
             _remove_legacy_result_artifacts()
@@ -441,6 +434,8 @@ def create_sctva_blueprint() -> Blueprint:
                 "backend_results_folder_disabled": True,
             }
             return jsonify(result), 200
+        except PlannerAdapterError as exc:
+            return jsonify({"error": str(exc)}), 422
         except ContractValidationError as exc:
             return jsonify({"error": str(exc)}), 400
         except Exception as exc:
@@ -455,15 +450,15 @@ def create_sctva_blueprint() -> Blueprint:
             if not isinstance(payload, dict):
                 return jsonify({"error": "Invalid JSON payload."}), 400
 
-            # IMPORTANT: raw RDP plans use ``steps`` and keep semantic target
-            # fields inside each step's ``parameters`` object.  Always pass that
-            # shape through PlannerAdapter before the SCTVA contract/engine.
-            # Already-normalized requests containing ``refactoring_plan.actions``
-            # are left untouched for backward compatibility.
-            sctva_payload = _normalize_execute_from_rdp_payload(
+            # Use the exact same normalization and boundary integrity check as
+            # /sctva/execute.  The route name must not determine the contract
+            # shape seen by the transformation engine.
+            sctva_payload, integrity_issues = normalize_sctva_request_payload(
                 payload,
                 adapter=adapter,
             )
+            if integrity_issues:
+                return jsonify(_move_method_integrity_response(integrity_issues)), 200
 
             _remove_legacy_result_artifacts()
             result = agent.execute(sctva_payload)

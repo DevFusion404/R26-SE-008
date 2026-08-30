@@ -22,6 +22,7 @@ if __name__ == "__main__":
 from .analysis import LocalRefactorDetector
 from .contracts import ContractValidationError, SCTVARequestContract, SourceFileContract
 from .contracts import RefactoringAction
+from .integration.planner_adapter import normalize_sctva_request_payload
 from .constants import (
     ACTION_EXTRACT_CLASS,
     ACTION_EXTRACT_METHOD,
@@ -78,7 +79,26 @@ class SafeCodeTransformationValidationAgent:
 
     def execute(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         """Execute from raw payload and return result dict."""
-        request = SCTVARequestContract.from_dict(payload)
+        # Keep programmatic callers on the same RDP normalization path as both
+        # HTTP entry points.  This is idempotent for an ordinary SCTVA request.
+        normalized_payload, integrity_issues = normalize_sctva_request_payload(payload)
+        if integrity_issues:
+            return {
+                "success": False,
+                "status": "REVIEW_REQUIRED",
+                "reason": "RDP_MOVE_METHOD_PARAMETERS_LOST",
+                "rollback_occurred": False,
+                "transformation_applied": False,
+                "normalization_diagnostics": integrity_issues,
+                "safety_report": {
+                    "summary": "Transformation requires review before execution.",
+                    "risk_flags": ["RDP_MOVE_METHOD_PARAMETERS_LOST"],
+                    "human_messages": [
+                        "Move Method planner parameters were lost before AST resolution; no source code was changed.",
+                    ],
+                },
+            }
+        request = SCTVARequestContract.from_dict(normalized_payload)
         return self.execute_request(request)
 
     def execute_request(self, request: SCTVARequestContract) -> Dict[str, Any]:
@@ -394,9 +414,21 @@ class SafeCodeTransformationValidationAgent:
     def _collect_source_files(self, request: SCTVARequestContract) -> List[SourceFileContract]:
         if request.source_files:
             return request.source_files
+
+        # A single-source request historically used the synthetic name
+        # ``source_code``.  RDP actions, however, are commonly scoped to the
+        # real filename (for example ``jarvis.py``).  When there is exactly
+        # one unambiguous plan filename, bind the source text to that name so
+        # action scoping and AST resolution operate on the same file identity.
+        plan_file_names = {
+            str(action.parameters.get("source_file") or "").strip()
+            for action in request.refactoring_plan.actions
+            if str(action.parameters.get("source_file") or "").strip()
+        }
+        file_name = next(iter(plan_file_names)) if len(plan_file_names) == 1 else "source_code"
         return [
             SourceFileContract(
-                file_name="source_code",
+                file_name=file_name,
                 source_code=request.source_code,
                 language=request.language,
                 source_mode="raw",
@@ -1370,6 +1402,7 @@ class SafeCodeTransformationValidationAgent:
             # set by the transaction finalizer below.
             require_compilation=(
                 request.execution_options.require_compilation
+                and language != "c"
                 and not any(
                     action.action_type == ACTION_UPDATE_JAVA_PARAMETER_OBJECT_CALL_SITE
                     for action in actions
@@ -1377,6 +1410,49 @@ class SafeCodeTransformationValidationAgent:
             ),
             timeout_seconds=request.execution_options.timeout_seconds,
         )
+
+        if (
+            language == "c"
+            and syntax_step.passed
+            and request.execution_options.require_compilation
+        ):
+            candidate_c_repository = []
+            target_path = self._normalize_path(file_entry.file_name)
+            for project_file in project_files:
+                project_name = str(
+                    project_file.get("file_name") or project_file.get("file_path") or ""
+                )
+                candidate_c_repository.append({
+                    **project_file,
+                    "source_code": (
+                        transformed_code
+                        if self._normalize_path(project_name) == target_path
+                        else str(project_file.get("source_code") or "")
+                    ),
+                })
+            repository_syntax = self.syntax_validator.validate_c_project(
+                candidate_c_repository,
+                require_compilation=True,
+                timeout_seconds=request.execution_options.timeout_seconds,
+            )
+            syntax_step.details["repository_compiler_validation"] = (
+                repository_syntax.to_dict()
+            )
+            syntax_step.details["compiler_validation"] = (
+                repository_syntax.details.get("compiler_validation", "UNAVAILABLE")
+            )
+            syntax_step.details["compiler"] = repository_syntax.details.get("compiler")
+            if repository_syntax.details.get("warnings"):
+                syntax_step.details.setdefault("warnings", []).extend(
+                    repository_syntax.details["warnings"]
+                )
+            if not repository_syntax.passed:
+                syntax_step.passed = False
+                syntax_step.score = 0.0
+                syntax_step.message = repository_syntax.message
+                syntax_step.details.setdefault("diagnostics", []).extend(
+                    repository_syntax.details.get("diagnostics", [])
+                )
 
         structural_step = self.structural_validator.validate(
             language=language,
@@ -3964,7 +4040,11 @@ class SafeCodeTransformationValidationAgent:
                     },
                 ))
         if not planned_types:
-            return detected_actions
+            return self._deduplicate_internal_actions(
+                file_name=file_entry.file_name,
+                existing_actions=existing_actions,
+                detected_actions=detected_actions,
+            )
 
         # The dedicated polymorphism transformer performs its own AST target
         # recovery.  Do not append a second locally detected action when RDP
@@ -3991,7 +4071,7 @@ class SafeCodeTransformationValidationAgent:
             if isinstance(values, list):
                 planned_literals.update(values)
 
-        return [
+        detected_actions = [
             action
             for action in detected_actions
             if action.action_type in planned_types
@@ -4001,6 +4081,112 @@ class SafeCodeTransformationValidationAgent:
                 or action.parameters.get("literal_value") in planned_literals
             )
         ]
+        return self._deduplicate_internal_actions(
+            file_name=file_entry.file_name,
+            existing_actions=existing_actions,
+            detected_actions=detected_actions,
+        )
+
+    @staticmethod
+    def _canonical_refactoring_family(action: RefactoringAction) -> str:
+        """Normalize display and technical action names for target deduplication."""
+
+        for value in (action.action_type, action.source_refactoring):
+            normalized = re.sub(
+                r"[^a-z0-9]+",
+                "_",
+                str(value or "").strip().lower(),
+            ).strip("_")
+            if normalized in {
+                "extract_method",
+                "extract_function",
+                "extract_c_method",
+                "extract_java_method",
+                "extract_python_method",
+            }:
+                return ACTION_EXTRACT_METHOD
+        return str(action.action_type or "").strip().lower()
+
+    @staticmethod
+    def _action_target_method(action: RefactoringAction) -> str:
+        """Get the normalized routine name from modern or legacy action data."""
+
+        params = action.parameters or {}
+        target = params.get("target")
+        target = target if isinstance(target, dict) else {}
+        for key in (
+            "source_method",
+            "method",
+            "method_name",
+            "function",
+            "function_name",
+        ):
+            value = params.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+            value = target.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return ""
+
+    @classmethod
+    def _dedup_file_identity(cls, action: RefactoringAction, file_name: str) -> str:
+        """Resolve only exact/suffix path aliases; never merge sibling files."""
+
+        action_path = cls._normalize_path(cls._action_source_file(action))
+        current_path = cls._normalize_path(file_name)
+        if not action_path:
+            return current_path
+        if (
+            action_path == current_path
+            or current_path.endswith(f"/{action_path}")
+            or action_path.endswith(f"/{current_path}")
+        ):
+            return current_path
+        return action_path
+
+    @classmethod
+    def _internal_action_deduplication_key(
+        cls,
+        action: RefactoringAction,
+        *,
+        file_name: str,
+    ) -> tuple[str, str, str] | None:
+        family = cls._canonical_refactoring_family(action)
+        method = cls._action_target_method(action)
+        if family != ACTION_EXTRACT_METHOD or not method:
+            return None
+        return (cls._dedup_file_identity(action, file_name), family, method)
+
+    @classmethod
+    def _deduplicate_internal_actions(
+        cls,
+        *,
+        file_name: str,
+        existing_actions: List[RefactoringAction],
+        detected_actions: List[RefactoringAction],
+    ) -> List[RefactoringAction]:
+        """Remove duplicate local actions without suppressing new SCTVA findings."""
+
+        planned_keys = {
+            key
+            for action in existing_actions
+            if (key := cls._internal_action_deduplication_key(
+                action,
+                file_name=file_name,
+            )) is not None
+        }
+        retained: List[RefactoringAction] = []
+        seen_local_keys: set[tuple[str, str, str]] = set()
+
+        for action in detected_actions:
+            key = cls._internal_action_deduplication_key(action, file_name=file_name)
+            if key is not None and (key in planned_keys or key in seen_local_keys):
+                continue
+            if key is not None:
+                seen_local_keys.add(key)
+            retained.append(action)
+        return retained
 
     @staticmethod
     def _request_allows_local_refactoring(request: SCTVARequestContract) -> bool:

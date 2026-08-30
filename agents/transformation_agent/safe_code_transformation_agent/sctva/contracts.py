@@ -131,7 +131,7 @@ def normalize_move_method_parameters(action: Dict[str, Any]) -> Dict[str, Any]:
     if destination_parameter:
         normalized["destination_parameter"] = destination_parameter
 
-    if "source_line" not in normalized:
+    if not isinstance(normalized.get("source_line"), (int, float)):
         line_sources: List[Dict[str, Any]] = [action, target]
         line_sources.extend(step_parameters)
         line_sources.extend(step_targets)
@@ -143,6 +143,38 @@ def normalize_move_method_parameters(action: Dict[str, Any]) -> Dict[str, Any]:
             lines = source.get("lines")
             if isinstance(lines, list) and lines and isinstance(lines[0], (int, float)):
                 normalized["source_line"] = int(lines[0])
+                break
+
+    # Preserve the complete planner range as a hint.  ``source_line`` is the
+    # canonical single-line hint used by the resolver, but retaining the
+    # original range is important for diagnostics and for composed plans where
+    # line numbers shift after an earlier accepted action.
+    existing_target_lines = normalized.get("target_lines")
+    if not isinstance(existing_target_lines, list) or not any(
+        isinstance(value, (int, float)) for value in existing_target_lines
+    ):
+        line_sources: List[Dict[str, Any]] = [action, target]
+        line_sources.extend(step_parameters)
+        line_sources.extend(step_targets)
+        for source in line_sources:
+            lines = source.get("target_lines") or source.get("lines")
+            if isinstance(lines, list):
+                numeric_lines = [
+                    int(value) for value in lines
+                    if isinstance(value, (int, float))
+                ]
+                if numeric_lines:
+                    normalized["target_lines"] = numeric_lines
+                    break
+
+    # Keep the planner step identity in the action parameters as well as on
+    # the action envelope.  This lets the request boundary pair original and
+    # normalized actions even when an orchestration layer rebuilt the action.
+    if normalized.get("source_step_id") is None:
+        for source in [action, *raw_steps]:
+            value = source.get("source_step_id") or source.get("step_id")
+            if value is not None:
+                normalized["source_step_id"] = value
                 break
 
     # Keep the original requested planner values for diagnostics.  They must
