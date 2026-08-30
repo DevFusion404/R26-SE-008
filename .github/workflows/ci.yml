@@ -13,7 +13,6 @@ on:
       - 'agents/cuqa_agent/**'
       - 'agents/transformation_agent/**'
       - 'agents/orchestration_agent/**'
-      - 'user_management/**'
       - 'frontend/**'
       - '.github/workflows/ci.yml'
   pull_request:
@@ -25,7 +24,6 @@ on:
       - 'agents/cuqa_agent/**'
       - 'agents/transformation_agent/**'
       - 'agents/orchestration_agent/**'
-      - 'user_management/**'
       - 'frontend/**'
       - '.github/workflows/ci.yml'
   workflow_dispatch:
@@ -47,11 +45,6 @@ on:
         type: boolean
       force_diwo:
         description: 'Force rebuild Orchestration agent even if unchanged'
-        required: false
-        default: 'false'
-        type: boolean
-      force_user_management:
-        description: 'Force rebuild User Management service even if unchanged'
         required: false
         default: 'false'
         type: boolean
@@ -85,9 +78,8 @@ jobs:
       rdp:          ${{ steps.filter.outputs.rdp }}
       cuqa:         ${{ steps.filter.outputs.cuqa }}
       sctva:        ${{ steps.filter.outputs.sctva }}
-      diwo:            ${{ steps.filter.outputs.diwo }}
-      user_management: ${{ steps.filter.outputs.user_management }}
-      frontend:        ${{ steps.filter.outputs.frontend }}
+      diwo:         ${{ steps.filter.outputs.diwo }}
+      frontend:     ${{ steps.filter.outputs.frontend }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -105,8 +97,6 @@ jobs:
               - 'agents/transformation_agent/**'
             diwo:
               - 'agents/orchestration_agent/**'
-            user_management:
-              - 'user_management/**'
             frontend:
               - 'frontend/**'
 
@@ -268,44 +258,6 @@ jobs:
           cache-to: type=inline
 
   # -------------------------------------------------------------
-  # 2f. Build & push User Management image to ACR
-  # -------------------------------------------------------------
-  build-user-management:
-    name: Build and push User Management image
-    needs: detect-changes
-    runs-on: ubuntu-latest
-    if: >
-      needs.detect-changes.outputs.user_management == 'true' ||
-      github.event.inputs.force_user_management == 'true'
-    env:
-      IMAGE_NAME: user-management
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Log in to Azure Container Registry
-        uses: docker/login-action@v3
-        with:
-          registry: ${{ secrets.ACR_LOGIN_SERVER }}
-          username: ${{ secrets.ACR_USERNAME }}
-          password: ${{ secrets.ACR_PASSWORD }}
-
-      - name: Build and push User Management Docker image
-        uses: docker/build-push-action@v5
-        with:
-          context: ./user_management
-          file: ./user_management/Dockerfile
-          push: ${{ github.event_name != 'pull_request' }}
-          tags: |
-            ${{ secrets.ACR_LOGIN_SERVER }}/${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
-            ${{ secrets.ACR_LOGIN_SERVER }}/${{ env.IMAGE_NAME }}:latest
-          cache-from: type=registry,ref=${{ secrets.ACR_LOGIN_SERVER }}/${{ env.IMAGE_NAME }}:latest
-          cache-to: type=inline
-
-  # -------------------------------------------------------------
   # 2e. Build & push Frontend image to ACR
   # -------------------------------------------------------------
   build-frontend:
@@ -344,33 +296,11 @@ jobs:
           cache-to: type=inline
 
   # -------------------------------------------------------------
-  # 3b. Deploy User Management to Azure Web App (if configured)
-  # -------------------------------------------------------------
-  deploy-user-management:
-    name: Deploy User Management to Azure Web App
-    needs: build-user-management
-    runs-on: ubuntu-latest
-    if: github.event_name != 'pull_request'
-    env:
-      IMAGE_NAME: user-management
-      AZURE_WEBAPP_NAME: ${{ secrets.AZURE_WEBAPP_NAME_USER_MANAGEMENT }}
-      AZURE_WEBAPP_PUBLISH_PROFILE: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE_USER_MANAGEMENT }}
-    steps:
-      - name: Deploy User Management image to Azure Web App
-        if: >
-          env.AZURE_WEBAPP_NAME != '' &&
-          env.AZURE_WEBAPP_PUBLISH_PROFILE != ''
-        uses: azure/webapps-deploy@v3
-        with:
-          app-name: ${{ env.AZURE_WEBAPP_NAME }}
-          publish-profile: ${{ env.AZURE_WEBAPP_PUBLISH_PROFILE }}
-          images: ${{ secrets.ACR_LOGIN_SERVER }}/${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
-
-  # -------------------------------------------------------------
   # 3. Deploy Frontend to Azure Web App
   #
-  # The frontend is the primary Web App. All backend microservices
-  # are pushed to ACR and run on Azure Container Apps / App Service.
+  # The frontend is the only component deployed to Azure Web App.
+  # All agents (rdp, cuqa, sctva, diwo) are pushed to ACR only
+  # and run via Azure Container Apps or similar.
   # Skipped on pull_request events.
   # -------------------------------------------------------------
   deploy-frontend:
