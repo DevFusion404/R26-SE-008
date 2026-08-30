@@ -115,7 +115,11 @@ export default function CodeSmellApprovalPage({
   onReloadWorkspace,
 }) {
   // ── Review arrangement ─────────────────────────────────────────────────────
-  const [mode, setMode] = useState("smell");
+  // Opens on File wise: the first question a developer asks of a fresh report
+  // is which files are in trouble, and it is the only mode whose unit — a path
+  // — they already know before reading anything. Smell wise and Category wise
+  // are both one click away, and neither loses a tick when switched to.
+  const [mode, setMode] = useState("file");
   const [selected, setSelected] = useState(new Set());          // file paths
   const [selectedIds, setSelectedIds] = useState(new Set());    // smell ids
 
@@ -136,6 +140,9 @@ export default function CodeSmellApprovalPage({
   const [isSubmitting, setIsSubmitting] = useState(false);
   // Which half of the hand-off is running: "filtering" (fast, local to the
   // backend) or "planning" (the RDP agent, which is the one worth waiting on).
+  // Read only by the Continue button, which is the whole progress indicator —
+  // a stepped panel underneath it narrated a wait the button was already
+  // narrating, in more words and further from where the developer clicked.
   const [submitPhase, setSubmitPhase] = useState(null);
 
   // Which file's original source is open, and which smell inside it is focused.
@@ -815,72 +822,61 @@ export default function CodeSmellApprovalPage({
       />
 
       <div style={{
-        display: "grid", gap: 16, alignItems: "start",
-        gridTemplateColumns: "minmax(0, 3fr) minmax(260px, 1fr)",
+        display: "flex", flexDirection: "column", gap: 10,
+        maxHeight: "min(72vh, 780px)", overflowY: "auto", paddingRight: 4,
       }}>
-        <div style={{
-          display: "flex", flexDirection: "column", gap: 10,
-          maxHeight: "min(72vh, 780px)", overflowY: "auto", paddingRight: 4,
-        }}>
-          {activeGroups.length === 0 && (
-            <div style={{
-              padding: "28px 20px", textAlign: "center", background: C.panel,
-              border: `1px dashed ${C.border}`, borderRadius: 11,
-              color: C.textMuted, fontSize: 13, flexShrink: 0,
-            }}>
-              {emptyMessage}
-            </div>
-          )}
+        {activeGroups.length === 0 && (
+          <div style={{
+            padding: "28px 20px", textAlign: "center", background: C.panel,
+            border: `1px dashed ${C.border}`, borderRadius: 11,
+            color: C.textMuted, fontSize: 13, flexShrink: 0,
+          }}>
+            {emptyMessage}
+          </div>
+        )}
 
-          {mode === "smell" && (
-            <SmellWiseView
-              groups={smellGroups}
-              selectedIds={selectedIds}
-              openKeys={effectiveOpen}
-              onToggleOpen={toggleOpen}
-              onToggleRows={toggleRows}
-              onToggleSmell={toggleSmell}
-              onView={(file, id) => setViewing({ file, focusId: id })}
-              onShowImpact={setImpactRow}
-              impacts={impacts}
-            />
-          )}
+        {mode === "smell" && (
+          <SmellWiseView
+            groups={smellGroups}
+            selectedIds={selectedIds}
+            openKeys={effectiveOpen}
+            onToggleOpen={toggleOpen}
+            onToggleRows={toggleRows}
+            onToggleSmell={toggleSmell}
+            onView={(file, id) => setViewing({ file, focusId: id })}
+            onShowImpact={setImpactRow}
+            impacts={impacts}
+          />
+        )}
 
-          {mode === "category" && (
-            <CategoryWiseView
-              groups={catGroups}
-              priorities={categoryPriority}
-              selectedIds={selectedIds}
-              openKeys={effectiveOpen}
-              onToggleOpen={toggleOpen}
-              onToggleRows={toggleRows}
-              onToggleSmell={toggleSmell}
-              onView={(file, id) => setViewing({ file, focusId: id })}
-              onShowImpact={setImpactRow}
-              impacts={impacts}
-            />
-          )}
+        {mode === "category" && (
+          <CategoryWiseView
+            groups={catGroups}
+            priorities={categoryPriority}
+            selectedIds={selectedIds}
+            openKeys={effectiveOpen}
+            onToggleOpen={toggleOpen}
+            onToggleRows={toggleRows}
+            onToggleSmell={toggleSmell}
+            onView={(file, id) => setViewing({ file, focusId: id })}
+            onShowImpact={setImpactRow}
+            impacts={impacts}
+          />
+        )}
 
-          {isFileMode && (
-            <FileWiseView
-              groups={fileGroups}
-              openKeys={effectiveOpen}
-              onToggleOpen={toggleOpen}
-              onToggleFile={toggleFile}
-              onViewFile={(file) => setViewing({ file, focusId: null })}
-              onView={(file, id) => setViewing({ file, focusId: id })}
-              onShowImpact={setImpactRow}
-              qualityOf={qualityOf}
-              impacts={impacts}
-            />
-          )}
-        </div>
-
-        <SelectionSummaryPanel
-          summary={panelSummary}
-          mode={mode}
-          onClear={rejectAll}
-        />
+        {isFileMode && (
+          <FileWiseView
+            groups={fileGroups}
+            openKeys={effectiveOpen}
+            onToggleOpen={toggleOpen}
+            onToggleFile={toggleFile}
+            onViewFile={(file) => setViewing({ file, focusId: null })}
+            onView={(file, id) => setViewing({ file, focusId: id })}
+            onShowImpact={setImpactRow}
+            qualityOf={qualityOf}
+            impacts={impacts}
+          />
+        )}
       </div>
 
       <div style={{ marginTop: 10, fontSize: 11, color: C.textMuted, display: "flex", gap: 16, flexWrap: "wrap" }}>
@@ -898,7 +894,7 @@ export default function CodeSmellApprovalPage({
         )}
       </div>
 
-      {isSubmitting && <SubmitProgress phase={submitPhase} smellCount={selectedSmells.length} />}
+      <SelectionSummaryPanel summary={panelSummary} onClear={rejectAll} />
 
       {impactSummary && (
         <div style={{ marginTop: 16 }}>
@@ -1177,65 +1173,6 @@ function Spinner({ size = 13, color = "currentColor" }) {
       />
       <style>{"@keyframes diwoSpin { to { transform: rotate(360deg); } }"}</style>
     </>
-  );
-}
-
-/**
- * The hand-off, step by step. Naming the step that is running — and saying it
- * is another agent doing the work — is the difference between a developer
- * waiting and a developer clicking again because nothing is moving.
- */
-function SubmitProgress({ phase, smellCount }) {
-  const steps = [
-    {
-      key: "filtering",
-      label: "Filtering the report to your selection",
-      detail: `${smellCount} finding${smellCount === 1 ? "" : "s"} kept`,
-    },
-    {
-      key: "planning",
-      label: "Refactoring Planning Agent is generating the plan",
-      detail: "interpreting smells, scoring candidates (MCDA), sequencing steps",
-    },
-  ];
-  const activeIndex = steps.findIndex((s) => s.key === phase);
-
-  return (
-    <div style={{
-      marginTop: 12, padding: "12px 16px", borderRadius: 11,
-      background: `${C.accent}0a`, border: `1px solid ${C.accent}40`,
-    }}>
-      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-        {steps.map((step, i) => {
-          const done = activeIndex > i;
-          const active = activeIndex === i;
-          return (
-            <div key={step.key} style={{ display: "flex", alignItems: "center", gap: 9 }}>
-              <span style={{ width: 14, display: "inline-flex", justifyContent: "center", flexShrink: 0 }}>
-                {done
-                  ? <span style={{ color: C.accent, fontWeight: 900, fontSize: 12 }}>✓</span>
-                  : active
-                    ? <Spinner size={11} color={C.accent} />
-                    : <span style={{ width: 6, height: 6, borderRadius: "50%", background: C.border }} />}
-              </span>
-              <span style={{
-                fontSize: 12,
-                color: done ? C.accent : active ? C.text : C.textMuted,
-                fontWeight: active ? 700 : 500,
-              }}>
-                {step.label}
-              </span>
-              <span style={{ fontSize: 11, color: C.textMuted }}>· {step.detail}</span>
-            </div>
-          );
-        })}
-      </div>
-      <div style={{ marginTop: 9, fontSize: 11, color: C.textMuted, lineHeight: 1.5 }}>
-        Planning runs on another agent over HTTP, so this can take a few seconds on a
-        large selection. The page moves to the Refactoring Plan stage on its own —
-        no need to click again.
-      </div>
-    </div>
   );
 }
 

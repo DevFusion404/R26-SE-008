@@ -86,7 +86,11 @@ export default function AuditSidebar({
   onRefresh,
   refreshing = false,
 }) {
-  const [collapsed, setCollapsed] = useState(false);
+  // Starts minimised. The trail is a record to consult, not a thing to read
+  // alongside the work — and at 360px it was taking a quarter of the width off
+  // every stage before the developer had asked for it. The rail keeps the entry
+  // count visible, so it still says when there is something to go and look at.
+  const [collapsed, setCollapsed] = useState(true);
   // "trail" is the persisted backend record; "session" is browser commentary.
   const [view, setView] = useState("trail");
   const [openIds, setOpenIds] = useState(() => new Set());

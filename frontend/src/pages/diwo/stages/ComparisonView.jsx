@@ -192,7 +192,7 @@ function MetricBar({ label, before, after, unit = "", higherIsBetter = true, car
   );
 }
 
-export function ComparisonView({ workflow, workflowId: propWorkflowId, language: propLanguage, auditLogs = [], onComplete, onLoadLogs, loading }) {
+export function ComparisonView({ workflow, workflowId: propWorkflowId, language: propLanguage, auditLogs = [], onComplete, onLoadLogs, onBack, loading }) {
   const [notes, setNotes] = useState("");
   const mb = workflow?.metrics_before || {};
   const ma = workflow?.metrics_after || {};
@@ -418,8 +418,28 @@ export function ComparisonView({ workflow, workflowId: propWorkflowId, language:
 
   return (
     <div className="page-card">
+      {onBack && (
+        <button
+          type="button"
+          onClick={onBack}
+          title="Go back to the Results Review stage"
+          style={{
+            marginBottom: 14,
+            padding: "8px 16px",
+            borderRadius: 8,
+            border: "1px solid #334155",
+            background: "#1e293b",
+            color: "#cbd5e1",
+            fontSize: 12.5,
+            fontWeight: 700,
+            cursor: "pointer",
+          }}
+        >
+          ← Back to Results Review
+        </button>
+      )}
+
       <div className="page-header">
-        <div className="header-icon compare">📊</div>
         <div>
           <h1>Before / After Comparison</h1>
           <p>Review the code quality improvements achieved through refactoring.</p>
@@ -691,8 +711,22 @@ export function ComparisonView({ workflow, workflowId: propWorkflowId, language:
     className="primary-btn complete-btn"
     onClick={() => onComplete && onComplete(notes)}
     disabled={loading}
+    title="Close this workflow and write the final record to the audit trail"
+    style={{
+      marginLeft: "auto",
+      padding: "11px 26px",
+      borderRadius: 10,
+      border: "none",
+      background: loading ? "#334155" : "#22c55e",
+      color: loading ? "#94a3b8" : "#04210f",
+      fontSize: 13.5,
+      fontWeight: 800,
+      letterSpacing: 0.2,
+      cursor: loading ? "wait" : "pointer",
+      boxShadow: loading ? "none" : "0 0 22px rgba(34,197,94,0.28)",
+    }}
   >
-    {loading ? "Completing..." : "✓ Complete Workflow"}
+    {loading ? "Completing…" : "✓ Complete Workflow"}
   </button>
 </div>
 
