@@ -220,6 +220,14 @@ class RefactoringAction:
             "replace_bare_except_with_specific_exceptions",
         }:
             self.action_type = "narrow_exception_handler"
+        if self.action_type in {
+            "replace_nested_conditional_with_guard_clause",
+            "replace_conditional_with_guard_clauses",
+            "simplify_conditional_loop",
+            "guard_clause",
+            "guard_clauses",
+        }:
+            self.action_type = "replace_nested_conditional_with_guard_clauses"
         if self.action_type not in SUPPORTED_ACTIONS:
             raise ContractValidationError(
                 f"Unsupported action_type '{self.action_type}'. Supported: {sorted(SUPPORTED_ACTIONS)}"
@@ -251,6 +259,13 @@ class RefactoringAction:
             "replace bare except",
             "replace_bare_except",
             "replace_bare_except_with_specific_exception",
+        }
+        guard_clause_refactorings = {
+            "replace nested conditional with guard clauses",
+            "replace nested conditional with guard clause",
+            "replace_conditional_with_guard_clauses",
+            "guard clauses",
+            "guard clause",
         }
         if normalized_action_type == "noop" and source_refactoring in bare_except_refactorings:
             # Recover plans normalized by an older PlannerAdapter before the
@@ -330,6 +345,61 @@ class RefactoringAction:
                 parameters["source_file"] = source_file
             if isinstance(source_line, (int, float)):
                 parameters["source_line"] = int(source_line)
+        if normalized_action_type == "noop" and source_refactoring in guard_clause_refactorings:
+            data = dict(data)
+            data["action_type"] = "replace_nested_conditional_with_guard_clauses"
+            parameters["promoted_from_noop"] = True
+            target = data.get("target") if isinstance(data.get("target"), dict) else {}
+            legacy = parameters.get("legacy_step") if isinstance(parameters.get("legacy_step"), dict) else {}
+            legacy_params = legacy.get("parameters") if isinstance(legacy.get("parameters"), dict) else {}
+            legacy_target = legacy.get("target") if isinstance(legacy.get("target"), dict) else {}
+            for key in (
+                "method", "source_method", "function", "target_function",
+                "source_file", "source_line", "start_line", "end_line",
+                "target_lines", "target_range", "source_step_id",
+            ):
+                if parameters.get(key) not in (None, ""):
+                    continue
+                for container in (target, legacy_params, legacy_target, legacy, data):
+                    value = container.get(key) if isinstance(container, dict) else None
+                    if value not in (None, ""):
+                        parameters[key] = value
+                        break
+            method = str(
+                parameters.get("source_method")
+                or parameters.get("method")
+                or parameters.get("function")
+                or parameters.get("target_function")
+                or ""
+            ).strip()
+            if method:
+                parameters["method"] = method
+                parameters["source_method"] = method
+                parameters["target_function"] = method
+            source_file = str(
+                parameters.get("source_file")
+                or target.get("source_file")
+                or target.get("file")
+                or legacy_params.get("source_file")
+                or legacy_target.get("source_file")
+                or legacy_target.get("file")
+                or legacy.get("source_file")
+                or legacy.get("file")
+                or ""
+            ).strip()
+            if source_file:
+                parameters["source_file"] = source_file
+            target_lines = parameters.get("target_lines") or parameters.get("lines")
+            if not isinstance(target_lines, (list, tuple)):
+                target_lines = legacy_target.get("lines") or target.get("lines")
+            if isinstance(target_lines, (list, tuple)):
+                parameters["target_lines"] = list(target_lines)
+                if parameters.get("source_line") in (None, "") and target_lines:
+                    first_line = target_lines[0]
+                    if isinstance(first_line, (int, float)) or (
+                        isinstance(first_line, str) and first_line.strip().isdigit()
+                    ):
+                        parameters["source_line"] = int(first_line)
         if normalized_action_type in {"inline_class", "inline_python_class"} or (
             normalized_action_type == "noop" and source_refactoring == "inline class"
         ):
@@ -371,6 +441,17 @@ class RefactoringAction:
         warnings = data.get("warnings", [])
         if not isinstance(warnings, list):
             raise ContractValidationError("Action field 'warnings' must be a list when provided.")
+        if data["action_type"] == "replace_nested_conditional_with_guard_clauses":
+            warnings = [
+                warning for warning in warnings
+                if not (
+                    "guard clause" in str(warning).lower()
+                    and (
+                        "unsupported" in str(warning).lower()
+                        or "mapped to noop" in str(warning).lower()
+                    )
+                )
+            ]
 
         return cls(
             action_type=data["action_type"],

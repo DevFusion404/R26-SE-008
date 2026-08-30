@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from sctva.validators.syntax_validator import SyntaxValidator
 from sctva.validators.structural_validator import StructuralValidator
 from sctva.contracts import RefactoringAction
+from sctva.transformers.c_extract_method import apply_extract_method as extract_c_method
 from sctva.validators.c_support import compare_c_static_summaries, validate_c_behavior
 
 
@@ -516,6 +517,64 @@ def test_c_structural_validator_high_for_small_change():
         transformed_code="int add(int a, int b) { return a + b; }\n",
     )
     assert result.score >= 0.8
+
+
+def test_c_extract_method_structural_validation_requires_clean_scope_data_flow():
+    original = '''int process(int value) {
+    int first = value + 1;
+    int second = first + 2;
+    int third = second + 3;
+    int observed = third + 4;
+    return observed;
+}
+'''
+    transformed, count, metadata = extract_c_method(
+        original,
+        new_method_name="calculate_values",
+        method_name="process",
+        start_line=2,
+        end_line=5,
+    )
+    assert count == 1
+
+    action = RefactoringAction(
+        action_type="extract_method",
+        parameters={
+            "function": "process",
+            "new_function_name": "calculate_values",
+            "applied_transformation_metadata": metadata,
+        },
+    )
+    result = StructuralValidator().validate(
+        language="c",
+        original_code=original,
+        transformed_code=transformed,
+        actions=[action],
+    )
+    assert result.passed is True
+    checks = result.details["extract_method_validation"][0]["checks"]
+    assert checks["scope_data_flow"] is True
+
+    invalid_action = RefactoringAction(
+        action_type="extract_method",
+        parameters={
+            **action.parameters,
+            "applied_transformation_metadata": {
+                **metadata,
+                "scope_validation": {
+                    **metadata["scope_validation"],
+                    "undefined_identifiers": ["fcp"],
+                },
+            },
+        },
+    )
+    invalid_result = StructuralValidator().validate(
+        language="c",
+        original_code=original,
+        transformed_code=transformed,
+        actions=[invalid_action],
+    )
+    assert invalid_result.passed is False
 
 
 def test_c_static_comparison_accepts_suffixed_duplicate_constant_names():

@@ -1157,6 +1157,31 @@ class SafeCodeTransformationValidationAgent:
             raw_line = params.get("source_line")
             source_line = int(raw_line) if isinstance(raw_line, (int, float)) else None
 
+            target_name = str(
+                params.get("target_name")
+                or params.get("symbol")
+                or params.get("function")
+                or params.get("variable")
+                or ""
+            ).strip()
+            target_kind = str(params.get("target_kind") or "").strip().upper()
+            if not method and target_name and target_kind not in {"VARIABLE", "DECLARATION", "DATA"}:
+                method = target_name
+            has_target_metadata = bool(
+                method or target_name or params.get("variable") or source_line is not None
+            )
+            if not has_target_metadata:
+                diagnostic_file = configured_matches[0] if configured_matches else (c_files[0] if c_files else None)
+                if diagnostic_file is not None:
+                    params["source_file"] = diagnostic_file.file_name
+                params.update({
+                    "unresolved_legacy_target": True,
+                    "unresolved_status": "review_required",
+                    "unresolved_reason": "DEAD_CODE_TARGET_METADATA_MISSING",
+                    "source_resolution_error": "DEAD_CODE_TARGET_METADATA_MISSING",
+                })
+                continue
+
             definition_matches: list[tuple[SourceFileContract, str]] = []
             if method:
                 definition_matches = [
@@ -1167,6 +1192,19 @@ class SafeCodeTransformationValidationAgent:
                         method,
                     ) == 1
                 ]
+            elif params.get("variable") or target_kind in {"VARIABLE", "DECLARATION", "DATA"}:
+                variable = str(params.get("variable") or target_name).strip()
+                for entry in candidates:
+                    analysis = c_transformers.resolve_c_dead_code_target(
+                        entry.source_code,
+                        variable=variable,
+                        target_kind="VARIABLE",
+                        source_line=source_line,
+                        project_source_files=project_files,
+                        current_file_name=entry.file_name,
+                    )
+                    if analysis.get("candidate_count") == 1:
+                        definition_matches.append((entry, variable))
             elif len(candidates) == 1 and source_line is not None:
                 analysis = c_transformers.analyze_c_dead_code_target(
                     candidates[0].source_code,
@@ -1205,6 +1243,7 @@ class SafeCodeTransformationValidationAgent:
                 params["source_file"] = entry.file_name
                 if resolved_method:
                     params["method"] = resolved_method
+                    params["target_name"] = resolved_method
                 params["source_file_resolution"] = {
                     "status": "success",
                     "strategy": "repository_c_dead_code_target",
@@ -2298,6 +2337,98 @@ class SafeCodeTransformationValidationAgent:
                         or "not simulated" in str(warning).lower()
                         or "mapped to noop" in str(warning).lower()
                     )
+                )
+            ]
+
+    @staticmethod
+    def _promote_guard_clause_noops(actions: List[RefactoringAction]) -> None:
+        """Recover legacy C Guard Clause actions before file/symbol resolution."""
+
+        guard_names = {
+            "replace nested conditional with guard clauses",
+            "replace nested conditional with guard clause",
+            "replace_conditional_with_guard_clauses",
+            "guard clauses",
+            "guard clause",
+        }
+
+        def first_text(*values: Any) -> str:
+            return next(
+                (value.strip() for value in values if isinstance(value, str) and value.strip()),
+                "",
+            )
+
+        for action in actions:
+            if action.action_type != ACTION_NOOP:
+                continue
+            source_refactoring = str(action.source_refactoring or "").strip().lower()
+            warning_text = " ".join(str(item) for item in action.warnings).lower()
+            if source_refactoring not in guard_names and "guard clause" not in warning_text:
+                continue
+
+            params = action.parameters
+            legacy_step = params.get("legacy_step")
+            legacy_step = legacy_step if isinstance(legacy_step, dict) else {}
+            legacy_params = legacy_step.get("parameters")
+            legacy_params = legacy_params if isinstance(legacy_params, dict) else {}
+            legacy_target = legacy_step.get("target")
+            legacy_target = legacy_target if isinstance(legacy_target, dict) else {}
+            legacy_location = legacy_step.get("location")
+            legacy_location = legacy_location if isinstance(legacy_location, dict) else {}
+
+            method = first_text(
+                params.get("source_method"), params.get("method"),
+                params.get("function"), params.get("target_function"),
+                legacy_params.get("source_method"), legacy_params.get("method"),
+                legacy_params.get("function"), legacy_params.get("target_function"),
+                legacy_target.get("method"), legacy_target.get("function"),
+                legacy_target.get("target_function"), legacy_location.get("method"),
+                legacy_location.get("function"), legacy_step.get("target_function"),
+            )
+            source_file = first_text(
+                params.get("source_file"), legacy_params.get("source_file"),
+                legacy_target.get("source_file"), legacy_target.get("file"),
+                legacy_location.get("source_file"), legacy_location.get("file"),
+                legacy_step.get("source_file"),
+            )
+            target_lines = (
+                params.get("target_lines") or params.get("lines")
+                or legacy_params.get("target_lines") or legacy_params.get("lines")
+                or legacy_target.get("target_lines") or legacy_target.get("lines")
+                or legacy_step.get("target_lines") or legacy_step.get("lines")
+                or []
+            )
+            if not isinstance(target_lines, (list, tuple)):
+                target_lines = [target_lines] if target_lines is not None else []
+            numeric_lines = [
+                int(value) for value in target_lines
+                if isinstance(value, (int, float)) or (isinstance(value, str) and value.strip().isdigit())
+            ]
+            source_line = params.get("source_line")
+            if not isinstance(source_line, (int, float)) and numeric_lines:
+                source_line = numeric_lines[0]
+
+            params["method"] = method
+            params["source_method"] = method
+            params["target_function"] = method
+            if source_file:
+                params["source_file"] = source_file
+            params["target_lines"] = list(target_lines)
+            if isinstance(source_line, (int, float)):
+                params["source_line"] = int(source_line)
+            params["source_step_id"] = (
+                params.get("source_step_id")
+                or legacy_step.get("source_step_id")
+                or legacy_step.get("step_id")
+                or action.source_step_id
+            )
+            params["promoted_from_noop"] = True
+            action.action_type = ACTION_REPLACE_NESTED_CONDITIONAL_WITH_GUARD_CLAUSES
+            action.warnings = [
+                warning for warning in action.warnings
+                if not (
+                    "guard clause" in str(warning).lower()
+                    and ("unsupported" in str(warning).lower() or "mapped to noop" in str(warning).lower())
                 )
             ]
 

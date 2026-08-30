@@ -1,7 +1,9 @@
 import asyncio
 
 from sctva.integration.planner_adapter import PlannerAdapter
+from sctva.transformers import c_extract_method
 from sctva.transformers.c_extract_method import apply_extract_method as extract_c_method
+from sctva.transformers.extract_method_common import StatementSpan
 from sctva.transformers.java_extract_method import apply_extract_method as extract_java_method
 from sctva.transformers.python_extract_method import apply_extract_method as extract_python_method
 from sctva.validators.syntax_validator import SyntaxValidator
@@ -688,6 +690,304 @@ def test_c_extract_method_preserves_initializer_assignment_operator_for_output()
     assert "int total;\n    process_total(input, &total);" in transformed
     assert metadata["outputs"] == ["total"]
     assert metadata["status"] == "success"
+    assert SyntaxValidator().validate(
+        language="c",
+        source_code=transformed,
+        require_compilation=True,
+        timeout_seconds=10,
+    ).passed is True
+
+
+def test_c_extract_method_forwards_all_comma_declared_file_handles_and_keeps_caller_scope():
+    source = '''#include <stdio.h>
+
+int write_files(int value) {
+    FILE *fp, *fcp;
+    int first = value + 1;
+    int second = value + 2;
+    fp = tmpfile();
+    fcp = tmpfile();
+    fprintf(fp, "%d", first);
+    fprintf(fcp, "%d", second);
+    fclose(fp);
+    fclose(fcp);
+    return first + second;
+}
+'''
+    transformed, count, metadata = extract_c_method(
+        source,
+        new_method_name="write_file_values",
+        method_name="write_files",
+        start_line=7,
+        end_line=11,
+    )
+
+    assert count == 1
+    assert "static void write_file_values(" in transformed
+    assert "FILE **fcp_out" in transformed
+    assert "    FILE * fp;" in transformed
+    assert "write_file_values(first, second, &fcp);" in transformed
+    assert "fclose(fcp);" in transformed
+    assert metadata["scope_validation"] == {
+        "undefined_identifiers": [],
+        "out_of_scope_identifiers": [],
+        "missing_inputs": [],
+        "missing_outputs": [],
+    }
+    assert SyntaxValidator().validate(
+        language="c",
+        source_code=transformed,
+        require_compilation=True,
+        timeout_seconds=10,
+    ).passed is True
+
+
+def test_c_extract_method_accepts_top_level_aggregate_state_and_sizeof_declaration():
+    source = '''#include <stdio.h>
+
+struct CustomerDetails {
+    int room;
+} s;
+
+int update_record(int value) {
+    FILE *f = tmpfile();
+    long int size = sizeof(s);
+    if (value > 0) {
+        s.room = value;
+        fseek(f, size, SEEK_CUR);
+        fwrite(&s, sizeof(s), 1, f);
+    }
+    fclose(f);
+    return s.room;
+}
+'''
+
+    transformed, count, metadata = extract_c_method(
+        source,
+        new_method_name="write_customer_record",
+        method_name="update_record",
+        start_line=9,
+        end_line=13,
+    )
+
+    assert count == 1
+    assert "static void write_customer_record" in transformed
+    # Nested extraction must forward the live file and size values instead of
+    # relying on an unsafe implicit scope assumption.
+    assert "write_customer_record(f, size, value);" in transformed
+    assert metadata["scope_validation"] == {
+        "undefined_identifiers": [],
+        "out_of_scope_identifiers": [],
+        "missing_inputs": [],
+        "missing_outputs": [],
+    }
+
+
+def test_c_extract_method_allows_meaningful_reduction_without_full_smell_elimination():
+    selected = [
+        StatementSpan(start=0, end=1, text="line\n" * 7),
+    ]
+
+    assert c_extract_method._meaningfully_reduced(
+        {"loc": 53, "complexity": 7},
+        {"loc": 46, "complexity": 6},
+        selected,
+    ) is True
+    assert c_extract_method._meaningfully_reduced(
+        {"loc": 53, "complexity": 7},
+        {"loc": 51, "complexity": 6},
+        selected,
+    ) is False
+    assert c_extract_method._meaningfully_reduced(
+        {"loc": 119, "complexity": 25},
+        {"loc": 107, "complexity": 25},
+        selected + [StatementSpan(start=1, end=2, text="line\n" * 5)],
+    ) is True
+
+
+def test_c_extract_method_uses_bounded_nested_block_instead_of_long_helper(monkeypatch):
+    monkeypatch.setattr(
+        c_extract_method,
+        "_verify_c_compilation",
+        lambda source: ("UNAVAILABLE", "test compiler unavailable"),
+    )
+    updates = "\n".join(f"        record.value += {value};" for value in range(45))
+    source = f'''#include <stdio.h>
+
+struct Record {{ int value; }};
+
+void populate(FILE *fp) {{
+    struct Record record;
+    record.value = 0;
+    int repeat = 0;
+    while (repeat < 1) {{
+{updates}
+        fwrite(&record, sizeof(record), 1, fp);
+        repeat++;
+    }}
+}}
+'''
+
+    transformed, count, metadata = extract_c_method(
+        source,
+        new_method_name="populate_record_values",
+        method_name="populate",
+    )
+
+    assert count == 1
+    assert metadata["status"] == "success"
+    helper = c_extract_method._resolve_targets(transformed, "populate_record_values", "")[0]
+    assert metadata["after_loc"] < metadata["before_loc"]
+    assert c_extract_method._line_of(transformed, helper.end - 1) - c_extract_method._line_of(transformed, helper.start) + 1 <= 40
+    assert "populate_record_values(" in transformed
+
+
+def test_c_extract_method_rejects_undeclared_cross_boundary_file_handles():
+    source = '''#include <stdio.h>
+
+int write_files(int value) {
+    fp = tmpfile();
+    fcp = tmpfile();
+    fprintf(fp, "%d", value);
+    fprintf(fcp, "%d", value + 1);
+    return value;
+}
+'''
+    transformed, count, metadata = extract_c_method(
+        source,
+        new_method_name="write_file_values",
+        method_name="write_files",
+        start_line=4,
+        end_line=7,
+    )
+
+    assert transformed == source
+    assert count == 0
+    assert metadata["status"] == "review_required"
+    assert metadata["reason"] == "UNSAFE_C_EXTRACT_METHOD_DATA_FLOW"
+
+
+def test_c_extract_method_returns_file_pointer_outputs_to_the_caller_by_address():
+    source = '''#include <stdio.h>
+
+int prepare_files(int value) {
+    FILE *fp, *fcp;
+    fp = tmpfile();
+    fcp = tmpfile();
+    value += 1;
+    fclose(fp);
+    fclose(fcp);
+    return value;
+}
+'''
+    transformed, count, metadata = extract_c_method(
+        source,
+        new_method_name="open_files",
+        method_name="prepare_files",
+        start_line=4,
+        end_line=7,
+    )
+
+    assert count == 1
+    assert "static void open_files(FILE **fcp_out, FILE **fp_out, int *value_out)" in transformed
+    assert "open_files(&fcp, &fp, &value);" in transformed
+    assert "fclose(fp);" in transformed
+    assert "fclose(fcp);" in transformed
+    assert metadata["outputs"] == ["fcp", "fp", "value"]
+    assert metadata["scope_validation"] == {
+        "undefined_identifiers": [],
+        "out_of_scope_identifiers": [],
+        "missing_inputs": [],
+        "missing_outputs": [],
+    }
+    assert SyntaxValidator().validate(
+        language="c",
+        source_code=transformed,
+        require_compilation=True,
+        timeout_seconds=10,
+    ).passed is True
+
+
+def test_c_extract_method_forwards_all_three_comma_declared_handles():
+    source = '''#include <stdio.h>
+
+int load_files(int value) {
+    FILE *f1, *f2, *f3;
+    int first = value + 1;
+    int second = value + 2;
+    int third = value + 3;
+    f1 = tmpfile();
+    f2 = tmpfile();
+    f3 = tmpfile();
+    fprintf(f1, "%d", first);
+    fprintf(f2, "%d", second);
+    fprintf(f3, "%d", third);
+    fclose(f1);
+    fclose(f2);
+    fclose(f3);
+    return first + second + third;
+}
+'''
+    transformed, count, metadata = extract_c_method(
+        source,
+        new_method_name="write_loaded_values",
+        method_name="load_files",
+        start_line=11,
+        end_line=14,
+    )
+
+    assert count == 1
+    helper_signature = next(
+        line for line in transformed.splitlines()
+        if line.startswith("static void write_loaded_values(")
+    )
+    assert "FILE * f1" in helper_signature
+    assert "FILE * f2" in helper_signature
+    assert "FILE * f3" in helper_signature
+    assert "fclose(f2);" in transformed
+    assert "fclose(f3);" in transformed
+    assert metadata["scope_validation"] == {
+        "undefined_identifiers": [],
+        "out_of_scope_identifiers": [],
+        "missing_inputs": [],
+        "missing_outputs": [],
+    }
+    assert SyntaxValidator().validate(
+        language="c",
+        source_code=transformed,
+        require_compilation=True,
+        timeout_seconds=10,
+    ).passed is True
+
+
+def test_c_extract_method_keeps_proven_globals_shared_and_not_as_helper_parameters():
+    source = '''static int global_total;
+
+int update_total(int value) {
+    int first = value + 1;
+    global_total = first;
+    global_total += value;
+    int observed = global_total;
+    return observed;
+}
+'''
+    transformed, count, metadata = extract_c_method(
+        source,
+        new_method_name="update_global_total",
+        method_name="update_total",
+        start_line=4,
+        end_line=6,
+    )
+
+    assert count == 1
+    helper_signature = next(
+        line for line in transformed.splitlines()
+        if line.startswith("static void update_global_total(")
+    )
+    assert "global_total," not in helper_signature
+    assert " global_total)" not in helper_signature
+    assert "update_global_total(" in transformed
+    assert metadata["scope_validation"]["undefined_identifiers"] == []
     assert SyntaxValidator().validate(
         language="c",
         source_code=transformed,
