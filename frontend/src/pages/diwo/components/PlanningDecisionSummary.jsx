@@ -29,7 +29,6 @@
  * that is the only action that reaches the Transformation stage.
  */
 
-import { useState } from "react";
 import DeveloperStrategySelector from "./DeveloperStrategySelector";
 import { CategoryCount } from "./PlanningRecommendationBadge";
 import {
@@ -124,22 +123,12 @@ export default function PlanningDecisionSummary({
   strategy,
   onStrategyChange,
   strategyDelta,
-  onSelectRecommended,
-  onSelectAll,
-  onRejectAll,
-  onClearSelection,
   activeFilter,
   onFilterCategory,
   strategyBusy = false,
   planSource,
 }) {
-  const [confirmSelectAll, setConfirmSelectAll] = useState(false);
-  const [confirmRejectAll, setConfirmRejectAll] = useState(false);
-
-  const autoSelectable = summary?.auto_selectable ?? 0;
   const unclassified = summary?.unclassified ?? 0;
-  const manualOnly = summary?.[MANUAL_ONLY] ?? 0;
-  const nonGreen = Math.max(0, (totalSteps ?? 0) - autoSelectable);
   const maxRisk = summary?.max_risk || null;
 
   return (
@@ -248,143 +237,13 @@ export default function PlanningDecisionSummary({
         />
       </div>
 
-      {/* ── Bulk actions ─────────────────────────────────────────────────── */}
-      <div style={{
-        display: "flex", gap: 10, marginTop: 16, flexWrap: "wrap", alignItems: "center",
-      }}>
-        <button
-          type="button"
-          onClick={onSelectRecommended}
-          disabled={autoSelectable === 0}
-          title={
-            autoSelectable === 0
-              ? "DIWO found no step it can recommend without review in this plan."
-              : `Mark the ${autoSelectable} recommended step(s) as approved, leaving every other step for you to read. `
-                + "Steps you have already decided are untouched. Nothing is submitted — you still press Forward afterwards."
-          }
-          style={{
-            padding: "10px 20px", borderRadius: 8, fontWeight: 700, fontSize: 13,
-            cursor: autoSelectable === 0 ? "not-allowed" : "pointer",
-            background: autoSelectable === 0 ? C.border : C.accent,
-            color: autoSelectable === 0 ? C.textMuted : "#000",
-            border: "none",
-            boxShadow: autoSelectable === 0 ? "none" : `0 0 18px ${C.accentGlow}`,
-            transition: "all 0.2s",
-          }}
-        >
-          ✓ Select {autoSelectable} Recommended
-        </button>
+      {/* The bulk verdicts used to sit here. They moved to their own row on
+          the page, directly under the review-mode switch: this card is the
+          ASSESSMENT, and controls that act on every step at once read as part
+          of the assessment when they are inside it. What stays is the warning
+          below, which is about a decision in progress rather than a control. */}
 
-        {/* Secondary, and never silent: it says what it will include. */}
-        <button
-          type="button"
-          onClick={() => {
-            if (nonGreen > 0 && !confirmSelectAll) {
-              setConfirmSelectAll(true);
-              setConfirmRejectAll(false);
-              return;
-            }
-            setConfirmSelectAll(false);
-            onSelectAll?.();
-          }}
-          title="Approve every step, including ones DIWO flagged"
-          style={{
-            padding: "9px 16px", borderRadius: 8, fontWeight: 600, fontSize: 12,
-            cursor: "pointer", background: confirmSelectAll ? `${C.warn}20` : C.panel,
-            color: confirmSelectAll ? C.warn : C.textSub,
-            border: `1px solid ${confirmSelectAll ? C.warn : C.border}`,
-          }}
-        >
-          {confirmSelectAll ? "Confirm — select all anyway" : `Select all ${totalSteps}`}
-        </button>
 
-        {/* The counterpart to Select All. Two clicks, because it overwrites
-            every decision already made — including approvals. */}
-        <button
-          type="button"
-          onClick={() => {
-            if (!confirmRejectAll) {
-              setConfirmRejectAll(true);
-              setConfirmSelectAll(false);
-              return;
-            }
-            setConfirmRejectAll(false);
-            onRejectAll?.();
-          }}
-          onBlur={() => setConfirmRejectAll(false)}
-          title={`Reject all ${totalSteps} step(s). Nothing is submitted — a fully rejected plan simply cannot be forwarded.`}
-          style={{
-            padding: "9px 16px", borderRadius: 8, fontWeight: 600, fontSize: 12,
-            cursor: "pointer",
-            background: confirmRejectAll ? `${C.danger}20` : C.panel,
-            color: confirmRejectAll ? C.danger : C.textSub,
-            border: `1px solid ${confirmRejectAll ? C.danger : C.border}`,
-          }}
-        >
-          {confirmRejectAll ? "Confirm — reject all" : `✕ Reject all ${totalSteps}`}
-        </button>
-
-        {(approved > 0 || rejected > 0 || manual > 0) && (
-          <button
-            type="button"
-            title="Reset every step to pending. The only action that clears a decision you made deliberately."
-            onClick={onClearSelection}
-            style={{
-              padding: "9px 14px", borderRadius: 8, fontWeight: 600, fontSize: 12,
-              cursor: "pointer", background: "none", color: C.textMuted,
-              border: `1px solid ${C.border}`,
-            }}
-          >
-            Clear decisions
-          </button>
-        )}
-      </div>
-
-      {confirmRejectAll && (
-        <div style={{
-          marginTop: 10, padding: "10px 14px", borderRadius: 8,
-          background: `${C.danger}0d`, border: `1px solid ${C.danger}40`,
-          fontSize: 12, color: C.textSub, lineHeight: 1.55,
-        }}>
-          <b style={{ color: C.danger }}>✕ This rejects all {totalSteps} step(s)</b>
-          {approved > 0 || manual > 0
-            ? `, including the ${[
-                approved > 0 ? `${approved} you approved` : null,
-                manual > 0 ? `${manual} marked for manual work` : null,
-              ].filter(Boolean).join(" and ")}`
-            : ""}
-          . Nothing is sent anywhere — a plan with no approved step cannot be
-          forwarded at all. Click again to confirm.
-        </div>
-      )}
-
-      {confirmSelectAll && nonGreen > 0 && (
-        <div style={{
-          marginTop: 10, padding: "10px 14px", borderRadius: 8,
-          background: `${C.warn}0d`, border: `1px solid ${C.warn}40`,
-          fontSize: 12, color: C.textSub, lineHeight: 1.55,
-        }}>
-          <b style={{ color: C.warn }}>⚠ This also selects {nonGreen} step(s) DIWO flagged</b>
-          {" — "}
-          {[
-            summary?.review ? `${summary.review} to review carefully` : null,
-            summary?.not_recommended ? `${summary.not_recommended} not recommended` : null,
-            unclassified ? `${unclassified} not assessed` : null,
-          ].filter(Boolean).join(", ")}
-          . Click again to confirm, or select the recommended set and review the rest one by one.
-          {/* The one category this button cannot simply approve: approving a
-              manual-only step would forward one SCTVA has no automatic form
-              for, so it takes the decision that actually fits it. */}
-          {manualOnly > 0 && (
-            <div style={{ marginTop: 6, color: C.textMuted }}>
-              The {manualOnly} manual-only step{manualOnly > 1 ? "s are" : " is"} marked for
-              manual work instead of approved — SCTVA cannot execute{" "}
-              {manualOnly > 1 ? "them" : "it"}, so {manualOnly > 1 ? "they" : "it"} will not
-              be forwarded.
-            </div>
-          )}
-        </div>
-      )}
 
       <div style={{ marginTop: 10, fontSize: 11, color: C.textMuted, lineHeight: 1.55 }}>
         DIWO recommends; you decide. Selecting steps only marks them locally —
