@@ -36,6 +36,9 @@ from .constants import (
     ACTION_NOOP,
     ACTION_REMOVE_DEAD_CODE,
     ACTION_REPLACE_CONDITIONAL_WITH_POLYMORPHISM,
+    ACTION_REPLACE_NESTED_CONDITIONAL_WITH_GUARD_CLAUSES,
+    ACTION_REPLACE_CONDITIONAL_WITH_GUARD_CLAUSES,
+    ACTION_GUARD_CLAUSES,
     ACTION_UPDATE_JAVA_PARAMETER_OBJECT_CALL_SITE,
     EXTRACT_CLASS_ACTIONS,
     EXTRACT_CLASS_ACTION_BY_LANGUAGE,
@@ -112,6 +115,7 @@ class SafeCodeTransformationValidationAgent:
         self._canonicalize_inline_class_targets(request.refactoring_plan.actions)
         self._promote_hide_delegate_noops(request.refactoring_plan.actions)
         self._promote_polymorphism_noops(request.refactoring_plan.actions)
+        self._promote_guard_clauses_noops(request.refactoring_plan.actions)
         self._resolve_action_source_files(
             request.refactoring_plan.actions,
             file_entries,
@@ -153,6 +157,11 @@ class SafeCodeTransformationValidationAgent:
         self._resolve_parameter_object_source_files(
             request.refactoring_plan.actions,
             file_entries,
+        )
+        self._resolve_guard_clauses_source_files(
+            request.refactoring_plan.actions,
+            file_entries,
+            fallback_language=request.language,
         )
         coordinated_parameter_transactions = (
             self._prepare_java_parameter_object_transactions(
@@ -1586,6 +1595,14 @@ class SafeCodeTransformationValidationAgent:
                 structural_step.details.get("dead_code_validation") or []
             ),
         )
+        self._finalize_guard_clauses_logs(
+            transformation_log,
+            syntax_passed=syntax_step.passed,
+            structural_passed=structural_step.passed,
+            behavioral_passed=behavioral_step.passed,
+            invariant_passed=invariant_step.passed,
+            rollback_occurred=rollback_occurred,
+        )
 
         final_code = file_entry.source_code if rollback_occurred else transformed_code
         transformation_applied = final_code != file_entry.source_code
@@ -1922,6 +1939,149 @@ class SafeCodeTransformationValidationAgent:
 
         result["status"] = file_status
         return result
+
+
+    @staticmethod
+    def _promote_guard_clauses_noops(actions: List[RefactoringAction]) -> None:
+        """Promote legacy Guard Clause noops back to an executable action."""
+        for action in actions:
+            if action.action_type != ACTION_NOOP:
+                continue
+            source_refactoring = str(action.source_refactoring or "").strip().lower()
+            warnings = " ".join(str(item) for item in action.warnings).lower()
+            if (
+                source_refactoring in {
+                    "replace nested conditional with guard clauses",
+                    "replace nested conditionals with guard clauses",
+                    "replace conditional with guard clauses",
+                    "deep nesting",
+                    "deepnesting",
+                    "guard clauses",
+                }
+                or "guard clause" in warnings
+                or "deep nesting" in warnings
+            ):
+                action.action_type = ACTION_REPLACE_NESTED_CONDITIONAL_WITH_GUARD_CLAUSES
+                params = action.parameters
+                params["promoted_from_noop"] = True
+                params.setdefault("method", "")
+                action.warnings = [
+                    warning
+                    for warning in action.warnings
+                    if not (
+                        "guard clause" in str(warning).lower()
+                        and ("mapped to noop" in str(warning).lower() or "not simulated" in str(warning).lower())
+                    )
+                ]
+
+    def _resolve_guard_clauses_source_files(
+        self,
+        actions: List[RefactoringAction],
+        file_entries: List[SourceFileContract],
+        *,
+        fallback_language: str = "",
+    ) -> None:
+        """Bind Guard Clause actions to the matching C source file."""
+        c_files = [
+            f for f in file_entries
+            if (f.language or fallback_language).strip().lower() == "c"
+            or f.file_name.lower().endswith(".c")
+        ]
+        if not c_files:
+            return
+
+        guard_actions = {
+            ACTION_REPLACE_NESTED_CONDITIONAL_WITH_GUARD_CLAUSES,
+            ACTION_REPLACE_CONDITIONAL_WITH_GUARD_CLAUSES,
+            ACTION_GUARD_CLAUSES,
+        }
+
+        for action in actions:
+            if action.action_type not in guard_actions:
+                continue
+            params = action.parameters
+            configured_file = str(params.get("source_file") or "").strip()
+            if configured_file:
+                continue
+
+            method = str(params.get("method") or params.get("target_method") or "").strip()
+
+            matches: List[SourceFileContract] = []
+            if method:
+                for entry in c_files:
+                    if re.search(rf"\b{re.escape(method)}\s*\(", entry.source_code):
+                        matches.append(entry)
+
+            if len(matches) == 1:
+                params["source_file"] = matches[0].file_name
+            elif len(c_files) == 1:
+                params["source_file"] = c_files[0].file_name
+
+    @staticmethod
+    def _finalize_guard_clauses_logs(
+        transformation_log: List[TransformationLogEntry],
+        *,
+        syntax_passed: bool,
+        structural_passed: bool,
+        behavioral_passed: bool,
+        invariant_passed: bool,
+        rollback_occurred: bool,
+    ) -> None:
+        """Finalize metrics and validation status for Replace Nested Conditional with Guard Clauses."""
+        guard_actions = {
+            ACTION_REPLACE_NESTED_CONDITIONAL_WITH_GUARD_CLAUSES,
+            ACTION_REPLACE_CONDITIONAL_WITH_GUARD_CLAUSES,
+            ACTION_GUARD_CLAUSES,
+        }
+        for entry in transformation_log:
+            if entry.action_type not in guard_actions:
+                continue
+
+            metadata = entry.metadata
+            if str(metadata.get("status") or "").lower() == "not_applicable":
+                metadata["final_checks"] = {
+                    "plan_compliance": "NOT_APPLICABLE",
+                    "nesting_depth_reduction": "NOT_APPLICABLE",
+                    "behavior_preservation": "PASS" if behavioral_passed else "FAIL",
+                    "compilation_syntax_validation": "PASS" if syntax_passed else "FAIL",
+                    "invariant_preservation": "PASS" if invariant_passed else "FAIL",
+                }
+                metadata["syntax"] = metadata["final_checks"]["compilation_syntax_validation"]
+                metadata["behavior"] = metadata["final_checks"]["behavior_preservation"]
+                metadata["smell_reduction"] = "NOT_APPLICABLE"
+                metadata["final_status"] = "NOT_APPLICABLE"
+                metadata["final_decision"] = "NOT_APPLICABLE"
+                continue
+
+            nesting_reduced = bool(metadata.get("nesting_reduced"))
+            after_depth = metadata.get("after_nesting_depth")
+            depth_below_threshold = isinstance(after_depth, int) and after_depth <= 4
+            smell_reduced_passed = nesting_reduced and depth_below_threshold
+
+            checks = {
+                "plan_compliance": "PASS" if metadata.get("plan_compliance") == "PASS" else "FAIL",
+                "nesting_depth_reduction": "PASS" if smell_reduced_passed else "FAIL",
+                "behavior_preservation": "PASS" if behavioral_passed else "FAIL",
+                "compilation_syntax_validation": "PASS" if syntax_passed else "FAIL",
+                "invariant_preservation": "PASS" if invariant_passed else "FAIL",
+            }
+            metadata["final_checks"] = checks
+            metadata["syntax"] = checks["compilation_syntax_validation"]
+            metadata["behavior"] = checks["behavior_preservation"]
+            metadata["smell_reduction"] = "PASS" if smell_reduced_passed else "FAIL"
+
+            if rollback_occurred:
+                metadata["status"] = "rolled_back"
+                metadata["final_status"] = "ROLLED_BACK"
+                metadata["final_decision"] = "ROLLBACK"
+            elif entry.replacements_count <= 0 or "FAIL" in checks.values():
+                metadata["status"] = "review_required"
+                metadata["final_status"] = "REVIEW_REQUIRED"
+                metadata["final_decision"] = "REVIEW_REQUIRED"
+            else:
+                metadata["status"] = "pass"
+                metadata["final_status"] = "PASS"
+                metadata["final_decision"] = "PASS"
 
     @staticmethod
     def _promote_move_method_noops(actions: List[RefactoringAction]) -> None:

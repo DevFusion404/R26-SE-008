@@ -176,6 +176,15 @@ html, body, #root {
   margin: 1px 0;
 }
 .sidebar-item:hover { background: var(--bg-hover); color: var(--text-primary); }
+.sidebar-item.disabled {
+  opacity: 0.35;
+  cursor: not-allowed !important;
+  filter: grayscale(0.7);
+}
+.sidebar-item.disabled:hover {
+  background: transparent;
+  color: var(--text-secondary);
+}
 .sidebar-item.active {
   background: var(--accent-muted);
   border-left-color: var(--accent);

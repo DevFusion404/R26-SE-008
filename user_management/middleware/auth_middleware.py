@@ -1,4 +1,4 @@
-﻿"""
+"""
 middleware/auth_middleware.py
 Token verification helper used by route decorators.
 """
@@ -73,6 +73,11 @@ def verify_supabase_token(token: str) -> dict:
 # Decorators
 # ---------------------------------------------------------------------------
 
+import logging
+
+logger = logging.getLogger("user_management.auth_middleware")
+
+
 def require_auth(f):
     """
     Decorator: ensures the request carries a valid Bearer JWT.
@@ -82,10 +87,12 @@ def require_auth(f):
     def decorated(*args, **kwargs):
         token = extract_bearer_token(request.headers.get("Authorization"))
         if not token:
+            logger.warning(f"[AUTH FAILED - 401] Missing or malformed Authorization header on {request.path}")
             return jsonify({"success": False, "error": "Authorization token is required."}), 401
 
         result = verify_supabase_token(token)
         if not result["success"]:
+            logger.warning(f"[AUTH FAILED - 401] Token error on {request.path}: {result['error']}")
             return jsonify({"success": False, "error": result["error"]}), 401
 
         # Attach verified identity to Flask g for use in route handlers
@@ -107,13 +114,16 @@ def require_admin(f):
     def decorated(*args, **kwargs):
         token = extract_bearer_token(request.headers.get("Authorization"))
         if not token:
+            logger.warning(f"[ADMIN AUTH FAILED - 401] Missing token on {request.path}")
             return jsonify({"success": False, "error": "Authorization token is required."}), 401
 
         result = verify_supabase_token(token)
         if not result["success"]:
+            logger.warning(f"[ADMIN AUTH FAILED - 401] Token error on {request.path}: {result['error']}")
             return jsonify({"success": False, "error": result["error"]}), 401
 
         if result.get("role") != "admin":
+            logger.warning(f"[ADMIN AUTH FAILED - 403] User '{result.get('email')}' has role '{result.get('role')}', admin required.")
             return jsonify({"success": False, "error": "Admin access required."}), 403
 
         g.user_id = result["user_id"]
