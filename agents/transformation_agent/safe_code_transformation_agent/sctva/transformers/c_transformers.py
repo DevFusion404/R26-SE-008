@@ -1570,24 +1570,18 @@ def apply_replace_nested_conditional_with_guard_clauses(
     If transformation cannot be applied safely, returns original code with count=0
     and status='review_required'.
     """
-    lines = source_code.splitlines(keepends=True)
-    if not lines:
-        return source_code, 0, {"status": "review_required", "reason": "EMPTY_SOURCE"}
+    from .c_guard_clauses import apply_replace_nested_conditional_with_guard_clauses as _apply
+    return _apply(source_code, method_name=method_name, target_line=target_line)
 
-    nested_if_re = re.compile(
-        r"(\s*)if\s*\(([^)]+)\)\s*\{\s*\n\1\s+if\s*\(([^)]+)\)\s*\{\s*\n",
-        re.MULTILINE,
-    )
-    m = nested_if_re.search(source_code)
-    if m:
-        indent = m.group(1)
-        cond1 = m.group(2).strip()
-        cond2 = m.group(3).strip()
-        combined = f"{indent}if (!({cond1}) || !({cond2})) return;\n"
-        transformed = nested_if_re.sub(combined, source_code, count=1)
-        return transformed, 1, {"status": "success"}
 
-    return source_code, 0, {"status": "review_required", "reason": "CANNOT_SAFELY_INVERT_CONDITIONAL"}
+def validate_c_guard_clauses(
+    original_code: str,
+    transformed_code: str,
+    *,
+    method: str = "",
+) -> Dict[str, Any]:
+    from .c_guard_clauses import validate_c_guard_clauses as _validate
+    return _validate(original_code, transformed_code, method=method)
 
 
 def _mask_c_comments_and_strings(source_code: str) -> str:
@@ -2151,4 +2145,6 @@ __all__ = [
     "apply_replace_literal",
     "apply_normalize_multiline_statement",
     "validate_c_parameter_object",
+    "apply_replace_nested_conditional_with_guard_clauses",
+    "validate_c_guard_clauses",
 ]
