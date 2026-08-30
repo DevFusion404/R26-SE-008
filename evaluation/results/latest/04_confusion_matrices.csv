@@ -1,0 +1,8 @@
+smell_type,tp,fp,fn,tn
+Comments,0,629,0,0
+DataClass,0,0,301,2037
+FeatureEnvy,0,0,68,2347
+LargeClass,0,210,254,2080
+LongMethod,0,632,276,2154
+MagicNumber,0,3746,0,0
+TooManyParameters,0,30,0,0

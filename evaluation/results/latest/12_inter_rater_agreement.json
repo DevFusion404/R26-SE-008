@@ -1,0 +1,13 @@
+{
+  "status": "Calculated",
+  "jointly_labelled_samples": 2468,
+  "observed_agreement": 0.675,
+  "cohens_kappa": 0.3689,
+  "disagreement_count": 802,
+  "contingency_matrix": {
+    "r1_1_r2_1": 775,
+    "r1_1_r2_0": 622,
+    "r1_0_r2_1": 180,
+    "r1_0_r2_0": 891
+  }
+}
