@@ -934,14 +934,14 @@ export default function DIWOAgentPage() {
           {/* FIX [F2]: Busy indicator */}
           {backendBusy && (
             <span style={{ fontSize: 11, color: C.warn, padding: "2px 8px", background: `${C.warn}15`, borderRadius: 4, border: `1px solid ${C.warn}40` }}>
-              ⏳ Contacting backend…
+              ⏳ Working…
             </span>
           )}
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
           <div style={{ width: 8, height: 8, borderRadius: "50%", background: workflowId ? C.accent : C.warn, boxShadow: `0 0 8px ${workflowId ? C.accent : C.warn}` }} />
           <span style={{ fontSize: 11, color: C.textMuted }}>
-            {workflowId ? `wf: ${workflowId}` : "offline"} · R26-SE-008 · IT22277886
+            {workflowId ? "Connected" : "Not connected"}
           </span>
         </div>
       </div>
