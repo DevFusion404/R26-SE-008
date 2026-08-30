@@ -37,7 +37,7 @@ from urllib.parse import urlparse
 from pydantic import BaseModel, HttpUrl
 
 import requests
-from fastapi import FastAPI, File, Form, UploadFile, HTTPException, Body, Request, Header, Query
+from fastapi import FastAPI, File, Form, UploadFile, HTTPException, Body
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, HttpUrl
@@ -92,105 +92,15 @@ app.add_middleware(
 )
 
 # ---------------------------------------------------------------------------
-# Multi-Tenant Workspace Session State
-# Isolates repositories by session_id / user_id to prevent cross-user collisions in cloud deployments.
+# Active Workspace Session State
+# Holds global session context for extracted repo root, source type, and file paths.
 # ---------------------------------------------------------------------------
-_workspaces: dict[str, dict] = {}
-
-
-def _get_workspace_dict(session_id: str) -> dict:
-    """Return the workspace dictionary for a given session.
-    If session is 'default' and no repo is loaded in default,
-    fallback to the latest active workspace so legacy / proxy callers without headers resolve.
-    """
-    """Return the workspace dictionary for a given session, initializing if necessary."""
-    sid = session_id or "default"
-    if sid not in _workspaces:
-        _workspaces[sid] = {
-            "root": None,
-            "source": None,
-            "repo_name": None,
-            "files": [],
-        }
-    return _workspaces[sid]
-
-
-class _WorkspaceProxy:
-    """
-    Backwards compatibility proxy for test suites and code referencing `_workspace`.
-    Delegates to `_workspaces['default']`.
-    """
-    def __getitem__(self, key):
-        return _get_workspace_dict("default")[key]
-
-    def __setitem__(self, key, value):
-        _get_workspace_dict("default")[key] = value
-
-    def get(self, key, default=None):
-        return _get_workspace_dict("default").get(key, default)
-
-    def update(self, *args, **kwargs):
-        _get_workspace_dict("default").update(*args, **kwargs)
-
-    def __iter__(self):
-        return iter(_get_workspace_dict("default"))
-
-    def __len__(self):
-        return len(_get_workspace_dict("default"))
-
-    def items(self):
-        return _get_workspace_dict("default").items()
-
-    def keys(self):
-        return _get_workspace_dict("default").keys()
-
-    def values(self):
-        return _get_workspace_dict("default").values()
-
-
-_workspace: dict = _WorkspaceProxy()  # type: ignore
-
-
-def _extract_session_id(request: Request) -> str:
-    """
-    Extracts session or user identifier from headers or query parameters.
-    Priority:
-      1. Header 'X-Session-ID'
-      2. Header 'X-User-ID'
-      3. Query parameter 'session_id' or 'sessionId'
-      4. Header 'Authorization' (decode sub/user_id from JWT payload if present)
-      5. Fallback to 'default'
-    """
-    sid = request.headers.get("X-Session-ID") or request.headers.get("x-session-id")
-    if sid and sid.strip():
-        return sid.strip()
-
-    uid = request.headers.get("X-User-ID") or request.headers.get("x-user-id")
-    if uid and uid.strip():
-        return uid.strip()
-
-    q_sid = request.query_params.get("session_id") or request.query_params.get("sessionId")
-    if q_sid and q_sid.strip():
-        return q_sid.strip()
-
-    # If Authorization header contains Bearer JWT token, extract sub
-    auth_header = request.headers.get("Authorization") or request.headers.get("authorization")
-    if auth_header and auth_header.startswith("Bearer "):
-        try:
-            token = auth_header[7:].strip()
-            parts = token.split(".")
-            if len(parts) >= 2:
-                import base64
-                padded = parts[1] + "=" * ((4 - len(parts[1]) % 4) % 4)
-                payload_json = base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8")
-                payload = json.loads(payload_json)
-                sub = payload.get("sub") or payload.get("user_id") or payload.get("id")
-                if sub:
-                    return f"user_{sub}"
-        except Exception:
-            pass
-
-    return "default"
+_workspace: dict = {
+    "root": None,          # Absolute path to extracted/cloned project folder
+    "source": None,        # Source origin: "zip" | "github"
+    "repo_name": None,     # Repository display name
+    "files": [],           # List of relative paths to discovered source code files
+}
 
 SUPPORTED_EXTENSIONS = {".py", ".java", ".c", ".h"}
 
@@ -366,14 +276,8 @@ def root():
 
 
 @app.get("/api/health")
-def health(request: Request):
-    session_id = _extract_session_id(request)
-    ws = _get_workspace_dict(session_id)
-    return {
-        "status": "ok",
-        "workspace_loaded": ws["root"] is not None,
-        "session_id": session_id,
-    }
+def health():
+    return {"status": "ok", "workspace_loaded": _workspace["root"] is not None}
 
 
 # ── 1. Upload ZIP ────────────────────────────────────────────────────────────
@@ -382,23 +286,20 @@ MAX_ZIP_SIZE_MB = 500
 MAX_ZIP_SIZE_BYTES = MAX_ZIP_SIZE_MB * 1024 * 1024  # 500 MB limit
 
 @app.post("/api/upload-zip")
-async def upload_zip(request: Request, file: UploadFile = File(...)):
+async def upload_zip(file: UploadFile = File(...)):
     """
-    Accept a ZIP file (up to 500 MB), extract it to an isolated session workspace, and
+    Accept a ZIP file (up to 500 MB), extract it to a temporary workspace, and
     scan for supported source files.
     """
     assert file.filename is not None
     if not file.filename.endswith(".zip"):
         raise HTTPException(400, "Only .zip files are supported.")
 
-    session_id = _extract_session_id(request)
-    ws = _get_workspace_dict(session_id)
+    # Clean previous workspace
+    if _workspace["root"] and os.path.exists(_workspace["root"]):
+        shutil.rmtree(_workspace["root"], ignore_errors=True)
 
-    # Clean previous workspace for this session only
-    if ws["root"] and os.path.exists(ws["root"]):
-        shutil.rmtree(ws["root"], ignore_errors=True)
-
-    tmp_dir = tempfile.mkdtemp(prefix=f"cuqa_{session_id}_")
+    tmp_dir = tempfile.mkdtemp(prefix="cuqa_")
     zip_path = os.path.join(tmp_dir, "upload.zip")
 
     total_bytes = 0
@@ -432,7 +333,7 @@ async def upload_zip(request: Request, file: UploadFile = File(...)):
     source_files = _find_source_files(extract_dir)
     lang_info = _get_language_breakdown(source_files)
 
-    ws.update({
+    _workspace.update({
         "root": extract_dir,
         "source": "zip",
         "repo_name": file.filename.replace(".zip", ""),
@@ -441,8 +342,7 @@ async def upload_zip(request: Request, file: UploadFile = File(...)):
 
     return {
         "message": "ZIP uploaded and extracted successfully.",
-        "session_id": session_id,
-        "repo_name": ws["repo_name"],
+        "repo_name": _workspace["repo_name"],
         "files_found": len(source_files),
         "source_files": source_files[:100],  # cap for response size
         # Language detection results
@@ -456,8 +356,8 @@ async def upload_zip(request: Request, file: UploadFile = File(...)):
 # ── 2. GitHub Repo ───────────────────────────────────────────────────────────
 
 @app.post("/api/github-repo")
-def load_github_repo(req: Request, payload: GitHubRepoRequest):
-    url = str(payload.url).rstrip('/')  # Normalize trailing slash
+def load_github_repo(request: GitHubRepoRequest):  # Use Pydantic model
+    url = str(request.url).rstrip('/')  # Normalize trailing slash
 
     # Remove .git suffix if present
     if url.endswith('.git'):
@@ -487,14 +387,11 @@ def load_github_repo(req: Request, payload: GitHubRepoRequest):
     else:
         raise HTTPException(502, f"Could not download '{repo_name}' from GitHub. Repo may be private or use non-standard branch names.")
     
-    session_id = _extract_session_id(req)
-    ws = _get_workspace_dict(session_id)
+    # Clean previous workspace
+    if _workspace["root"] and os.path.exists(_workspace["root"]):
+        shutil.rmtree(_workspace["root"], ignore_errors=True)
 
-    # Clean previous workspace for this session
-    if ws["root"] and os.path.exists(ws["root"]):
-        shutil.rmtree(ws["root"], ignore_errors=True)
-
-    tmp_dir = tempfile.mkdtemp(prefix=f"cuqa_gh_{session_id}_")
+    tmp_dir = tempfile.mkdtemp(prefix="cuqa_gh_")
     zip_path = os.path.join(tmp_dir, "repo.zip")
 
     total_bytes = 0
@@ -528,7 +425,7 @@ def load_github_repo(req: Request, payload: GitHubRepoRequest):
     source_files = _find_source_files(extract_dir)
     lang_info = _get_language_breakdown(source_files)
 
-    ws.update({
+    _workspace.update({
         "root": extract_dir,
         "source": "github",
         "repo_name": repo_name,
@@ -552,18 +449,15 @@ def load_github_repo(req: Request, payload: GitHubRepoRequest):
 # ── 3. Project Structure ─────────────────────────────────────────────────────
 
 @app.get("/api/project-structure")
-def project_structure(request: Request):
-    """Return the file tree of the loaded repository for the current session."""
-    session_id = _extract_session_id(request)
-    ws = _get_workspace_dict(session_id)
-    if not ws["root"]:
+def project_structure():
+    """Return the file tree of the loaded repository."""
+    if not _workspace["root"]:
         raise HTTPException(400, "No repository loaded. Upload a ZIP or provide a GitHub URL first.")
-    tree = _build_tree(ws["root"])
+    tree = _build_tree(_workspace["root"])
     return {
-        "session_id": session_id,
-        "repo_name": ws["repo_name"],
-        "source": ws["source"],
-        "total_source_files": len(ws["files"]),
+        "repo_name": _workspace["repo_name"],
+        "source": _workspace["source"],
+        "total_source_files": len(_workspace["files"]),
         "tree": tree,
     }
 
@@ -571,15 +465,13 @@ def project_structure(request: Request):
 # ── 4. Parse AST ─────────────────────────────────────────────────────────────
 
 @app.post("/api/parse-ast")
-def parse_ast(request: Request, payload: dict):
+def parse_ast(payload: dict):
     """
     Parse a specific file in the workspace and return its AST JSON.
 
     Body: { "file_path": "relative/path/to/File.java" }
     """
-    session_id = _extract_session_id(request)
-    ws = _get_workspace_dict(session_id)
-    if not ws["root"]:
+    if not _workspace["root"]:
         raise HTTPException(400, "No repository loaded.")
 
     rel_path = payload.get("file_path", "")
@@ -587,7 +479,7 @@ def parse_ast(request: Request, payload: dict):
         raise HTTPException(400, "file_path is required.")
 
     # SEC-FIX: path traversal prevention
-    full_path = _safe_resolve_path(ws["root"], rel_path)
+    full_path = _safe_resolve_path(_workspace["root"], rel_path)
     if not os.path.isfile(full_path):
         raise HTTPException(404, f"File not found: {rel_path}")
 
@@ -613,23 +505,21 @@ def parse_ast(request: Request, payload: dict):
 # ── 5. Quality Report ────────────────────────────────────────────────────────
 
 @app.post("/api/quality-report")
-def quality_report(request: Request, payload: dict = None): # type: ignore
+def quality_report(payload: dict = None): # type: ignore
     """
     Generate a quality report for one or all files in the workspace.
 
     Body (optional): { "file_path": "relative/path/File.py" }
     If file_path omitted, reports on all loaded files (capped at 50).
     """
-    session_id = _extract_session_id(request)
-    ws = _get_workspace_dict(session_id)
-    if not ws["root"]:
+    if not _workspace["root"]:
         raise HTTPException(400, "No repository loaded.")
 
     file_path = (payload or {}).get("file_path")
 
     if file_path:
         # SEC-FIX: path traversal prevention
-        full_path = _safe_resolve_path(ws["root"], file_path)
+        full_path = _safe_resolve_path(_workspace["root"], file_path)
         if not os.path.isfile(full_path):
             raise HTTPException(404, f"File not found: {file_path}")
         with open(full_path, "r", encoding="utf-8", errors="replace") as f:
@@ -643,8 +533,8 @@ def quality_report(request: Request, payload: dict = None): # type: ignore
     # dead-code detection.  We read each file once and reuse the text.
     file_reports = []
     all_sources: list[tuple[str, str]] = []   # (basename, source) for repo index
-    for rel in ws["files"][:50]:
-        full_path = os.path.join(ws["root"], rel)
+    for rel in _workspace["files"][:50]:
+        full_path = os.path.join(_workspace["root"], rel)
         try:
             with open(full_path, "r", encoding="utf-8", errors="replace") as f:
                 source = f.read()
@@ -660,31 +550,28 @@ def quality_report(request: Request, payload: dict = None): # type: ignore
     # Pass source texts so generate_repo_report can apply cross-file dead-code
     # detection: functions imported by other files are NOT flagged as dead.
     repo_report = generate_repo_report(file_reports, sources=all_sources)
-    repo_report["repo_name"] = ws["repo_name"]
+    repo_report["repo_name"] = _workspace["repo_name"]
     return {"type": "repository", "report": repo_report}
 
 
 # ── 6. List source files ─────────────────────────────────────────────────────
 
 @app.get("/api/files")
-def list_files(request: Request):
-    """Return list of all discovered source files in the workspace for current session."""
-    session_id = _extract_session_id(request)
-    ws = _get_workspace_dict(session_id)
-    if not ws["root"]:
+def list_files():
+    """Return list of all discovered source files in the workspace."""
+    if not _workspace["root"]:
         raise HTTPException(400, "No repository loaded.")
     return {
-        "session_id": session_id,
-        "repo_name": ws["repo_name"],
-        "files": ws["files"],
-        "total": len(ws["files"]),
+        "repo_name": _workspace["repo_name"],
+        "files": _workspace["files"],
+        "total": len(_workspace["files"]),
     }
 
 
 # ── 7. Repository Understanding Overview ──────────────────────────────────────
 
 @app.get("/api/repository-overview")
-def repository_overview(request: Request):
+def repository_overview():
     """
     Generate a beginner-friendly structural understanding of the loaded repository.
 
@@ -704,16 +591,14 @@ def repository_overview(request: Request):
     Part of CUQA's Code Understanding responsibility (distinct from Quality
     Assessment which is handled by /api/quality-report).
     """
-    session_id = _extract_session_id(request)
-    ws = _get_workspace_dict(session_id)
-    if not ws["root"]:
+    if not _workspace["root"]:
         raise HTTPException(400, "No repository loaded. Upload a ZIP or provide a GitHub URL first.")
 
     try:
         overview = analyze_repository_overview(
-            root=ws["root"],
-            repo_name=ws["repo_name"] or "unknown",
-            source_files=ws["files"],
+            root=_workspace["root"],
+            repo_name=_workspace["repo_name"] or "unknown",
+            source_files=_workspace["files"],
         )
     except Exception as exc:
         raise HTTPException(500, f"Repository analysis failed: {exc}")
@@ -731,14 +616,12 @@ class WorkspaceUpdateRequest(BaseModel):
     files: list[WorkspaceFileUpdate]
 
 @app.post("/api/update-workspace")
-def update_workspace(request: Request, payload: WorkspaceUpdateRequest):
+def update_workspace(payload: WorkspaceUpdateRequest):
     """
-    Update/overwrite workspace source files with refactored code for current session.
+    Update/overwrite workspace source files with refactored code.
     Allows CUQA to re-analyze refactored code and accurately report updated metrics/smells.
     """
-    session_id = _extract_session_id(request)
-    ws = _get_workspace_dict(session_id)
-    if not ws["root"]:
+    if not _workspace["root"]:
         raise HTTPException(400, "No repository loaded.")
 
     updated_count = 0
@@ -749,7 +632,7 @@ def update_workspace(request: Request, payload: WorkspaceUpdateRequest):
         if not rel_path:
             continue
         try:
-            full_path = _safe_resolve_path(ws["root"], rel_path)
+            full_path = _safe_resolve_path(_workspace["root"], rel_path)
             os.makedirs(os.path.dirname(full_path), exist_ok=True)
             with open(full_path, "w", encoding="utf-8") as f:
                 f.write(item.content)
@@ -774,14 +657,12 @@ class SingleSourceFileRequest(BaseModel):
 
 @app.post("/api/source-files")
 @app.post("/api/cuqa/source-files")
-def fetch_source_files(request: Request, raw_payload: dict = Body(...)):
+def fetch_source_files(raw_payload: dict = Body(...)):
     """
     Return raw source code content for a list of workspace file paths.
     Used by downstream Transformation (SCTVA) and Orchestration (DIWO) Agents.
     """
-    session_id = _extract_session_id(request)
-    ws = _get_workspace_dict(session_id)
-    if not ws["root"]:
+    if not _workspace["root"]:
         raise HTTPException(400, "No repository loaded.")
 
     file_paths = raw_payload.get("file_paths")
@@ -796,7 +677,7 @@ def fetch_source_files(request: Request, raw_payload: dict = Body(...)):
         if not clean_path:
             continue
         try:
-            full_path = _safe_resolve_path(ws["root"], clean_path)
+            full_path = _safe_resolve_path(_workspace["root"], clean_path)
             if os.path.isfile(full_path):
                 with open(full_path, "r", encoding="utf-8", errors="replace") as f:
                     content = f.read()
@@ -823,18 +704,16 @@ def fetch_source_files(request: Request, raw_payload: dict = Body(...)):
 
 @app.post("/api/source-file")
 @app.post("/api/cuqa/source-file")
-def fetch_single_source_file_post(request: Request, payload: SingleSourceFileRequest):
+def fetch_single_source_file_post(payload: SingleSourceFileRequest):
     """Return raw source code content for a single workspace file path (POST)."""
-    session_id = _extract_session_id(request)
-    ws = _get_workspace_dict(session_id)
-    if not ws["root"]:
+    if not _workspace["root"]:
         raise HTTPException(400, "No repository loaded.")
 
     clean_path = payload.file_path.strip()
     if not clean_path:
         raise HTTPException(400, "file_path is required.")
 
-    full_path = _safe_resolve_path(ws["root"], clean_path)
+    full_path = _safe_resolve_path(_workspace["root"], clean_path)
     if not os.path.isfile(full_path):
         raise HTTPException(404, f"File not found in workspace: {clean_path}")
 
@@ -854,18 +733,16 @@ def fetch_single_source_file_post(request: Request, payload: SingleSourceFileReq
 @app.get("/api/source-file")
 @app.get("/api/cuqa/raw-source")
 @app.get("/api/cuqa/source-file")
-def fetch_single_source_file_get(request: Request, file_path: str = ""):
+def fetch_single_source_file_get(file_path: str = ""):
     """Return raw source code content for a single workspace file path (GET query param)."""
-    session_id = _extract_session_id(request)
-    ws = _get_workspace_dict(session_id)
-    if not ws["root"]:
+    if not _workspace["root"]:
         raise HTTPException(400, "No repository loaded.")
 
     clean_path = file_path.strip()
     if not clean_path:
         raise HTTPException(400, "file_path parameter is required.")
 
-    full_path = _safe_resolve_path(ws["root"], clean_path)
+    full_path = _safe_resolve_path(_workspace["root"], clean_path)
     if not os.path.isfile(full_path):
         raise HTTPException(404, f"File not found in workspace: {clean_path}")
 

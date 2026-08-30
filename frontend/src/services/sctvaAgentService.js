@@ -1,5 +1,4 @@
 import API_CONFIG, { buildApiUrl } from '../config/api.config';
-import { getSessionHeaders } from './cuqaAgentService';
 
 const DEFAULT_OPTIONS = {
   strict_mode: true,
@@ -30,7 +29,7 @@ const SCTVAAgentService = {
   async execute(payload) {
     const response = await fetch(this.getExecuteUrl(), {
       method: 'POST',
-      headers: getSessionHeaders({ 'Content-Type': 'application/json' }),
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     });
 
