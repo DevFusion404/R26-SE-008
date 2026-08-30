@@ -1,16 +1,13 @@
 import API_CONFIG, { buildApiUrl } from "../config/api.config";
-import { getSessionHeaders } from "./cuqaAgentService";
 
 class DIWOAgentService {
   static async request(url, options = {}) {
-    const headers = getSessionHeaders({
-      "Content-Type": "application/json",
-      ...(options.headers || {}),
-    });
-
     const response = await fetch(url, {
+      headers: {
+        "Content-Type": "application/json",
+        ...(options.headers || {}),
+      },
       ...options,
-      headers,
     });
 
     let data = null;

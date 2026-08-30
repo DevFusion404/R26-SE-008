@@ -4,7 +4,6 @@
  */
 
 import API_CONFIG, { buildApiUrl } from '../config/api.config';
-import { getSessionHeaders } from './cuqaAgentService';
 
 class RDPAgentService {
   /**
@@ -16,7 +15,6 @@ class RDPAgentService {
       const url = buildApiUrl('RDP_AGENT', 'health');
       const response = await fetch(url, {
         method: 'GET',
-        headers: getSessionHeaders(),
         timeout: API_CONFIG.RDP_AGENT.timeout,
       });
       return response.ok;
@@ -45,7 +43,6 @@ class RDPAgentService {
 
         response = await fetch(url, {
           method: 'POST',
-          headers: getSessionHeaders(),
           body: formData,
           timeout: API_CONFIG.RDP_AGENT.timeout,
         });
@@ -53,9 +50,9 @@ class RDPAgentService {
         // Send as JSON
         response = await fetch(url, {
           method: 'POST',
-          headers: getSessionHeaders({
+          headers: {
             'Content-Type': 'application/json',
-          }),
+          },
           body: JSON.stringify(qualityReport),
           timeout: API_CONFIG.RDP_AGENT.timeout,
         });
