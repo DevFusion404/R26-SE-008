@@ -1,0 +1,30 @@
+{
+  "file_path": "evaluation\\data\\MLCQCodeSmellSamples.csv",
+  "total_rows_read": 14739,
+  "valid_records_count": 9517,
+  "errors": [],
+  "warnings": [],
+  "passed": true,
+  "smell_distribution": {
+    "FeatureEnvy": {
+      "total": 2415,
+      "pos": 68,
+      "neg": 2347
+    },
+    "LongMethod": {
+      "total": 2430,
+      "pos": 276,
+      "neg": 2154
+    },
+    "LargeClass": {
+      "total": 2334,
+      "pos": 254,
+      "neg": 2080
+    },
+    "DataClass": {
+      "total": 2338,
+      "pos": 301,
+      "neg": 2037
+    }
+  }
+}

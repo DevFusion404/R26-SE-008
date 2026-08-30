@@ -1,0 +1,12 @@
+{
+  "evaluation_timestamp": "2026-08-30T06:15:29.367825+00:00",
+  "evaluation_mode": "Real-World Empirical Evaluation",
+  "repository_names": [
+    "ant-rel-1.8.4"
+  ],
+  "repository_count": 1,
+  "number_of_evaluated_samples": 9517,
+  "ground_truth_checksum_sha256": "8e05db55150a984f0b08ab211f5f612374790ea918ba08afc290cf122b63551b",
+  "bootstrap_iterations": 1000,
+  "random_seed": 42
+}
