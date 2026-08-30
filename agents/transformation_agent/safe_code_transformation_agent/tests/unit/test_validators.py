@@ -244,6 +244,87 @@ def test_java_syntax_validator_detects_nested_method_declaration():
     assert "nested method declaration" in result.message
 
 
+def test_java_syntax_validator_accepts_action_listener_anonymous_class_method():
+    source = '''import java.awt.event.*;
+class Demo {
+    void outer(Button button) {
+        button.addActionListener(new ActionListener() {
+            @Override
+            public void actionPerformed(ActionEvent event) {
+                System.out.println("clicked");
+            }
+        });
+    }
+}
+'''
+    result = SyntaxValidator().validate(language="java", source_code=source, require_compilation=False, timeout_seconds=5)
+    assert result.passed is True
+
+
+def test_java_syntax_validator_accepts_mouse_adapter_anonymous_class_method():
+    source = '''import java.awt.event.*;
+class Demo {
+    void outer(Component component) {
+        component.addMouseListener(new MouseAdapter() {
+            @Override
+            public void mouseClicked(MouseEvent event) {
+                System.out.println(event.getX());
+            }
+        });
+    }
+}
+'''
+    result = SyntaxValidator().validate(language="java", source_code=source, require_compilation=False, timeout_seconds=5)
+    assert result.passed is True
+
+
+def test_java_syntax_validator_accepts_key_adapter_anonymous_class_method():
+    source = '''import java.awt.event.*;
+class Demo {
+    void outer(Component component) {
+        component.addKeyListener(new KeyAdapter() {
+            @Override
+            public void keyPressed(KeyEvent event) {
+                System.out.println(event.getKeyCode());
+            }
+        });
+    }
+}
+'''
+    result = SyntaxValidator().validate(language="java", source_code=source, require_compilation=False, timeout_seconds=5)
+    assert result.passed is True
+
+
+def test_java_syntax_validator_accepts_anonymous_jtable_subclass_method():
+    source = '''import javax.swing.JTable;
+class Demo {
+    JTable table = new JTable() {
+        @Override
+        public boolean isCellEditable(int row, int column) {
+            return false;
+        }
+    };
+}
+'''
+    result = SyntaxValidator().validate(language="java", source_code=source, require_compilation=False, timeout_seconds=5)
+    assert result.passed is True
+
+
+def test_java_syntax_validator_accepts_method_in_local_named_class():
+    source = '''class Demo {
+    void outer() {
+        class LocalHandler {
+            void handle() {
+            }
+        }
+        new LocalHandler().handle();
+    }
+}
+'''
+    result = SyntaxValidator().validate(language="java", source_code=source, require_compilation=False, timeout_seconds=5)
+    assert result.passed is True
+
+
 def test_c_syntax_validator_accepts_multiline_assignment():
     validator = SyntaxValidator()
     source = (
