@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import os
+import re
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -21,12 +22,14 @@ if __name__ == "__main__":
 from .analysis import LocalRefactorDetector
 from .contracts import ContractValidationError, SCTVARequestContract, SourceFileContract
 from .contracts import RefactoringAction
+from .integration.planner_adapter import normalize_sctva_request_payload
 from .constants import (
     ACTION_EXTRACT_CLASS,
     ACTION_EXTRACT_METHOD,
     ACTION_ENCAPSULATE_C_VARIABLE,
     ACTION_ENCAPSULATE_VARIABLE,
     ACTION_HIDE_DELEGATE,
+    ACTION_INTRODUCE_JAVA_PARAMETER_OBJECT,
     ACTION_INLINE_PYTHON_CLASS,
     ACTION_MOVE_PYTHON_METHOD,
     ACTION_NARROW_EXCEPTION_HANDLER,
@@ -36,16 +39,22 @@ from .constants import (
     ACTION_REPLACE_NESTED_CONDITIONAL_WITH_GUARD_CLAUSES,
     ACTION_REPLACE_CONDITIONAL_WITH_GUARD_CLAUSES,
     ACTION_GUARD_CLAUSES,
+    ACTION_UPDATE_JAVA_PARAMETER_OBJECT_CALL_SITE,
     EXTRACT_CLASS_ACTIONS,
     EXTRACT_CLASS_ACTION_BY_LANGUAGE,
     PARAMETER_OBJECT_ACTIONS,
     PARAMETER_OBJECT_ACTION_BY_LANGUAGE,
 )
-from .models import SCTVAResult, TransformationLogEntry
+from .models import SCTVAResult, TransformationLogEntry, ValidationStepResult
 from .reporting.safety_reporter import SafetyReporter
 from .rollback.rollback_manager import RollbackManager
 from .scoring.confidence_scorer import ConfidenceScorer
-from .transformers import c_transformers, python_transformers
+from .transformers import (
+    c_transformers,
+    java_parameter_object,
+    python_inline_class,
+    python_transformers,
+)
 from .transformers.engine import TransformationEngine
 from .transformers.c_extract_method import target_match_count as c_method_target_count
 from .transformers.java_extract_class import _parse_java_class, declared_class_names
@@ -73,7 +82,26 @@ class SafeCodeTransformationValidationAgent:
 
     def execute(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         """Execute from raw payload and return result dict."""
-        request = SCTVARequestContract.from_dict(payload)
+        # Keep programmatic callers on the same RDP normalization path as both
+        # HTTP entry points.  This is idempotent for an ordinary SCTVA request.
+        normalized_payload, integrity_issues = normalize_sctva_request_payload(payload)
+        if integrity_issues:
+            return {
+                "success": False,
+                "status": "REVIEW_REQUIRED",
+                "reason": "RDP_MOVE_METHOD_PARAMETERS_LOST",
+                "rollback_occurred": False,
+                "transformation_applied": False,
+                "normalization_diagnostics": integrity_issues,
+                "safety_report": {
+                    "summary": "Transformation requires review before execution.",
+                    "risk_flags": ["RDP_MOVE_METHOD_PARAMETERS_LOST"],
+                    "human_messages": [
+                        "Move Method planner parameters were lost before AST resolution; no source code was changed.",
+                    ],
+                },
+            }
+        request = SCTVARequestContract.from_dict(normalized_payload)
         return self.execute_request(request)
 
     def execute_request(self, request: SCTVARequestContract) -> Dict[str, Any]:
@@ -134,6 +162,11 @@ class SafeCodeTransformationValidationAgent:
             request.refactoring_plan.actions,
             file_entries,
             fallback_language=request.language,
+        coordinated_parameter_transactions = (
+            self._prepare_java_parameter_object_transactions(
+                request.refactoring_plan.actions,
+                file_entries,
+            )
         )
         self._mark_unresolved_legacy_actions(request.refactoring_plan.actions)
         action_scope = self._build_action_scope_index(request.refactoring_plan.actions)
@@ -205,7 +238,13 @@ class SafeCodeTransformationValidationAgent:
             return index, file_result
 
         indexed_results: Dict[int, Dict[str, Any]] = {}
-        max_workers = self._parallel_file_workers(request, len(file_entries))
+        # A coordinated Java Parameter Object edit shares a repository-wide
+        # caller set.  Execute its file actions deterministically so its audit
+        # trail and transaction decision cannot race other file workers.
+        max_workers = 1 if coordinated_parameter_transactions else self._parallel_file_workers(
+            request,
+            len(file_entries),
+        )
 
         if max_workers <= 1:
             for index, file_entry in enumerate(file_entries):
@@ -227,6 +266,26 @@ class SafeCodeTransformationValidationAgent:
             indexed_results[index]
             for index in sorted(indexed_results)
         ]
+
+        if coordinated_parameter_transactions:
+            self._finalize_java_parameter_object_transactions(
+                file_results=file_results,
+                file_entries=file_entries,
+                transactions=coordinated_parameter_transactions,
+                request=request,
+            )
+
+        # Python Inline Class can require a true repository transaction when a
+        # tiny class is imported, instantiated, or inherited in peer files.
+        # Per-file execution intentionally preserves those classes first; this
+        # phase then rewrites the accepted workspace atomically and upgrades
+        # the original REVIEW_REQUIRED action only if every repository check
+        # passes.
+        self._finalize_python_inline_class_transactions(
+            file_results=file_results,
+            file_entries=file_entries,
+            request=request,
+        )
 
         if not file_results:
             raise ContractValidationError("No source files matched the refactoring plan targets.")
@@ -286,11 +345,23 @@ class SafeCodeTransformationValidationAgent:
             )
             for res in file_results if isinstance(res, dict)
         )
+        safely_not_applicable_files = sum(
+            1
+            for res in file_results
+            if isinstance(res, dict) and res.get("status") == "NOT_APPLICABLE"
+        )
         if rollback_occurred or any(res.get("rollback_occurred") for res in file_results if isinstance(res, dict)):
             overall_status = "FAILED"
         elif has_review_global:
             overall_status = "REVIEW_REQUIRED"
-        elif success and files_succeeded == files_total and files_total > 0:
+        elif safely_not_applicable_files == files_total and files_total > 0:
+            overall_status = "NOT_APPLICABLE"
+        elif (
+            success
+            and files_succeeded == files_total
+            and files_applied == files_total
+            and files_total > 0
+        ):
             overall_status = "FULL_SUCCESS"
         elif files_succeeded > 0 or total_replacements > 0:
             overall_status = "PARTIAL_SUCCESS"
@@ -351,14 +422,571 @@ class SafeCodeTransformationValidationAgent:
     def _collect_source_files(self, request: SCTVARequestContract) -> List[SourceFileContract]:
         if request.source_files:
             return request.source_files
+
+        # A single-source request historically used the synthetic name
+        # ``source_code``.  RDP actions, however, are commonly scoped to the
+        # real filename (for example ``jarvis.py``).  When there is exactly
+        # one unambiguous plan filename, bind the source text to that name so
+        # action scoping and AST resolution operate on the same file identity.
+        plan_file_names = {
+            str(action.parameters.get("source_file") or "").strip()
+            for action in request.refactoring_plan.actions
+            if str(action.parameters.get("source_file") or "").strip()
+        }
+        file_name = next(iter(plan_file_names)) if len(plan_file_names) == 1 else "source_code"
         return [
             SourceFileContract(
-                file_name="source_code",
+                file_name=file_name,
                 source_code=request.source_code,
                 language=request.language,
                 source_mode="raw",
             )
         ]
+
+    @classmethod
+    def _prepare_java_parameter_object_transactions(
+        cls,
+        actions: List[RefactoringAction],
+        file_entries: List[SourceFileContract],
+    ) -> List[Dict[str, Any]]:
+        """Expand verified Java callers into one coordinated project edit.
+
+        The target transformer remains the source of truth for target safety.
+        This preflight only resolves concrete external invocations and creates
+        internal caller actions after every candidate was resolved.
+        """
+        project_files = [entry.to_dict() for entry in file_entries]
+        additions: List[RefactoringAction] = []
+        transactions: List[Dict[str, Any]] = []
+        generated_keys: set[tuple[str, str, str]] = set()
+
+        for action_index, action in enumerate(list(actions), start=1):
+            if action.action_type != ACTION_INTRODUCE_JAVA_PARAMETER_OBJECT:
+                continue
+            if action.parameters.get("java_parameter_object_role") == "call_site":
+                continue
+            source_file = cls._action_source_file(action)
+            candidates = [
+                entry for entry in file_entries
+                if source_file and cls._file_matches(
+                    action_source_file=source_file,
+                    file_name=entry.file_name,
+                )
+            ]
+            if len(candidates) != 1:
+                continue
+            target_entry = candidates[0]
+            if (target_entry.language or "").lower() != "java" and not target_entry.file_name.lower().endswith(".java"):
+                continue
+
+            params = action.parameters
+            _, _, preflight = java_parameter_object.apply_introduce_parameter_object(
+                target_entry.source_code,
+                method=str(params.get("method") or params.get("method_name") or "").strip(),
+                parameter_object_name=str(
+                    params.get("parameter_object_name")
+                    or params.get("new_class_name")
+                    or params.get("parameter_class_name")
+                    or ""
+                ).strip(),
+                source_class=str(params.get("source_class") or "").strip(),
+                source_file=target_entry.file_name,
+                current_file_name=target_entry.file_name,
+                parameter_name=str(params.get("parameter_name") or "params").strip(),
+                project_source_files=project_files,
+                source_resolution_error=str(params.get("source_resolution_error") or ""),
+                target_parameter_count=params.get("target_parameter_count"),
+                parameter_types=params.get("parameter_types"),
+            )
+            resolution = preflight.get("cross_file_call_site_resolution")
+            if not isinstance(resolution, dict):
+                continue
+            params["cross_file_call_site_resolution"] = copy.deepcopy(resolution)
+            if resolution.get("unresolved"):
+                # The real action will report this same diagnostic and leave
+                # every source file untouched.
+                continue
+            callers = list(resolution.get("resolved") or [])
+            if not callers:
+                continue
+
+            transaction_id = f"java_parameter_object_{action_index}"
+            params["coordinated_project_transaction_id"] = transaction_id
+            params["coordinated_project_callers"] = copy.deepcopy(callers)
+            params["parameter_count"] = int(preflight.get("before_parameter_count") or 0)
+            params["target_signature"] = str(resolution.get("target_signature") or "")
+            params["source_class"] = str(preflight.get("source_class") or params.get("source_class") or "")
+            transaction_files = {target_entry.file_name}
+            for caller in callers:
+                caller_file = str(caller.get("file_name") or "")
+                if not caller_file:
+                    continue
+                key = (transaction_id, caller_file, str(params.get("method") or ""))
+                if key in generated_keys:
+                    continue
+                generated_keys.add(key)
+                transaction_files.add(caller_file)
+                additions.append(
+                    RefactoringAction(
+                        action_type=ACTION_UPDATE_JAVA_PARAMETER_OBJECT_CALL_SITE,
+                        parameters={
+                            "source_file": caller_file,
+                            "java_parameter_object_role": "call_site",
+                            "coordinated_project_transaction_id": transaction_id,
+                            "target_class": params["source_class"],
+                            "method": str(params.get("method") or params.get("method_name") or ""),
+                            "parameter_object_name": str(params.get("parameter_object_name") or ""),
+                            "parameter_count": params["parameter_count"],
+                            "target_signature": params["target_signature"],
+                            "caller_resolution": copy.deepcopy(caller),
+                        },
+                        source_step_id=action.source_step_id,
+                        source_refactoring="Introduce Parameter Object coordinated call-site update",
+                    )
+                )
+            transactions.append({
+                "id": transaction_id,
+                "target_file": target_entry.file_name,
+                "files": sorted(transaction_files),
+                "callers": callers,
+                "target_signature": params["target_signature"],
+            })
+
+        actions.extend(additions)
+        return transactions
+
+    def _finalize_java_parameter_object_transactions(
+        self,
+        *,
+        file_results: List[Dict[str, Any]],
+        file_entries: List[SourceFileContract],
+        transactions: List[Dict[str, Any]],
+        request: SCTVARequestContract,
+    ) -> None:
+        """Accept coordinated edits only after the complete project re-parses."""
+        entries_by_path = {
+            self._normalize_path(entry.file_name): entry
+            for entry in file_entries
+        }
+        results_by_path = {
+            self._normalize_path(str(result.get("file_name") or "")): result
+            for result in file_results
+        }
+
+        for transaction in transactions:
+            transaction_paths = {
+                self._normalize_path(file_name) for file_name in transaction["files"]
+            }
+            participant_results = [
+                results_by_path.get(path) for path in transaction_paths
+            ]
+            incomplete = any(result is None or not result.get("transformation_applied") for result in participant_results)
+            project_sources = []
+            for path, entry in entries_by_path.items():
+                result = results_by_path.get(path)
+                project_sources.append({
+                    "file_name": entry.file_name,
+                    "source_code": str(result.get("refactored_code")) if result else entry.source_code,
+                })
+            repository_validation = self.syntax_validator.validate_java_project(
+                project_sources,
+                require_compilation=request.execution_options.require_compilation,
+                timeout_seconds=request.execution_options.timeout_seconds,
+            )
+            accepted = not incomplete and repository_validation.passed
+            for result in participant_results:
+                if result is None:
+                    continue
+                report = result.get("safety_report") or {}
+                report.setdefault("human_messages", []).append(
+                    "Repository-wide Java Parameter Object validation: " + repository_validation.message
+                )
+                report.setdefault("risk_flags", [])
+                for log in report.get("transformation_log") or []:
+                    metadata = log.get("metadata") or {}
+                    if metadata.get("coordinated_project_transaction_id") == transaction["id"]:
+                        metadata["repository_validation"] = {
+                            "passed": repository_validation.passed,
+                            "details": repository_validation.details,
+                        }
+                if accepted:
+                    continue
+                original = entries_by_path[self._normalize_path(str(result.get("file_name") or ""))].source_code
+                result["refactored_code"] = original
+                result["transformation_applied"] = False
+                result["rollback_occurred"] = True
+                result["success"] = False
+                result["rollback_reason"] = "CROSS_FILE_CALL_SITES_REQUIRE_COORDINATED_EDIT"
+                report["summary"] = "Coordinated Java Parameter Object transformation rejected and rolled back."
+                report["rollback_reason"] = "CROSS_FILE_CALL_SITES_REQUIRE_COORDINATED_EDIT"
+                report["risk_flags"].append("validation_failed:cross_file_parameter_object")
+
+
+    def _finalize_python_inline_class_transactions(
+        self,
+        *,
+        file_results: List[Dict[str, Any]],
+        file_entries: List[SourceFileContract],
+        request: SCTVARequestContract,
+    ) -> None:
+        """Upgrade safe cross-file Python Inline Class actions atomically.
+
+        The per-file transformer deliberately reports external references
+        instead of mutating a class that peer files still depend on. This
+        stage starts from the accepted workspace, rewrites every participant
+        in memory, validates the complete candidate, and commits all files
+        together only when every check passes.
+        """
+
+        entries_by_path = {
+            self._normalize_path(entry.file_name): entry
+            for entry in file_entries
+        }
+        results_by_path = {
+            self._normalize_path(str(result.get("file_name") or "")): result
+            for result in file_results
+        }
+
+        candidates: List[Dict[str, str]] = []
+        seen: set[tuple[str, str]] = set()
+        for result in file_results:
+            file_name = str(result.get("file_name") or "")
+            report = result.get("safety_report") or {}
+            for log in report.get("transformation_log") or []:
+                if str(log.get("action_type") or "") != ACTION_INLINE_PYTHON_CLASS:
+                    continue
+                metadata = log.get("metadata") or {}
+                if (
+                    str(metadata.get("status") or "").lower() != "review_required"
+                    or str(metadata.get("reason") or "")
+                    != "EXTERNAL_CLASS_REFERENCES_REQUIRE_REPOSITORY_INLINE"
+                ):
+                    continue
+                class_name = str(
+                    metadata.get("class_to_inline")
+                    or metadata.get("normalized_target_class")
+                    or ""
+                ).strip()
+                if not class_name:
+                    continue
+                key = (self._normalize_path(file_name), class_name)
+                if key in seen:
+                    continue
+                seen.add(key)
+                candidates.append({
+                    "file_name": file_name,
+                    "class_name": class_name,
+                })
+
+        for candidate in candidates:
+            target_file = candidate["file_name"]
+            class_name = candidate["class_name"]
+            target_path = self._normalize_path(target_file)
+            target_result = results_by_path.get(target_path)
+            target_entry = entries_by_path.get(target_path)
+            if target_result is None or target_entry is None:
+                continue
+
+            workspace_sources: List[Dict[str, Any]] = []
+            for entry in file_entries:
+                path_key = self._normalize_path(entry.file_name)
+                result = results_by_path.get(path_key)
+                workspace_sources.append({
+                    "file_name": entry.file_name,
+                    "file_path": entry.file_name,
+                    "language": entry.language or request.language,
+                    "source_code": (
+                        str(result.get("refactored_code"))
+                        if result is not None
+                        else entry.source_code
+                    ),
+                })
+
+            transaction = python_inline_class.apply_repository_inline_class_transaction(
+                workspace_sources,
+                target_file_name=target_file,
+                class_to_inline=class_name,
+            )
+            target_report = target_result.get("safety_report") or {}
+            target_report.setdefault("human_messages", [])
+            target_report.setdefault("risk_flags", [])
+
+            if transaction.get("status") != "success":
+                reason = str(
+                    transaction.get("reason")
+                    or "REPOSITORY_INLINE_TRANSACTION_NOT_PROVEN_SAFE"
+                )
+                target_report["human_messages"].append(
+                    "Repository-wide Inline Class was not committed: " + reason + "."
+                )
+                target_result["repository_inline_transaction"] = {
+                    "status": "review_required",
+                    "reason": reason,
+                    "details": transaction,
+                }
+                continue
+
+            transformed_sources = dict(transaction.get("transformed_sources") or {})
+            replacement_counts = {
+                str(name): int(count or 0)
+                for name, count in (transaction.get("replacement_counts") or {}).items()
+            }
+            candidate_repository = list(transaction.get("candidate_repository") or [])
+
+            repository_syntax = self.syntax_validator.validate_python_project(
+                candidate_repository,
+                timeout_seconds=request.execution_options.timeout_seconds,
+            )
+
+            current_target_source = str(target_result.get("refactored_code") or "")
+            candidate_target_source = str(
+                transformed_sources.get(target_file, current_target_source)
+            )
+            synthetic_action = RefactoringAction(
+                action_type=ACTION_INLINE_PYTHON_CLASS,
+                parameters={
+                    "class_to_inline": class_name,
+                    "source_file": target_file,
+                    "inline_mode": "module_function",
+                    "repository_atomic_inline": True,
+                },
+                source_refactoring="Inline Class repository transaction",
+            )
+            target_structural = self.structural_validator.validate(
+                language="python",
+                original_code=current_target_source,
+                transformed_code=candidate_target_source,
+                actions=[synthetic_action],
+            )
+            target_behavioral = self.behavioral_validator.validate(
+                language="python",
+                original_code=current_target_source,
+                transformed_code=candidate_target_source,
+                behavior_tests=request.refactoring_plan.behavior_tests,
+                enable_behavior_tests=request.execution_options.enable_behavior_tests,
+                actions=[synthetic_action],
+                strict_mode=request.execution_options.strict_mode,
+                project_source_files=candidate_repository,
+                current_file_name=target_file,
+                structural_validation_passed=target_structural.passed,
+            )
+            target_invariant = self.invariant_miner.mine(
+                language="python",
+                behavioral_step=target_behavioral,
+                actions=[synthetic_action],
+                strict_mode=request.execution_options.strict_mode,
+            )
+
+            accepted = all((
+                repository_syntax.passed,
+                target_structural.passed,
+                target_behavioral.passed,
+                target_invariant.passed,
+            ))
+            validation_details = {
+                "repository_syntax": repository_syntax.to_dict(),
+                "target_structural": target_structural.to_dict(),
+                "target_behavioral": target_behavioral.to_dict(),
+                "target_invariant": target_invariant.to_dict(),
+            }
+            transaction_id = (
+                f"python_inline_class:{self._normalize_path(target_file)}:{class_name}"
+            )
+
+            if not accepted:
+                failed = [
+                    name
+                    for name, step in (
+                        ("repository_syntax", repository_syntax),
+                        ("target_structural", target_structural),
+                        ("target_behavioral", target_behavioral),
+                        ("target_invariant", target_invariant),
+                    )
+                    if not step.passed
+                ]
+                target_report["human_messages"].append(
+                    "Repository-wide Inline Class candidate was rolled back; "
+                    "failed validation stage(s): " + ", ".join(failed) + "."
+                )
+                if "validation_failed:repository_inline_class" not in target_report["risk_flags"]:
+                    target_report["risk_flags"].append(
+                        "validation_failed:repository_inline_class"
+                    )
+                target_result["repository_inline_transaction"] = {
+                    "id": transaction_id,
+                    "status": "rolled_back",
+                    "failed_stages": failed,
+                    "validation": validation_details,
+                }
+                continue
+
+            peer_metadata_by_file = {
+                self._normalize_path(str(item.get("file_name") or "")): item
+                for item in transaction.get("peer_metadata") or []
+                if isinstance(item, dict)
+            }
+            affected_files = [
+                target_file,
+                *[str(name) for name in transaction.get("reference_files") or []],
+            ]
+
+            participants_present = all(
+                self._normalize_path(affected_file) in results_by_path
+                and self._normalize_path(affected_file) in entries_by_path
+                and affected_file in transformed_sources
+                for affected_file in affected_files
+            )
+            if not participants_present:
+                target_report["human_messages"].append(
+                    "Repository-wide Inline Class candidate was discarded because "
+                    "a transaction participant disappeared before commit."
+                )
+                if "validation_failed:repository_inline_class_participant" not in target_report["risk_flags"]:
+                    target_report["risk_flags"].append(
+                        "validation_failed:repository_inline_class_participant"
+                    )
+                continue
+
+            for affected_file in affected_files:
+                affected_path = self._normalize_path(affected_file)
+                result = results_by_path[affected_path]
+                entry = entries_by_path[affected_path]
+                new_source = str(transformed_sources[affected_file])
+                replacements = int(replacement_counts.get(affected_file, 0) or 0)
+                result["refactored_code"] = new_source
+                result["transformation_applied"] = new_source != entry.source_code
+                result["total_replacements"] = int(result.get("total_replacements", 0) or 0) + replacements
+                result["confidence_applicable"] = bool(
+                    result.get("transformation_applied") or result.get("rollback_occurred")
+                )
+                result["repository_inline_transaction"] = {
+                    "id": transaction_id,
+                    "status": "success",
+                    "strategy": transaction.get("strategy"),
+                    "class_to_inline": class_name,
+                    "target_file": target_file,
+                    "affected_files": affected_files,
+                    "method_names": list(transaction.get("method_names") or []),
+                    "validation": validation_details,
+                }
+
+                report = result.get("safety_report") or {}
+                report.setdefault("human_messages", [])
+                report.setdefault("risk_flags", [])
+                report.setdefault("transformation_log", [])
+
+                if affected_path == target_path:
+                    target_inline_log = None
+                    for log in report.get("transformation_log") or []:
+                        metadata = log.get("metadata") or {}
+                        if (
+                            str(log.get("action_type") or "") == ACTION_INLINE_PYTHON_CLASS
+                            and str(metadata.get("class_to_inline") or "") == class_name
+                            and str(metadata.get("reason") or "")
+                            == "EXTERNAL_CLASS_REFERENCES_REQUIRE_REPOSITORY_INLINE"
+                        ):
+                            target_inline_log = log
+                            break
+                    if target_inline_log is not None:
+                        metadata = target_inline_log.setdefault("metadata", {})
+                        metadata.update({
+                            "status": "success",
+                            "reason": "REPOSITORY_ATOMIC_INLINE_APPLIED",
+                            "strategy": "repository_atomic_module_function",
+                            "inline_mode": "module_function",
+                            "repository_transaction_id": transaction_id,
+                            "repository_affected_files": affected_files,
+                            "repository_reference_files": list(
+                                transaction.get("reference_files") or []
+                            ),
+                            "repository_method_names": list(
+                                transaction.get("method_names") or []
+                            ),
+                            "repository_validation": validation_details,
+                            "reclassified_action_type": ACTION_INLINE_PYTHON_CLASS,
+                            "plan_compliance": "PASS",
+                        })
+                        target_inline_log["replacements_count"] = replacements
+                        target_inline_log["warnings"] = [
+                            f"Inline Class applied atomically across the repository: "
+                            f"{class_name} was safely inlined."
+                        ]
+                else:
+                    peer_metadata = dict(peer_metadata_by_file.get(affected_path) or {})
+                    report["transformation_log"].append({
+                        "action_index": len(report["transformation_log"]) + 1,
+                        "action_type": "inline_python_class_repository_update",
+                        "replacements_count": replacements,
+                        "warnings": [],
+                        "metadata": {
+                            **peer_metadata,
+                            "status": "success",
+                            "class_to_inline": class_name,
+                            "source_file": affected_file,
+                            "repository_transaction_id": transaction_id,
+                            "target_file": target_file,
+                            "strategy": "repository_atomic_module_function",
+                        },
+                    })
+                    report["human_messages"].append(
+                        f"Repository Inline Class updated references to {class_name} "
+                        f"atomically with {target_file}."
+                    )
+
+            target_report = target_result.get("safety_report") or {}
+            filtered_messages = []
+            for message in target_report.get("human_messages") or []:
+                lowered = str(message).lower()
+                if (
+                    lowered.startswith("no source-code change was applied")
+                    or lowered.startswith("inline class requires review:")
+                    or lowered == "no replacements were applied."
+                    or lowered.startswith("inline class plan compliance failed:")
+                ):
+                    continue
+                filtered_messages.append(message)
+            filtered_messages.extend([
+                f"Repository-wide Inline Class applied successfully: {class_name} "
+                f"was rewritten across {len(affected_files)} file(s).",
+                repository_syntax.message,
+                target_structural.message,
+            ])
+            target_report["human_messages"] = filtered_messages
+            target_report["risk_flags"] = [
+                flag
+                for flag in target_report.get("risk_flags") or []
+                if flag not in {
+                    "transformation_not_applied",
+                    "transformation_warning",
+                    "plan_compliance_failed:inline_class",
+                }
+            ]
+            target_report["summary"] = (
+                "Repository-wide Inline Class transformation accepted after all safety checks."
+            )
+            target_report["rollback_reason"] = ""
+
+            target_result.setdefault("plan_compliance", {})["inline_class"] = "PASS"
+            target_result["rollback_occurred"] = False
+            target_result["success"] = True
+            target_result["status"] = "FULL_SUCCESS"
+
+            validation_score, confidence_details = self.scorer.score(
+                syntax=repository_syntax,
+                structural=target_structural,
+                behavioral=target_behavioral,
+                invariant=target_invariant,
+            )
+            target_result["validation_score"] = round(validation_score, 4)
+            target_result["confidence_score"] = round(validation_score, 4)
+            target_result["confidence_components"] = confidence_details
+            target_result["confidence_applicable"] = True
+            target_result["validation"] = {
+                "syntax": repository_syntax.to_dict(),
+                "structural": target_structural.to_dict(),
+                "behavioral": target_behavioral.to_dict(),
+                "invariant": target_invariant.to_dict(),
+            }
 
     @classmethod
     def _resolve_action_source_files(
@@ -742,8 +1370,24 @@ class SafeCodeTransformationValidationAgent:
         total_replacements = sum(
             entry.replacements_count for entry in transformation_log
         )
+        safely_not_applicable_logs = [
+            entry
+            for entry in transformation_log
+            if entry.action_type != ACTION_NOOP
+            and str(entry.metadata.get("status") or "").lower()
+            in {"not_applicable", "already_applied", "satisfied"}
+        ]
+        all_executable_actions_safely_not_applicable = (
+            bool(executable_actions)
+            and len(safely_not_applicable_logs) == len(executable_actions)
+        )
+
         if not transformation_attempted:
-            if executable_actions:
+            if all_executable_actions_safely_not_applicable:
+                transform_warnings.append(
+                    "No source-code change was required: every executable action was safely classified as not applicable or already satisfied."
+                )
+            elif executable_actions:
                 transform_warnings.append(
                     "No source-code change was applied: every executable action produced zero replacements."
                 )
@@ -761,9 +1405,62 @@ class SafeCodeTransformationValidationAgent:
         syntax_step = self.syntax_validator.validate(
             language=language,
             source_code=transformed_code,
-            require_compilation=request.execution_options.require_compilation,
+            # A coordinated caller can legitimately depend on the target class
+            # in another imported file.  It is compiled with that full source
+            # set by the transaction finalizer below.
+            require_compilation=(
+                request.execution_options.require_compilation
+                and language != "c"
+                and not any(
+                    action.action_type == ACTION_UPDATE_JAVA_PARAMETER_OBJECT_CALL_SITE
+                    for action in actions
+                )
+            ),
             timeout_seconds=request.execution_options.timeout_seconds,
         )
+
+        if (
+            language == "c"
+            and syntax_step.passed
+            and request.execution_options.require_compilation
+        ):
+            candidate_c_repository = []
+            target_path = self._normalize_path(file_entry.file_name)
+            for project_file in project_files:
+                project_name = str(
+                    project_file.get("file_name") or project_file.get("file_path") or ""
+                )
+                candidate_c_repository.append({
+                    **project_file,
+                    "source_code": (
+                        transformed_code
+                        if self._normalize_path(project_name) == target_path
+                        else str(project_file.get("source_code") or "")
+                    ),
+                })
+            repository_syntax = self.syntax_validator.validate_c_project(
+                candidate_c_repository,
+                require_compilation=True,
+                timeout_seconds=request.execution_options.timeout_seconds,
+            )
+            syntax_step.details["repository_compiler_validation"] = (
+                repository_syntax.to_dict()
+            )
+            syntax_step.details["compiler_validation"] = (
+                repository_syntax.details.get("compiler_validation", "UNAVAILABLE")
+            )
+            syntax_step.details["compiler"] = repository_syntax.details.get("compiler")
+            if repository_syntax.details.get("warnings"):
+                syntax_step.details.setdefault("warnings", []).extend(
+                    repository_syntax.details["warnings"]
+                )
+            if not repository_syntax.passed:
+                syntax_step.passed = False
+                syntax_step.score = 0.0
+                syntax_step.message = repository_syntax.message
+                syntax_step.details.setdefault("diagnostics", []).extend(
+                    repository_syntax.details.get("diagnostics", [])
+                )
 
         structural_step = self.structural_validator.validate(
             language=language,
@@ -772,30 +1469,95 @@ class SafeCodeTransformationValidationAgent:
             actions=validation_actions,
         )
 
-        behavioral_step = self.behavioral_validator.validate(
-            language=language,
-            original_code=file_entry.source_code,
-            transformed_code=transformed_code,
-            behavior_tests=request.refactoring_plan.behavior_tests,
-            enable_behavior_tests=request.execution_options.enable_behavior_tests,
-            actions=validation_actions,
-            strict_mode=request.execution_options.strict_mode,
-            project_source_files=project_files,
-            current_file_name=file_entry.file_name,
-            structural_validation_passed=structural_step.passed,
+        coordinated_call_site_only = (
+            language == "java"
+            and bool(actions)
+            and all(
+                action.action_type == ACTION_UPDATE_JAVA_PARAMETER_OBJECT_CALL_SITE
+                for action in actions
+            )
         )
+        coordinated_parameter_target = (
+            language == "java"
+            and any(
+                action.action_type == ACTION_INTRODUCE_JAVA_PARAMETER_OBJECT
+                and action.parameters.get("coordinated_project_transaction_id")
+                for action in actions
+            )
+        )
+        if coordinated_call_site_only:
+            # The caller now depends on the target's new nested parameter
+            # object, so isolated probes would execute an intentionally
+            # incomplete one-file compilation unit.  Repository compilation
+            # is performed atomically after every participating file changes.
+            behavioral_step = ValidationStepResult(
+                name="behavioral",
+                passed=True,
+                score=1.0,
+                message="Java coordinated caller behavior deferred to repository validation.",
+                details={"mode": "coordinated_java_repository_validation"},
+            )
+            invariant_step = ValidationStepResult(
+                name="invariant",
+                passed=True,
+                score=1.0,
+                message="Java coordinated caller invariants deferred to repository validation.",
+                details={"mode": "coordinated_java_repository_validation"},
+            )
+        else:
+            behavioral_step = self.behavioral_validator.validate(
+                language=language,
+                original_code=file_entry.source_code,
+                transformed_code=transformed_code,
+                behavior_tests=request.refactoring_plan.behavior_tests,
+                enable_behavior_tests=request.execution_options.enable_behavior_tests,
+                actions=validation_actions,
+                strict_mode=request.execution_options.strict_mode,
+                # The imported project snapshot still contains the original
+                # caller files while this target is being validated.  Probe the
+                # target in isolation here; the final transaction stage then
+                # compiles the fully rewritten repository together.
+                project_source_files=[] if coordinated_parameter_target else project_files,
+                current_file_name=file_entry.file_name,
+                structural_validation_passed=structural_step.passed,
+            )
 
-        invariant_step = self.invariant_miner.mine(
-            language=language,
-            behavioral_step=behavioral_step,
-            actions=validation_actions,
-            strict_mode=request.execution_options.strict_mode,
-        )
+            invariant_step = self.invariant_miner.mine(
+                language=language,
+                behavioral_step=behavioral_step,
+                actions=validation_actions,
+                strict_mode=request.execution_options.strict_mode,
+            )
 
         rollback_occurred, rollback_reason = self.rollback_manager.evaluate(
             [syntax_step, structural_step, behavioral_step, invariant_step],
             rollback_on_behavior_failure=request.execution_options.rollback_on_behavior_failure,
         )
+
+        selective_replay = self._attempt_selective_java_parameter_object_replay(
+            request=request,
+            file_entry=file_entry,
+            actions=actions,
+            project_files=project_files,
+            structural_step=structural_step,
+            rollback_occurred=rollback_occurred,
+        )
+        if selective_replay is not None:
+            (
+                transformed_code,
+                transformation_log,
+                transform_warnings,
+                validation_actions,
+                syntax_step,
+                structural_step,
+                behavioral_step,
+                invariant_step,
+            ) = selective_replay
+            rollback_occurred = False
+            rollback_reason = ""
+            transform_warnings.append(
+                "Selective rollback preserved independent accepted actions after an invalid Java Parameter Object action was removed."
+            )
 
         self._finalize_extract_class_logs(
             transformation_log,
@@ -862,8 +1624,13 @@ class SafeCodeTransformationValidationAgent:
             rollback_reason=rollback_reason,
             transformation_log=transformation_log,
             validation_steps=[syntax_step, structural_step, behavioral_step, invariant_step],
-            extra_warnings=transform_warnings,
+            extra_warnings=(
+                []
+                if all_executable_actions_safely_not_applicable
+                else transform_warnings
+            ),
             transformation_applied=transformation_applied,
+            not_applicable=all_executable_actions_safely_not_applicable,
         )
 
         safety_report.human_messages.append(
@@ -939,6 +1706,15 @@ class SafeCodeTransformationValidationAgent:
             and str(log_entry.metadata.get("reason") or "")
             == "SMELL_RESOLVED_BY_PRIOR_REFACTORING"
         )
+        already_handled_inline_count = sum(
+            1
+            for log_entry in transformation_log
+            if log_entry.action_type == ACTION_INLINE_PYTHON_CLASS
+            and str(log_entry.metadata.get("status") or "").lower()
+            == "already_handled"
+            and str(log_entry.metadata.get("reason") or "")
+            == "ALREADY_HANDLED_BY_PRIOR_INLINE_CLASS"
+        )
         review_inline_count = sum(
             1
             for log_entry in transformation_log
@@ -950,6 +1726,7 @@ class SafeCodeTransformationValidationAgent:
             or successful_inline_count
             + unresolved_inline_count
             + resolved_by_prior_refactoring_inline_count
+            + already_handled_inline_count
             == requested_inline_count
         )
         if requested_inline_count and not inline_class_plan_complete:
@@ -1065,9 +1842,7 @@ class SafeCodeTransformationValidationAgent:
                 "not every requested action was safely applied."
             )
 
-        success = (
-            transformation_applied
-            and
+        validation_passed = (
             (not rollback_occurred)
             and syntax_step.passed
             and structural_step.passed
@@ -1078,6 +1853,10 @@ class SafeCodeTransformationValidationAgent:
             and global_variable_plan_complete
             and hide_delegate_plan_complete
             and polymorphism_plan_complete
+        )
+        success = validation_passed and (
+            transformation_applied
+            or all_executable_actions_safely_not_applicable
         )
 
         result = SCTVAResult(
@@ -1148,6 +1927,8 @@ class SafeCodeTransformationValidationAgent:
             file_status = "FAILED"
         elif has_review:
             file_status = "REVIEW_REQUIRED"
+        elif all_executable_actions_safely_not_applicable and not transformation_applied:
+            file_status = "NOT_APPLICABLE"
         elif success:
             file_status = "FULL_SUCCESS"
         elif total_replacements > 0:
@@ -1376,7 +2157,8 @@ class SafeCodeTransformationValidationAgent:
             legacy_target = legacy_target if isinstance(legacy_target, dict) else {}
 
             target_class = str(
-                params.get("class_to_inline")
+                params.get("qualified_class_name")
+                or params.get("class_to_inline")
                 or params.get("target_class")
                 or params.get("source_class")
                 or params.get("class_name")
@@ -1737,11 +2519,12 @@ class SafeCodeTransformationValidationAgent:
             ]
 
             requested = str(
-                params.get("class_to_inline")
+                params.get("qualified_class_name")
+                or params.get("class_to_inline")
                 or params.get("target_class")
                 or ""
             ).strip()
-            explicit_matches: list[SourceFileContract] = []
+            explicit_matches: list[tuple[SourceFileContract, dict[str, Any]]] = []
             parse_failures = 0
             if requested:
                 # A path in an RDP plan can be stale even when its explicit
@@ -1750,29 +2533,32 @@ class SafeCodeTransformationValidationAgent:
                 # This runs before local Lazy Class detection by design.
                 explicit_candidates = candidate_entries or python_entries
                 for entry in explicit_candidates:
-                    try:
-                        tree = ast.parse(entry.source_code)
-                    except SyntaxError:
+                    resolution = python_transformers.resolve_inline_class_target(
+                        entry.source_code,
+                        class_to_inline=requested,
+                    )
+                    if resolution.get("status") == "success":
+                        explicit_matches.append((entry, resolution))
+                    elif resolution.get("reason") == "SOURCE_PARSE_FAILED":
                         parse_failures += 1
-                        continue
-                    matches = [
-                        node
-                        for node in tree.body
-                        if isinstance(node, ast.ClassDef) and node.name == requested
-                    ]
-                    if len(matches) == 1:
-                        explicit_matches.append(entry)
-                    elif len(matches) > 1:
-                        params["source_resolution_error"] = "DUPLICATE_EXPLICIT_CLASS_TARGET"
+                    elif resolution.get("reason") in {
+                        "DUPLICATE_EXPLICIT_CLASS_TARGET",
+                        "AMBIGUOUS_QUALIFIED_INLINE_CLASS_TARGET",
+                    }:
+                        params["source_resolution_error"] = str(resolution["reason"])
                         params["source_resolution_status"] = "review_required"
                         explicit_matches = []
                         break
 
             if len(explicit_matches) == 1:
-                entry = explicit_matches[0]
+                entry, resolution = explicit_matches[0]
                 params["source_file"] = entry.file_name
-                params["class_to_inline"] = requested
-                params["target_class"] = requested
+                params["class_to_inline"] = str(resolution["class_to_inline"])
+                params["target_class"] = params["class_to_inline"]
+                if resolution.get("qualified_class_name"):
+                    params["qualified_class_name"] = str(
+                        resolution["qualified_class_name"]
+                    )
                 params["requested_target"] = {
                     "class_to_inline": requested,
                     "source_file": entry.file_name,
@@ -1903,14 +2689,18 @@ class SafeCodeTransformationValidationAgent:
 
             matches: list[tuple[SourceFileContract, dict[str, Any]]] = []
             failures: list[tuple[str, str]] = []
+            non_applicable_resolutions: list[dict[str, Any]] = []
             for entry in candidate_entries:
                 resolution = python_transformers.resolve_move_method_target(
                     entry.source_code,
-                    method_name=str(params.get("method") or ""),
+                    method_name=str(
+                        params.get("method") or params.get("source_method") or ""
+                    ),
                     source_class=str(params.get("source_class") or ""),
                     destination_class=str(params.get("destination_class") or ""),
                     destination_parameter=str(params.get("destination_parameter") or ""),
                     source_line=source_line,
+                    allow_unique_inference=params.get("promoted_from_noop") is True,
                 )
                 if resolution.get("status") == "success":
                     matches.append((entry, resolution))
@@ -1919,6 +2709,11 @@ class SafeCodeTransformationValidationAgent:
                         str(resolution.get("status") or "review_required"),
                         str(resolution.get("reason") or "MOVE_METHOD_TARGET_NOT_FOUND"),
                     ))
+                    if resolution.get("status") == "not_applicable":
+                        non_applicable_resolutions.append({
+                            **resolution,
+                            "source_file": entry.file_name,
+                        })
 
             if len(matches) != 1:
                 failure_reasons = [reason for _, reason in failures]
@@ -1937,17 +2732,35 @@ class SafeCodeTransformationValidationAgent:
                     or any(status == "review_required" for status, _ in failures)
                     else "not_applicable"
                 )
+                if params["source_resolution_status"] == "not_applicable" and non_applicable_resolutions:
+                    resolved = non_applicable_resolutions[0]
+                    params["target_kind"] = str(
+                        resolved.get("target_kind") or "CLASS_METHOD"
+                    )
+                    params["suggested_refactoring"] = str(
+                        resolved.get("suggested_refactoring") or ""
+                    )
+                    params["source_class_resolved"] = bool(
+                        resolved.get("source_class_resolved", False)
+                    )
+                    params["destination_class_resolved"] = bool(
+                        resolved.get("destination_class_resolved", False)
+                    )
+                    params["move_method_target_resolution"] = resolved
                 continue
 
             entry, resolution = matches[0]
             requested = {
-                "method": str(params.get("method") or ""),
+                "method": str(
+                    params.get("method") or params.get("source_method") or ""
+                ),
                 "source_class": str(params.get("source_class") or ""),
                 "destination_class": str(params.get("destination_class") or ""),
                 "destination_parameter": str(params.get("destination_parameter") or ""),
             }
             params["source_file"] = entry.file_name
             params["method"] = str(resolution["method"])
+            params["source_method"] = str(resolution["method"])
             params["source_class"] = str(resolution["source_class"])
             params["destination_class"] = str(resolution["destination_class"])
             params["destination_parameter"] = str(resolution["destination_parameter"])
@@ -2424,6 +3237,28 @@ class SafeCodeTransformationValidationAgent:
             resolution_error = str(params.get("source_resolution_error") or "").strip()
             resolution_status = str(params.get("source_resolution_status") or "").strip().lower()
             promoted = params.get("promoted_from_noop") is True
+            targetless_bare_except = (
+                action.action_type == ACTION_NARROW_EXCEPTION_HANDLER
+                and not str(params.get("original_exception_type") or "").strip()
+                and not str(
+                    params.get("source_method")
+                    or params.get("method")
+                    or params.get("method_name")
+                    or ""
+                ).strip()
+                and not isinstance(params.get("source_line"), (int, float))
+            )
+            if targetless_bare_except:
+                params["unresolved_legacy_target"] = True
+                params["unresolved_action_type"] = action.action_type
+                params["unresolved_reason"] = "BARE_EXCEPT_TARGET_MISSING_FROM_PLAN"
+                params["unresolved_status"] = "review_required"
+                action.warnings = [
+                    warning
+                    for warning in action.warnings
+                    if "mapped to noop" not in str(warning).lower()
+                ]
+                continue
             stale_extract_method = False
             if action.action_type == ACTION_EXTRACT_METHOD and resolution_error:
                 source_file = cls._action_source_file(action)
@@ -2527,11 +3362,19 @@ class SafeCodeTransformationValidationAgent:
                 params["not_applicable_to_source"] = True
                 params["not_applicable_reason"] = reason
                 params["not_applicable_action_type"] = planned.action_type
-                params["target_resolution"] = {
-                    "status": "not_applicable",
-                    "strategy": "stale_rdp_target_guard",
-                    "reason": reason,
-                }
+                existing_resolution = params.get("move_method_target_resolution")
+                if isinstance(existing_resolution, dict):
+                    # Preserve the AST decision made by the language-specific
+                    # resolver.  Replacing it with a generic stale-target
+                    # marker loses useful classification such as MODULE_FUNCTION
+                    # and MOVE_FUNCTION in the final safety report.
+                    params["target_resolution"] = existing_resolution
+                else:
+                    params["target_resolution"] = {
+                        "status": "not_applicable",
+                        "strategy": "stale_rdp_target_guard",
+                        "reason": reason,
+                    }
                 params.pop("unresolved_legacy_target", None)
 
                 # Compatibility warnings from old adapters are implementation
@@ -2963,6 +3806,9 @@ class SafeCodeTransformationValidationAgent:
                         entry.metadata[key] = validation[key]
                 if not entry.metadata.get("target"):
                     entry.metadata["target"] = str(validation.get("target") or "")
+                ledger = entry.metadata.get("dead_code_removal_ledger_entry")
+                if isinstance(ledger, dict):
+                    ledger["validation_result"] = validation_status
 
             # A planner step can incorrectly point at a live/referenced method.
             # The transformation engine records that as NOT_APPLICABLE.  This
@@ -2990,6 +3836,21 @@ class SafeCodeTransformationValidationAgent:
                 }
                 entry.metadata["status"] = "not_applicable"
                 entry.metadata["final_decision"] = "NOT_APPLICABLE"
+                continue
+
+            if str(entry.metadata.get("status") or "").lower() == "already_handled":
+                entry.metadata["checks"] = {
+                    "target_already_handled": True,
+                    "syntax_validation": syntax_passed,
+                    "structural_validation": structural_passed,
+                    "behavior_preservation": behavioral_passed,
+                    "invariant_preservation": invariant_passed,
+                }
+                entry.metadata["final_checks"] = {
+                    key: "PASS" if value else "FAIL"
+                    for key, value in entry.metadata["checks"].items()
+                }
+                entry.metadata["final_decision"] = "ALREADY_HANDLED"
                 continue
 
             if rollback_occurred:
@@ -3221,6 +4082,75 @@ class SafeCodeTransformationValidationAgent:
             source_code=file_entry.source_code,
             existing_actions=existing_actions,
         )
+        if language == "python" and detected_actions:
+            # RDP and SCTVA's local detector can identify the same bare
+            # handler using different line numbers after prior refactorings.
+            # Resolve both against this AST and retain the RDP action only.
+            from .transformers import python_transformers
+
+            planned_bare_targets: set[tuple[str, int]] = set()
+            for planned in existing_actions:
+                if planned.action_type != ACTION_NARROW_EXCEPTION_HANDLER:
+                    continue
+                params = planned.parameters or {}
+                if str(params.get("original_exception_type") or "").strip():
+                    continue
+                raw_line = params.get("source_line")
+                resolved = python_transformers.resolve_bare_exception_handler(
+                    file_entry.source_code,
+                    source_line=int(raw_line) if isinstance(raw_line, (int, float)) else None,
+                    source_class=str(
+                        params.get("source_class") or params.get("class_name") or ""
+                    ).strip(),
+                    source_method=str(
+                        params.get("source_method") or params.get("method") or ""
+                    ).strip(),
+                    handler_name=str(params.get("handler_name") or "").strip(),
+                    target_exception_type=str(
+                        params.get("target_exception_type") or ""
+                    ).strip(),
+                    require_specific_exception=False,
+                )
+                if resolved.get("status") == "success":
+                    planned_bare_targets.add((
+                        str(resolved.get("qualified_source_method") or ""),
+                        int(resolved.get("resolved_handler_line") or 0),
+                    ))
+
+            if planned_bare_targets:
+                retained_actions: list[RefactoringAction] = []
+                for detected in detected_actions:
+                    if (
+                        detected.action_type != ACTION_NARROW_EXCEPTION_HANDLER
+                        or detected.source_refactoring != "SCTVA Internal Analysis"
+                        or str(
+                            (detected.parameters or {}).get("original_exception_type") or ""
+                        ).strip()
+                    ):
+                        retained_actions.append(detected)
+                        continue
+                    params = detected.parameters or {}
+                    raw_line = params.get("source_line")
+                    resolved = python_transformers.resolve_bare_exception_handler(
+                        file_entry.source_code,
+                        source_line=int(raw_line) if isinstance(raw_line, (int, float)) else None,
+                        source_class=str(
+                            params.get("source_class") or params.get("class_name") or ""
+                        ).strip(),
+                        source_method=str(
+                            params.get("source_method") or params.get("method") or ""
+                        ).strip(),
+                        handler_name=str(params.get("handler_name") or "").strip(),
+                        target_exception_type=str(params.get("target_exception_type") or "").strip(),
+                        require_specific_exception=False,
+                    )
+                    identity = (
+                        str(resolved.get("qualified_source_method") or ""),
+                        int(resolved.get("resolved_handler_line") or 0),
+                    )
+                    if resolved.get("status") != "success" or identity not in planned_bare_targets:
+                        retained_actions.append(detected)
+                detected_actions = retained_actions
         # Only the actions already scoped to this file are authoritative here.
         # Using every action from the request leaks refactoring types from other
         # files into the current file when a multi-file request is processed.
@@ -3269,7 +4199,11 @@ class SafeCodeTransformationValidationAgent:
                     },
                 ))
         if not planned_types:
-            return detected_actions
+            return self._deduplicate_internal_actions(
+                file_name=file_entry.file_name,
+                existing_actions=existing_actions,
+                detected_actions=detected_actions,
+            )
 
         # The dedicated polymorphism transformer performs its own AST target
         # recovery.  Do not append a second locally detected action when RDP
@@ -3296,7 +4230,7 @@ class SafeCodeTransformationValidationAgent:
             if isinstance(values, list):
                 planned_literals.update(values)
 
-        return [
+        detected_actions = [
             action
             for action in detected_actions
             if action.action_type in planned_types
@@ -3306,6 +4240,112 @@ class SafeCodeTransformationValidationAgent:
                 or action.parameters.get("literal_value") in planned_literals
             )
         ]
+        return self._deduplicate_internal_actions(
+            file_name=file_entry.file_name,
+            existing_actions=existing_actions,
+            detected_actions=detected_actions,
+        )
+
+    @staticmethod
+    def _canonical_refactoring_family(action: RefactoringAction) -> str:
+        """Normalize display and technical action names for target deduplication."""
+
+        for value in (action.action_type, action.source_refactoring):
+            normalized = re.sub(
+                r"[^a-z0-9]+",
+                "_",
+                str(value or "").strip().lower(),
+            ).strip("_")
+            if normalized in {
+                "extract_method",
+                "extract_function",
+                "extract_c_method",
+                "extract_java_method",
+                "extract_python_method",
+            }:
+                return ACTION_EXTRACT_METHOD
+        return str(action.action_type or "").strip().lower()
+
+    @staticmethod
+    def _action_target_method(action: RefactoringAction) -> str:
+        """Get the normalized routine name from modern or legacy action data."""
+
+        params = action.parameters or {}
+        target = params.get("target")
+        target = target if isinstance(target, dict) else {}
+        for key in (
+            "source_method",
+            "method",
+            "method_name",
+            "function",
+            "function_name",
+        ):
+            value = params.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+            value = target.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return ""
+
+    @classmethod
+    def _dedup_file_identity(cls, action: RefactoringAction, file_name: str) -> str:
+        """Resolve only exact/suffix path aliases; never merge sibling files."""
+
+        action_path = cls._normalize_path(cls._action_source_file(action))
+        current_path = cls._normalize_path(file_name)
+        if not action_path:
+            return current_path
+        if (
+            action_path == current_path
+            or current_path.endswith(f"/{action_path}")
+            or action_path.endswith(f"/{current_path}")
+        ):
+            return current_path
+        return action_path
+
+    @classmethod
+    def _internal_action_deduplication_key(
+        cls,
+        action: RefactoringAction,
+        *,
+        file_name: str,
+    ) -> tuple[str, str, str] | None:
+        family = cls._canonical_refactoring_family(action)
+        method = cls._action_target_method(action)
+        if family != ACTION_EXTRACT_METHOD or not method:
+            return None
+        return (cls._dedup_file_identity(action, file_name), family, method)
+
+    @classmethod
+    def _deduplicate_internal_actions(
+        cls,
+        *,
+        file_name: str,
+        existing_actions: List[RefactoringAction],
+        detected_actions: List[RefactoringAction],
+    ) -> List[RefactoringAction]:
+        """Remove duplicate local actions without suppressing new SCTVA findings."""
+
+        planned_keys = {
+            key
+            for action in existing_actions
+            if (key := cls._internal_action_deduplication_key(
+                action,
+                file_name=file_name,
+            )) is not None
+        }
+        retained: List[RefactoringAction] = []
+        seen_local_keys: set[tuple[str, str, str]] = set()
+
+        for action in detected_actions:
+            key = cls._internal_action_deduplication_key(action, file_name=file_name)
+            if key is not None and (key in planned_keys or key in seen_local_keys):
+                continue
+            if key is not None:
+                seen_local_keys.add(key)
+            retained.append(action)
+        return retained
 
     @staticmethod
     def _request_allows_local_refactoring(request: SCTVARequestContract) -> bool:
@@ -3322,7 +4362,13 @@ class SafeCodeTransformationValidationAgent:
         transformation_log: List[TransformationLogEntry],
     ) -> List[RefactoringAction]:
         effective_actions: List[RefactoringAction] = []
-        for action, log_entry in zip(actions, transformation_log):
+        logs_by_action_index = {
+            entry.action_index: entry for entry in transformation_log
+        }
+        for index, action in enumerate(actions, start=1):
+            log_entry = logs_by_action_index.get(index)
+            if log_entry is None:
+                continue
             satisfied_inline_class = (
                 action.action_type == ACTION_INLINE_PYTHON_CLASS
                 and str(log_entry.metadata.get("reason") or "")
@@ -3346,6 +4392,7 @@ class SafeCodeTransformationValidationAgent:
             effective_parameters = log_entry.metadata.get("effective_action_parameters")
             if isinstance(effective_parameters, dict):
                 validation_parameters = dict(effective_parameters)
+                validation_parameters["_sctva_action_index"] = index
                 validation_parameters["applied_transformation_metadata"] = dict(
                     log_entry.metadata
                 )
@@ -3362,6 +4409,7 @@ class SafeCodeTransformationValidationAgent:
 
             if effective_type == action.action_type:
                 validation_parameters = dict(action.parameters or {})
+                validation_parameters["_sctva_action_index"] = index
                 validation_parameters["applied_transformation_metadata"] = dict(
                     log_entry.metadata
                 )
@@ -3377,6 +4425,7 @@ class SafeCodeTransformationValidationAgent:
                 continue
 
             validation_parameters = dict(action.parameters or {})
+            validation_parameters["_sctva_action_index"] = index
             validation_parameters["applied_transformation_metadata"] = dict(
                 log_entry.metadata
             )
@@ -3390,6 +4439,99 @@ class SafeCodeTransformationValidationAgent:
                 )
             )
         return effective_actions
+
+    def _attempt_selective_java_parameter_object_replay(
+        self,
+        *,
+        request: SCTVARequestContract,
+        file_entry: SourceFileContract,
+        actions: List[RefactoringAction],
+        project_files: List[Dict[str, Any]],
+        structural_step: ValidationStepResult,
+        rollback_occurred: bool,
+    ) -> tuple[Any, ...] | None:
+        """Replay independent accepted Java actions after a proven PO failure.
+
+        This is deliberately narrow: it only removes an action that the
+        Parameter Object structural validator identified as failing.  If the
+        remaining sequence cannot pass all validation stages, SCTVA keeps the
+        existing whole-file rollback rather than guessing at dependencies.
+        """
+        language = (file_entry.language or request.language).strip().lower()
+        if not rollback_occurred or language != "java":
+            return None
+        if any(action.parameters.get("coordinated_project_transaction_id") for action in actions):
+            return None
+        checks = list(structural_step.details.get("parameter_object_validation") or [])
+        failed_indexes = [
+            int(item.get("action_index"))
+            for item in checks
+            if item.get("passed") is False and isinstance(item.get("action_index"), int)
+        ]
+        if not failed_indexes:
+            return None
+        parameter_indexes = [
+            index for index, action in enumerate(actions, start=1)
+            if action.action_type == ACTION_INTRODUCE_JAVA_PARAMETER_OBJECT
+        ]
+        if len(parameter_indexes) < 2:
+            return None
+
+        for failed_index in failed_indexes:
+            retained = [
+                copy.deepcopy(action)
+                for index, action in enumerate(actions, start=1)
+                if index != failed_index
+            ]
+            if not retained:
+                continue
+            candidate, logs, warnings = self.transformer.apply_actions(
+                language=language,
+                source_code=file_entry.source_code,
+                actions=retained,
+                strict_mode=request.execution_options.strict_mode,
+                project_source_files=project_files,
+                current_file_name=file_entry.file_name,
+                repository_complete=bool(request.source_files),
+                behavior_tests=request.refactoring_plan.behavior_tests,
+            )
+            effective = self._actions_with_effective_replacements(retained, logs)
+            syntax = self.syntax_validator.validate(
+                language=language,
+                source_code=candidate,
+                require_compilation=request.execution_options.require_compilation,
+                timeout_seconds=request.execution_options.timeout_seconds,
+            )
+            structural = self.structural_validator.validate(
+                language=language,
+                original_code=file_entry.source_code,
+                transformed_code=candidate,
+                actions=effective,
+            )
+            behavioral = self.behavioral_validator.validate(
+                language=language,
+                original_code=file_entry.source_code,
+                transformed_code=candidate,
+                behavior_tests=request.refactoring_plan.behavior_tests,
+                enable_behavior_tests=request.execution_options.enable_behavior_tests,
+                actions=effective,
+                strict_mode=request.execution_options.strict_mode,
+                project_source_files=project_files,
+                current_file_name=file_entry.file_name,
+                structural_validation_passed=structural.passed,
+            )
+            invariant = self.invariant_miner.mine(
+                language=language,
+                behavioral_step=behavioral,
+                actions=effective,
+                strict_mode=request.execution_options.strict_mode,
+            )
+            if all(step.passed for step in (syntax, structural, behavioral, invariant)):
+                for entry in logs:
+                    entry.metadata.setdefault("selective_replay", True)
+                    entry.metadata.setdefault("selectively_rolled_back_action", failed_index)
+                return candidate, logs, warnings, effective, syntax, structural, behavioral, invariant
+        return None
 
     @staticmethod
     def _parallel_file_workers(

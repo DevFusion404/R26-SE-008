@@ -5,7 +5,16 @@ from sctva.transformers.c_extract_class import apply_extract_component
 from sctva.validators.syntax_validator import SyntaxValidator
 
 
-JAVA_LIBRARY_SOURCE = '''import java.util.ArrayList;
+def _make_java_large(source: str) -> str:
+    """Keep legacy extraction fixtures above the production large-class gate."""
+    padding = "\n".join(
+        f"    int __sctva_padding_{index}() {{ return {index}; }}"
+        for index in range(20)
+    )
+    return source.rsplit("}", 1)[0] + padding + "\n}\n"
+
+
+JAVA_LIBRARY_SOURCE = _make_java_large('''import java.util.ArrayList;
 import java.util.List;
 
 public class LibraryManager {
@@ -32,10 +41,10 @@ public class LibraryManager {
         enabled = false;
     }
 }
-'''
+''')
 
 
-JAVA_SETTER_SHADOW_SOURCE = '''public class CustomerRecord {
+JAVA_SETTER_SHADOW_SOURCE = _make_java_large('''public class CustomerRecord {
     private String name;
     private int accountId;
 
@@ -50,7 +59,34 @@ JAVA_SETTER_SHADOW_SOURCE = '''public class CustomerRecord {
     public void setAccountId(int accountId) { this.accountId = accountId; }
     public String summary() { return getName() + ":" + getAccountId(); }
 }
+''')
+
+
+def test_java_extract_class_non_large_source_is_not_applicable():
+    source = '''class SmallRecord {
+    private String value;
+
+    String getValue() { return value; }
+}
 '''
+
+    transformed, replacements, metadata = apply_java_extract_class(
+        source,
+        source_file="SmallRecord.java",
+        current_file_name="SmallRecord.java",
+        source_class="SmallRecord",
+        new_class_name="RecordState",
+        methods_to_extract=["getValue"],
+        fields_to_extract=["value"],
+    )
+
+    assert transformed == source
+    assert replacements == 0
+    assert metadata["status"] == "not_applicable"
+    assert metadata["success"] is True
+    assert metadata["reason"] == "SOURCE_CLASS_NOT_LARGE_ENOUGH"
+    assert metadata["large_class_before"]["detected"] is False
+    assert metadata["replacements_count"] == 0
 
 
 C_NOTICE_SOURCE = '''#include <stddef.h>
@@ -294,6 +330,7 @@ class CustomerRecord extends NamedBase {
     void setAccountId(int accountId) { this.accountId = accountId; }
 }
 '''
+    source = _make_java_large(source)
     transformed, replacements, metadata = apply_java_extract_class(
         source,
         source_class="CustomerRecord",
@@ -492,16 +529,15 @@ def test_java_and_c_extract_class_are_idempotent():
 
 
 def test_java_and_c_large_class_metrics_stop_triggering_after_extraction():
-    java_utilities = "\n".join(
-        f"    public int utility{index}() {{ return enabled ? {index} : 0; }}"
-        for index in range(1, 18)
+    java_source = _java_large_pipeline_source(
+        class_name="LibraryManager",
+        utility_count=18,
     )
-    java_source = JAVA_LIBRARY_SOURCE.rsplit("}", 1)[0] + java_utilities + "\n}\n"
     _, java_count, java_metadata = apply_java_extract_class(
         java_source,
         source_class="LibraryManager",
         new_class_name="NoticeBoard",
-        methods_to_extract=["addNotice", "latestNotice", "noticeCount"],
+        methods_to_extract=["addNotice", "noticeCount", "hasNotices"],
         fields_to_extract=["notices"],
     )
 
@@ -599,7 +635,7 @@ def test_java_extract_class_is_not_applicable_when_prior_actions_resolved_smell(
     assert replacements == 0
     assert metadata["status"] == "not_applicable"
     assert metadata["final_decision"] == "NOT_APPLICABLE"
-    assert metadata["reason"] == "SMELL_ALREADY_RESOLVED_BY_PRIOR_TRANSFORMATIONS"
+    assert metadata["reason"] == "SOURCE_CLASS_NOT_LARGE_ENOUGH"
     assert metadata["repository_original_large_class"]["detected"] is True
     assert metadata["large_class_before"]["detected"] is False
 
@@ -615,8 +651,9 @@ def test_java_extract_class_evaluates_later_candidate_after_unsafe_first_candida
     int noticeCount() { return notices; }
     boolean hasNotices() { return notices > 0; }
     int primaryValue() { return primary; }
-}
-'''
+    }
+    '''
+    source = _make_java_large(source)
     transformed, replacements, metadata = apply_java_extract_class(
         source,
         source_class="CandidateHost",
@@ -639,8 +676,9 @@ def test_java_extract_class_returns_generic_review_after_all_candidates_fail():
     void globalUp() { globalState++; }
     int globalValue() { return globalState; }
     int primaryValue() { return primary; }
-}
-'''
+    }
+    '''
+    source = _make_java_large(source)
     transformed, replacements, metadata = apply_java_extract_class(
         source,
         source_class="UnsafeCandidateHost",
@@ -662,6 +700,7 @@ def test_java_extract_class_re_resolves_stale_class_name_from_current_members():
         class_name="CurrentPipelineManager",
         utility_count=2,
     )
+    source = _make_java_large(source)
     transformed, replacements, metadata = apply_java_extract_class(
         source,
         source_class="OldPipelineManager",
@@ -687,8 +726,9 @@ def test_failed_java_extract_class_candidate_keeps_current_pre_action_source():
     String getName() { return name; }
     boolean hasName() { return name != null; }
     int keepResponsibility() { return 1; }
-}
-'''
+    }
+    '''
+    current = _make_java_large(current)
     transformed, replacements, metadata = apply_java_extract_class(
         current,
         source_class="CurrentState",
@@ -804,7 +844,7 @@ def test_java_order_like_extract_class_accepts_meaningful_reduction_even_if_smel
     assert metadata["smell_reduced"] is True
     assert metadata["validation"]["large_class_reduction"] == "PASS"
     assert metadata["implementation_revision"] == (
-        "java_extract_class_reduction_v12_20260827"
+        "java_extract_class_precondition_v13_20260829"
     )
     assert "class OrderHelper" in transformed
     assert metadata["candidate_evaluations"]

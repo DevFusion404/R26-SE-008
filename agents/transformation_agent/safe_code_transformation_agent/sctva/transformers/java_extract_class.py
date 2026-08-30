@@ -21,7 +21,7 @@ NOT_APPLICABLE = "not_applicable"
 # Included in every Extract Class result so reports can prove which runtime
 # implementation actually executed. If this value is missing from a report,
 # the running SCTVA process/container is using an older or different code copy.
-IMPLEMENTATION_REVISION = "java_extract_class_reduction_v12_20260827"
+IMPLEMENTATION_REVISION = "java_extract_class_precondition_v13_20260829"
 
 _IDENTIFIER = r"[A-Za-z_$][A-Za-z0-9_$]*"
 _MODIFIERS = {
@@ -268,14 +268,16 @@ class JavaExtractClassRefactoring:
         original_smell = self._large_class(original_metrics) if original_metrics else None
         metadata["repository_original_metrics"] = original_metrics
         metadata["repository_original_large_class"] = original_smell
-        if (
-            accepted_prior
-            and original_smell
-            and original_smell["detected"]
-            and not current_smell["detected"]
-        ):
+        # Extract Class is a remedy for a current Large Class smell.  The
+        # action input is the source of truth in a composed pipeline: the
+        # original snapshot is retained for audit only and must never force a
+        # second extraction after an earlier action has reduced the class.
+        # This check deliberately runs before candidate discovery so a small
+        # class cannot be reported as an unsafe/failed extraction merely
+        # because RDP requested Extract Class for it.
+        if not current_smell["detected"]:
             return self._not_applicable(
-                "SMELL_ALREADY_RESOLVED_BY_PRIOR_TRANSFORMATIONS",
+                "SOURCE_CLASS_NOT_LARGE_ENOUGH",
                 metadata,
             )
 
@@ -1136,6 +1138,7 @@ class JavaExtractClassRefactoring:
             "validation": {
                 "syntax": "PASS",
                 "structural": "PASS" if structural else "FAIL",
+                "structural_refactoring": "PASS" if structural else "FAIL",
                 "dependency": "PASS" if structural else "FAIL",
                 "internal_references_updated": (
                     "PASS" if not unresolved_internal_references else "FAIL"
@@ -1306,6 +1309,8 @@ class JavaExtractClassRefactoring:
         return self.source, 0, {
             **metadata,
             "status": NOT_APPLICABLE,
+            "success": True,
+            "replacements_count": 0,
             "reason": reason,
             "final_decision": "NOT_APPLICABLE",
             "plan_compliance": "NOT_APPLICABLE",
@@ -1313,6 +1318,7 @@ class JavaExtractClassRefactoring:
             "validation": {
                 "syntax": "PASS",
                 "structural": "NOT_APPLICABLE",
+                "structural_refactoring": "NOT_APPLICABLE",
                 "dependency": "NOT_APPLICABLE",
                 "full_api_preservation": "NOT_APPLICABLE",
                 "state_compatibility": "NOT_APPLICABLE",
@@ -1503,6 +1509,57 @@ def _parse_java_field(declaration: str, start: int, end: int) -> JavaField | Non
     )
 
 
+def _mask_java_annotations(text: str) -> str:
+    """Blank Java annotations while preserving offsets and line structure.
+
+    The member parser historically selected the *last* identifier followed by
+    ``(`` in a method header.  That misclassified parameter annotations such as
+    ``@RequestParam("pid")`` as the method name.  This helper removes both
+    method-level and parameter-level annotations before method-declarator
+    discovery, including qualified annotation names and nested annotation
+    arguments.
+    """
+
+    chars = list(text)
+    index = 0
+    length = len(text)
+    while index < length:
+        if text[index] != "@":
+            index += 1
+            continue
+
+        previous = text[index - 1] if index else " "
+        if previous.isalnum() or previous in "_$":
+            index += 1
+            continue
+
+        cursor = index + 1
+        name_start = cursor
+        while cursor < length and (
+            text[cursor].isalnum() or text[cursor] in "_$."
+        ):
+            cursor += 1
+        if cursor == name_start:
+            index += 1
+            continue
+
+        while cursor < length and text[cursor].isspace():
+            cursor += 1
+
+        end = cursor
+        if cursor < length and text[cursor] == "(":
+            closing = _matching(text, cursor, "(", ")")
+            if closing is not None:
+                end = closing + 1
+
+        for position in range(index, end):
+            if chars[position] not in "\r\n":
+                chars[position] = " "
+        index = max(end, index + 1)
+
+    return "".join(chars)
+
+
 def _parse_java_method(
     source: str,
     masked: str,
@@ -1514,19 +1571,24 @@ def _parse_java_method(
     header: str,
 ) -> JavaMethod | None:
     masked_header = masked[start:open_brace]
-    matches = list(re.finditer(rf"({_IDENTIFIER})\s*\(", masked_header))
+    declaration_header = _mask_java_annotations(masked_header)
+    matches = list(re.finditer(rf"({_IDENTIFIER})\s*\(", declaration_header))
     matches = [match for match in matches if match.group(1) not in _CONTROL_NAMES]
     if not matches:
         return None
+
+    # After annotations are masked, a Java method/constructor header has one
+    # declarator identifier followed by its parameter list.  Selecting from the
+    # cleaned header prevents @RequestParam/@GetMapping from becoming fake
+    # method names.
     name_match = matches[-1]
     name = name_match.group(1)
-    paren_open = masked_header.find("(", name_match.start())
-    paren_close = _matching(masked_header, paren_open, "(", ")")
+    paren_open = declaration_header.find("(", name_match.start())
+    paren_close = _matching(declaration_header, paren_open, "(", ")")
     if paren_close is None:
         return None
     params_raw = header[paren_open + 1:paren_close]
-    prefix = masked_header[:name_match.start()].strip()
-    prefix = re.sub(r"(?:@\w+(?:\s*\([^)]*\))?\s*)", "", prefix).strip()
+    prefix = declaration_header[:name_match.start()].strip()
     tokens = prefix.split()
     modifiers = {token for token in tokens if token in _MODIFIERS}
     remainder = " ".join(token for token in tokens if token not in _MODIFIERS).strip()
@@ -1584,7 +1646,7 @@ def _populate_java_dependencies(model: JavaClass) -> None:
 def _java_parameter_names(params_raw: str) -> list[str]:
     names: list[str] = []
     for raw in _split_top_level(params_raw, ","):
-        cleaned = re.sub(r"@\w+(?:\s*\([^)]*\))?", "", raw).strip()
+        cleaned = _mask_java_annotations(raw).strip()
         cleaned = re.sub(r"\bfinal\b", "", cleaned).strip()
         match = re.search(rf"({_IDENTIFIER})\s*(?:\[\s*\])?\s*$", cleaned)
         if match:

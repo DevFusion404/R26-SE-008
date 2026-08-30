@@ -728,6 +728,29 @@ class _RemoveDeadCodeTransformer(cst.CSTTransformer):
         return updated_node
 
 
+class _RemoveDeadClassTransformer(cst.CSTTransformer):
+    METADATA_DEPENDENCIES = (PositionProvider,)
+
+    def __init__(self, class_name: str, target_line: int) -> None:
+        self.class_name = class_name
+        self.target_line = target_line
+        self.replacements = 0
+
+    def leave_ClassDef(
+        self,
+        original_node: cst.ClassDef,
+        updated_node: cst.ClassDef,
+    ) -> cst.CSTNode:
+        position = self.get_metadata(PositionProvider, original_node)
+        if (
+            original_node.name.value == self.class_name
+            and position.start.line == self.target_line
+        ):
+            self.replacements += 1
+            return cst.RemoveFromParent()
+        return updated_node
+
+
 def _apply_transformer(
     source_code: str,
     transformer: cst.CSTTransformer,
@@ -1225,8 +1248,8 @@ def apply_remove_dead_code(
     dead_code_kind: str = "",
     target_statement_fingerprint: str = "",
 ) -> Tuple[str, int]:
-    if not method_name and source_line is None:
-        raise ValueError("remove_dead_code requires 'method_name' or 'source_line'.")
+    if not method_name and source_line is None and not class_name:
+        raise ValueError("remove_dead_code requires 'method_name', 'class_name', or 'source_line'.")
 
     # RDP can provide the owning method together with the line of a dead
     # statement inside it. Resolve that statement before considering removal
@@ -1281,6 +1304,22 @@ def apply_remove_dead_code(
     except SyntaxError:
         return source_code, 0
 
+    if not method_name and class_name and dead_code_kind == "unused_class":
+        classes = [
+            node for node in tree.body
+            if isinstance(node, ast.ClassDef) and node.name == class_name
+        ]
+        if len(classes) != 1:
+            return source_code, 0
+        target = classes[0]
+        return _apply_transformer(
+            source_code,
+            _RemoveDeadClassTransformer(
+                class_name,
+                target_line=int(getattr(target, "lineno", 0) or 0),
+            ),
+        )
+
     target = _resolve_python_dead_callable_identity(
         tree,
         method_name=method_name,
@@ -1311,6 +1350,382 @@ def apply_remove_dead_code(
     )
 
 
+def resolve_bare_exception_handler(
+    source_code: str,
+    *,
+    source_line: Optional[int] = None,
+    source_class: str = "",
+    source_method: str = "",
+    handler_name: str = "",
+    target_exception_type: str = "",
+    require_specific_exception: bool = True,
+) -> dict[str, Any]:
+    """Resolve one current-AST bare handler and a *proven* replacement type.
+
+    Line numbers and class/method names from RDP are hints: preceding SCTVA
+    actions can legitimately move a handler.  A target is accepted only when
+    exactly one bare handler remains after applying every usable hint.
+    """
+    try:
+        tree = ast.parse(source_code)
+    except SyntaxError:
+        return {"status": "review_required", "reason": "PYTHON_PARSE_FAILED"}
+
+    parents = {
+        child: parent
+        for parent in ast.walk(tree)
+        for child in ast.iter_child_nodes(parent)
+    }
+
+    def context(handler: ast.ExceptHandler) -> tuple[str, str, ast.Try | None]:
+        class_name = ""
+        method_name = ""
+        current: ast.AST | None = handler
+        parent_try: ast.Try | None = None
+        while current is not None:
+            current = parents.get(current)
+            if isinstance(current, ast.Try) and parent_try is None:
+                parent_try = current
+            if isinstance(current, (ast.FunctionDef, ast.AsyncFunctionDef)) and not method_name:
+                method_name = current.name
+            if isinstance(current, ast.ClassDef) and not class_name:
+                class_name = current.name
+        return class_name, method_name, parent_try
+
+    def method_context(method: ast.AST) -> tuple[str, str]:
+        class_name = ""
+        current: ast.AST | None = method
+        while current is not None:
+            current = parents.get(current)
+            if isinstance(current, ast.ClassDef):
+                class_name = current.name
+                break
+        return class_name, str(getattr(method, "name", "") or "")
+
+    def handler_belongs_to(handler: ast.ExceptHandler, method: ast.AST) -> bool:
+        current: ast.AST | None = handler
+        while current is not None:
+            if current is method:
+                return True
+            current = parents.get(current)
+        return False
+
+    bare_handlers = [
+        handler
+        for handler in ast.walk(tree)
+        if isinstance(handler, ast.ExceptHandler) and handler.type is None
+    ]
+    if not bare_handlers:
+        return {"status": "not_applicable", "reason": "BARE_EXCEPT_TARGET_NOT_FOUND"}
+
+    method_nodes = [
+        node for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    ]
+    selected_method: ast.AST | None = None
+    target_resolution = "file_bare_handler_fallback"
+    explicit_matches = [
+        method for method in method_nodes
+        if method_context(method) == (source_class, source_method)
+    ] if source_class and source_method else []
+    method_matches = [
+        method for method in method_nodes
+        if str(getattr(method, "name", "") or "") == source_method
+    ] if source_method else []
+    line_matches = [
+        method for method in method_nodes
+        if source_line is not None
+        and int(getattr(method, "lineno", 0) or 0) <= source_line <= int(
+            getattr(method, "end_lineno", 0) or 0
+        )
+    ]
+
+    if len(explicit_matches) == 1:
+        selected_method = explicit_matches[0]
+        target_resolution = "explicit_class_and_method"
+    elif len(method_matches) == 1:
+        selected_method = method_matches[0]
+        target_resolution = "explicit_method_current_ast"
+    elif line_matches:
+        # Nested callables can share a line range. The innermost enclosing
+        # callable is the handler's semantic owner.
+        selected_method = min(
+            line_matches,
+            key=lambda method: int(getattr(method, "end_lineno", 0) or 0)
+            - int(getattr(method, "lineno", 0) or 0),
+        )
+        target_resolution = "current_ast_enclosing_method_from_line"
+    elif len(explicit_matches) > 1 or len(method_matches) > 1:
+        return {
+            "status": "review_required",
+            "reason": "AMBIGUOUS_SOURCE_METHOD",
+            "candidate_count": len(explicit_matches) or len(method_matches),
+        }
+
+    candidates = (
+        [handler for handler in bare_handlers if handler_belongs_to(handler, selected_method)]
+        if selected_method is not None
+        else list(bare_handlers)
+    )
+    if handler_name:
+        matches = [handler for handler in candidates if str(handler.name or "") == handler_name]
+        if matches:
+            candidates = matches
+    if source_line is not None:
+        matches = [handler for handler in candidates if handler.lineno == source_line]
+        if matches:
+            candidates = matches
+
+    if len(candidates) != 1:
+        return {
+            "status": "review_required",
+            "reason": "AMBIGUOUS_BARE_EXCEPT_TARGET" if len(candidates) > 1 else "BARE_EXCEPT_TARGET_NOT_FOUND",
+            "candidate_count": len(candidates),
+            "target_resolution": target_resolution,
+        }
+
+    handler = candidates[0]
+    resolved_class, resolved_method, try_node = context(handler)
+    target_metadata = {
+        "original_handler": "bare_except",
+        "source_class": resolved_class,
+        "source_method": resolved_method,
+        "qualified_source_method": (
+            f"{resolved_class}.{resolved_method}"
+            if resolved_class and resolved_method else resolved_method
+        ),
+        "handler_line": handler.lineno,
+        "resolved_handler_line": handler.lineno,
+        "handler_index": (
+            try_node.handlers.index(handler) if try_node is not None else 0
+        ),
+        "try_line": int(getattr(try_node, "lineno", 0) or 0),
+        "handler_name": str(handler.name or ""),
+        "original_handler_type": "bare_except",
+        "target_resolution": target_resolution,
+    }
+
+    # Some callers only need stable target identity for de-duplication or to
+    # repair a legacy planner action.  Do not make target resolution depend on
+    # whether the exception type has already been proven.
+    if not require_specific_exception:
+        return {
+            "status": "success",
+            **target_metadata,
+            "replacement_exception": "",
+            "exception_resolution_strategy": "target_only",
+        }
+
+    replacement = str(target_exception_type or "").strip()
+    strategy = "explicit_plan_exception_type" if replacement else ""
+    if replacement in {"Exception", "BaseException"}:
+        replacement = ""
+        strategy = ""
+
+    if not replacement and try_node is not None:
+        mysql_error = _python_mysql_error_for_try(tree, try_node)
+        if mysql_error:
+            mysql_exception_types = {
+                mysql_error,
+                *_python_database_row_access_exceptions(try_node),
+            }
+            replacement = _python_exception_tuple_text(
+                sorted(mysql_exception_types)
+            )
+            strategy = "import_and_try_body_context"
+
+    if not replacement and try_node is not None:
+        inferred = sorted({
+            exception_type
+            for _, exception_types in _python_try_risky_statement_exceptions(tree, try_node)
+            for exception_type in exception_types
+            if exception_type not in {"Exception", "BaseException"}
+        })
+        if len(inferred) == 1:
+            replacement = inferred[0]
+            strategy = "try_body_ast_exception_evidence"
+
+    if not _valid_python_exception_type(replacement):
+        return {
+            "status": "review_required",
+            "reason": "SPECIFIC_EXCEPTION_TYPE_NOT_PROVEN",
+            "source_class": resolved_class,
+            "source_method": resolved_method,
+            "handler_line": handler.lineno,
+        }
+
+    return {
+        "status": "success",
+        **target_metadata,
+        "replacement_exception": replacement,
+        "exception_resolution_strategy": strategy,
+    }
+
+
+def _python_mysql_error_for_try(tree: ast.Module, try_node: ast.Try) -> str:
+    """Return a MySQL error class only with import and DB-operation evidence."""
+    imported_error_names: set[str] = set()
+    for node in tree.body:
+        if isinstance(node, ast.ImportFrom) and str(node.module or "").startswith("mysql.connector"):
+            for alias in node.names:
+                if alias.name in {"Error", "DatabaseError", "InterfaceError"}:
+                    imported_error_names.add(alias.asname or alias.name)
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == "mysql.connector":
+                    imported_error_names.add(f"{alias.asname or 'mysql'}.connector.Error")
+
+    if not imported_error_names:
+        return ""
+    calls = {
+        _python_call_name(node.func).lower()
+        for statement in try_node.body
+        for node in ast.walk(statement)
+        if isinstance(node, ast.Call)
+    }
+    database_operations = {
+        "connect", "cursor", "execute", "executemany", "fetchone",
+        "fetchall", "fetchmany", "commit", "rollback", "close",
+    }
+    proven_database_receivers = _python_database_receivers_before_try(tree, try_node)
+    has_database_operation = any(
+        call.startswith("mysql.connector.")
+        or (
+            call.split(".")[-1] in database_operations
+            and (
+                call.rsplit(".", 1)[0] in proven_database_receivers
+                or any(
+                    token in call
+                    for token in ("db", "database", "conn", "connection", "cursor")
+                )
+            )
+        )
+        for call in calls
+    )
+    return sorted(imported_error_names)[0] if has_database_operation else ""
+
+
+def _python_database_row_access_exceptions(try_node: ast.Try) -> set[str]:
+    """Return locally provable row-access failures inside a DB try block.
+
+    ``cursor.fetchone()`` commonly feeds an indexed row immediately afterward.
+    Even when the database call itself is covered by the connector's ``Error``
+    class, a missing row can make the value non-subscriptable and an incomplete
+    sequence can make the index invalid.  Keeping those locally visible failure
+    modes in the narrowed handler avoids changing a legacy login/fallback path
+    into an uncaught ``TypeError``/``IndexError``.
+    """
+
+    fetched_names: set[str] = set()
+    for statement in try_node.body:
+        if not isinstance(statement, (ast.Assign, ast.AnnAssign)):
+            continue
+        value = statement.value
+        if not isinstance(value, ast.Call):
+            continue
+        call_name = _python_call_name(value.func).lower()
+        if call_name.rsplit(".", 1)[-1] != "fetchone":
+            continue
+        targets = list(statement.targets) if isinstance(statement, ast.Assign) else [statement.target]
+        for target in targets:
+            if isinstance(target, ast.Name):
+                fetched_names.add(target.id)
+
+    if not fetched_names:
+        return set()
+
+    for statement in try_node.body:
+        for node in ast.walk(statement):
+            if (
+                isinstance(node, ast.Subscript)
+                and isinstance(node.value, ast.Name)
+                and node.value.id in fetched_names
+            ):
+                return {"IndexError", "TypeError"}
+    return set()
+
+
+def _python_database_receivers_before_try(
+    tree: ast.Module,
+    try_node: ast.Try,
+) -> set[str]:
+    """Prove local names/attributes that hold DB connections or cursors.
+
+    Real legacy code frequently creates a cursor before the ``try`` block and
+    then uses a short variable such as ``cur`` inside the protected body.  A
+    name-only heuristic therefore misses valid database evidence.  This helper
+    follows simple assignment lineage such as::
+
+        cur = self.conn.cursor()
+        try:
+            cur.execute(...)
+
+    Only direct assignments before the target try are used; no speculative
+    interprocedural type inference is performed.
+    """
+
+    parents = {
+        child: parent
+        for parent in ast.walk(tree)
+        for child in ast.iter_child_nodes(parent)
+    }
+
+    owner: ast.AST | None = try_node
+    while owner is not None:
+        owner = parents.get(owner)
+        if isinstance(owner, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Module)):
+            break
+
+    statements = list(getattr(owner, "body", []) or [])
+    known: set[str] = set()
+
+    def assigned_names(statement: ast.AST) -> list[str]:
+        targets: list[ast.expr] = []
+        if isinstance(statement, ast.Assign):
+            targets = list(statement.targets)
+        elif isinstance(statement, ast.AnnAssign):
+            targets = [statement.target]
+        result: list[str] = []
+        for target in targets:
+            name = _python_call_name(target)
+            if name:
+                result.append(name.lower())
+        return result
+
+    for statement in statements:
+        if statement is try_node:
+            break
+        if not isinstance(statement, (ast.Assign, ast.AnnAssign)):
+            continue
+        value = statement.value
+        if value is None:
+            continue
+        value_name = _python_call_name(value).lower()
+        value_is_db = False
+        if isinstance(value, ast.Call):
+            call_name = _python_call_name(value.func).lower()
+            leaf = call_name.rsplit(".", 1)[-1]
+            receiver = call_name.rsplit(".", 1)[0] if "." in call_name else ""
+            value_is_db = (
+                call_name.startswith("mysql.connector.")
+                or leaf in {"connect", "cursor"}
+                and (
+                    receiver in known
+                    or any(
+                        token in receiver
+                        for token in ("db", "database", "conn", "connection", "cursor")
+                    )
+                )
+            )
+        elif value_name:
+            value_is_db = value_name in known
+
+        if value_is_db:
+            known.update(assigned_names(statement))
+
+    return known
+
+
 def apply_narrow_exception_handler(
     source_code: str,
     *,
@@ -1318,6 +1733,8 @@ def apply_narrow_exception_handler(
     original_exception_type: str = "",
     target_exception_type: str = "",
     handler_name: str = "",
+    source_class: str = "",
+    source_method: str = "",
 ) -> Tuple[str, int]:
     """Narrow broad Python exception handling.
 
@@ -1333,20 +1750,36 @@ def apply_narrow_exception_handler(
     except SyntaxError:
         return source_code, 0
 
+    # Bare handlers need a specific, evidence-backed type.  This resolution is
+    # separate from broad ``except Exception`` narrowing, which can split a
+    # try body when there are multiple independently-provable operations.
+    if not original_exception_type:
+        resolution = resolve_bare_exception_handler(
+            source_code,
+            source_line=source_line,
+            source_class=source_class,
+            source_method=source_method,
+            handler_name=handler_name,
+            target_exception_type=target_exception_type,
+        )
+        if resolution.get("status") != "success":
+            return source_code, 0
+        source_line = int(resolution["handler_line"])
+        handler_name = str(resolution.get("handler_name") or "")
+        target_exception_type = str(resolution["replacement_exception"])
+
     candidates: list[tuple[ast.Try, ast.ExceptHandler]] = []
     for try_node in (node for node in ast.walk(tree) if isinstance(node, ast.Try)):
-        if try_node.orelse or try_node.finalbody or len(try_node.handlers) != 1:
-            continue
-        handler = try_node.handlers[0]
-        handler_type = _python_exception_expression_name(handler.type)
-        if original_exception_type:
-            if handler_type != original_exception_type:
+        for handler in try_node.handlers:
+            handler_type = _python_exception_expression_name(handler.type)
+            if original_exception_type:
+                if handler_type != original_exception_type:
+                    continue
+            elif handler.type is not None:
                 continue
-        elif handler.type is not None:
-            continue
-        if handler_name and str(handler.name or "") != handler_name:
-            continue
-        candidates.append((try_node, handler))
+            if handler_name and str(handler.name or "") != handler_name:
+                continue
+            candidates.append((try_node, handler))
 
     if source_line is not None:
         line_matches = [
@@ -1377,6 +1810,9 @@ def apply_narrow_exception_handler(
         and len(try_node.body) > 1
         and bool(risky_statements)
         and _python_try_body_is_safe_to_split(try_node)
+        and not try_node.orelse
+        and not try_node.finalbody
+        and len(try_node.handlers) == 1
     )
     if can_split:
         transformed = _split_python_overreaching_try(
@@ -1743,10 +2179,12 @@ def resolve_move_method_target(
     source_code: str,
     *,
     method_name: str = "",
+    source_method: str = "",
     source_class: str = "",
     destination_class: str = "",
     destination_parameter: str = "",
     source_line: int | None = None,
+    allow_unique_inference: bool = False,
 ) -> dict[str, Any]:
     """Resolve a Feature-Envy Move Method target from real Python AST evidence.
 
@@ -1756,10 +2194,11 @@ def resolve_move_method_target(
     destination class and envied parameter.
     """
 
-    requested_method = str(method_name or "").strip()
+    requested_method = str(method_name or source_method or "").strip()
     requested_source = str(source_class or "").strip()
     requested_destination = str(destination_class or "").strip()
     requested_parameter = str(destination_parameter or "").strip()
+    placeholder_class_names = {"", "sourceclass", "unknownclass", "none", "null"}
 
     try:
         tree = ast.parse(source_code)
@@ -1777,23 +2216,64 @@ def resolve_move_method_target(
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
     }
 
-    # A module-level function is not a Move Method target, even when the RDP
-    # plan invents filename-derived classes such as ``jarvis`` /
-    # ``jarvisTarget``.  Check this *before* class-count analysis so SCTVA does
-    # not accidentally recover an unrelated class method in a large module.
-    if requested_method and requested_method in module_function_nodes:
-        function = module_function_nodes[requested_method]
+    def class_method_node(
+        class_node: ast.ClassDef,
+        name: str,
+    ) -> ast.FunctionDef | ast.AsyncFunctionDef | None:
+        return next(
+            (
+                item
+                for item in class_node.body
+                if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and item.name == name
+            ),
+            None,
+        )
+
+    explicit_source_node = classes.get(requested_source) if requested_source else None
+    explicit_source_method = (
+        class_method_node(explicit_source_node, requested_method)
+        if explicit_source_node is not None and requested_method
+        else None
+    )
+
+    def module_function_not_applicable(
+        function: ast.FunctionDef | ast.AsyncFunctionDef,
+        *,
+        target_resolution: str,
+        requested_method_name: str = "",
+    ) -> dict[str, Any]:
         return {
-            "status": "satisfied",
-            "reason": "MODULE_LEVEL_FUNCTION_IS_NOT_MOVE_METHOD_TARGET",
-            "method": requested_method,
+            "status": "not_applicable",
+            "reason": "MOVE_METHOD_TARGET_IS_MODULE_FUNCTION",
+            "target_kind": "MODULE_FUNCTION",
+            "suggested_refactoring": "MOVE_FUNCTION",
+            "source_class_resolved": False,
+            "destination_class_resolved": requested_destination in classes,
+            "target_resolution": target_resolution,
+            "method": function.name,
             "lineno": int(getattr(function, "lineno", 0) or 0),
             "end_lineno": int(
                 getattr(function, "end_lineno", getattr(function, "lineno", 0)) or 0
             ),
+            "requested_method": requested_method_name,
+            "requested_source_method": requested_method_name,
             "requested_source_class": requested_source,
             "requested_destination_class": requested_destination,
+            "replacements_count": 0,
         }
+
+    # A module-level function is not a Move Method target, even when the RDP
+    # plan invents filename-derived classes such as ``SourceClass``.  A real
+    # explicitly requested source class takes precedence, however: Python can
+    # legally contain both a module function and a class method with the same
+    # name, and the class-qualified plan must resolve to the class method.
+    if explicit_source_node is None and requested_method in module_function_nodes:
+        return module_function_not_applicable(
+            module_function_nodes[requested_method],
+            target_resolution="module_level_function_ast",
+            requested_method_name=requested_method,
+        )
 
     # When the method name is stale/missing, a CUQA/RDP source line can still
     # prove that the smell points at a module function.  In that case Move
@@ -1809,27 +2289,130 @@ def resolve_move_method_target(
         ]
         if len(line_function_matches) == 1:
             function = line_function_matches[0]
-            return {
-                "status": "not_applicable",
-                "reason": "MODULE_LEVEL_FUNCTION_IS_NOT_MOVE_METHOD_TARGET",
-                "method": function.name,
-                "lineno": int(getattr(function, "lineno", 0) or 0),
-                "end_lineno": int(
-                    getattr(function, "end_lineno", getattr(function, "lineno", 0)) or 0
-                ),
-                "requested_method": requested_method,
-                "requested_source_class": requested_source,
-                "requested_destination_class": requested_destination,
-                "strategy": "source_line_module_function_guard",
-            }
+            if explicit_source_node is None:
+                return module_function_not_applicable(
+                    function,
+                    target_resolution="source_line_module_function_guard",
+                    requested_method_name=requested_method,
+                )
 
-    if len(classes) < 2:
-        if not classes:
+    # An explicitly named class is authoritative.  If it exists but does not
+    # own the requested method, do not fall back to a same-named module
+    # function or to an unrelated class method.
+    if explicit_source_node is not None and requested_method and explicit_source_method is None:
+        return {
+            "status": "not_applicable",
+            "reason": "MOVE_METHOD_TARGET_NOT_FOUND",
+            "target_kind": "CLASS_METHOD",
+            "source_class_resolved": True,
+            "requested_method": requested_method,
+            "requested_source_method": requested_method,
+            "requested_source_class": requested_source,
+            "requested_destination_class": requested_destination,
+            "replacements_count": 0,
+        }
+
+    # Explicit class names are contracts, not hints.  If one of them is
+    # absent, do not recover a different class pair and accidentally turn a
+    # module function or stale RDP target into a Move Method.
+    if requested_source and requested_source not in classes:
+        # Preserve semantic recovery for malformed filename-derived plans only
+        # when neither the requested method nor source class names a real
+        # symbol.  A source-line recovery can still identify the real method.
+        malformed_recovery = (
+            isinstance(source_line, int)
+            and source_line > 0
+            and requested_source.lower() not in placeholder_class_names
+            and requested_method not in module_function_nodes
+            and requested_method == requested_source
+            and any(
+                isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and item.name == requested_destination
+                for owner in classes.values()
+                for item in owner.body
+            )
+        )
+        if not malformed_recovery:
             return {
                 "status": "not_applicable",
                 "reason": "MOVE_METHOD_REQUIRES_SOURCE_AND_DESTINATION_CLASSES",
+                "target_kind": "CLASS_METHOD",
+                "source_class_resolved": False,
+                "missing_class": "source",
+                "requested_method": requested_method,
+                "requested_source_method": requested_method,
+                "requested_source_class": requested_source,
+                "requested_destination_class": requested_destination,
+                "replacements_count": 0,
             }
-        return {"status": "review_required", "reason": "INSUFFICIENT_CLASS_CONTEXT"}
+    if requested_destination and requested_destination not in classes:
+        # A clearly real source method plus an absent destination is an
+        # invalid Move Method request.  The legacy malformed-plan recovery
+        # below remains available when the method itself is also a stale hint.
+        source_has_method = bool(
+            requested_source in classes
+            and any(
+                isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and item.name == requested_method
+                for item in classes[requested_source].body
+            )
+        )
+        if source_has_method or requested_method in module_function_nodes:
+            return {
+                "status": "not_applicable",
+                "reason": "MOVE_METHOD_DESTINATION_CLASS_NOT_FOUND",
+                "target_kind": "CLASS_METHOD",
+                "source_class_resolved": requested_source in classes,
+                "destination_class_resolved": False,
+                "missing_class": "destination",
+                "requested_method": requested_method,
+                "requested_source_method": requested_method,
+                "requested_source_class": requested_source,
+                "requested_destination_class": requested_destination,
+                "replacements_count": 0,
+            }
+    if (
+        requested_source
+        and requested_destination
+        and requested_source == requested_destination
+    ):
+        return {
+            "status": "not_applicable",
+            "reason": "SOURCE_AND_DESTINATION_CLASS_MATCH",
+            "target_kind": "CLASS_METHOD",
+            "source_class_resolved": requested_source in classes,
+            "destination_class_resolved": requested_destination in classes,
+            "requested_source_class": requested_source,
+            "requested_destination_class": requested_destination,
+            "replacements_count": 0,
+        }
+    if (not requested_source or not requested_destination) and not allow_unique_inference:
+        return {
+            "status": "not_applicable",
+            "reason": "MOVE_METHOD_REQUIRES_SOURCE_AND_DESTINATION_CLASSES",
+            "target_kind": "CLASS_METHOD",
+            "source_class_resolved": requested_source in classes,
+            "destination_class_resolved": requested_destination in classes,
+            "missing_class": "source" if not requested_source else "destination",
+            "requested_method": requested_method,
+            "requested_source_method": requested_method,
+            "requested_source_class": requested_source,
+            "requested_destination_class": requested_destination,
+            "replacements_count": 0,
+        }
+    if len(classes) < 2:
+        return {
+            "status": "not_applicable",
+            "reason": "MOVE_METHOD_REQUIRES_SOURCE_AND_DESTINATION_CLASSES",
+            "target_kind": "CLASS_METHOD",
+            "source_class_resolved": requested_source in classes,
+            "destination_class_resolved": requested_destination in classes,
+            "requested_method": requested_method,
+            "requested_source_method": requested_method,
+            "requested_source_class": requested_source,
+            "requested_destination_class": requested_destination,
+            "replacements_count": 0,
+        }
 
     # Track simple assignments such as ``student = Student(...)`` so call-site
     # arguments can be tied back to their concrete class.
@@ -1900,6 +2483,26 @@ def resolve_move_method_target(
         return inferred
 
     candidates: list[dict[str, Any]] = []
+
+    explicit_source_method_exists = bool(
+        requested_source in classes
+        and requested_method
+        and any(
+            isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and item.name == requested_method
+            for item in classes[requested_source].body
+        )
+    )
+    if requested_source in classes and requested_method and not explicit_source_method_exists:
+        return {
+            "status": "not_applicable",
+            "reason": "MOVE_METHOD_TARGET_NOT_FOUND",
+            "target_kind": "CLASS_METHOD",
+            "requested_method": requested_method,
+            "requested_source_method": requested_method,
+            "requested_source_class": requested_source,
+            "requested_destination_class": requested_destination,
+        }
 
     for owner_name, owner_node in classes.items():
         for method in owner_node.body:
@@ -2002,6 +2605,19 @@ def resolve_move_method_target(
     ]
     if len(exact) == 1:
         selected = exact[0]
+    elif (
+        explicit_source_method_exists
+        and requested_destination in classes
+    ):
+        return {
+            "status": "review_required",
+            "reason": "DESTINATION_CLASS_NOT_COMPATIBLE",
+            "target_kind": "CLASS_METHOD",
+            "requested_method": requested_method,
+            "requested_source_method": requested_method,
+            "requested_source_class": requested_source,
+            "requested_destination_class": requested_destination,
+        }
     else:
         selected = None
 
@@ -2044,7 +2660,11 @@ def resolve_move_method_target(
     return {
         "status": "success",
         **selected,
+        "target_kind": "CLASS_METHOD",
+        "source_class_resolved": True,
+        "destination_class_resolved": True,
         "requested_method": requested_method,
+        "requested_source_method": requested_method,
         "requested_source_class": requested_source,
         "requested_destination_class": requested_destination,
         "requested_destination_parameter": requested_parameter,
@@ -2055,6 +2675,7 @@ def apply_move_method(
     source_code: str,
     *,
     method_name: str = "",
+    source_method: str = "",
     source_class: str = "",
     destination_class: str = "",
     destination_parameter: str = "",
@@ -2069,7 +2690,8 @@ def apply_move_method(
     """
 
     requested_target = {
-        "method": str(method_name or "").strip(),
+        "method": str(method_name or source_method or "").strip(),
+        "source_method": str(source_method or method_name or "").strip(),
         "source_class": str(source_class or "").strip(),
         "destination_class": str(destination_class or "").strip(),
         "destination_parameter": str(destination_parameter or "").strip(),
@@ -2110,6 +2732,13 @@ def apply_move_method(
         return source_code, 0, {
             "status": resolution_status,
             "reason": str(resolution.get("reason") or "MOVE_METHOD_TARGET_NOT_FOUND"),
+            "target_kind": str(resolution.get("target_kind") or "CLASS_METHOD"),
+            "suggested_refactoring": str(resolution.get("suggested_refactoring") or ""),
+            "source_class_resolved": bool(resolution.get("source_class_resolved", False)),
+            "destination_class_resolved": bool(
+                resolution.get("destination_class_resolved", False)
+            ),
+            "replacements_count": 0,
             **requested_target,
             "target_resolution": resolution,
         }
@@ -2674,21 +3303,39 @@ def resolve_inline_class_target(
         tree = ast.parse(source_code)
     except SyntaxError:
         return {"status": "review_required", "reason": "SOURCE_PARSE_FAILED"}
+    # Explicit RDP targets are resolved by qualified class identity first.
+    # This accepts ``Class``, ``Outer.Inner`` and module-qualified forms while
+    # refusing ambiguous short names instead of silently selecting a top-level
+    # class with the same spelling.
+    from . import python_inline_class
+
     classes = [node for node in tree.body if isinstance(node, ast.ClassDef)]
     class_names = {node.name for node in classes}
     requested = str(class_to_inline or "").strip()
-    exact_matches = [node for node in classes if node.name == requested]
-    if requested and len(exact_matches) == 1:
-        return {
+    explicit = python_inline_class.resolve_python_inline_class_target(
+        source_code,
+        class_to_inline=requested,
+    ) if requested else {}
+    if requested and explicit.get("status") == "success":
+        result = {
             "status": "success",
-            "class_to_inline": requested,
+            "class_to_inline": str(explicit["class_to_inline"]),
             "strategy": "explicit_plan_target",
             "target_resolution": "explicit_plan_target",
         }
-    if len(exact_matches) > 1:
+        # Retain the established compact response for top-level classes while
+        # carrying qualified evidence when a nested/module-qualified target
+        # actually needs it.
+        if "." in str(explicit.get("class_to_inline") or "") or "." in requested:
+            result["qualified_class_name"] = str(
+                explicit.get("qualified_class_name") or ""
+            )
+            result["class_model"] = dict(explicit.get("class_model") or {})
+        return result
+    if requested and explicit.get("status") == "review_required":
         return {
             "status": "review_required",
-            "reason": "DUPLICATE_EXPLICIT_CLASS_TARGET",
+            "reason": str(explicit.get("reason") or "DUPLICATE_EXPLICIT_CLASS_TARGET"),
             "target_resolution": "explicit_plan_target_ambiguous",
         }
 
@@ -2740,12 +3387,13 @@ def apply_inline_class(
     project_source_files: Sequence[dict[str, Any]] | None = None,
     current_file_name: str = "",
 ) -> Tuple[str, int, dict[str, Any]]:
-    """Inline a small, statically-contained Python helper class.
+    """Inline a Python class using the safest supported strategy.
 
-    Only module-local helper classes are accepted.  The class is converted to
-    module functions and every proven construction/call/field reference is
-    updated atomically.  Any dynamic, inherited, or unresolved usage returns
-    ``review_required`` before the source is changed.
+    Supported cases include owned-composition helpers, small module-local
+    helpers, empty/transparent local inheritance aliases, and prior-lineage
+    cleanup.  Distinct framework/configuration classes are intentionally
+    reported as not applicable, while genuinely ambiguous dynamic/inheritance
+    cases remain review-required.
     """
 
     def review(reason: str) -> Tuple[str, int, dict[str, Any]]:
@@ -2761,7 +3409,40 @@ def apply_inline_class(
     )
     if resolution.get("status") != "success":
         return review(str(resolution.get("reason") or "INLINE_CLASS_TARGET_NOT_FOUND"))
-    class_to_inline = str(resolution["class_to_inline"])
+    from . import python_inline_class
+
+    strategy = python_inline_class.select_python_inline_class_strategy(
+        source_code,
+        class_to_inline=str(resolution["class_to_inline"]),
+        project_source_files=project_source_files or [],
+        current_file_name=current_file_name,
+    )
+    if strategy.get("status") != "success":
+        return source_code, 0, {
+            "status": str(strategy.get("status") or "review_required"),
+            "reason": str(strategy.get("reason") or "INLINE_CLASS_REVIEW_REQUIRED"),
+            "class_to_inline": str(resolution["class_to_inline"]),
+            "qualified_class_name": str(strategy.get("qualified_class_name") or ""),
+            "strategy": str(strategy.get("strategy") or ""),
+            "class_model": dict(strategy.get("class_model") or {}),
+            "reference_files": list(strategy.get("reference_files") or []),
+        }
+
+    # Direct callers of python_transformers.apply_inline_class must receive the
+    # same inheritance support as the TransformationEngine.  Previously only
+    # the engine's owned-composition pre-pass could reach the inheritance
+    # collapse implementation, so direct calls silently fell back to the old
+    # module-function transformer.
+    if strategy.get("strategy") == "simple_inheritance_collapse":
+        return python_inline_class.apply_owned_inline_class(
+            source_code,
+            class_to_inline=str(strategy.get("class_name") or resolution["class_to_inline"]),
+            project_source_files=project_source_files or [],
+            current_file_name=current_file_name,
+            prior_transformations=prior_transformations or [],
+        )
+
+    class_to_inline = str(strategy.get("class_name") or resolution["class_to_inline"])
     if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", class_to_inline):
         return review("INVALID_CLASS_TARGET")
     try:
@@ -2776,9 +3457,6 @@ def apply_inline_class(
     if len(classes) != 1:
         return review("TARGET_CLASS_NOT_FOUND")
     class_node = classes[0]
-    if class_node.bases or class_node.keywords or class_node.decorator_list:
-        return review("INHERITANCE_OR_METACLASS_UNSUPPORTED")
-
     # A preceding Move Method can leave its old source class as only a
     # docstring/pass statement.  Resolve that current symbol state before the
     # normal Inline Class strategies: an empty class is not a missing target.
@@ -3454,20 +4132,43 @@ def _apply_inline_class_into_owner(
 def _inline_owner_constructor_field_parameters(
     constructor: ast.FunctionDef,
 ) -> tuple[list[str], str]:
+    """Return owner-constructor field mappings for Inline Class.
+
+    A constructor containing only a docstring and/or ``pass`` is a valid
+    stateless constructor.  Older logic required at least one argument after
+    ``self`` and treated ``pass`` as executable state, which incorrectly
+    rejected harmless lazy classes such as ``Main`` and ``Database``.
+    """
+
     if (
         constructor.decorator_list
         or constructor.args.posonlyargs
         or constructor.args.vararg
         or constructor.args.kwonlyargs
-        or len(constructor.args.args) < 2
+        or len(constructor.args.args) < 1
         or constructor.args.args[0].arg != "self"
     ):
         return [], "CONSTRUCTOR_SIGNATURE_UNSUPPORTED"
+
     parameters = [argument.arg for argument in constructor.args.args[1:]]
     fields: list[str] = []
     body = list(constructor.body)
-    if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant) and isinstance(body[0].value.value, str):
+
+    if (
+        body
+        and isinstance(body[0], ast.Expr)
+        and isinstance(body[0].value, ast.Constant)
+        and isinstance(body[0].value.value, str)
+    ):
         body = body[1:]
+
+    # ``pass`` carries no state and no side effect.  Ignore it when deciding
+    # whether the constructor is safe to inline.
+    body = [statement for statement in body if not isinstance(statement, ast.Pass)]
+
+    if not parameters and not body:
+        return [], ""
+
     for statement in body:
         if not (
             isinstance(statement, ast.Assign)
@@ -3480,6 +4181,7 @@ def _inline_owner_constructor_field_parameters(
         ):
             return [], "CONSTRUCTOR_STATE_UNSUPPORTED"
         fields.append(statement.targets[0].attr)
+
     if len(fields) != len(parameters) or len(set(fields)) != len(fields):
         return [], "CONSTRUCTOR_FIELD_MAPPING_UNSUPPORTED"
     return fields, ""
@@ -3595,6 +4297,13 @@ def _render_inlined_owner_method(
 def _inline_class_constructor_fields(
     constructor: ast.FunctionDef | None,
 ) -> tuple[dict[str, str], str]:
+    """Extract safe literal constructor state for module-function Inline Class.
+
+    ``__init__(self): pass`` is intentionally treated as an empty/stateless
+    constructor.  Complex statements, calls, control flow, or non-literal
+    field values remain review-required through the existing error codes.
+    """
+
     if constructor is None:
         return {}, ""
     if (
@@ -3606,10 +4315,25 @@ def _inline_class_constructor_fields(
         or constructor.args.args[0].arg != "self"
     ):
         return {}, "CONSTRUCTOR_SIGNATURE_UNSUPPORTED"
+
     fields: dict[str, str] = {}
     body = list(constructor.body)
-    if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant) and isinstance(body[0].value.value, str):
+
+    if (
+        body
+        and isinstance(body[0], ast.Expr)
+        and isinstance(body[0].value, ast.Constant)
+        and isinstance(body[0].value.value, str)
+    ):
         body = body[1:]
+
+    # ``pass`` is syntactic filler only; it does not represent constructor
+    # state and must not cause CONSTRUCTOR_STATE_UNSUPPORTED.
+    body = [statement for statement in body if not isinstance(statement, ast.Pass)]
+
+    if not body:
+        return {}, ""
+
     for statement in body:
         if not (
             isinstance(statement, ast.Assign)
@@ -3970,6 +4694,424 @@ def resolve_dead_code_target(
                 include_attributes=False,
             )
     return "", ""
+
+
+def analyze_python_dead_code_target(
+    source_code: str,
+    *,
+    method_name: str = "",
+    class_name: Optional[str] = None,
+    source_line: Optional[int] = None,
+    dead_code_kind: str = "",
+    target_statement_fingerprint: str = "",
+    project_source_files: Sequence[Any] | None = None,
+    current_file_name: str = "",
+) -> dict[str, Any]:
+    """Prove whether one Python dead-code target is safe to remove.
+
+    This is deliberately conservative.  A requested callable is removable only
+    when its identity is unique and no repository AST indicates a reference,
+    export, framework hook, inheritance dependency, or dynamic lookup.
+    Statement-level targets are accepted only when their deadness is proven by
+    local control flow or an unused literal assignment.
+    """
+    try:
+        tree = ast.parse(source_code)
+    except SyntaxError:
+        return {"status": "REVIEW_REQUIRED", "reason": "SOURCE_PARSE_FAILED"}
+
+    anchored_kinds = {
+        "unused_callable",
+        "constant_false_branch",
+        "unreachable_after_terminator",
+        "unused_literal_assignment",
+    }
+    if (
+        dead_code_kind in anchored_kinds - {"unused_callable"}
+        and target_statement_fingerprint
+    ):
+        return {
+            "status": "SAFE_TO_REMOVE",
+            "target_kind": dead_code_kind,
+            "target_fingerprint": target_statement_fingerprint,
+            "deadness_evidence": [f"accepted_ast_anchor:{dead_code_kind}"],
+        }
+
+    kind, fingerprint = resolve_dead_code_target(
+        source_code,
+        method_name=method_name,
+        class_name=class_name,
+        source_line=source_line,
+    )
+    if kind in {
+        "constant_false_branch",
+        "unreachable_after_terminator",
+        "unused_literal_assignment",
+    }:
+        return {
+            "status": "SAFE_TO_REMOVE",
+            "target_kind": kind,
+            "target_fingerprint": fingerprint,
+            "deadness_evidence": [f"ast_proven_{kind}"],
+        }
+    if kind == "dynamic_callable":
+        return {
+            "status": "REVIEW_REQUIRED",
+            "target_kind": kind,
+            "target_fingerprint": fingerprint,
+            "reason": "DYNAMIC_REFERENCE_DETECTED",
+        }
+    if kind == "live_callable":
+        return {
+            "status": "NOT_DEAD",
+            "target_kind": kind,
+            "target_fingerprint": fingerprint,
+            "reason": "LOCAL_REFERENCE_DETECTED",
+        }
+    if not method_name and source_line is not None:
+        # A line-only plan action must not expand into the enclosing function
+        # after a prior action shifted source lines.  An internal AST anchor can
+        # relocate a proven statement later; without one this action is stale.
+        return {"status": "NOT_APPLICABLE", "reason": "STALE_LINE_TARGET"}
+
+    if not method_name and class_name:
+        classes = [
+            node for node in tree.body
+            if isinstance(node, ast.ClassDef) and node.name == class_name
+        ]
+        if len(classes) != 1:
+            return {"status": "NOT_APPLICABLE", "reason": "CLASS_TARGET_NOT_FOUND"}
+        target_class = classes[0]
+        target_fingerprint = ast.dump(target_class, include_attributes=False)
+        if target_class.decorator_list:
+            return {
+                "status": "REVIEW_REQUIRED",
+                "target_kind": "unused_class",
+                "target_fingerprint": target_fingerprint,
+                "reason": "DECORATOR_OR_FRAMEWORK_HOOK",
+            }
+        repository = _python_dead_code_repository_sources(
+            source_code=source_code,
+            project_source_files=project_source_files,
+            current_file_name=current_file_name,
+        )
+        references: list[str] = []
+        uncertain: list[str] = []
+        for file_name, candidate_source in repository:
+            try:
+                candidate_tree = ast.parse(candidate_source)
+            except SyntaxError:
+                uncertain.append(f"unparseable_repository_file:{file_name}")
+                continue
+            candidate_parents = {
+                child: parent
+                for parent in ast.walk(candidate_tree)
+                for child in ast.iter_child_nodes(parent)
+            }
+            class_in_tree = next(
+                (
+                    node for node in ast.walk(candidate_tree)
+                    if isinstance(node, ast.ClassDef)
+                    and ast.dump(node, include_attributes=False) == target_fingerprint
+                ),
+                None,
+            )
+            for node in ast.walk(candidate_tree):
+                if class_in_tree is not None and _python_ast_descends_from(
+                    node, class_in_tree, candidate_parents
+                ):
+                    continue
+                if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load) and node.id == class_name:
+                    references.append(f"class_reference:{file_name}:{getattr(node, 'lineno', 0)}")
+                elif isinstance(node, ast.Attribute) and node.attr == class_name:
+                    references.append(f"class_attribute_reference:{file_name}:{getattr(node, 'lineno', 0)}")
+                elif isinstance(node, ast.ImportFrom) and any(
+                    alias.name == class_name or alias.asname == class_name for alias in node.names
+                ):
+                    references.append(f"class_import_reference:{file_name}:{getattr(node, 'lineno', 0)}")
+                elif _python_dead_code_export_contains(node, class_name):
+                    references.append(f"class_export_reference:{file_name}:{getattr(node, 'lineno', 0)}")
+                elif _python_dead_code_dynamic_lookup(node, class_name):
+                    uncertain.append(f"dynamic_class_reference:{file_name}:{getattr(node, 'lineno', 0)}")
+                elif isinstance(node, ast.ClassDef) and any(
+                    isinstance(base, ast.Name) and base.id == class_name
+                    or isinstance(base, ast.Attribute) and base.attr == class_name
+                    for base in node.bases
+                ):
+                    references.append(f"inheritance_reference:{file_name}:{getattr(node, 'lineno', 0)}")
+        if references:
+            return {
+                "status": "NOT_DEAD", "target_kind": "unused_class",
+                "target_fingerprint": target_fingerprint,
+                "reason": "REPOSITORY_REFERENCE_DETECTED", "deadness_evidence": references,
+            }
+        if uncertain:
+            return {
+                "status": "REVIEW_REQUIRED", "target_kind": "unused_class",
+                "target_fingerprint": target_fingerprint,
+                "reason": "REPOSITORY_DEADNESS_UNCERTAIN", "deadness_evidence": uncertain,
+            }
+        return {
+            "status": "SAFE_TO_REMOVE", "target_kind": "unused_class",
+            "target_fingerprint": target_fingerprint,
+            "deadness_evidence": ["repository_ast_no_class_references", "no_dynamic_or_export_risk"],
+        }
+
+    target = _resolve_python_dead_callable_identity(
+        tree,
+        method_name=method_name,
+        class_name=class_name,
+        source_line=source_line,
+    )
+    if target is None:
+        return {"status": "NOT_APPLICABLE", "reason": "TARGET_NOT_FOUND"}
+
+    parents = {
+        child: parent
+        for parent in ast.walk(tree)
+        for child in ast.iter_child_nodes(parent)
+    }
+    owner = _python_callable_class_name(target, parents) or ""
+    if target.decorator_list or target.name.startswith(("test_", "pytest_")) or (
+        target.name.startswith("__") and target.name.endswith("__")
+    ):
+        return {
+            "status": "REVIEW_REQUIRED",
+            "target_kind": "callable",
+            "target_fingerprint": ast.dump(target, include_attributes=False),
+            "reason": "DECORATOR_OR_FRAMEWORK_HOOK",
+        }
+    if not owner and target.name.lower() in {"main", "app", "application", "cli", "setup", "teardown"}:
+        return {
+            "status": "REVIEW_REQUIRED",
+            "target_kind": "callable",
+            "target_fingerprint": ast.dump(target, include_attributes=False),
+            "reason": "ENTRY_POINT_OR_FRAMEWORK_HOOK",
+        }
+
+    repository = _python_dead_code_repository_sources(
+        source_code=source_code,
+        project_source_files=project_source_files,
+        current_file_name=current_file_name,
+    )
+    reference_evidence: list[str] = []
+    uncertain_evidence: list[str] = []
+    target_fingerprint = ast.dump(target, include_attributes=False)
+    for file_name, candidate_source in repository:
+        try:
+            candidate_tree = ast.parse(candidate_source)
+        except SyntaxError:
+            uncertain_evidence.append(f"unparseable_repository_file:{file_name}")
+            continue
+        candidate_parents = {
+            child: parent
+            for parent in ast.walk(candidate_tree)
+            for child in ast.iter_child_nodes(parent)
+        }
+        target_in_this_tree = next(
+            (
+                node for node in ast.walk(candidate_tree)
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and ast.dump(node, include_attributes=False) == target_fingerprint
+            ),
+            None,
+        )
+        for node in ast.walk(candidate_tree):
+            if target_in_this_tree is not None and _python_ast_descends_from(
+                node, target_in_this_tree, candidate_parents
+            ):
+                continue
+            if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load) and node.id == target.name:
+                reference_evidence.append(f"direct_reference:{file_name}:{getattr(node, 'lineno', 0)}")
+            elif isinstance(node, ast.Attribute) and node.attr == target.name:
+                reference_evidence.append(f"attribute_reference:{file_name}:{getattr(node, 'lineno', 0)}")
+            elif isinstance(node, ast.ImportFrom) and any(
+                alias.name == target.name or alias.asname == target.name
+                for alias in node.names
+            ):
+                reference_evidence.append(f"import_reference:{file_name}:{getattr(node, 'lineno', 0)}")
+            elif _python_dead_code_export_contains(node, target.name):
+                reference_evidence.append(f"export_reference:{file_name}:{getattr(node, 'lineno', 0)}")
+            elif _python_dead_code_dynamic_lookup(node, target.name):
+                uncertain_evidence.append(f"dynamic_reference:{file_name}:{getattr(node, 'lineno', 0)}")
+
+        if owner and _python_dead_code_has_inheritance_risk(candidate_tree, owner, target.name):
+            uncertain_evidence.append(f"inheritance_or_override:{file_name}")
+        if owner and any(
+            isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == owner
+            for node in ast.walk(candidate_tree)
+        ):
+            # An instance can invoke the method dynamically, so exact method
+            # reachability cannot be proven from the imported snapshot.
+            uncertain_evidence.append(f"class_instantiation:{file_name}")
+
+    if reference_evidence:
+        return {
+            "status": "NOT_DEAD",
+            "target_kind": "unused_callable",
+            "target_role": "method" if owner else "function",
+            "target_fingerprint": target_fingerprint,
+            "owner": owner,
+            "reason": "REPOSITORY_REFERENCE_DETECTED",
+            "deadness_evidence": reference_evidence,
+        }
+    if uncertain_evidence:
+        return {
+            "status": "REVIEW_REQUIRED",
+            "target_kind": "unused_callable",
+            "target_role": "method" if owner else "function",
+            "target_fingerprint": target_fingerprint,
+            "owner": owner,
+            "reason": "REPOSITORY_DEADNESS_UNCERTAIN",
+            "deadness_evidence": uncertain_evidence,
+        }
+    return {
+        "status": "SAFE_TO_REMOVE",
+        "target_kind": "unused_callable",
+        "target_role": "method" if owner else "function",
+        "target_fingerprint": target_fingerprint,
+        "owner": owner,
+        "deadness_evidence": ["repository_ast_no_references", "no_dynamic_or_export_risk"],
+    }
+
+
+def _python_dead_code_repository_sources(
+    *,
+    source_code: str,
+    project_source_files: Sequence[Any] | None,
+    current_file_name: str,
+) -> list[tuple[str, str]]:
+    sources: list[tuple[str, str]] = [(current_file_name or "<current>", source_code)]
+    normalized_current = str(current_file_name or "").replace("\\", "/").lower()
+    for item in project_source_files or []:
+        if isinstance(item, dict):
+            file_name = str(item.get("file_name") or item.get("name") or item.get("path") or "")
+            code = str(item.get("source_code") or item.get("code") or "")
+        else:
+            file_name = str(getattr(item, "file_name", "") or getattr(item, "name", ""))
+            code = str(getattr(item, "source_code", "") or getattr(item, "code", ""))
+        normalized_name = file_name.replace("\\", "/").lower()
+        if not code or (normalized_current and normalized_name == normalized_current):
+            continue
+        if file_name.lower().endswith(".py"):
+            sources.append((file_name, code))
+    return sources
+
+
+def resolve_applied_dead_code_identity(
+    before_code: str,
+    after_code: str,
+    *,
+    dead_code_kind: str,
+) -> str:
+    """Return the exact pre-action AST statement removed by one safe action."""
+    try:
+        before_tree = ast.parse(before_code)
+        after_tree = ast.parse(after_code)
+    except SyntaxError:
+        return ""
+    after_dumps = {
+        ast.dump(node, include_attributes=False)
+        for node in ast.walk(after_tree)
+        if isinstance(node, ast.stmt)
+    }
+    if dead_code_kind == "unused_callable":
+        candidates = [
+            node for node in ast.walk(before_tree)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and ast.dump(node, include_attributes=False) not in after_dumps
+        ]
+    elif dead_code_kind == "unused_class":
+        candidates = [
+            node for node in ast.walk(before_tree)
+            if isinstance(node, ast.ClassDef)
+            and ast.dump(node, include_attributes=False) not in after_dumps
+        ]
+    elif dead_code_kind == "constant_false_branch":
+        candidates = [
+            node for node in ast.walk(before_tree)
+            if isinstance(node, ast.If)
+            and not node.orelse
+            and _static_python_boolean(node.test) is False
+            and ast.dump(node, include_attributes=False) not in after_dumps
+        ]
+    elif dead_code_kind == "unreachable_after_terminator":
+        candidates = [
+            node for node in _unreachable_python_statements(before_tree)
+            if ast.dump(node, include_attributes=False) not in after_dumps
+        ]
+    elif dead_code_kind == "unused_literal_assignment":
+        candidates = [
+            node for node in ast.walk(before_tree)
+            if isinstance(node, (ast.Assign, ast.AnnAssign))
+            and ast.dump(node, include_attributes=False) not in after_dumps
+        ]
+    else:
+        candidates = []
+    if len(candidates) != 1:
+        return ""
+    return ast.dump(candidates[0], include_attributes=False)
+
+
+def _python_ast_descends_from(
+    node: ast.AST,
+    ancestor: ast.AST,
+    parents: dict[ast.AST, ast.AST],
+) -> bool:
+    current: ast.AST | None = node
+    while current is not None:
+        if current is ancestor:
+            return True
+        current = parents.get(current)
+    return False
+
+
+def _python_dead_code_export_contains(node: ast.AST, target_name: str) -> bool:
+    if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+        return False
+    targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+    if not any(isinstance(target, ast.Name) and target.id == "__all__" for target in targets):
+        return False
+    value = node.value
+    if value is None:
+        return False
+    return any(
+        isinstance(item, ast.Constant) and item.value == target_name
+        for item in ast.walk(value)
+    )
+
+
+def _python_dead_code_dynamic_lookup(node: ast.AST, target_name: str) -> bool:
+    if not isinstance(node, ast.Call):
+        return False
+    name = node.func.id if isinstance(node.func, ast.Name) else ""
+    if name not in {"getattr", "setattr", "hasattr", "delattr", "globals", "locals", "vars", "eval", "exec", "__import__", "import_module"}:
+        return False
+    return any(isinstance(arg, ast.Constant) and arg.value == target_name for arg in ast.walk(node)) or name in {
+        "globals", "locals", "vars", "eval", "exec"
+    }
+
+
+def _python_dead_code_has_inheritance_risk(
+    tree: ast.Module,
+    owner: str,
+    method_name: str,
+) -> bool:
+    for node in (item for item in ast.walk(tree) if isinstance(item, ast.ClassDef)):
+        if node.name == owner:
+            continue
+        inherited = any(
+            isinstance(base, ast.Name) and base.id == owner
+            or isinstance(base, ast.Attribute) and base.attr == owner
+            for base in node.bases
+        )
+        overrides = any(
+            isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)) and item.name == method_name
+            for item in node.body
+        )
+        if inherited or overrides:
+            return True
+    return False
 
 
 def resolve_dead_code_callable_name(

@@ -513,6 +513,109 @@ def test_c_introduce_constant_uses_define_for_magic_number():
     assert "CONSTANT_NUMBER_0_12" in transformed
 
 
+def test_c_introduce_constant_ignores_character_literal_case_label():
+    source = "switch (option) { case '3': return 3; }\n"
+    transformed, count = c_transformers.apply_extract_constant(
+        source, 3, "THRESHOLD_LIMIT_3"
+    )
+
+    assert count == 1
+    assert "case '3':" in transformed
+    assert "return THRESHOLD_LIMIT_3;" in transformed
+
+
+def test_c_introduce_constant_does_not_replace_number_inside_string():
+    source = 'const char *value = "3";\n'
+    transformed, count = c_transformers.apply_extract_constant(
+        source, 3, "THRESHOLD_LIMIT_3"
+    )
+
+    assert count == 0
+    assert transformed == source
+    assert c_transformers.analyze_extract_constant_target(source, 3)["reason"] == (
+        "TARGET_IN_STRING_LITERAL"
+    )
+
+
+def test_c_introduce_constant_does_not_replace_format_string_or_comment_text():
+    source = '// 3\nconst char *path = "candidate%d.txt";\n'
+    transformed, count = c_transformers.apply_extract_constant(
+        source, 3, "THRESHOLD_LIMIT_3"
+    )
+
+    assert count == 0
+    assert transformed == source
+
+
+def test_c_introduce_constant_skips_unsupported_numeric_contexts():
+    for source in ("enum Status { READY = 3 };\n", "case 3:\n"):
+        transformed, count = c_transformers.apply_extract_constant(
+            source, 3, "THRESHOLD_LIMIT_3"
+        )
+        assert count == 0
+        assert transformed == source
+        assert c_transformers.analyze_extract_constant_target(source, 3)["reason"] == (
+            "TARGET_CONTEXT_UNSUPPORTED"
+        )
+
+
+def test_c_introduce_constant_skips_function_parameter_array_bound():
+    source = "int extractYear(char userID[15]) { return userID[0]; }\n"
+    transformed, count = c_transformers.apply_extract_constant(
+        source, 15, "THRESHOLD_LIMIT_15"
+    )
+
+    assert count == 0
+    assert transformed == source
+    assert c_transformers.analyze_extract_constant_target(source, 15)["reason"] == (
+        "TARGET_IN_C_TYPE_OR_SIGNATURE_CONTEXT"
+    )
+
+
+def test_c_introduce_constant_skips_local_array_declaration_bound():
+    source = "void build_name(void) { char filename[20]; filename[0] = '\\0'; }\n"
+    transformed, count = c_transformers.apply_extract_constant(
+        source, 20, "THRESHOLD_LIMIT_20"
+    )
+
+    assert count == 0
+    assert transformed == source
+    assert c_transformers.analyze_extract_constant_target(source, 20)["reason"] == (
+        "TARGET_IN_C_TYPE_OR_SIGNATURE_CONTEXT"
+    )
+
+
+def test_c_introduce_constant_replaces_only_code_when_code_and_string_share_value():
+    source = 'const char *label = "3";\nint limit = 3;\n'
+    transformed, count = c_transformers.apply_extract_constant(
+        source, 3, "THRESHOLD_LIMIT_3"
+    )
+
+    assert count == 1
+    assert 'const char *label = "3";' in transformed
+    assert "int limit = THRESHOLD_LIMIT_3;" in transformed
+
+
+def test_c_introduce_constant_preserves_numeric_expression_context():
+    source = "int allowed(int x) { return x > 10; }\n"
+    transformed, count = c_transformers.apply_extract_constant(
+        source, 10, "THRESHOLD_LIMIT_10"
+    )
+
+    assert count == 1
+    assert "x > THRESHOLD_LIMIT_10" in transformed
+
+
+def test_c_introduce_constant_does_not_fallback_from_unsafe_char_target_line():
+    source = "switch (option) {\n    case '3': return 0;\n}\nint value = 3;\n"
+    transformed, count = c_transformers.apply_extract_constant(
+        source, 3, "THRESHOLD_LIMIT_3", source_line=2
+    )
+
+    assert count == 0
+    assert transformed == source
+
+
 def test_c_extract_constant_normalizes_legacy_magic_name():
     source = "int size(void) { return 7; }\n"
     transformed, count = c_transformers.apply_extract_constant(source, 7, "MAGIC_NUMBER_7")

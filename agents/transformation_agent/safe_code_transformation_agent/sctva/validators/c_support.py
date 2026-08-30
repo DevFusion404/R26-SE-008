@@ -27,6 +27,11 @@ _C_FUNCTION_RE = re.compile(
 )
 _C_MACRO_RE = re.compile(r"(?m)^\s*#\s*define\s+([A-Za-z_][A-Za-z0-9_]*)\b(.*)$")
 _C_CONTROL_FLOW_RE = re.compile(r"\b(if|for|while|switch|case|default|goto)\b")
+_C_INTEGER_MACRO_RE = re.compile(
+    r"^(?P<sign>[+-]?)(?P<number>0[xX][0-9A-Fa-f]+|0[bB][01]+|0[0-7]*|[1-9][0-9]*)"
+    r"(?P<suffix>[uUlL]*)$"
+)
+_C_SIGNATURE_ARRAY_MACRO_RE = re.compile(r"\[\s*([A-Za-z_][A-Za-z0-9_]*)\s*\]")
 
 
 def _runtime_temp_root() -> Path:
@@ -74,6 +79,51 @@ def extract_c_macros(source_code: str) -> Dict[str, str]:
     return macros
 
 
+def _canonical_c_integer_macro_value(value: str) -> str | None:
+    """Return a canonical integer value for a simple, verified C macro."""
+
+    match = _C_INTEGER_MACRO_RE.fullmatch(value.strip())
+    if match is None:
+        return None
+
+    number = match.group("number")
+    if number.lower().startswith("0x"):
+        numeric_value = int(number, 16)
+    elif number.lower().startswith("0b"):
+        numeric_value = int(number, 2)
+    elif len(number) > 1 and number.startswith("0"):
+        numeric_value = int(number, 8)
+    else:
+        numeric_value = int(number, 10)
+    if match.group("sign") == "-":
+        numeric_value = -numeric_value
+    return str(numeric_value)
+
+
+def canonicalize_c_signature_array_bounds(
+    signature: str,
+    macros: Dict[str, str],
+) -> str:
+    """Expand only verified numeric macros in C function-array bounds.
+
+    This intentionally does not normalize arbitrary macro uses or other parts
+    of a signature.  It lets ``char id[15]`` compare equal to
+    ``char id[SIZE]`` only when the current source proves ``SIZE`` is exactly
+    the integer value ``15``.
+    """
+
+    verified_values = {
+        name: canonical
+        for name, value in macros.items()
+        if (canonical := _canonical_c_integer_macro_value(value)) is not None
+    }
+
+    return _C_SIGNATURE_ARRAY_MACRO_RE.sub(
+        lambda match: f"[{verified_values.get(match.group(1), match.group(1))}]",
+        signature,
+    )
+
+
 def summarize_c_source(source_code: str) -> Dict[str, Any]:
     source_code = source_code.lstrip("\ufeff")
     function_signatures = extract_c_function_signatures(source_code)
@@ -85,6 +135,10 @@ def summarize_c_source(source_code: str) -> Dict[str, Any]:
         "parse_success": True,
         "functions": {signature.split(":", 1)[0]: signature for signature in function_signatures},
         "function_signatures": function_signatures,
+        "canonical_function_signatures": [
+            canonicalize_c_signature_array_bounds(signature, macros)
+            for signature in function_signatures
+        ],
         "function_count": len(function_signatures),
         "macros": macros,
         "macro_count": len(macros),
@@ -248,6 +302,8 @@ def compare_c_static_summaries(
 
     original_signatures = dict(original_summary.get("functions", {}))
     transformed_signatures = dict(transformed_summary.get("functions", {}))
+    original_macros = original_summary.get("macros", {})
+    transformed_macros = transformed_summary.get("macros", {})
 
     normalized_expected_original = set()
     for name, signature in original_signatures.items():
@@ -260,9 +316,16 @@ def compare_c_static_summaries(
                 f"{name}:{parameter_object['object_name']} {parameter_object['parameter_name']}"
             )
         else:
-            normalized_expected_original.add(signature.replace(name, expected_name, 1))
+            normalized_expected_original.add(
+                canonicalize_c_signature_array_bounds(
+                    signature.replace(name, expected_name, 1),
+                    original_macros,
+                )
+            )
 
-    transformed_signature_set = set(transformed_summary.get("function_signatures", []))
+    transformed_signature_set = set(
+        transformed_summary.get("canonical_function_signatures", [])
+    )
 
     missing_functions = sorted(normalized_expected_original - transformed_signature_set)
     added_signatures: set[str] = set()
@@ -285,13 +348,14 @@ def compare_c_static_summaries(
                     "actual_signature": signature,
                 })
                 continue
-        added_signatures.add(signature)
+        added_signatures.add(
+            canonicalize_c_signature_array_bounds(signature, transformed_macros)
+        )
 
     unexpected_functions = sorted(
         transformed_signature_set - normalized_expected_original - added_signatures
     )
 
-    transformed_macros = transformed_summary.get("macros", {})
     missing_macros: List[Dict[str, Any]] = []
     for name, value in expected_macros.items():
         expected_value = _c_literal(value)
@@ -1117,6 +1181,7 @@ def _expected_failure_c(
 
 __all__ = [
     "compare_c_static_summaries",
+    "canonicalize_c_signature_array_bounds",
     "extract_c_function_signatures",
     "extract_c_macros",
     "infer_c_runtime_tests_from_source",

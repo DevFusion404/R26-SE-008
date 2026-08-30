@@ -125,12 +125,324 @@ def _should_skip_replacement(line: str, constant_name: str) -> bool:
     return False
 
 
+_C_NUMERIC_TOKEN_RE = re.compile(
+    r"(?:0[xX][0-9A-Fa-f]+|0[bB][01]+|(?:\d+\.\d*|\.\d+|\d+)"
+    r"(?:[eE][+-]?\d+)?)(?:[uUlLfF]*)"
+)
+
+
+def _inside_square_brackets(masked_source: str, index: int) -> bool:
+    """Return whether ``index`` is inside an array/indexing expression."""
+
+    depth = 0
+    for char in reversed(masked_source[:index]):
+        if char == "]":
+            depth += 1
+        elif char == "[":
+            if depth:
+                depth -= 1
+            else:
+                return True
+    return False
+
+
+_C_TYPE_DECLARATION_RE = re.compile(
+    r"\b(?:_Atomic|_Bool|auto|bool|char|const|double|enum|extern|float|"
+    r"int|long|register|restrict|short|signed|size_t|static|struct|"
+    r"typedef|union|unsigned|void|volatile)\b"
+)
+
+
+def _enclosing_square_bracket_start(masked_source: str, index: int) -> int | None:
+    """Return the opening bracket enclosing ``index``, when there is one."""
+
+    depth = 0
+    for position in range(index - 1, -1, -1):
+        char = masked_source[position]
+        if char == "]":
+            depth += 1
+        elif char == "[":
+            if depth:
+                depth -= 1
+            else:
+                return position
+    return None
+
+
+def _looks_like_c_type_declaration(
+    masked_source: str,
+    position: int,
+) -> bool:
+    """Conservatively identify a declaration fragment ending at ``position``."""
+
+    boundary = max(
+        masked_source.rfind(";", 0, position),
+        masked_source.rfind("{", 0, position),
+        masked_source.rfind("}", 0, position),
+    )
+    prefix = masked_source[boundary + 1 : position]
+
+    # An assignment before the bracket is an executable expression such as
+    # ``int value = values[15]`` rather than an array/type declaration.
+    if "=" in prefix:
+        return False
+    return bool(_C_TYPE_DECLARATION_RE.search(prefix))
+
+
+def _is_c_type_or_signature_context(masked_source: str, index: int) -> bool:
+    """Return whether a numeric token belongs to a declaration/type construct."""
+
+    bracket_start = _enclosing_square_bracket_start(masked_source, index)
+    if bracket_start is not None:
+        return _looks_like_c_type_declaration(masked_source, bracket_start)
+
+    return _looks_like_c_type_declaration(masked_source, index)
+
+
+def _c_numeric_context(
+    source_code: str,
+    masked_source: str,
+    start: int,
+    end: int,
+) -> str:
+    """Classify a numeric token before it is eligible for substitution."""
+
+    line_start = masked_source.rfind("\n", 0, start) + 1
+    line_end = masked_source.find("\n", end)
+    if line_end < 0:
+        line_end = len(masked_source)
+    line_prefix = masked_source[line_start:start]
+    line_suffix = masked_source[end:line_end]
+
+    # Preprocessor directives are a separate language and are intentionally
+    # excluded from this transformation.  This prevents replacements in macro
+    # definitions and continued macro lines.
+    if masked_source[line_start:line_end].lstrip().startswith("#"):
+        return "TARGET_CONTEXT_UNSUPPORTED"
+
+    # Case labels and enum values affect integral-language constructs rather
+    # than ordinary runtime expressions.  Leave them for a dedicated,
+    # compiler-validated refactoring if one is added later.
+    if re.search(r"(?:^|[;{}])\s*case\b", line_prefix) and re.search(
+        r":", line_suffix
+    ):
+        return "TARGET_CONTEXT_UNSUPPORTED"
+    last_open = masked_source.rfind("{", 0, start)
+    last_close = masked_source.rfind("}", 0, start)
+    enum_start = masked_source.rfind("enum", 0, start)
+    if enum_start > last_close and enum_start < last_open:
+        return "TARGET_CONTEXT_UNSUPPORTED"
+
+    # Function parameter bounds, local/struct arrays, typedefs, and other
+    # declaration-only type forms are deliberately out of scope.  Replacing
+    # them changes the textual signature and can confuse downstream tools even
+    # when a macro has an equivalent value.
+    if _inside_square_brackets(masked_source, start):
+        if _is_c_type_or_signature_context(masked_source, start):
+            return "TARGET_IN_C_TYPE_OR_SIGNATURE_CONTEXT"
+        return "TARGET_CONTEXT_UNSUPPORTED"
+
+    previous = start - 1
+    while previous >= line_start and masked_source[previous].isspace():
+        previous -= 1
+    following = end
+    while following < line_end and masked_source[following].isspace():
+        following += 1
+    if previous >= line_start and masked_source[previous] == ":":
+        if _is_c_type_or_signature_context(masked_source, start):
+            return "TARGET_IN_C_TYPE_OR_SIGNATURE_CONTEXT"
+        return "TARGET_CONTEXT_UNSUPPORTED"
+    if following < line_end and masked_source[following] == ":":
+        if _is_c_type_or_signature_context(masked_source, start):
+            return "TARGET_IN_C_TYPE_OR_SIGNATURE_CONTEXT"
+        return "TARGET_CONTEXT_UNSUPPORTED"
+
+    # A standalone token in executable C code is the only accepted context.
+    return ""
+
+
+def _ignored_c_context_for_literal(
+    source_code: str,
+    literal_text: str,
+    source_line: Optional[int] = None,
+) -> str:
+    """Find a matching value inside a char/string/comment for diagnostics."""
+
+    if not literal_text:
+        return ""
+    index = 0
+    state = "code"
+    token_start = 0
+    while index < len(source_code):
+        char = source_code[index]
+        nxt = source_code[index + 1] if index + 1 < len(source_code) else ""
+        if state == "code":
+            if char == "/" and nxt == "/":
+                state = "line_comment"
+                token_start = index + 2
+                index += 2
+                continue
+            if char == "/" and nxt == "*":
+                state = "block_comment"
+                token_start = index + 2
+                index += 2
+                continue
+            if char == '"':
+                state = "string"
+                token_start = index + 1
+                index += 1
+                continue
+            if char == "'":
+                state = "char"
+                token_start = index + 1
+                index += 1
+                continue
+            index += 1
+            continue
+
+        closing = (
+            (state == "string" and char == '"')
+            or (state == "char" and char == "'")
+        )
+        if closing:
+            token = source_code[token_start:index]
+            token_line = _line_for_c_index(source_code, token_start)
+            if (source_line is None or token_line == source_line) and re.search(
+                rf"(?<![A-Za-z0-9_]){re.escape(literal_text)}(?![A-Za-z0-9_])",
+                token,
+            ):
+                return (
+                    "TARGET_IN_CHAR_LITERAL"
+                    if state == "char"
+                    else "TARGET_IN_STRING_LITERAL"
+                )
+            state = "code"
+            index += 1
+            continue
+        if state in {"string", "char"} and char == "\\" and nxt:
+            index += 2
+            continue
+        if state == "line_comment" and char == "\n":
+            token = source_code[token_start:index]
+            token_line = _line_for_c_index(source_code, token_start)
+            if (source_line is None or token_line == source_line) and re.search(
+                rf"(?<![A-Za-z0-9_]){re.escape(literal_text)}(?![A-Za-z0-9_])",
+                token,
+            ):
+                return "TARGET_IN_COMMENT"
+            state = "code"
+        elif state == "block_comment" and char == "*" and nxt == "/":
+            token = source_code[token_start:index]
+            start_line = _line_for_c_index(source_code, token_start)
+            end_line = _line_for_c_index(source_code, index)
+            if (source_line is None or start_line <= source_line <= end_line) and re.search(
+                rf"(?<![A-Za-z0-9_]){re.escape(literal_text)}(?![A-Za-z0-9_])",
+                token,
+            ):
+                return "TARGET_IN_COMMENT"
+            state = "code"
+            index += 1
+        index += 1
+    if state == "line_comment":
+        token = source_code[token_start:]
+        token_line = _line_for_c_index(source_code, token_start)
+        if (source_line is None or token_line == source_line) and re.search(
+            rf"(?<![A-Za-z0-9_]){re.escape(literal_text)}(?![A-Za-z0-9_])",
+            token,
+        ):
+            return "TARGET_IN_COMMENT"
+    elif state == "block_comment":
+        token = source_code[token_start:]
+        start_line = _line_for_c_index(source_code, token_start)
+        end_line = _line_for_c_index(source_code, len(source_code))
+        if (source_line is None or start_line <= source_line <= end_line) and re.search(
+            rf"(?<![A-Za-z0-9_]){re.escape(literal_text)}(?![A-Za-z0-9_])",
+            token,
+        ):
+            return "TARGET_IN_COMMENT"
+    return ""
+
+
+def _find_c_numeric_literals(
+    source_code: str,
+    literal_value: Any,
+    source_line: Optional[int] = None,
+) -> tuple[list[tuple[int, int]], str]:
+    """Return safe numeric token spans and a conservative rejection reason."""
+
+    if isinstance(literal_value, bool) or not isinstance(literal_value, (int, float)):
+        return [], "TARGET_NOT_C_NUMERIC_LITERAL"
+
+    literal_text = _to_c_literal(literal_value)
+    magnitude = literal_text
+    sign = ""
+    if magnitude[:1] in {"+", "-"}:
+        sign, magnitude = magnitude[0], magnitude[1:]
+    masked = _mask_c_non_code(source_code)
+    spans: list[tuple[int, int]] = []
+    rejection_reason = ""
+
+    for match in _C_NUMERIC_TOKEN_RE.finditer(masked):
+        start, end = match.span()
+        token = source_code[start:end]
+        if token != magnitude:
+            continue
+        if sign:
+            sign_index = start - 1
+            while sign_index >= 0 and masked[sign_index].isspace():
+                sign_index -= 1
+            if sign_index < 0 or masked[sign_index] != sign:
+                continue
+            start = sign_index
+        before = masked[start - 1] if start > 0 else ""
+        after = masked[end] if end < len(masked) else ""
+        if before.isalnum() or before == "_" or after.isalnum() or after == "_":
+            continue
+        line = _line_for_c_index(source_code, start)
+        if source_line is not None and line != source_line:
+            continue
+        context = _c_numeric_context(source_code, masked, start, end)
+        if context:
+            rejection_reason = rejection_reason or context
+            continue
+        spans.append((start, end))
+
+    if spans:
+        return spans, ""
+    ignored = _ignored_c_context_for_literal(source_code, magnitude, source_line)
+    return [], ignored or rejection_reason or "TARGET_NOT_C_NUMERIC_LITERAL"
+
+
+def analyze_extract_constant_target(
+    source_code: str,
+    literal_value: Any,
+    source_line: Optional[int] = None,
+) -> dict[str, Any]:
+    """Expose safe C literal classification for engine/report diagnostics."""
+
+    spans, reason = _find_c_numeric_literals(source_code, literal_value, source_line)
+    return {
+        "eligible": bool(spans),
+        "candidate_count": len(spans),
+        "reason": reason if not spans else "C_NUMERIC_EXPRESSION",
+    }
+
+
 def _replace_literal(
     source_code: str,
     literal_value: Any,
     constant_name: str,
     source_line: Optional[int] = None,
 ) -> Tuple[str, int]:
+    if isinstance(literal_value, (int, float)) and not isinstance(literal_value, bool):
+        spans, _ = _find_c_numeric_literals(source_code, literal_value, source_line)
+        if not spans:
+            return source_code, 0
+        # Apply from right to left so token offsets remain stable.
+        for start, end in reversed(spans):
+            source_code = source_code[:start] + constant_name + source_code[end:]
+        return source_code, len(spans)
+
     pattern = _literal_pattern(literal_value)
     lines = source_code.splitlines(keepends=True)
     replacements = 0
@@ -278,12 +590,22 @@ def apply_extract_constant(
         source_line,
     )
     if replacements == 0 and source_line is not None:
-        transformed, replacements = _replace_literal(
+        # Do not fall back to another occurrence when the requested line
+        # contains an unsafe character/string/comment/context target.  The
+        # legacy fallback is retained only when the line simply missed the
+        # literal entirely.
+        context = analyze_extract_constant_target(
             source_code,
             literal_value,
-            preferred_name,
-            None,
+            source_line,
         )
+        if context["reason"] == "TARGET_NOT_C_NUMERIC_LITERAL":
+            transformed, replacements = _replace_literal(
+                source_code,
+                literal_value,
+                preferred_name,
+                None,
+            )
     if replacements > 0:
         transformed = _insert_define(transformed, preferred_name, literal_value)
     return transformed, replacements
@@ -2132,6 +2454,7 @@ def apply_fault_injection(source_code: str, original_logic: str, faulty_logic: s
 
 __all__ = [
     "apply_extract_constant",
+    "analyze_extract_constant_target",
     "apply_fault_injection",
     "apply_inject_syntax_error",
     "apply_extract_method",
