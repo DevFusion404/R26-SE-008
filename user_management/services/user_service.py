@@ -130,19 +130,20 @@ def login(email: str, password: str) -> dict:
         session = auth_resp.session
 
         # Fetch role and profile details from database profiles table
+        role = _extract_role_from_profile(user.id)
         try:
             profile_resp = supabase.table(PROFILES_TABLE).select("*").eq("id", user.id).single().execute()
             profile = profile_resp.data if profile_resp.data else {
                 "id": user.id,
                 "email": user.email,
-                "full_name": user.user_metadata.get("full_name", "User"),
+                "full_name": (user.user_metadata or {}).get("full_name", "User"),
                 "role": role,
             }
         except Exception:
             profile = {
                 "id": user.id,
                 "email": user.email,
-                "full_name": user.user_metadata.get("full_name", "User"),
+                "full_name": (user.user_metadata or {}).get("full_name", "User"),
                 "role": role,
             }
 
@@ -310,26 +311,8 @@ def verify_token(token: str) -> dict:
     Decodes a Supabase JWT and extracts user_id and role.
     Returns: {success, data: {user_id, email, role}} or {success, error}
     """
-    try:
-        payload = jwt.decode(
-            token,
-            JWT_SECRET,
-            algorithms=["HS256"],
-            options={"verify_aud": False},
-        )
-        user_id = payload.get("sub")
-        email = payload.get("email", "")
-        user_meta = payload.get("user_metadata", {}) or {}
-        app_meta = payload.get("app_metadata", {}) or {}
-        role = user_meta.get("role") or app_meta.get("role") or "user"
-
-        if not user_id:
-            return _err("Token missing user id.")
-
-        return _ok({"user_id": user_id, "email": email, "role": role})
-    except jwt.ExpiredSignatureError:
-        return _err("Token has expired.")
-    except jwt.InvalidTokenError as exc:
-        return _err(f"Invalid token: {exc}")
-    except Exception as exc:
-        return _err(f"Token error: {exc}")
+    from middleware.auth_middleware import verify_supabase_token
+    res = verify_supabase_token(token)
+    if res["success"]:
+        return _ok({"user_id": res["user_id"], "email": res["email"], "role": res["role"]})
+    return _err(res.get("error", "Invalid token"))

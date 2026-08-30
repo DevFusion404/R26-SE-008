@@ -3,9 +3,50 @@
  * -------------------
  * Frontend Service for CUQA Agent (Code Understanding & Quality Assessment).
  * Encapsulates all backend API calls to the CUQA FastAPI server (port 8080).
+ * Automatically includes session isolation headers (X-Session-ID / JWT) to prevent
+ * multi-user workspace state collisions in cloud environments.
  */
 
 import API_CONFIG, { buildApiUrl } from '../config/api.config';
+
+/**
+ * Returns the current active user ID or persistent guest session ID.
+ * @returns {string}
+ */
+export function getSessionId() {
+  const userStr = localStorage.getItem('current_user_profile');
+  if (userStr) {
+    try {
+      const user = JSON.parse(userStr);
+      if (user?.id) return `user_${user.id}`;
+    } catch {
+      // ignore JSON parse error
+    }
+  }
+  let guestId = localStorage.getItem('refactoriq_session_id');
+  if (!guestId) {
+    guestId = 'session_' + Math.random().toString(36).substring(2, 11) + '_' + Date.now();
+    localStorage.setItem('refactoriq_session_id', guestId);
+  }
+  return guestId;
+}
+
+/**
+ * Generates common headers including X-Session-ID and Authorization token.
+ * @param {object} [extraHeaders={}]
+ * @returns {object}
+ */
+export function getSessionHeaders(extraHeaders = {}) {
+  const token = localStorage.getItem('user_auth_token');
+  const headers = {
+    'X-Session-ID': getSessionId(),
+    ...extraHeaders,
+  };
+  if (token) {
+    headers['Authorization'] = `Bearer ${token}`;
+  }
+  return headers;
+}
 
 class CUQAAgentService {
   /**
@@ -28,6 +69,7 @@ class CUQAAgentService {
     const url = this.getEndpointUrl('health');
     const response = await fetch(url, {
       method: 'GET',
+      headers: getSessionHeaders(),
     });
     if (!response.ok) {
       throw new Error(`Health check failed with status ${response.status}`);
@@ -48,6 +90,7 @@ class CUQAAgentService {
 
     const response = await fetch(url, {
       method: 'POST',
+      headers: getSessionHeaders(), // Multi-tenant session isolation
       body: formData,
     });
 
@@ -70,7 +113,7 @@ class CUQAAgentService {
     const url = this.getEndpointUrl('githubRepo');
     const response = await fetch(url, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: getSessionHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify({ url: repoUrl.trim() }),
     });
 
@@ -89,6 +132,7 @@ class CUQAAgentService {
     const url = this.getEndpointUrl('projectStructure');
     const response = await fetch(url, {
       method: 'GET',
+      headers: getSessionHeaders(),
     });
 
     const data = await response.json();
@@ -108,7 +152,7 @@ class CUQAAgentService {
     const url = this.getEndpointUrl('parseAst');
     const response = await fetch(url, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: getSessionHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify({ file_path: filePath }),
     });
 
@@ -130,7 +174,7 @@ class CUQAAgentService {
 
     const response = await fetch(url, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: getSessionHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify(body),
     });
 
@@ -149,6 +193,7 @@ class CUQAAgentService {
     const url = this.getEndpointUrl('files');
     const response = await fetch(url, {
       method: 'GET',
+      headers: getSessionHeaders(),
     });
 
     const data = await response.json();
@@ -167,6 +212,7 @@ class CUQAAgentService {
     const url = this.getEndpointUrl('repositoryOverview');
     const response = await fetch(url, {
       method: 'GET',
+      headers: getSessionHeaders(),
     });
 
     const data = await response.json();
@@ -186,7 +232,7 @@ class CUQAAgentService {
       `${this.getEndpointUrl('health').replace('/api/health', '')}/api/update-workspace`;
     const response = await fetch(url, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: getSessionHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify({ files }),
     });
 
