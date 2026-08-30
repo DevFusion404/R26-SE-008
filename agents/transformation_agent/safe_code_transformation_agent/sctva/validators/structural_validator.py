@@ -21,6 +21,10 @@ from ..constants import (
     ACTION_INLINE_PYTHON_CLASS,
     ACTION_MOVE_PYTHON_METHOD,
     ACTION_REPLACE_CONDITIONAL_WITH_POLYMORPHISM,
+    ACTION_REPLACE_NESTED_CONDITIONAL_WITH_GUARD_CLAUSES,
+    ACTION_REPLACE_CONDITIONAL_WITH_GUARD_CLAUSES,
+    ACTION_SIMPLIFY_CONDITIONAL_LOOP,
+    ACTION_GUARD_CLAUSES,
     ACTION_NARROW_EXCEPTION_HANDLER,
     ACTION_RENAME_METHOD,
     ACTION_REMOVE_DEAD_CODE,
@@ -267,6 +271,21 @@ class StructuralValidator:
             if language == "python"
             and action.action_type == ACTION_REPLACE_CONDITIONAL_WITH_POLYMORPHISM
         ]
+        guard_clause_checks = [
+            self._validate_c_guard_clauses_action(
+                original_code=original_code,
+                transformed_code=transformed_code,
+                action=action,
+            )
+            for action in actions or []
+            if language == "c"
+            and action.action_type in {
+                ACTION_REPLACE_NESTED_CONDITIONAL_WITH_GUARD_CLAUSES,
+                ACTION_REPLACE_CONDITIONAL_WITH_GUARD_CLAUSES,
+                ACTION_SIMPLIFY_CONDITIONAL_LOOP,
+                ACTION_GUARD_CLAUSES,
+            }
+        ]
         specific_passed = all(
             item.get("passed")
             for item in [
@@ -280,6 +299,7 @@ class StructuralValidator:
                 *hide_delegate_checks,
                 *rename_method_checks,
                 *polymorphism_checks,
+                *guard_clause_checks,
             ]
         )
         if (
@@ -291,6 +311,7 @@ class StructuralValidator:
             or (inline_class_checks and all(item.get("passed") for item in inline_class_checks))
             or (hide_delegate_checks and all(item.get("passed") for item in hide_delegate_checks))
             or (rename_method_checks and all(item.get("passed") for item in rename_method_checks))
+            or (guard_clause_checks and all(item.get("passed") for item in guard_clause_checks))
         ):
             score = max(score, threshold)
         if dead_code_checks and all(item.get("passed") for item in dead_code_checks):
@@ -655,7 +676,7 @@ class StructuralValidator:
         ).strip()
         parameter_name = str(params.get("parameter_name") or "params").strip()
         if language == "python":
-            result = self._validate_python_parameter_object(
+            return self._validate_python_parameter_object(
                 original_code,
                 transformed_code,
                 method=method,
@@ -664,7 +685,7 @@ class StructuralValidator:
                 parameter_name=parameter_name,
             )
         elif language == "java":
-            result = self._validate_java_parameter_object(
+            return self._validate_java_parameter_object(
                 original_code,
                 transformed_code,
                 method=method,
@@ -1285,6 +1306,27 @@ class StructuralValidator:
             result["passed"] = False
             result["reason"] = "LOCAL_SOURCE_COMPILATION_ERROR"
         return result
+
+    @staticmethod
+    def _validate_c_guard_clauses_action(
+        *,
+        original_code: str,
+        transformed_code: str,
+        action: RefactoringAction,
+    ) -> Dict[str, Any]:
+        params = action.parameters or {}
+        method = str(
+            params.get("method")
+            or params.get("target_method")
+            or params.get("function")
+            or params.get("function_name")
+            or ""
+        ).strip()
+        return c_transformers.validate_c_guard_clauses(
+            original_code,
+            transformed_code,
+            method=method,
+        )
 
     @staticmethod
     def _validate_c_extract_method_action(
