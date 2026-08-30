@@ -636,10 +636,10 @@ function HumanInTheLoopPanel({ report, onContinue, onNavigate, pipelineState }) 
                   gap: 6,
                   boxShadow: '0 0 14px rgba(16,185,129,0.35)',
                 }}
-                title="Navigate to DIWO Orchestration Agent"
+                title="Navigate to DIWO Agent (User View)"
               >
-                <span>Send</span>
-                <span>DIWO Agent</span>
+                <span>👤</span>
+                <span>Go to User View</span>
               </button>
             )}
           </div>
@@ -667,10 +667,10 @@ function HumanInTheLoopPanel({ report, onContinue, onNavigate, pipelineState }) 
                   transition: 'all 0.2s ease',
                   boxShadow: '0 0 12px rgba(16,185,129,0.15)',
                 }}
-                title="Navigate to DIWO Orchestration Agent"
+                title="Navigate to DIWO Agent (User View)"
               >
-                <span>🎛</span>
-                <span>DIWO Agent</span>
+                <span>👤</span>
+                <span>Go to User View</span>
               </button>
             )}
             <button
@@ -880,7 +880,7 @@ export default function CUQAAgentPage({ repoLoaded, repoMeta, onSendToRdp, onRep
             <button
               id="cuqa-diwo-nav-btn"
               onClick={() => onNavigate('orchestrate')}
-              title="Navigate to DIWO Orchestration Agent"
+              title="Navigate to DIWO Agent (User View)"
               style={{
                 padding: '8px 16px',
                 background: 'linear-gradient(135deg, #10b981, #059669)',
@@ -898,8 +898,8 @@ export default function CUQAAgentPage({ repoLoaded, repoMeta, onSendToRdp, onRep
                 transition: 'all 0.2s ease',
               }}
             >
-              <span>🎛</span>
-              <span>DIWO Agent</span>
+              <span>👤</span>
+              <span>Go to User View</span>
             </button>
           )}
           {report && onSendToRdp && (
