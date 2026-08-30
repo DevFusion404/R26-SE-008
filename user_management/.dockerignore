@@ -1,41 +1,16 @@
-# Git & VCS
 .git
 .gitignore
-.gitattributes
-
-# Python cache & bytecode
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
-
-# Environment & Secrets
 .env
-.env.*
-*.env
-
-# Virtual Environments
 .venv/
 venv/
 env/
-ENV/
-
-# Testing & Coverage
 .pytest_cache/
-.coverage
-htmlcov/
 tests/
-
-# Build & CI artifacts
 .dockerignore
 Dockerfile
 docker-compose.yml
-docker-compose.*.yml
 README*
-*.md
-
-# IDE & OS
-.vscode/
-.idea/
-.DS_Store
-Thumbs.db

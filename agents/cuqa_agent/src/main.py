@@ -99,10 +99,6 @@ _workspaces: dict[str, dict] = {}
 
 
 def _get_workspace_dict(session_id: str) -> dict:
-    """Return the workspace dictionary for a given session.
-    If session is 'default' and no repo is loaded in default,
-    fallback to the latest active workspace so legacy / proxy callers without headers resolve.
-    """
     """Return the workspace dictionary for a given session, initializing if necessary."""
     sid = session_id or "default"
     if sid not in _workspaces:
