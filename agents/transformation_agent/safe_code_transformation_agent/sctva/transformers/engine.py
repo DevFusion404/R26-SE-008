@@ -36,6 +36,7 @@ from ..constants import (
     ACTION_HIDE_DELEGATE,
     ACTION_MOVE_PYTHON_METHOD,
     ACTION_REPLACE_CONDITIONAL_WITH_POLYMORPHISM,
+    ACTION_REPLACE_NESTED_CONDITIONAL_WITH_GUARD_CLAUSES,
     ACTION_MOVE_C_FUNCTION,
     PARAMETER_OBJECT_ACTIONS,
     EXTRACT_CLASS_ACTIONS,
@@ -45,6 +46,7 @@ from ..models import TransformationLogEntry
 from . import (
     c_extract_class,
     c_extract_method,
+    c_guard_clauses,
     c_transformers,
     java_extract_class,
     java_extract_method,
@@ -83,6 +85,8 @@ def _action_method_name(action: RefactoringAction) -> str:
         or action.parameters.get("function")
         or action.parameters.get("function_name")
         or action.parameters.get("source_method")
+        or action.parameters.get("target_function")
+        or action.parameters.get("target_method")
         or ""
     ).strip()
 
@@ -736,13 +740,18 @@ class TransformationEngine:
                 # not-applicable Extract/Move/Inline action cannot accidentally
                 # execute with invalid target metadata.
                 if action.parameters.get("not_applicable_to_source") is True:
+                    not_applicable_reason = str(
+                        action.parameters.get("not_applicable_reason")
+                        or action.parameters.get("source_resolution_error")
+                        or "TARGET_NOT_FOUND_IN_SOURCE"
+                    )
+                    unresolved_dead_code_metadata = (
+                        action.action_type == ACTION_REMOVE_DEAD_CODE
+                        and not_applicable_reason == "DEAD_CODE_TARGET_METADATA_MISSING"
+                    )
                     action_metadata = {
-                        "status": "not_applicable",
-                        "reason": str(
-                            action.parameters.get("not_applicable_reason")
-                            or action.parameters.get("source_resolution_error")
-                            or "TARGET_NOT_FOUND_IN_SOURCE"
-                        ),
+                        "status": "review_required" if unresolved_dead_code_metadata else "not_applicable",
+                        "reason": not_applicable_reason,
                         "requested_action_type": str(
                             action.parameters.get("not_applicable_action_type")
                             or action.action_type
@@ -760,6 +769,29 @@ class TransformationEngine:
                     ):
                         if key in action.parameters:
                             action_metadata[key] = action.parameters[key]
+                    if action.action_type == ACTION_REMOVE_DEAD_CODE:
+                        action_metadata.update({
+                            "target_name": str(
+                                action.parameters.get("target_name")
+                                or action.parameters.get("symbol")
+                                or action.parameters.get("function")
+                                or action.parameters.get("variable")
+                                or ""
+                            ),
+                            "candidate_count": 0,
+                            "target_resolved": False,
+                            "target_removed": False,
+                            "dead_code_target_status": "REVIEW_REQUIRED",
+                            "c_dead_code_analysis": {
+                                "status": "review_required",
+                                "reason": str(
+                                    action.parameters.get("not_applicable_reason")
+                                    or action.parameters.get("source_resolution_error")
+                                    or "DEAD_CODE_TARGET_METADATA_MISSING"
+                                ),
+                                "candidate_count": 0,
+                            },
+                        })
                     # Do not add a human-facing warning here.  The detailed
                     # transformation log retains the reason and status.
                     warnings = []
@@ -791,6 +823,35 @@ class TransformationEngine:
                     ):
                         if key in action.parameters:
                             action_metadata[key] = bool(action.parameters[key])
+                    if action.action_type == ACTION_REMOVE_DEAD_CODE:
+                        # This action is stopped before transformer dispatch;
+                        # retain an explicit proof that no C target was
+                        # resolved rather than silently reporting a no-op.
+                        action_metadata.update({
+                            "target_name": str(
+                                action.parameters.get("target_name")
+                                or action.parameters.get("symbol")
+                                or action.parameters.get("function")
+                                or action.parameters.get("variable")
+                                or ""
+                            ),
+                            "target_kind": str(
+                                action.parameters.get("target_kind") or ""
+                            ).upper(),
+                            "candidate_count": 0,
+                            "target_resolved": False,
+                            "target_removed": False,
+                            "dead_code_target_status": "REVIEW_REQUIRED",
+                            "c_dead_code_analysis": {
+                                "status": "review_required",
+                                "reason": str(
+                                    action.parameters.get("unresolved_reason")
+                                    or action.parameters.get("source_resolution_error")
+                                    or "DEAD_CODE_TARGET_METADATA_MISSING"
+                                ),
+                                "candidate_count": 0,
+                            },
+                        })
                     resolution_metadata = action.parameters.get(
                         "move_method_target_resolution"
                     )
@@ -1331,6 +1392,55 @@ class TransformationEngine:
                         warnings.append(
                             f"Feature Envy Move Method applied: {method_name} moved from "
                             f"{source_class} to {destination_class}."
+                        )
+
+                elif action.action_type == ACTION_REPLACE_NESTED_CONDITIONAL_WITH_GUARD_CLAUSES:
+                    if language != "c":
+                        action_metadata = {
+                            "status": "not_applicable",
+                            "reason": "GUARD_CLAUSES_CURRENTLY_REQUIRE_C_SOURCE",
+                            "replacements_count": 0,
+                        }
+                    else:
+                        def optional_guard_line(name: str) -> int | None:
+                            value = action.parameters.get(name)
+                            if isinstance(value, str) and value.strip().isdigit():
+                                value = int(value.strip())
+                            return int(value) if isinstance(value, (int, float)) else None
+
+                        current_code, replacements, action_metadata = (
+                            c_guard_clauses.apply_replace_nested_conditional_with_guard_clauses(
+                                current_code,
+                                method_name=_action_method_name(action),
+                                source_line=optional_guard_line("source_line"),
+                                start_line=optional_guard_line("start_line"),
+                                end_line=optional_guard_line("end_line"),
+                                target_lines=action.parameters.get("target_lines"),
+                                source_file=str(
+                                    action.parameters.get("source_file")
+                                    or current_file_name
+                                ),
+                            )
+                        )
+                    if action_metadata.get("status") == "success":
+                        action_metadata["reclassified_action_type"] = (
+                            ACTION_REPLACE_NESTED_CONDITIONAL_WITH_GUARD_CLAUSES
+                        )
+                        warnings.append(
+                            "Replace Nested Conditional with Guard Clauses applied: "
+                            f"{action_metadata.get('guard_clauses_added', 0)} guard clause(s) added."
+                        )
+                        warnings = [
+                            warning for warning in warnings
+                            if not (
+                                "unsupported refactoring" in str(warning).lower()
+                                and "guard clause" in str(warning).lower()
+                            )
+                        ]
+                    else:
+                        warnings.append(
+                            "Replace Nested Conditional with Guard Clauses requires review: "
+                            f"{action_metadata.get('reason') or 'no safe exit strategy'}."
                         )
 
                 elif action.action_type == ACTION_REPLACE_CONDITIONAL_WITH_POLYMORPHISM:
@@ -1874,6 +1984,12 @@ class TransformationEngine:
                             python_parameter_object.apply_introduce_parameter_object(current_code, **kwargs)
                         )
                     elif language == "c":
+                        # These fields belong to Java's coordinated
+                        # repository transaction and are not accepted by the
+                        # C parameter-object transformer.
+                        kwargs.pop("coordinated_project_callers", None)
+                        kwargs.pop("target_parameter_count", None)
+                        kwargs.pop("parameter_types", None)
                         current_code, replacements, action_metadata = (
                             c_transformers.apply_introduce_parameter_object(current_code, **kwargs)
                         )
@@ -2066,6 +2182,22 @@ class TransformationEngine:
                         or action.parameters.get("method_name")
                         or ""
                     ).strip()
+                    target_name = str(
+                        action.parameters.get("target_name")
+                        or action.parameters.get("symbol")
+                        or action.parameters.get("function")
+                        or action.parameters.get("variable")
+                        or method_name
+                        or ""
+                    ).strip()
+                    variable_name = str(
+                        action.parameters.get("variable")
+                        or action.parameters.get("variable_name")
+                        or ""
+                    ).strip()
+                    target_kind = str(
+                        action.parameters.get("target_kind") or ""
+                    ).strip().upper()
                     class_name = action.parameters.get("class_name")
                     if not class_name:
                         class_name = action.parameters.get("target_class") or action.parameters.get("source_class")
@@ -2305,21 +2437,40 @@ class TransformationEngine:
                                 "reason": str(deadness_proof.get("reason") or "TARGET_NOT_FOUND"),
                             })
                     elif language == "c":
-                        named_c_target = bool(method_name)
-                        c_analysis = c_transformers.analyze_c_dead_code_target(
+                        named_c_target = bool(method_name or target_name or variable_name)
+                        c_analysis = c_transformers.resolve_c_dead_code_target(
                             current_code,
-                            method_name,
+                            target_name=target_name,
+                            method_name=method_name,
+                            symbol=str(action.parameters.get("symbol") or ""),
+                            function=str(action.parameters.get("function") or ""),
+                            variable=variable_name,
+                            target_kind=target_kind,
                             source_line=source_line,
                             project_source_files=project_source_files,
                             current_file_name=current_file_name,
                         )
-                        resolved_target = str(c_analysis.get("target") or method_name).strip()
+                        resolved_target = str(c_analysis.get("target") or target_name).strip()
                         if resolved_target and (
                             named_c_target or c_analysis.get("removable") is True
                         ):
                             method_name = resolved_target
-                            action.parameters["method"] = resolved_target
+                            if str(c_analysis.get("target_kind") or "").upper() == "VARIABLE":
+                                variable_name = resolved_target
+                                action.parameters["variable"] = resolved_target
+                            else:
+                                action.parameters["method"] = resolved_target
                             action_metadata["target"] = resolved_target
+                        action_metadata.update({
+                            "target_name": str(c_analysis.get("target_name") or resolved_target),
+                            "target_kind": str(c_analysis.get("target_kind") or ""),
+                            "candidate_count": int(c_analysis.get("candidate_count") or 0),
+                            "target_resolved": int(c_analysis.get("candidate_count") or 0) == 1,
+                            "remaining_references": int(c_analysis.get("remaining_references") or 0),
+                            "target_resolution": (
+                                "PASS" if int(c_analysis.get("candidate_count") or 0) == 1 else "FAIL"
+                            ),
+                        })
                         action_metadata["c_dead_code_analysis"] = dict(c_analysis)
                         blocked_statuses = {
                             "live_reference",
@@ -2339,6 +2490,18 @@ class TransformationEngine:
                                     or "C function is not proven dead and was preserved."
                                 ),
                             })
+                        elif c_analysis.get("removable") is not True and source_line is None:
+                            action_metadata.update({
+                                "dead_code_target_status": str(
+                                    c_analysis.get("status") or "REVIEW_REQUIRED"
+                                ).upper(),
+                                "status": "review_required",
+                                "final_decision": "REVIEW_REQUIRED",
+                                "reason": str(
+                                    c_analysis.get("reason") or "DEAD_CODE_NOT_PROVEN"
+                                ),
+                                "target_removed": False,
+                            })
                         else:
                             current_code, replacements = c_transformers.apply_remove_dead_code(
                                 current_code,
@@ -2348,9 +2511,24 @@ class TransformationEngine:
                                 project_source_files=project_source_files,
                                 current_file_name=current_file_name,
                                 repository_complete=repository_complete,
+                                variable_name=variable_name,
+                                target_kind=target_kind,
                             )
                             if replacements:
-                                action_metadata["target_removed"] = True
+                                action_metadata.update({
+                                    "target_removed": True,
+                                    "dead_code_target_status": "proven_dead",
+                                    "status": "success",
+                                    "final_decision": "PASS",
+                                })
+                            else:
+                                action_metadata.update({
+                                    "target_removed": False,
+                                    "dead_code_target_status": "REVIEW_REQUIRED",
+                                    "status": "review_required",
+                                    "final_decision": "REVIEW_REQUIRED",
+                                    "reason": "DEAD_CODE_NOT_PROVEN",
+                                })
                     else:
                         current_code, replacements = java_transformers.apply_remove_dead_code(
                             current_code, method_name, class_name, source_line
