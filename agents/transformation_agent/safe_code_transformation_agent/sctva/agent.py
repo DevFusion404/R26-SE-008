@@ -162,6 +162,7 @@ class SafeCodeTransformationValidationAgent:
             request.refactoring_plan.actions,
             file_entries,
             fallback_language=request.language,
+        )
         coordinated_parameter_transactions = (
             self._prepare_java_parameter_object_transactions(
                 request.refactoring_plan.actions,

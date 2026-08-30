@@ -676,7 +676,7 @@ class StructuralValidator:
         ).strip()
         parameter_name = str(params.get("parameter_name") or "params").strip()
         if language == "python":
-            result = self._validate_python_parameter_object(
+            return self._validate_python_parameter_object(
                 original_code,
                 transformed_code,
                 method=method,
@@ -685,7 +685,7 @@ class StructuralValidator:
                 parameter_name=parameter_name,
             )
         elif language == "java":
-            result = self._validate_java_parameter_object(
+            return self._validate_java_parameter_object(
                 original_code,
                 transformed_code,
                 method=method,
