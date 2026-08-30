@@ -1,7 +1,10 @@
+import subprocess
+from types import SimpleNamespace
+
 from sctva.validators.syntax_validator import SyntaxValidator
 from sctva.validators.structural_validator import StructuralValidator
 from sctva.contracts import RefactoringAction
-from sctva.validators.c_support import compare_c_static_summaries
+from sctva.validators.c_support import compare_c_static_summaries, validate_c_behavior
 
 
 def test_python_syntax_validator_passes_valid_code():
@@ -80,6 +83,147 @@ def test_c_syntax_validator_ignores_braces_in_strings_and_comments():
         timeout_seconds=5,
     )
     assert result.passed is True
+
+
+def test_c_syntax_validator_records_gcc_compiler_pass(monkeypatch):
+    monkeypatch.setattr(
+        "sctva.validators.syntax_validator.shutil.which",
+        lambda name: "C:/tools/gcc.exe" if name == "gcc" else None,
+    )
+    monkeypatch.setattr(
+        "sctva.validators.syntax_validator.subprocess.run",
+        lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout="", stderr=""),
+    )
+
+    result = SyntaxValidator().validate(
+        language="c",
+        source_code="int value(void) { return 1; }\n",
+        require_compilation=True,
+        timeout_seconds=5,
+    )
+
+    assert result.passed is True
+    assert result.details["compiler_validation"] == "PASS"
+    assert result.details["compiler"] == "gcc"
+
+
+def test_c_syntax_validator_fails_real_compiler_error(monkeypatch):
+    monkeypatch.setattr(
+        "sctva.validators.syntax_validator.shutil.which",
+        lambda name: "C:/tools/gcc.exe" if name == "gcc" else None,
+    )
+    monkeypatch.setattr(
+        "sctva.validators.syntax_validator.subprocess.run",
+        lambda *args, **kwargs: SimpleNamespace(
+            returncode=1,
+            stdout="",
+            stderr="sctva_temp.c:3:9: error: unknown type name 'MissingType'",
+        ),
+    )
+
+    result = SyntaxValidator().validate(
+        language="c",
+        source_code="int value(void) { return 1; }\n",
+        require_compilation=True,
+        timeout_seconds=5,
+    )
+
+    assert result.passed is False
+    assert result.details["compiler_validation"] == "FAIL"
+    assert result.details["compiler_details"]["reason"] == "C_COMPILER_SYNTAX_ERROR"
+    assert result.details["diagnostics"][0]["line"] == 3
+
+
+def test_c_repository_compiler_validates_header_through_translation_unit(monkeypatch):
+    commands = []
+    monkeypatch.setattr(
+        "sctva.validators.syntax_validator.shutil.which",
+        lambda name: "C:/tools/gcc.exe" if name == "gcc" else None,
+    )
+
+    def successful_compile(command, **kwargs):
+        commands.append(command)
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(
+        "sctva.validators.syntax_validator.subprocess.run",
+        successful_compile,
+    )
+    result = SyntaxValidator().validate_c_project(
+        [
+            {"file_name": "include/config.h", "source_code": "#define LIMIT 10\n"},
+            {
+                "file_name": "src/main.c",
+                "source_code": '#include "config.h"\nint main(void) { return LIMIT; }\n',
+            },
+        ],
+        require_compilation=True,
+        timeout_seconds=5,
+    )
+
+    assert result.passed is True
+    assert result.details["compiler_validation"] == "PASS"
+    assert result.details["compiler_details"]["validated_translation_units"] == ["src/main.c"]
+    assert len(commands) == 1
+    assert commands[0][-1].endswith("src\\main.c") or commands[0][-1].endswith("src/main.c")
+
+
+def test_c_syntax_validator_reports_compiler_unavailable(monkeypatch):
+    monkeypatch.setattr("sctva.validators.syntax_validator.shutil.which", lambda name: None)
+
+    result = SyntaxValidator().validate(
+        language="c",
+        source_code="int value(void) { return 1; }\n",
+        require_compilation=True,
+        timeout_seconds=5,
+    )
+
+    assert result.passed is True
+    assert result.details["compiler_validation"] == "UNAVAILABLE"
+    assert result.details["compiler_details"]["reason"] == "C_COMPILER_NOT_AVAILABLE"
+
+
+def test_c_syntax_validator_uses_clang_when_gcc_is_unavailable(monkeypatch):
+    monkeypatch.setattr(
+        "sctva.validators.syntax_validator.shutil.which",
+        lambda name: "C:/tools/clang.exe" if name == "clang" else None,
+    )
+    monkeypatch.setattr(
+        "sctva.validators.syntax_validator.subprocess.run",
+        lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout="", stderr=""),
+    )
+
+    result = SyntaxValidator().validate(
+        language="c",
+        source_code="int value(void) { return 1; }\n",
+        require_compilation=True,
+        timeout_seconds=5,
+    )
+
+    assert result.passed is True
+    assert result.details["compiler"] == "clang"
+
+
+def test_c_syntax_validator_fails_compiler_timeout(monkeypatch):
+    monkeypatch.setattr(
+        "sctva.validators.syntax_validator.shutil.which",
+        lambda name: "C:/tools/gcc.exe" if name == "gcc" else None,
+    )
+
+    def timed_out(*args, **kwargs):
+        raise subprocess.TimeoutExpired(cmd=args[0], timeout=kwargs["timeout"])
+
+    monkeypatch.setattr("sctva.validators.syntax_validator.subprocess.run", timed_out)
+    result = SyntaxValidator().validate(
+        language="c",
+        source_code="int value(void) { return 1; }\n",
+        require_compilation=True,
+        timeout_seconds=1,
+    )
+
+    assert result.passed is False
+    assert result.details["compiler_validation"] == "FAIL"
+    assert result.details["compiler_details"]["reason"] == "C_COMPILER_TIMEOUT"
 
 
 def test_c_syntax_validator_detects_missing_return_semicolon():
@@ -411,3 +555,72 @@ def test_c_static_comparison_accepts_suffixed_duplicate_constant_names():
     ]
 
     assert compare_c_static_summaries(original, transformed, actions)["matched"] is True
+
+
+def test_c_static_comparison_accepts_verified_numeric_macro_in_array_bound():
+    original = "int extractYear(char userID[15]) { return userID[0]; }\n"
+    transformed = (
+        "#define THRESHOLD_LIMIT_15 15\n"
+        "int extractYear(char userID[THRESHOLD_LIMIT_15]) { return userID[0]; }\n"
+    )
+
+    assert compare_c_static_summaries(original, transformed, [])['matched'] is True
+
+    structural = StructuralValidator().validate(
+        language="c",
+        original_code=original,
+        transformed_code=transformed,
+    )
+    assert structural.details["function_signature_similarity"] == 1.0
+
+
+def test_c_static_behavior_accepts_verified_numeric_macro_in_array_bound():
+    original = "int extractYear(char userID[15]) { return userID[0]; }\n"
+    transformed = (
+        "#define SIZE 15\n"
+        "int extractYear(char userID[SIZE]) { return userID[0]; }\n"
+    )
+
+    result = validate_c_behavior(
+        original_code=original,
+        transformed_code=transformed,
+        behavior_tests=[],
+        actions=[],
+        enable_behavior_tests=True,
+        timeout_seconds=1,
+    )
+    assert result["passed"] is True
+    assert result["details"]["c_results"][0]["comparison"]["matched"] is True
+
+
+def test_c_static_comparison_rejects_wrong_numeric_macro_in_array_bound():
+    original = "int extractYear(char userID[15]) { return userID[0]; }\n"
+    transformed = (
+        "#define THRESHOLD_LIMIT_15 14\n"
+        "int extractYear(char userID[THRESHOLD_LIMIT_15]) { return userID[0]; }\n"
+    )
+
+    comparison = compare_c_static_summaries(original, transformed, [])
+    assert comparison["matched"] is False
+    assert comparison["missing_functions"] == ["extractYear:char userID[15]"]
+
+
+def test_c_static_comparison_rejects_undefined_or_non_numeric_array_macros():
+    original = "int extractYear(char userID[15]) { return userID[0]; }\n"
+    transformed_sources = [
+        "int extractYear(char userID[SIZE]) { return userID[0]; }\n",
+        "#define SIZE LENGTH\nint extractYear(char userID[SIZE]) { return userID[0]; }\n",
+        "#define SIZE(x) (x)\nint extractYear(char userID[SIZE]) { return userID[0]; }\n",
+    ]
+
+    for transformed in transformed_sources:
+        assert compare_c_static_summaries(original, transformed, [])["matched"] is False
+
+
+def test_c_static_comparison_does_not_mask_real_signature_changes():
+    original = "int extractYear(char userID[15]) { return userID[0]; }\n"
+    transformed = "int extractMonth(char userID[15]) { return userID[0]; }\n"
+
+    comparison = compare_c_static_summaries(original, transformed, [])
+    assert comparison["matched"] is False
+    assert comparison["missing_functions"] == ["extractYear:char userID[15]"]
