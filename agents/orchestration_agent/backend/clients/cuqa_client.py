@@ -56,31 +56,14 @@ class CUQAError(RuntimeError):
         self.detail = detail
 
 
-def _request(method: str, path: str, body=None, timeout: int = 120, extra_headers: Optional[dict] = None) -> dict:
+def _request(method: str, path: str, body=None, timeout: int = 120) -> dict:
     url = f"{cuqa_base_url()}{path}"
     data = json.dumps(body).encode("utf-8") if body is not None else None
-
-    headers = {"Content-Type": "application/json", "Accept": "application/json"}
-
-    # Forward session headers if running within Flask request context
-    try:
-        from flask import has_request_context, request as flask_req
-        if has_request_context():
-            for h in ("X-Session-ID", "x-session-id", "X-User-ID", "x-user-id", "Authorization", "authorization"):
-                val = flask_req.headers.get(h)
-                if val:
-                    headers[h] = val
-    except Exception:
-        pass
-
-    if extra_headers:
-        headers.update(extra_headers)
-
     req = urllib.request.Request(
         url,
         data=data,
         method=method,
-        headers=headers,
+        headers={"Content-Type": "application/json", "Accept": "application/json"},
     )
 
     try:
