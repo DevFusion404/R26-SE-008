@@ -2122,6 +2122,12 @@ def apply_replace_nested_conditional_with_guard_clauses(
     source_code: str,
     method_name: Optional[str] = None,
     target_line: Optional[int] = None,
+    *,
+    source_line: Optional[int] = None,
+    start_line: Optional[int] = None,
+    end_line: Optional[int] = None,
+    target_lines: Optional[Sequence[Any]] = None,
+    source_file: str = "",
 ) -> Tuple[str, int, Dict[str, Any]]:
     """
     Transform nested conditionals in C into guard clauses where safe.
@@ -2129,7 +2135,16 @@ def apply_replace_nested_conditional_with_guard_clauses(
     and status='review_required'.
     """
     from .c_guard_clauses import apply_replace_nested_conditional_with_guard_clauses as _apply
-    return _apply(source_code, method_name=method_name, target_line=target_line)
+    return _apply(
+        source_code,
+        method_name=method_name,
+        target_line=target_line,
+        source_line=source_line,
+        start_line=start_line,
+        end_line=end_line,
+        target_lines=target_lines,
+        source_file=source_file,
+    )
 
 
 def validate_c_guard_clauses(
