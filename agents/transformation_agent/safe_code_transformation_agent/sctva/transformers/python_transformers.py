@@ -2179,10 +2179,12 @@ def resolve_move_method_target(
     source_code: str,
     *,
     method_name: str = "",
+    source_method: str = "",
     source_class: str = "",
     destination_class: str = "",
     destination_parameter: str = "",
     source_line: int | None = None,
+    allow_unique_inference: bool = False,
 ) -> dict[str, Any]:
     """Resolve a Feature-Envy Move Method target from real Python AST evidence.
 
@@ -2192,10 +2194,11 @@ def resolve_move_method_target(
     destination class and envied parameter.
     """
 
-    requested_method = str(method_name or "").strip()
+    requested_method = str(method_name or source_method or "").strip()
     requested_source = str(source_class or "").strip()
     requested_destination = str(destination_class or "").strip()
     requested_parameter = str(destination_parameter or "").strip()
+    placeholder_class_names = {"", "sourceclass", "unknownclass", "none", "null"}
 
     try:
         tree = ast.parse(source_code)
@@ -2213,23 +2216,64 @@ def resolve_move_method_target(
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
     }
 
-    # A module-level function is not a Move Method target, even when the RDP
-    # plan invents filename-derived classes such as ``jarvis`` /
-    # ``jarvisTarget``.  Check this *before* class-count analysis so SCTVA does
-    # not accidentally recover an unrelated class method in a large module.
-    if requested_method and requested_method in module_function_nodes:
-        function = module_function_nodes[requested_method]
+    def class_method_node(
+        class_node: ast.ClassDef,
+        name: str,
+    ) -> ast.FunctionDef | ast.AsyncFunctionDef | None:
+        return next(
+            (
+                item
+                for item in class_node.body
+                if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and item.name == name
+            ),
+            None,
+        )
+
+    explicit_source_node = classes.get(requested_source) if requested_source else None
+    explicit_source_method = (
+        class_method_node(explicit_source_node, requested_method)
+        if explicit_source_node is not None and requested_method
+        else None
+    )
+
+    def module_function_not_applicable(
+        function: ast.FunctionDef | ast.AsyncFunctionDef,
+        *,
+        target_resolution: str,
+        requested_method_name: str = "",
+    ) -> dict[str, Any]:
         return {
-            "status": "satisfied",
-            "reason": "MODULE_LEVEL_FUNCTION_IS_NOT_MOVE_METHOD_TARGET",
-            "method": requested_method,
+            "status": "not_applicable",
+            "reason": "MOVE_METHOD_TARGET_IS_MODULE_FUNCTION",
+            "target_kind": "MODULE_FUNCTION",
+            "suggested_refactoring": "MOVE_FUNCTION",
+            "source_class_resolved": False,
+            "destination_class_resolved": requested_destination in classes,
+            "target_resolution": target_resolution,
+            "method": function.name,
             "lineno": int(getattr(function, "lineno", 0) or 0),
             "end_lineno": int(
                 getattr(function, "end_lineno", getattr(function, "lineno", 0)) or 0
             ),
+            "requested_method": requested_method_name,
+            "requested_source_method": requested_method_name,
             "requested_source_class": requested_source,
             "requested_destination_class": requested_destination,
+            "replacements_count": 0,
         }
+
+    # A module-level function is not a Move Method target, even when the RDP
+    # plan invents filename-derived classes such as ``SourceClass``.  A real
+    # explicitly requested source class takes precedence, however: Python can
+    # legally contain both a module function and a class method with the same
+    # name, and the class-qualified plan must resolve to the class method.
+    if explicit_source_node is None and requested_method in module_function_nodes:
+        return module_function_not_applicable(
+            module_function_nodes[requested_method],
+            target_resolution="module_level_function_ast",
+            requested_method_name=requested_method,
+        )
 
     # When the method name is stale/missing, a CUQA/RDP source line can still
     # prove that the smell points at a module function.  In that case Move
@@ -2245,27 +2289,130 @@ def resolve_move_method_target(
         ]
         if len(line_function_matches) == 1:
             function = line_function_matches[0]
-            return {
-                "status": "not_applicable",
-                "reason": "MODULE_LEVEL_FUNCTION_IS_NOT_MOVE_METHOD_TARGET",
-                "method": function.name,
-                "lineno": int(getattr(function, "lineno", 0) or 0),
-                "end_lineno": int(
-                    getattr(function, "end_lineno", getattr(function, "lineno", 0)) or 0
-                ),
-                "requested_method": requested_method,
-                "requested_source_class": requested_source,
-                "requested_destination_class": requested_destination,
-                "strategy": "source_line_module_function_guard",
-            }
+            if explicit_source_node is None:
+                return module_function_not_applicable(
+                    function,
+                    target_resolution="source_line_module_function_guard",
+                    requested_method_name=requested_method,
+                )
 
-    if len(classes) < 2:
-        if not classes:
+    # An explicitly named class is authoritative.  If it exists but does not
+    # own the requested method, do not fall back to a same-named module
+    # function or to an unrelated class method.
+    if explicit_source_node is not None and requested_method and explicit_source_method is None:
+        return {
+            "status": "not_applicable",
+            "reason": "MOVE_METHOD_TARGET_NOT_FOUND",
+            "target_kind": "CLASS_METHOD",
+            "source_class_resolved": True,
+            "requested_method": requested_method,
+            "requested_source_method": requested_method,
+            "requested_source_class": requested_source,
+            "requested_destination_class": requested_destination,
+            "replacements_count": 0,
+        }
+
+    # Explicit class names are contracts, not hints.  If one of them is
+    # absent, do not recover a different class pair and accidentally turn a
+    # module function or stale RDP target into a Move Method.
+    if requested_source and requested_source not in classes:
+        # Preserve semantic recovery for malformed filename-derived plans only
+        # when neither the requested method nor source class names a real
+        # symbol.  A source-line recovery can still identify the real method.
+        malformed_recovery = (
+            isinstance(source_line, int)
+            and source_line > 0
+            and requested_source.lower() not in placeholder_class_names
+            and requested_method not in module_function_nodes
+            and requested_method == requested_source
+            and any(
+                isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and item.name == requested_destination
+                for owner in classes.values()
+                for item in owner.body
+            )
+        )
+        if not malformed_recovery:
             return {
                 "status": "not_applicable",
                 "reason": "MOVE_METHOD_REQUIRES_SOURCE_AND_DESTINATION_CLASSES",
+                "target_kind": "CLASS_METHOD",
+                "source_class_resolved": False,
+                "missing_class": "source",
+                "requested_method": requested_method,
+                "requested_source_method": requested_method,
+                "requested_source_class": requested_source,
+                "requested_destination_class": requested_destination,
+                "replacements_count": 0,
             }
-        return {"status": "review_required", "reason": "INSUFFICIENT_CLASS_CONTEXT"}
+    if requested_destination and requested_destination not in classes:
+        # A clearly real source method plus an absent destination is an
+        # invalid Move Method request.  The legacy malformed-plan recovery
+        # below remains available when the method itself is also a stale hint.
+        source_has_method = bool(
+            requested_source in classes
+            and any(
+                isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and item.name == requested_method
+                for item in classes[requested_source].body
+            )
+        )
+        if source_has_method or requested_method in module_function_nodes:
+            return {
+                "status": "not_applicable",
+                "reason": "MOVE_METHOD_DESTINATION_CLASS_NOT_FOUND",
+                "target_kind": "CLASS_METHOD",
+                "source_class_resolved": requested_source in classes,
+                "destination_class_resolved": False,
+                "missing_class": "destination",
+                "requested_method": requested_method,
+                "requested_source_method": requested_method,
+                "requested_source_class": requested_source,
+                "requested_destination_class": requested_destination,
+                "replacements_count": 0,
+            }
+    if (
+        requested_source
+        and requested_destination
+        and requested_source == requested_destination
+    ):
+        return {
+            "status": "not_applicable",
+            "reason": "SOURCE_AND_DESTINATION_CLASS_MATCH",
+            "target_kind": "CLASS_METHOD",
+            "source_class_resolved": requested_source in classes,
+            "destination_class_resolved": requested_destination in classes,
+            "requested_source_class": requested_source,
+            "requested_destination_class": requested_destination,
+            "replacements_count": 0,
+        }
+    if (not requested_source or not requested_destination) and not allow_unique_inference:
+        return {
+            "status": "not_applicable",
+            "reason": "MOVE_METHOD_REQUIRES_SOURCE_AND_DESTINATION_CLASSES",
+            "target_kind": "CLASS_METHOD",
+            "source_class_resolved": requested_source in classes,
+            "destination_class_resolved": requested_destination in classes,
+            "missing_class": "source" if not requested_source else "destination",
+            "requested_method": requested_method,
+            "requested_source_method": requested_method,
+            "requested_source_class": requested_source,
+            "requested_destination_class": requested_destination,
+            "replacements_count": 0,
+        }
+    if len(classes) < 2:
+        return {
+            "status": "not_applicable",
+            "reason": "MOVE_METHOD_REQUIRES_SOURCE_AND_DESTINATION_CLASSES",
+            "target_kind": "CLASS_METHOD",
+            "source_class_resolved": requested_source in classes,
+            "destination_class_resolved": requested_destination in classes,
+            "requested_method": requested_method,
+            "requested_source_method": requested_method,
+            "requested_source_class": requested_source,
+            "requested_destination_class": requested_destination,
+            "replacements_count": 0,
+        }
 
     # Track simple assignments such as ``student = Student(...)`` so call-site
     # arguments can be tied back to their concrete class.
@@ -2336,6 +2483,26 @@ def resolve_move_method_target(
         return inferred
 
     candidates: list[dict[str, Any]] = []
+
+    explicit_source_method_exists = bool(
+        requested_source in classes
+        and requested_method
+        and any(
+            isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and item.name == requested_method
+            for item in classes[requested_source].body
+        )
+    )
+    if requested_source in classes and requested_method and not explicit_source_method_exists:
+        return {
+            "status": "not_applicable",
+            "reason": "MOVE_METHOD_TARGET_NOT_FOUND",
+            "target_kind": "CLASS_METHOD",
+            "requested_method": requested_method,
+            "requested_source_method": requested_method,
+            "requested_source_class": requested_source,
+            "requested_destination_class": requested_destination,
+        }
 
     for owner_name, owner_node in classes.items():
         for method in owner_node.body:
@@ -2438,6 +2605,19 @@ def resolve_move_method_target(
     ]
     if len(exact) == 1:
         selected = exact[0]
+    elif (
+        explicit_source_method_exists
+        and requested_destination in classes
+    ):
+        return {
+            "status": "review_required",
+            "reason": "DESTINATION_CLASS_NOT_COMPATIBLE",
+            "target_kind": "CLASS_METHOD",
+            "requested_method": requested_method,
+            "requested_source_method": requested_method,
+            "requested_source_class": requested_source,
+            "requested_destination_class": requested_destination,
+        }
     else:
         selected = None
 
@@ -2480,7 +2660,11 @@ def resolve_move_method_target(
     return {
         "status": "success",
         **selected,
+        "target_kind": "CLASS_METHOD",
+        "source_class_resolved": True,
+        "destination_class_resolved": True,
         "requested_method": requested_method,
+        "requested_source_method": requested_method,
         "requested_source_class": requested_source,
         "requested_destination_class": requested_destination,
         "requested_destination_parameter": requested_parameter,
@@ -2491,6 +2675,7 @@ def apply_move_method(
     source_code: str,
     *,
     method_name: str = "",
+    source_method: str = "",
     source_class: str = "",
     destination_class: str = "",
     destination_parameter: str = "",
@@ -2505,7 +2690,8 @@ def apply_move_method(
     """
 
     requested_target = {
-        "method": str(method_name or "").strip(),
+        "method": str(method_name or source_method or "").strip(),
+        "source_method": str(source_method or method_name or "").strip(),
         "source_class": str(source_class or "").strip(),
         "destination_class": str(destination_class or "").strip(),
         "destination_parameter": str(destination_parameter or "").strip(),
@@ -2546,6 +2732,13 @@ def apply_move_method(
         return source_code, 0, {
             "status": resolution_status,
             "reason": str(resolution.get("reason") or "MOVE_METHOD_TARGET_NOT_FOUND"),
+            "target_kind": str(resolution.get("target_kind") or "CLASS_METHOD"),
+            "suggested_refactoring": str(resolution.get("suggested_refactoring") or ""),
+            "source_class_resolved": bool(resolution.get("source_class_resolved", False)),
+            "destination_class_resolved": bool(
+                resolution.get("destination_class_resolved", False)
+            ),
+            "replacements_count": 0,
             **requested_target,
             "target_resolution": resolution,
         }

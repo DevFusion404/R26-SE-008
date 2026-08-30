@@ -652,27 +652,125 @@ class SyntaxValidator:
 
     @staticmethod
     def _find_java_nested_method_declaration(clean_source: str) -> str:
-        method_re = re.compile(
-            r"^[ \t]*(?:(?:public|private|protected|static|final|synchronized|native)\s+)*"
-            r"[A-Za-z_][A-Za-z0-9_<>\[\].?]*\s+"
-            r"(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*\([^;{}]*\)\s*\{"
-        )
-        method_stack: list[int] = []
-        brace_depth = 0
-        for line_no, raw_line in enumerate(clean_source.splitlines(), start=1):
-            line = raw_line.strip()
-            if not line or line.startswith("@"):
-                continue
-            previous_depth = brace_depth
-            method_match = method_re.match(raw_line)
-            if method_match and method_stack:
-                return f"nested method declaration '{method_match.group('name')}' near line {line_no}."
+        """Reject Java methods directly nested in methods, not class bodies.
 
-            brace_depth += raw_line.count("{") - raw_line.count("}")
-            if method_match:
-                method_stack.append(previous_depth + 1)
-            while method_stack and brace_depth < method_stack[-1]:
-                method_stack.pop()
+        A line-oriented method stack cannot distinguish an illegal declaration
+        from a perfectly legal method declared by an anonymous/local class.
+        This scanner first records method/class/anonymous-class opening braces,
+        then evaluates each method against the active lexical scope.
+        """
+        identifier = r"[A-Za-z_$][A-Za-z0-9_$]*"
+        method_start_re = re.compile(
+            rf"(?m)^[ \t]*(?:(?:public|private|protected|static|final|abstract|"
+            rf"synchronized|native|strictfp|default)\s+)*"
+            rf"(?:<[^{{}}\n]+>\s+)?"
+            rf"(?P<return_type>{identifier}(?:\s*<[^{{}}\n]+>)?(?:\s*\[\s*\])?)\s+"
+            rf"(?P<name>{identifier})\s*\("
+        )
+
+        def matching_delimiter(start: int, opening: str, closing: str) -> int | None:
+            depth = 0
+            for index in range(start, len(clean_source)):
+                char = clean_source[index]
+                if char == opening:
+                    depth += 1
+                elif char == closing:
+                    depth -= 1
+                    if depth == 0:
+                        return index
+            return None
+
+        def next_non_space(index: int) -> int:
+            while index < len(clean_source) and clean_source[index].isspace():
+                index += 1
+            return index
+
+        method_braces: dict[int, str] = {}
+        method_starts: dict[int, int] = {}
+        excluded_return_types = {
+            "return", "throw", "new", "if", "for", "while", "switch",
+            "catch", "assert", "synchronized", "try",
+        }
+        for match in method_start_re.finditer(clean_source):
+            if match.group("return_type") in excluded_return_types:
+                continue
+            paren_open = clean_source.find("(", match.start("name"))
+            paren_close = matching_delimiter(paren_open, "(", ")")
+            if paren_close is None:
+                continue
+            brace = next_non_space(paren_close + 1)
+            if clean_source.startswith("throws", brace):
+                throws_end = clean_source.find("{", brace)
+                if throws_end < 0:
+                    continue
+                brace = throws_end
+            if brace >= len(clean_source) or clean_source[brace] != "{":
+                continue
+            # A method call such as ``Type value()`` cannot be a declaration;
+            # declarations have a type/name prefix at the start of the line.
+            method_braces[brace] = match.group("name")
+            method_starts[brace] = match.start()
+
+        class_braces: dict[int, str] = {}
+        class_re = re.compile(
+            rf"\b(?:class|interface|enum|record|@interface)\s+{identifier}"
+            rf"(?:\s+extends\s+[^{{}}]+|\s+implements\s+[^{{}}]+)?\s*\{{"
+        )
+        for match in class_re.finditer(clean_source):
+            brace = clean_source.rfind("{", match.start(), match.end())
+            if brace >= 0:
+                class_braces[brace] = "CLASS"
+
+        anonymous_braces: set[int] = set()
+        new_re = re.compile(rf"\bnew\s+{identifier}(?:\s*\.\s*{identifier})?\s*(?:<[^{{}}]*>)?\s*\(")
+        for match in new_re.finditer(clean_source):
+            paren_open = clean_source.find("(", match.start())
+            paren_close = matching_delimiter(paren_open, "(", ")")
+            if paren_close is None:
+                continue
+            brace = next_non_space(paren_close + 1)
+            if brace < len(clean_source) and clean_source[brace] == "{":
+                anonymous_braces.add(brace)
+
+        scopes: list[tuple[int, str]] = []
+        events = sorted(
+            (index, clean_source[index], priority)
+            for index in range(len(clean_source))
+            if clean_source[index] in "{}"
+            for priority in (0,)
+        )
+        for index, character, _ in events:
+            if character == "}":
+                if scopes:
+                    scopes.pop()
+                continue
+
+            if index in method_braces:
+                kind = "METHOD"
+            elif index in class_braces:
+                kind = "LOCAL_CLASS" if any(
+                    scope_kind == "METHOD" for _, scope_kind in scopes
+                ) else "CLASS"
+            elif index in anonymous_braces:
+                kind = "ANONYMOUS_CLASS"
+            else:
+                kind = "BLOCK"
+
+            if kind == "METHOD":
+                enclosing = [scope_kind for _, scope_kind in scopes]
+                last_class_or_method = next(
+                    (
+                        scope_kind
+                        for scope_kind in reversed(enclosing)
+                        if scope_kind in {"METHOD", "CLASS", "LOCAL_CLASS", "ANONYMOUS_CLASS"}
+                    ),
+                    None,
+                )
+                if last_class_or_method == "METHOD":
+                    line_no = clean_source.count("\n", 0, method_starts[index]) + 1
+                    return f"nested method declaration '{method_braces[index]}' near line {line_no}."
+
+            scopes.append((index, kind))
         return ""
 
     @staticmethod

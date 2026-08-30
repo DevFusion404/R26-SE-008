@@ -401,6 +401,288 @@ def _replace_literal(
     return "".join(lines), replacements
 
 
+def _numeric_literal_occurrences(
+    source_code: str,
+    literal_value: Any,
+    *,
+    source_line: Optional[int] = None,
+) -> list[dict[str, int]]:
+    """Return eligible Java numeric-literal occurrences outside text/comments.
+
+    This deliberately operates on the comment/string-masked source so digits in
+    embedded HTML/CSS, URLs, entities, comments, and character literals are not
+    treated as Java Magic Numbers. Existing ``static final`` declarations are
+    excluded because they are already named constants rather than smells.
+    """
+
+    if (
+        not isinstance(literal_value, (int, float))
+        or isinstance(literal_value, bool)
+    ):
+        return []
+
+    pattern = _literal_pattern(literal_value)
+    masked_lines = _mask_java_comments_and_literals(source_code).splitlines(keepends=True)
+    raw_lines = source_code.splitlines(keepends=True)
+    occurrences: list[dict[str, int]] = []
+    for line_no, masked_line in enumerate(masked_lines, start=1):
+        if source_line is not None and line_no != source_line:
+            continue
+        raw_line = raw_lines[line_no - 1] if line_no <= len(raw_lines) else ""
+        if "static final" in raw_line:
+            continue
+        for match in pattern.finditer(masked_line):
+            occurrences.append(
+                {
+                    "line": line_no,
+                    "column": match.start() + 1,
+                }
+            )
+    return occurrences
+
+
+def _numeric_string_occurrences(
+    source_code: str,
+    literal_value: Any,
+    *,
+    source_line: Optional[int] = None,
+) -> list[dict[str, Any]]:
+    """Describe occurrences of a number inside Java string literals.
+
+    These are useful as diagnostics for upstream false-positive Magic Number
+    findings, but are never eligible targets for ``Introduce Constant``.
+    """
+
+    if (
+        not isinstance(literal_value, (int, float))
+        or isinstance(literal_value, bool)
+    ):
+        return []
+
+    literal_text = str(literal_value)
+    matches: list[dict[str, Any]] = []
+    for value, line_no, _start, _end in _iter_java_string_literals(source_code):
+        if source_line is not None and line_no != source_line:
+            continue
+        if literal_text not in value:
+            continue
+        matches.append({"line": line_no, "string_value": value})
+    return matches
+
+
+def _numeric_constants_for_literal(
+    source_code: str,
+    literal_value: Any,
+) -> list[str]:
+    """Return Java constant names whose initializer is exactly this number."""
+
+    if (
+        not isinstance(literal_value, (int, float))
+        or isinstance(literal_value, bool)
+    ):
+        return []
+
+    literal_text = re.escape(str(literal_value))
+    pattern = re.compile(
+        rf"\bstatic\s+final\s+[A-Za-z_][A-Za-z0-9_<>\[\].?]*\s+"
+        rf"(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*=\s*{literal_text}\s*;"
+    )
+    return [match.group("name") for match in pattern.finditer(source_code)]
+
+
+def apply_introduce_constant(
+    source_code: str,
+    literal_value: Any,
+    constant_name: Optional[str] = None,
+    source_line: Optional[int] = None,
+    *,
+    reference_source_code: Optional[str] = None,
+) -> Tuple[str, int, dict[str, Any]]:
+    """Safely apply Java Introduce Constant with target diagnostics.
+
+    ``reference_source_code`` should be the original file text before sequential
+    transformations. It allows an RDP/CUQA line target to be classified even
+    after earlier constant insertions shifted the current working line numbers.
+
+    Numeric values are eligible only when they exist as real Java numeric
+    literals outside strings/comments. Numbers that exist solely inside HTML,
+    CSS, URLs, entities, or any other Java string literal are safely classified
+    as ``not_applicable`` rather than rewritten or reported as failures.
+    """
+
+    reference = reference_source_code if reference_source_code is not None else source_code
+    metadata: dict[str, Any] = {
+        "refactoring": "Introduce Constant",
+        "language": "java",
+        "target_literal": literal_value,
+        "requested_source_line": source_line,
+        "status": "success",
+        "reason": "introduce_constant_applied",
+    }
+
+    is_numeric = (
+        isinstance(literal_value, (int, float))
+        and not isinstance(literal_value, bool)
+    )
+
+    if not is_numeric:
+        transformed, replacements = apply_extract_constant(
+            source_code,
+            literal_value,
+            constant_name,
+            source_line,
+        )
+        metadata["target_context"] = "NON_NUMERIC_LITERAL"
+        metadata["eligible_occurrences_before"] = replacements
+        if replacements <= 0:
+            metadata.update(
+                {
+                    "status": "not_applicable",
+                    "reason": "TARGET_LITERAL_NOT_FOUND",
+                    "final_status": "NOT_APPLICABLE",
+                    "final_decision": "NOT_APPLICABLE",
+                }
+            )
+        return transformed, replacements, metadata
+
+    reference_line_code = _numeric_literal_occurrences(
+        reference, literal_value, source_line=source_line
+    ) if source_line is not None else []
+    reference_line_strings = _numeric_string_occurrences(
+        reference, literal_value, source_line=source_line
+    ) if source_line is not None else []
+    reference_code = _numeric_literal_occurrences(reference, literal_value)
+    reference_strings = _numeric_string_occurrences(reference, literal_value)
+
+    metadata.update(
+        {
+            "reference_eligible_occurrences": len(reference_code),
+            "reference_string_occurrences": len(reference_strings),
+            "requested_line_eligible_occurrences": len(reference_line_code),
+            "requested_line_string_occurrences": len(reference_line_strings),
+        }
+    )
+
+    # A line-scoped upstream Magic Number target that points into a string is a
+    # false positive. Never fall back to a different numeric expression in the
+    # file, because that could refactor the wrong program behavior.
+    if source_line is not None and reference_line_strings and not reference_line_code:
+        metadata.update(
+            {
+                "status": "not_applicable",
+                "reason": "TARGET_NOT_JAVA_NUMERIC_LITERAL",
+                "target_context": "STRING_LITERAL",
+                "final_status": "NOT_APPLICABLE",
+                "final_decision": "NOT_APPLICABLE",
+            }
+        )
+        return source_code, 0, metadata
+
+    # If the original file contains no eligible Java numeric literal at all,
+    # the plan target is not a valid Introduce Constant operation. This catches
+    # HTML/CSS/string digits even when the upstream action omitted a line.
+    if not reference_code:
+        metadata.update(
+            {
+                "status": "not_applicable",
+                "reason": (
+                    "TARGET_NOT_JAVA_NUMERIC_LITERAL"
+                    if reference_strings
+                    else "TARGET_LITERAL_NOT_FOUND"
+                ),
+                "target_context": (
+                    "STRING_LITERAL" if reference_strings else "NOT_FOUND"
+                ),
+                "final_status": "NOT_APPLICABLE",
+                "final_decision": "NOT_APPLICABLE",
+            }
+        )
+        return source_code, 0, metadata
+
+    current_code_occurrences = _numeric_literal_occurrences(source_code, literal_value)
+    current_constants = set(_numeric_constants_for_literal(source_code, literal_value))
+    reference_constants = set(_numeric_constants_for_literal(reference, literal_value))
+    constants_added_during_run = sorted(current_constants - reference_constants)
+    normalized_name = _normalize_constant_name(constant_name, literal_value)
+    requested_constant_already_exists = normalized_name in current_constants
+    metadata["eligible_occurrences_before"] = len(current_code_occurrences)
+    if constants_added_during_run:
+        metadata["constants_added_by_prior_actions"] = constants_added_during_run
+    if requested_constant_already_exists:
+        metadata["existing_requested_constant"] = normalized_name
+
+    if not current_code_occurrences:
+        metadata.update(
+            {
+                "status": "not_applicable",
+                "reason": (
+                    "TARGET_ALREADY_REFACTORED_BY_PREVIOUS_ACTION"
+                    if constants_added_during_run
+                    else "TARGET_NO_LONGER_PRESENT"
+                ),
+                "target_context": "JAVA_NUMERIC_LITERAL",
+                "final_status": "NOT_APPLICABLE",
+                "final_decision": "NOT_APPLICABLE",
+            }
+        )
+        return source_code, 0, metadata
+
+    # Reuse only the exact requested constant name. Reusing an arbitrary
+    # pre-existing constant merely because it has the same numeric value can
+    # couple unrelated domain concepts and is therefore unsafe.
+    preferred_name = (
+        normalized_name
+        if requested_constant_already_exists
+        else _unique_constant_name(source_code, normalized_name)
+    )
+
+    # Sequential constant insertions shift original line numbers. Use the
+    # current line only when it still contains the requested literal; otherwise
+    # recover against the remaining eligible code occurrences.
+    current_line_occurrences = _numeric_literal_occurrences(
+        source_code, literal_value, source_line=source_line
+    ) if source_line is not None else []
+    effective_line = source_line if current_line_occurrences else None
+    metadata["target_resolution"] = (
+        "current_source_line" if effective_line is not None else "current_numeric_literal_scan"
+    )
+
+    transformed, replacements = _replace_literal(
+        source_code, literal_value, preferred_name, effective_line
+    )
+    if replacements > 0 and not requested_constant_already_exists and not _has_class_constant(
+        transformed, preferred_name
+    ):
+        transformed = _insert_class_constant(
+            transformed, preferred_name, literal_value
+        )
+
+    metadata.update(
+        {
+            "constant_name": preferred_name,
+            "target_context": "JAVA_NUMERIC_LITERAL",
+            "eligible_occurrences_after": len(
+                _numeric_literal_occurrences(transformed, literal_value)
+            ),
+            "reused_existing_constant": bool(requested_constant_already_exists),
+        }
+    )
+    if replacements <= 0:
+        metadata.update(
+            {
+                "status": "not_applicable",
+                "reason": "TARGET_NO_LONGER_PRESENT",
+                "final_status": "NOT_APPLICABLE",
+                "final_decision": "NOT_APPLICABLE",
+            }
+        )
+    else:
+        metadata["final_status"] = "PASS"
+        metadata["final_decision"] = "ACCEPT"
+
+    return transformed, replacements, metadata
+
+
 def _replace_numeric_inside_java_string(
     source_code: str,
     literal_value: Any,
