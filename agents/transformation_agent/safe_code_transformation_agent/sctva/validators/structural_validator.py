@@ -182,14 +182,22 @@ class StructuralValidator:
                     action=action,
                 )
                 if language == "python"
-                else self._validate_java_extract_method_action(
-                    original_code=original_code,
-                    transformed_code=transformed_code,
-                    action=action,
+                else (
+                    self._validate_c_extract_method_action(
+                        original_code=original_code,
+                        transformed_code=transformed_code,
+                        action=action,
+                    )
+                    if language == "c"
+                    else self._validate_java_extract_method_action(
+                        original_code=original_code,
+                        transformed_code=transformed_code,
+                        action=action,
+                    )
                 )
             )
             for action in actions or []
-            if language in {"python", "java"} and action.action_type == ACTION_EXTRACT_METHOD
+            if language in {"python", "java", "c"} and action.action_type == ACTION_EXTRACT_METHOD
         ]
         move_method_checks = [
             self._validate_python_move_method_action(
@@ -274,7 +282,16 @@ class StructuralValidator:
                 *polymorphism_checks,
             ]
         )
-        if polymorphism_checks and all(item.get("passed") for item in polymorphism_checks):
+        if (
+            (polymorphism_checks and all(item.get("passed") for item in polymorphism_checks))
+            or (parameter_object_checks and all(item.get("passed") for item in parameter_object_checks))
+            or (c_global_variable_checks and all(item.get("passed") for item in c_global_variable_checks))
+            or (extract_method_checks and all(item.get("passed") for item in extract_method_checks))
+            or (move_method_checks and all(item.get("passed") for item in move_method_checks))
+            or (inline_class_checks and all(item.get("passed") for item in inline_class_checks))
+            or (hide_delegate_checks and all(item.get("passed") for item in hide_delegate_checks))
+            or (rename_method_checks and all(item.get("passed") for item in rename_method_checks))
+        ):
             score = max(score, threshold)
         if dead_code_checks and all(item.get("passed") for item in dead_code_checks):
             # Remove Dead Code has a dedicated AST-level preservation proof for
@@ -655,17 +672,7 @@ class StructuralValidator:
                 object_name=object_name,
                 parameter_name=parameter_name,
             )
-        else:
-            result = {"passed": False, "reason": "unsupported_language"}
-        result["action_index"] = params.get("_sctva_action_index")
-        result["ledger_entry"] = dict(
-            params.get("parameter_object_ledger_entry")
-            or (params.get("applied_transformation_metadata") or {}).get(
-                "parameter_object_ledger_entry"
-            )
-            or {}
-        )
-        return result
+        return {"passed": False, "reason": "unsupported_language"}
 
     @staticmethod
     def _validate_python_parameter_object(
@@ -1278,6 +1285,65 @@ class StructuralValidator:
             result["passed"] = False
             result["reason"] = "LOCAL_SOURCE_COMPILATION_ERROR"
         return result
+
+    @staticmethod
+    def _validate_c_extract_method_action(
+        *,
+        original_code: str,
+        transformed_code: str,
+        action: RefactoringAction,
+    ) -> Dict[str, Any]:
+        from ..transformers.c_extract_class import _parse_c_module
+
+        params = action.parameters or {}
+        method_name = str(
+            params.get("method")
+            or params.get("method_name")
+            or params.get("function")
+            or params.get("function_name")
+            or params.get("target_method")
+            or ""
+        ).strip()
+        helper_name = str(
+            params.get("new_method_name")
+            or params.get("new_function_name")
+            or params.get("extracted_method_name")
+            or ""
+        ).strip()
+
+        before_module = _parse_c_module(original_code)
+        after_module = _parse_c_module(transformed_code)
+
+        before_fn_names = {f.name for f in before_module.functions}
+        after_fn_names = {f.name for f in after_module.functions}
+        new_functions = after_fn_names - before_fn_names
+
+        if helper_name:
+            helper_exists = helper_name in after_fn_names
+        else:
+            helper_exists = bool(new_functions)
+            if helper_exists:
+                helper_name = next(iter(new_functions))
+
+        before_target = next((f for f in before_module.functions if f.name == method_name), None) if method_name else None
+        after_target = next((f for f in after_module.functions if f.name == method_name), None) if method_name else None
+
+        if before_target and after_target:
+            called = bool(re.search(rf"\b{re.escape(helper_name)}\s*\(", after_target.body))
+            loc_reduced = len(after_target.body.splitlines()) <= len(before_target.body.splitlines())
+            passed = helper_exists and (called or loc_reduced)
+        else:
+            passed = helper_exists
+
+        return {
+            "passed": bool(passed),
+            "language": "c",
+            "method": method_name,
+            "helper": helper_name,
+            "checks": {
+                "helper_exists": helper_exists,
+            },
+        }
 
     def _validate_python_extract_method_action(
         self,

@@ -240,6 +240,11 @@ def cuqa_report_to_smells(report: dict) -> list:
                 "message": smell.get("message", ""),
                 "line": line,
                 "entity": entity,
+                # CUQA's own taxonomy, carried through rather than re-derived.
+                # It stamps every smell with these; dropping them here forced
+                # Stage 1 to guess a category for a smell that already had one.
+                "category": smell.get("category"),
+                "category_priority": smell.get("category_priority"),
                 "language": file_report.get("language", "unknown"),
                 "relative_path": rel_path,
                 "quality_score": file_report.get("quality_score", 100),

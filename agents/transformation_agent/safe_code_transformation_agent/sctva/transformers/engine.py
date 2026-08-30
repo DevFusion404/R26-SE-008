@@ -28,6 +28,7 @@ from ..constants import (
     ACTION_NORMALIZE_MULTILINE_STATEMENT,
     ACTION_NARROW_EXCEPTION_HANDLER,
     ACTION_INTRODUCE_PARAMETER_OBJECT,
+    ACTION_INTRODUCE_C_PARAMETER_OBJECT,
     ACTION_INTRODUCE_JAVA_PARAMETER_OBJECT,
     ACTION_INTRODUCE_PYTHON_PARAMETER_OBJECT,
     ACTION_UPDATE_JAVA_PARAMETER_OBJECT_CALL_SITE,
@@ -1844,6 +1845,8 @@ class TransformationEngine:
                         raise ValueError("introduce_java_parameter_object requires a Java source file.")
                     if action.action_type == ACTION_INTRODUCE_PYTHON_PARAMETER_OBJECT and language != "python":
                         raise ValueError("introduce_python_parameter_object requires a Python source file.")
+                    if action.action_type == ACTION_INTRODUCE_C_PARAMETER_OBJECT and language != "c":
+                        raise ValueError("introduce_c_parameter_object requires a C source file.")
                     if language == "java":
                         current_code, replacements, action_metadata = (
                             java_parameter_object.apply_introduce_parameter_object(current_code, **kwargs)
@@ -1855,8 +1858,20 @@ class TransformationEngine:
                         current_code, replacements, action_metadata = (
                             python_parameter_object.apply_introduce_parameter_object(current_code, **kwargs)
                         )
+                    elif language == "c":
+                        current_code, replacements, action_metadata = (
+                            c_transformers.apply_introduce_parameter_object(current_code, **kwargs)
+                        )
                     else:
-                        raise ValueError("Introduce Parameter Object is supported for Java and Python only.")
+                        action_metadata = {
+                            "status": "not_applicable",
+                            "reason": "UNSUPPORTED_LANGUAGE",
+                            "language": language,
+                            "refactoring": "Introduce Parameter Object",
+                            "supported_languages": ["java", "python", "c"],
+                            "plan_compliance": "FAIL",
+                            "behavioral_safety": "NOT_EVALUATED_NO_CHANGE",
+                        }
                     status = str(action_metadata.get("status") or "")
                     for resolution_key in (
                         "requested_source_class",

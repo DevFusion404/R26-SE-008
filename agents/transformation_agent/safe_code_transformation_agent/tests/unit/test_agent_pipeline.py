@@ -36,3 +36,43 @@ def test_zero_replacement_c_action_does_not_trigger_rollback():
     assert result["validation"]["syntax"]["passed"] is True
     assert result["validation"]["behavioral"]["passed"] is True
     assert result["validation"]["invariant"]["passed"] is True
+
+
+def test_c_introduce_parameter_object_executes_successfully():
+    agent = SafeCodeTransformationValidationAgent()
+    source = "int total(int a, int b, int c) { return a + b + c; }\n"
+
+    result = agent.execute(
+        {
+            "request_id": "c_parameter_object_supported",
+            "language": "c",
+            "source_code": source,
+            "refactoring_plan": {
+                "plan_id": "c_parameter_object_plan",
+                "actions": [
+                    {
+                        "action_type": "introduce_parameter_object",
+                        "parameters": {
+                            "method": "total",
+                            "parameter_object_name": "TotalParams",
+                        },
+                    }
+                ],
+                "behavior_tests": [],
+            },
+            "execution_options": {
+                "strict_mode": True,
+                "enable_behavior_tests": True,
+                "require_compilation": False,
+                "enable_sctva_auto_refactoring": False,
+            },
+        }
+    )
+
+    log = result["safety_report"]["transformation_log"][0]
+    assert result["transformation_applied"] is True
+    assert "typedef struct" in result["refactored_code"]
+    assert "TotalParams" in result["refactored_code"]
+    assert "int total(TotalParams params)" in result["refactored_code"]
+    assert not any("Action failed" in warning for warning in log["warnings"])
+

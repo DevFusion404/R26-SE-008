@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from typing import Any, Optional, Sequence, Tuple
 
 
@@ -522,6 +523,15 @@ _C_FUNCTION_DEFINITION_RE = re.compile(
     r"(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*\([^;{}]*\)\s*\{"
 )
 
+_C_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+@dataclass(frozen=True)
+class CParameter:
+    name: str
+    type_name: str
+    declaration: str
+
 
 def _c_function_definitions(source_code: str) -> list[dict[str, Any]]:
     """Return top-level C function definitions with balanced source spans."""
@@ -559,6 +569,427 @@ def c_function_definition_count(source_code: str, method_name: str) -> int:
     if not target:
         return 0
     return sum(item["name"] == target for item in _c_function_definitions(source_code))
+
+
+def apply_introduce_parameter_object(
+    source_code: str,
+    *,
+    method: str,
+    parameter_object_name: str,
+    source_class: str = "",
+    source_file: str = "",
+    current_file_name: str = "",
+    parameter_name: str = "params",
+    project_source_files: Sequence[Any] | None = None,
+    source_resolution_error: str = "",
+) -> tuple[str, int, dict[str, Any]]:
+    """Introduce a C typedef struct for a simple top-level function signature."""
+
+    del source_class
+    metadata: dict[str, Any] = {
+        "refactoring": "Introduce Parameter Object",
+        "language": "c",
+        "method": method,
+        "parameter_object_name": parameter_object_name,
+        "parameter_name": parameter_name,
+        "source_file": source_file or current_file_name,
+        "plan_compliance": "FAIL",
+    }
+    if source_resolution_error:
+        return _c_parameter_object_review(source_code, source_resolution_error, metadata)
+    if not _C_IDENTIFIER_RE.fullmatch(method or ""):
+        return _c_parameter_object_review(source_code, "INVALID_FUNCTION_TARGET", metadata)
+    if not _C_IDENTIFIER_RE.fullmatch(parameter_object_name or ""):
+        return _c_parameter_object_review(source_code, "INVALID_PARAMETER_OBJECT_NAME", metadata)
+    if not _C_IDENTIFIER_RE.fullmatch(parameter_name or ""):
+        return _c_parameter_object_review(source_code, "INVALID_PARAMETER_NAME", metadata)
+    if source_file and current_file_name and not _c_paths_match(source_file, current_file_name):
+        return _c_parameter_object_review(source_code, "SOURCE_FILE_MISMATCH", metadata)
+    if re.search(rf"\b(?:typedef\s+)?struct\s+{re.escape(parameter_object_name)}\b", _mask_c_non_code(source_code)):
+        return _c_parameter_object_review(source_code, "PARAMETER_OBJECT_ALREADY_EXISTS", metadata)
+
+    from .c_extract_class import _parse_c_module
+    from .c_extract_method import _verify_c_compilation
+
+    module = _parse_c_module(source_code)
+    targets = module.functions_by_name.get(method, [])
+    if len(targets) != 1:
+        reason = "FUNCTION_TARGET_NOT_FOUND" if not targets else "AMBIGUOUS_FUNCTION_TARGET"
+        return _c_parameter_object_review(source_code, reason, metadata)
+    function = targets[0]
+    if re.search(r"(?m)^\s*#", function.body):
+        return _c_parameter_object_review(source_code, "PREPROCESSOR_DIRECTIVE_INSIDE_FUNCTION", metadata)
+    if re.search(rf"(?<![A-Za-z0-9_]){re.escape(method)}\s*\(", _mask_c_non_code(function.body)):
+        return _c_parameter_object_review(source_code, "RECURSIVE_FUNCTION_NOT_SUPPORTED", metadata)
+
+    parsed_or_error = _parse_c_parameter_object_parameters(function.params_raw)
+    if isinstance(parsed_or_error, str):
+        return _c_parameter_object_review(source_code, parsed_or_error, metadata)
+    parameters = parsed_or_error
+    if len(parameters) < 2:
+        return _c_parameter_object_review(source_code, "PARAMETER_COUNT_NOT_REDUCIBLE", metadata)
+    if parameter_name in {item.name for item in parameters}:
+        return _c_parameter_object_review(source_code, "PARAMETER_NAME_COLLISION", metadata)
+    shadowed = _c_shadowed_parameter_names(function.body, {item.name for item in parameters})
+    if shadowed:
+        metadata["shadowed_parameters"] = sorted(shadowed)
+        return _c_parameter_object_review(source_code, "NESTED_SCOPE_PARAMETER_SHADOWING", metadata)
+
+    external_callers = _c_external_function_references(
+        method,
+        source_code,
+        project_source_files=project_source_files,
+        current_file_name=current_file_name or source_file,
+    )
+    if external_callers:
+        metadata["unresolved_external_callers"] = external_callers
+        return _c_parameter_object_review(source_code, "CROSS_FILE_CALL_SITES_REQUIRE_COORDINATED_EDIT", metadata)
+
+    signature_span = _c_function_parameter_span(source_code, function)
+    if signature_span is None:
+        return _c_parameter_object_review(source_code, "FUNCTION_SIGNATURE_PARSE_FAILED", metadata)
+
+    call_edits_or_error = _c_parameter_object_call_edits(
+        source_code,
+        method=method,
+        object_name=parameter_object_name,
+        parameters=parameters,
+        definition_name_span=(function.start + function.header.rfind(method), function.start + function.header.rfind(method) + len(method)),
+    )
+    if isinstance(call_edits_or_error, str):
+        return _c_parameter_object_review(source_code, call_edits_or_error, metadata)
+    call_edits, call_sites_updated = call_edits_or_error
+
+    body_start = function.open_brace + 1
+    body_end = function.end - 1
+    body_edits: list[tuple[int, int, str]] = []
+    body_masked = _mask_c_non_code(source_code[body_start:body_end])
+    for parameter in parameters:
+        pattern = re.compile(rf"(?<![A-Za-z0-9_.>]){re.escape(parameter.name)}\b")
+        body_edits.extend(
+            (body_start + match.start(), body_start + match.end(), f"{parameter_name}.{parameter.name}")
+            for match in pattern.finditer(body_masked)
+        )
+
+    struct_source = _c_parameter_object_typedef(parameter_object_name, parameters)
+    insert_at = _c_parameter_object_insert_index(source_code, function.start)
+    edits = [
+        (insert_at, insert_at, struct_source),
+        (signature_span[0], signature_span[1], f"{parameter_object_name} {parameter_name}"),
+        *body_edits,
+        *call_edits,
+    ]
+    transformed = _apply_c_edits(source_code, edits)
+
+    validation = validate_c_parameter_object(
+        source_code,
+        transformed,
+        method=method,
+        object_name=parameter_object_name,
+        parameter_name=parameter_name,
+    )
+    if not validation.get("passed"):
+        metadata["validation_details"] = validation
+        return _c_parameter_object_review(source_code, "STRUCTURAL_POSTCONDITION_FAILED", metadata)
+
+    compile_status, compile_msg = _verify_c_compilation(transformed)
+    if compile_status == "FAIL":
+        metadata["compiler_validation"] = compile_msg
+        return _c_parameter_object_review(source_code, f"COMPILATION_FAILED: {compile_msg}", metadata)
+
+    internal_validation = {
+        "parameter_object": "PASS",
+        "signature_reduction": "PASS",
+        "body_access": "PASS",
+        "call_sites": "PASS",
+    }
+    metadata.update({
+        "status": "success",
+        "reason": "parameter_object_introduced",
+        "plan_compliance": "PASS",
+        "parameters_moved": [item.name for item in parameters],
+        "parameter_types": {item.name: item.type_name for item in parameters},
+        "before_parameter_count": len(parameters),
+        "after_parameter_count": 1,
+        "call_sites_updated": call_sites_updated,
+        "validation": internal_validation,
+        "validation_details": validation,
+        "compiler_validation": compile_msg,
+        "behavioral_safety": "PASSED_COMPILER_AND_STRUCTURAL_VALIDATION" if compile_status == "PASS" else "STRUCTURAL_VALIDATION_ONLY",
+    })
+    return transformed, 1, metadata
+
+
+def validate_c_parameter_object(
+    original: str,
+    transformed: str,
+    *,
+    method: str,
+    object_name: str,
+    parameter_name: str,
+) -> dict[str, Any]:
+    from .c_extract_class import _parse_c_module
+
+    before_module = _parse_c_module(original)
+    after_module = _parse_c_module(transformed)
+    before_targets = before_module.functions_by_name.get(method, [])
+    after_targets = after_module.functions_by_name.get(method, [])
+    if len(before_targets) != 1 or len(after_targets) != 1:
+        return {"passed": False, "reason": "target_missing_or_ambiguous"}
+
+    before = before_targets[0]
+    after = after_targets[0]
+    parsed_or_error = _parse_c_parameter_object_parameters(before.params_raw)
+    if isinstance(parsed_or_error, str):
+        return {"passed": False, "reason": parsed_or_error}
+    parameters = parsed_or_error
+    fields = _c_parameter_object_fields(transformed, object_name)
+    used_before = {
+        item.name
+        for item in parameters
+        if re.search(rf"(?<![A-Za-z0-9_$.]){re.escape(item.name)}\b", _mask_c_non_code(before.body))
+    }
+    accessed_after = {
+        match.group(1)
+        for match in re.finditer(
+            rf"\b{re.escape(parameter_name)}\s*\.\s*([A-Za-z_][A-Za-z0-9_]*)\b",
+            _mask_c_non_code(after.body),
+        )
+    }
+    after_params = _parse_c_parameter_object_parameters(after.params_raw)
+    after_names = [] if isinstance(after_params, str) else [item.name for item in after_params]
+    after_types = [] if isinstance(after_params, str) else [item.type_name for item in after_params]
+    checks = {
+        "parameter_object_created": bool(fields),
+        "fields_preserved": [item.name for item in parameters] == list(fields),
+        "field_types_preserved": [item.type_name for item in parameters] == [fields.get(item.name) for item in parameters],
+        "parameter_count_reduced": len(parameters) > len(after_names),
+        "single_parameter_object_argument": after_names == [parameter_name] and after_types == [object_name],
+        "body_access_migrated": used_before <= accessed_after,
+        "call_sites_updated": _c_direct_old_arity_call_count(transformed, method, len(parameters)) == 0,
+    }
+    return {
+        "passed": all(checks.values()),
+        "language": "c",
+        "method": method,
+        "before_parameter_count": len(parameters),
+        "after_parameter_count": len(after_names),
+        "fields": list(fields),
+        "checks": checks,
+    }
+
+
+def _c_parameter_object_review(
+    source_code: str,
+    reason: str,
+    metadata: dict[str, Any],
+) -> tuple[str, int, dict[str, Any]]:
+    metadata.update({"status": "review_required", "reason": reason})
+    return source_code, 0, metadata
+
+
+def _parse_c_parameter_object_parameters(params_raw: str) -> list[CParameter] | str:
+    cleaned = str(params_raw or "").strip()
+    if not cleaned or cleaned == "void":
+        return []
+    parameters: list[CParameter] = []
+    for raw in _split_call_args(cleaned):
+        declaration = raw.strip()
+        if not declaration:
+            continue
+        if declaration == "...":
+            return "VARARGS_NOT_SUPPORTED"
+        if "..." in declaration:
+            return "VARARGS_NOT_SUPPORTED"
+        if re.search(r"\(\s*\*\s*[A-Za-z_][A-Za-z0-9_]*\s*\)", declaration):
+            return "FUNCTION_POINTER_PARAMETER_NOT_SUPPORTED"
+        array_match = re.search(r"([A-Za-z_][A-Za-z0-9_]*)\s*\[[^]]*\]\s*$", declaration)
+        if array_match:
+            name = array_match.group(1)
+            base_type = declaration[:array_match.start()].strip()
+            if not base_type or name in {"void", "const", "volatile", "restrict"}:
+                return "PARAMETER_PARSE_FAILED"
+            type_name = _normalize_c_type_text(f"{base_type}*")
+            parameters.append(CParameter(name=name, type_name=type_name, declaration=declaration))
+            continue
+        match = re.search(r"([A-Za-z_][A-Za-z0-9_]*)\s*$", declaration)
+        if not match:
+            return "PARAMETER_PARSE_FAILED"
+        name = match.group(1)
+        type_name = declaration[:match.start()].strip()
+        if not type_name or name in {"void", "const", "volatile", "restrict"}:
+            return "PARAMETER_PARSE_FAILED"
+        parameters.append(CParameter(name=name, type_name=_normalize_c_type_text(type_name), declaration=declaration))
+    return parameters
+
+
+def _normalize_c_type_text(value: str) -> str:
+    return re.sub(r"\s+", " ", value.replace("*", " * ")).replace(" *", "*").strip()
+
+
+def _c_function_parameter_span(source_code: str, function: Any) -> tuple[int, int] | None:
+    header = source_code[function.start:function.open_brace]
+    masked = _mask_c_non_code(header)
+    name_matches = list(re.finditer(rf"\b{re.escape(function.name)}\s*\(", masked))
+    if not name_matches:
+        return None
+    open_index = masked.find("(", name_matches[-1].start())
+    close_index = _find_matching_delimiter(masked, open_index, "(", ")")
+    if close_index is None:
+        return None
+    return function.start + open_index + 1, function.start + close_index
+
+
+def _find_matching_delimiter(source: str, start_idx: int, open_char: str, close_char: str) -> Optional[int]:
+    depth = 0
+    for idx in range(start_idx, len(source)):
+        char = source[idx]
+        if char == open_char:
+            depth += 1
+        elif char == close_char:
+            depth -= 1
+            if depth == 0:
+                return idx
+    return None
+
+
+def _c_parameter_object_call_edits(
+    source_code: str,
+    *,
+    method: str,
+    object_name: str,
+    parameters: Sequence[CParameter],
+    definition_name_span: tuple[int, int],
+) -> tuple[list[tuple[int, int, str]], int] | str:
+    masked = _mask_c_non_code(source_code)
+    pattern = re.compile(rf"(?<![A-Za-z0-9_]){re.escape(method)}\s*\(")
+    edits: list[tuple[int, int, str]] = []
+    for match in pattern.finditer(masked):
+        if (match.start(), match.start() + len(method)) == definition_name_span:
+            continue
+        if _c_brace_depth(masked, match.start()) <= 0:
+            continue
+        open_index = masked.find("(", match.start(), match.end())
+        close_index = _find_matching_delimiter(masked, open_index, "(", ")")
+        if close_index is None:
+            return "CALL_SITE_PARSE_FAILED"
+        args = _split_call_args(source_code[open_index + 1:close_index])
+        if len(args) != len(parameters):
+            return "CALL_SITE_ARITY_MISMATCH"
+        initializer = ", ".join(
+            f".{parameter.name} = {argument.strip()}"
+            for parameter, argument in zip(parameters, args)
+        )
+        edits.append((match.start(), close_index + 1, f"{method}(({object_name}){{ {initializer} }})"))
+    return edits, len(edits)
+
+
+def _c_parameter_object_typedef(object_name: str, parameters: Sequence[CParameter]) -> str:
+    fields = "\n".join(f"    {item.type_name} {item.name};" for item in parameters)
+    return f"typedef struct {{\n{fields}\n}} {object_name};\n\n"
+
+
+def _c_parameter_object_insert_index(source_code: str, function_start: int) -> int:
+    prefix = source_code[:function_start]
+    if prefix.endswith("\n\n") or not prefix.strip():
+        return function_start
+    line_start = source_code.rfind("\n", 0, function_start) + 1
+    return line_start
+
+
+def _apply_c_edits(source: str, edits: Sequence[tuple[int, int, str]]) -> str:
+    result = source
+    for start, end, replacement in sorted(edits, key=lambda item: item[0], reverse=True):
+        result = result[:start] + replacement + result[end:]
+    return result
+
+
+_C_NON_TYPE_KEYWORDS = {
+    "return", "case", "goto", "sizeof", "if", "while", "for", "switch",
+    "else", "default", "break", "continue", "typedef", "do",
+}
+
+
+def _c_shadowed_parameter_names(body: str, parameter_names: set[str]) -> set[str]:
+    masked = _mask_c_non_code(body)
+    shadowed: set[str] = set()
+    for name in parameter_names:
+        matches = re.finditer(
+            rf"\b([A-Za-z_][A-Za-z0-9_]*)"
+            rf"(?:\s*\*+\s*|\s+){re.escape(name)}\b\s*([=;,\[)])",
+            masked,
+        )
+        for m in matches:
+            type_token = m.group(1)
+            if type_token not in _C_NON_TYPE_KEYWORDS:
+                shadowed.add(name)
+    return shadowed
+
+
+def _c_external_function_references(
+    method: str,
+    source_code: str,
+    *,
+    project_source_files: Sequence[Any] | None,
+    current_file_name: str,
+) -> list[str]:
+    external: list[str] = []
+    for item in _project_c_sources(
+        source_code,
+        project_source_files=project_source_files,
+        current_file_name=current_file_name,
+    ):
+        if item.get("is_current"):
+            continue
+        if re.search(rf"(?<![A-Za-z0-9_]){re.escape(method)}\s*\(", _mask_c_non_code(item["source_code"])):
+            external.append(str(item.get("file_name") or "unknown"))
+    return external
+
+
+def _c_direct_old_arity_call_count(source_code: str, method: str, arity: int) -> int:
+    masked = _mask_c_non_code(source_code)
+    count = 0
+    for match in re.finditer(rf"(?<![A-Za-z0-9_]){re.escape(method)}\s*\(", masked):
+        if _c_brace_depth(masked, match.start()) <= 0:
+            continue
+        open_index = masked.find("(", match.start(), match.end())
+        close_index = _find_matching_delimiter(masked, open_index, "(", ")")
+        if close_index is None:
+            continue
+        args = _split_call_args(source_code[open_index + 1:close_index])
+        if len(args) == arity:
+            count += 1
+    return count
+
+
+def _c_parameter_object_fields(source_code: str, object_name: str) -> dict[str, str]:
+    match = re.search(
+        rf"typedef\s+struct\s*\{{(?P<body>.*?)\}}\s*{re.escape(object_name)}\s*;",
+        _mask_c_non_code(source_code),
+        flags=re.DOTALL,
+    )
+    if not match:
+        return {}
+    fields: dict[str, str] = {}
+    for raw in match.group("body").split(";"):
+        declaration = raw.strip()
+        if not declaration:
+            continue
+        parsed = _parse_c_parameter_object_parameters(declaration)
+        if isinstance(parsed, str) or len(parsed) != 1:
+            return {}
+        fields[parsed[0].name] = parsed[0].type_name
+    return fields
+
+
+def _c_paths_match(expected: str, actual: str) -> bool:
+    expected_path = str(expected or "").replace("\\", "/").lower()
+    actual_path = str(actual or "").replace("\\", "/").lower()
+    return bool(
+        expected_path == actual_path
+        or expected_path.endswith(f"/{actual_path}")
+        or actual_path.endswith(f"/{expected_path}")
+    )
 
 
 def _project_c_sources(
@@ -1710,6 +2141,7 @@ __all__ = [
     "apply_fault_injection",
     "apply_inject_syntax_error",
     "apply_extract_method",
+    "apply_introduce_parameter_object",
     "apply_replace_unsafe_function",
     "apply_encapsulate_variable",
     "apply_encapsulate_c_variable",
@@ -1718,4 +2150,5 @@ __all__ = [
     "apply_rename_symbol",
     "apply_replace_literal",
     "apply_normalize_multiline_statement",
+    "validate_c_parameter_object",
 ]

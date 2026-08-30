@@ -15,6 +15,7 @@ from ..constants import (
     ACTION_EXTRACT_METHOD,
     ACTION_EXTRACT_PYTHON_CLASS,
     ACTION_FAULT_INJECTION,
+    ACTION_INTRODUCE_C_PARAMETER_OBJECT,
     ACTION_INTRODUCE_JAVA_PARAMETER_OBJECT,
     ACTION_INTRODUCE_PARAMETER_OBJECT,
     ACTION_INTRODUCE_PYTHON_PARAMETER_OBJECT,
@@ -638,6 +639,7 @@ class PlannerAdapter:
                 params.get("parameter_object_name")
                 or params.get("new_class_name")
                 or params.get("parameter_class_name")
+                or (f"{method}Params" if method else "ParameterObject")
             )
             if not method or not object_name:
                 raise PlannerAdapterError(
@@ -650,6 +652,8 @@ class PlannerAdapter:
                 action_type = ACTION_INTRODUCE_JAVA_PARAMETER_OBJECT
             elif normalized_file.endswith(".py"):
                 action_type = ACTION_INTRODUCE_PYTHON_PARAMETER_OBJECT
+            elif normalized_file.endswith((".c", ".h")):
+                action_type = ACTION_INTRODUCE_C_PARAMETER_OBJECT
             action = {
                 "action_type": action_type,
                 "parameters": {

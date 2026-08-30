@@ -500,3 +500,148 @@ export const formatPoints = (value, { signed = true } = {}) => {
 
 export const formatMinutes = (value) =>
   typeof value === "number" && !Number.isNaN(value) ? `~${value} min` : "—";
+
+// ─── Grouping the plan ───────────────────────────────────────────────────────
+
+/** The file a step targets. One name for it, used by every grouping below. */
+export const fileOf = (step) => step?.target?.file || "(module level)";
+
+/**
+ * The refactoring method a step applies — "Extract Method", "Rename Variable".
+ *
+ * This is the PLAN METHOD: what RDP decided to do, as opposed to the smell
+ * that provoked it. A plan of forty steps is usually six or seven methods, so
+ * it is the axis that makes a long plan reviewable in one pass — a developer
+ * who trusts Extract Method and distrusts Move Class can act on that belief
+ * directly instead of hunting for the steps that happen to embody it.
+ */
+export const methodOf = (step) => step?.refactoring || "(unspecified)";
+
+/**
+ * Approval state over a set of steps, in the shape QuickSelectDropdown reads.
+ *
+ * Approve is the only verdict counted as "selected": reject and manual are
+ * decisions too, but the checkbox in a quick-select answers "is this going to
+ * the transformation agent", and neither of those does.
+ */
+export function approvalState(steps, decisions = {}) {
+  const total = (steps || []).length;
+  const selected = (steps || []).filter((s) => decisions[s.step_id] === APPROVE).length;
+  return {
+    total,
+    selected,
+    all: total > 0 && selected === total,
+    partial: selected > 0 && selected < total,
+    none: selected === 0,
+  };
+}
+
+const worstImpact = (steps) => {
+  const rank = { high: 0, medium: 1, low: 2 };
+  let worst = null;
+  for (const step of steps || []) {
+    const impact = step.impact || step.expected_impact;
+    if (!(impact in rank)) continue;
+    if (worst === null || rank[impact] < rank[worst]) worst = impact;
+  }
+  return worst;
+};
+
+/**
+ * Generic single-level grouping, preserving first-seen order.
+ *
+ * Order matters here in a way it does not in Stage 1: the plan arrives from
+ * RDP already sequenced, and re-sorting groups by size or severity would put a
+ * step that must run third above one that must run first.
+ */
+function groupBy(steps, keyOf, { decisions = {} } = {}) {
+  const index = new Map();
+  const groups = [];
+
+  for (const step of steps || []) {
+    const key = keyOf(step);
+    let group = index.get(key);
+    if (!group) {
+      group = { key, label: key, steps: [] };
+      index.set(key, group);
+      groups.push(group);
+    }
+    group.steps.push(step);
+  }
+
+  return groups.map((group) => ({
+    ...group,
+    stepCount: group.steps.length,
+    fileCount: new Set(group.steps.map(fileOf)).size,
+    methodCount: new Set(group.steps.map(methodOf)).size,
+    selection: approvalState(group.steps, decisions),
+    breakdown: groupBreakdown(group.steps),
+    worstImpact: worstImpact(group.steps),
+  }));
+}
+
+/** file -> its steps. */
+export const groupStepsByFile = (steps, options) => groupBy(steps, fileOf, options);
+
+/** refactoring method -> its steps, across every file. */
+export const groupStepsByMethod = (steps, options) => groupBy(steps, methodOf, options);
+
+/**
+ * Options for the plan-method quick-select.
+ *
+ * Built from ALL steps rather than the filtered ones, for the same reason
+ * Stage 1 builds its smell-type options that way: this dropdown is how a
+ * developer reaches a method the current filter is hiding, so a list that
+ * shrank with the filter would defeat its own purpose.
+ *
+ * `findingCount` / `fileCount` are named for what QuickSelectDropdown renders,
+ * not for what this stage calls them — the component is shared, and renaming
+ * its contract for one caller would break the other.
+ */
+export function methodOptions(steps, decisions = {}) {
+  return groupStepsByMethod(steps, { decisions })
+    .map((group) => ({
+      key: group.key,
+      label: group.label,
+      steps: group.steps,
+      selection: group.selection,
+      findingCount: group.stepCount,
+      fileCount: group.fileCount,
+      worstSeverity: group.worstImpact,
+    }))
+    .sort((a, b) => b.findingCount - a.findingCount || a.key.localeCompare(b.key));
+}
+
+/**
+ * Which whole-plan verdict the current decisions amount to.
+ *
+ *   "all"          every step approved
+ *   "reject"       every step rejected
+ *   "recommended"  exactly the auto-selectable set approved, nothing else decided
+ *   null           anything else — a review in progress
+ *
+ * DERIVED, never remembered. A flag set when the button was pressed would go
+ * on claiming "all selected" after the developer reopened one step and changed
+ * their mind. The highlight has to describe the plan's state, not the last
+ * button anyone pressed.
+ *
+ * "recommended" is deliberately strict: approving one extra step by hand is no
+ * longer the recommendation, so the bar stops claiming it is. `all` is checked
+ * first, because a plan whose recommended set IS every step is both, and "you
+ * approved everything" is the more important of the two to say.
+ */
+export function activeBulkVerdict(steps, decisions = {}) {
+  const list = steps || [];
+  if (list.length === 0) return null;
+
+  const counts = countDecisions(list, decisions);
+  if (counts.approved === list.length) return "all";
+  if (counts.rejected === list.length) return "reject";
+
+  const auto = list.filter(isAutoSelectable);
+  if (auto.length === 0) return null;
+  if (counts.approved !== auto.length) return null;
+  if (counts.rejected > 0 || counts.manual > 0) return null;
+
+  return auto.every((step) => decisions[step.step_id] === APPROVE) ? "recommended" : null;
+}

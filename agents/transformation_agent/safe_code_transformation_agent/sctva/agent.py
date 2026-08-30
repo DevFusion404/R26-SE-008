@@ -2934,6 +2934,9 @@ class SafeCodeTransformationValidationAgent:
                 elif language == "python" or lower_name.endswith(".py"):
                     owners = cls._python_parameter_object_method_owners(entry.source_code, method)
                     matches.extend((entry, owner) for owner in owners)
+                elif language == "c" or lower_name.endswith((".c", ".h")):
+                    if c_transformers.c_function_definition_count(entry.source_code, method) == 1:
+                        matches.append((entry, cls._file_stem(entry.file_name)))
 
             requested_class = str(params.get("source_class") or "").strip()
             exact = [item for item in matches if item[1] == requested_class]
@@ -2965,7 +2968,13 @@ class SafeCodeTransformationValidationAgent:
             entry, owner = resolved
             language = (entry.language or "").strip().lower()
             if not language:
-                language = "java" if entry.file_name.lower().endswith(".java") else "python"
+                lower_name = entry.file_name.lower()
+                if lower_name.endswith(".java"):
+                    language = "java"
+                elif lower_name.endswith(".py"):
+                    language = "python"
+                elif lower_name.endswith((".c", ".h")):
+                    language = "c"
             specialized = PARAMETER_OBJECT_ACTION_BY_LANGUAGE.get(language)
             if not specialized:
                 params["source_resolution_error"] = "SOURCE_FILE_LANGUAGE_MISMATCH"
@@ -3519,7 +3528,9 @@ class SafeCodeTransformationValidationAgent:
                 "invariant_preservation": "PASS" if invariant_passed else "FAIL",
             }
             entry.metadata["final_checks"] = checks
-            if rollback_occurred:
+            if str(entry.metadata.get("status") or "").lower() == "not_applicable":
+                entry.metadata["final_decision"] = "NOT_APPLICABLE"
+            elif rollback_occurred:
                 entry.metadata["status"] = "rolled_back"
                 entry.metadata["final_decision"] = "ROLLBACK"
             elif entry.replacements_count <= 0 or "FAIL" in checks.values():

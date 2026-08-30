@@ -98,6 +98,7 @@ def expected_c_transform_summary(actions: Sequence[RefactoringAction]) -> Dict[s
     expected_removed: set[str] = set()
     expected_macros: Dict[str, Any] = {}
     expected_added_functions: Dict[str, str] = {}
+    expected_parameter_objects: Dict[str, Dict[str, str]] = {}
 
     for action in actions:
         action_type = getattr(action, "action_type", "")
@@ -187,11 +188,37 @@ def expected_c_transform_summary(actions: Sequence[RefactoringAction]) -> Dict[s
             if setter_name:
                 expected_added_functions[setter_name] = ""
 
+        elif action_type in {"introduce_parameter_object", "introduce_c_parameter_object"}:
+            method = str(
+                params.get("method")
+                or params.get("method_name")
+                or params.get("function")
+                or params.get("function_name")
+                or ""
+            ).strip()
+            object_name = str(
+                params.get("parameter_object_name")
+                or params.get("new_class_name")
+                or params.get("parameter_class_name")
+                or ""
+            ).strip()
+            parameter_name = str(params.get("parameter_name") or "params").strip()
+            applied = params.get("applied_transformation_metadata")
+            if isinstance(applied, dict):
+                object_name = str(applied.get("parameter_object_name") or object_name)
+                parameter_name = str(applied.get("parameter_name") or parameter_name)
+            if method and object_name and parameter_name:
+                expected_parameter_objects[method] = {
+                    "object_name": object_name,
+                    "parameter_name": parameter_name,
+                }
+
     return {
         "expected_renames": expected_renames,
         "expected_removed": sorted(expected_removed),
         "expected_macros": expected_macros,
         "expected_added_functions": expected_added_functions,
+        "expected_parameter_objects": expected_parameter_objects,
     }
 
 
@@ -217,6 +244,7 @@ def compare_c_static_summaries(
     expected_removed = set(expected["expected_removed"])
     expected_macros = expected["expected_macros"]
     expected_added_functions = expected["expected_added_functions"]
+    expected_parameter_objects = expected["expected_parameter_objects"]
 
     original_signatures = dict(original_summary.get("functions", {}))
     transformed_signatures = dict(transformed_summary.get("functions", {}))
@@ -226,7 +254,13 @@ def compare_c_static_summaries(
         expected_name = expected_renames.get(name, name)
         if name in expected_removed:
             continue
-        normalized_expected_original.add(signature.replace(name, expected_name, 1))
+        parameter_object = expected_parameter_objects.get(name)
+        if parameter_object and expected_name == name:
+            normalized_expected_original.add(
+                f"{name}:{parameter_object['object_name']} {parameter_object['parameter_name']}"
+            )
+        else:
+            normalized_expected_original.add(signature.replace(name, expected_name, 1))
 
     transformed_signature_set = set(transformed_summary.get("function_signatures", []))
 

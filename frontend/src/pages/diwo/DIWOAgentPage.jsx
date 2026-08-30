@@ -171,7 +171,7 @@ export default function DIWOAgentPage() {
     return () => { cancelled = true; };
   }, [workflowId, phase]);
 
-  // ── On mount: create backend workflow ─────────────────────────────────────
+  // ── Seed the workflow from whatever CUQA currently holds ──────────────────
   /**
    * Preferred path: POST /workflows/from-cuqa — the DIWO backend calls the CUQA
    * agent's POST /api/quality-report, normalizes it, and seeds the workflow with
@@ -180,46 +180,89 @@ export default function DIWOAgentPage() {
    *
    * Fallback: the bundled sample report via POST /workflows, so the flow stays
    * usable when the CUQA agent is not running or has no repository loaded.
+   *
+   * Callable more than once, and that is the point. CUQA replaces its whole
+   * workspace on every upload, so after the developer uploads a second
+   * repository this workflow — seeded from the first — describes code that is
+   * no longer there. Re-running it mints a NEW workflow from the current
+   * workspace, which is the only correct response: the smell ids, the impact
+   * records and the stored report all belong to one repository, and there is no
+   * partial refresh that keeps them consistent.
    */
-  useEffect(() => {
-    (async () => {
-      setBackendBusy(true);
-      try {
-        try {
-          const res = await api.post("/workflows/from-cuqa", {});
-          setWorkflowId(res.workflow_id);
-          setWorkflowLanguage(res.language || "java");
-          setMetricsBeforeApi(res.metrics_before || null);
-          setCuqaReport(res.report || null);
-          addLog(
-            `CUQA report ingested from ${res.cuqa_url || "CUQA agent"}: ` +
-            `${res.report?.summary?.files_analyzed ?? 0} file(s), ${res.smell_count ?? 0} smell(s)`,
-            "success"
-          );
-          addLog(`Backend workflow created: ${res.workflow_id} (target: ${res.target})`, "success");
-          return;
-        } catch (e) {
-          // FIX [F3]: Surface the reason; do not silently fall to mock.
-          addLog(`Live CUQA ingestion unavailable: ${e.message}`, "warn");
-        }
+  const bootstrapWorkflow = useCallback(async ({ reason = "mount" } = {}) => {
+    setBackendBusy(true);
 
-        const smells = buildBackendSmells();
-        const res = await api.post("/workflows", {
-          target: "ECommerceSystem.java",
-          language: "java",
-          smells,
-        });
+    // A re-seed replaces the session. Clearing first means a failure cannot
+    // leave Stage 1 showing one repository's smells against another's workflow.
+    if (reason !== "mount") {
+      setPlanData(null);
+      setPlanMeta(null);
+      setApprovedPlan(null);
+      setPreApprovalPlan(null);
+      setTransformationData(null);
+      setMetricsAfterApi(null);
+      setWorkflow(null);
+      setBackendLog([]);
+      setPhase(0);
+    }
+
+    try {
+      try {
+        const res = await api.post("/workflows/from-cuqa", {});
         setWorkflowId(res.workflow_id);
-        setWorkflowLanguage("java");
+        setWorkflowLanguage(res.language || "java");
         setMetricsBeforeApi(res.metrics_before || null);
-        addLog(`Backend workflow created from sample report: ${res.workflow_id}`, "warn");
+        setCuqaReport(res.report || null);
+        addLog(
+          `CUQA report ingested from ${res.cuqa_url || "CUQA agent"}: ` +
+          `${res.report?.repo_name ? `${res.report.repo_name} — ` : ""}` +
+          `${res.report?.summary?.files_analyzed ?? 0} file(s), ${res.smell_count ?? 0} smell(s)`,
+          "success"
+        );
+        addLog(
+          reason === "mount"
+            ? `Backend workflow created: ${res.workflow_id} (target: ${res.target})`
+            : `New workflow created for the current CUQA workspace: ${res.workflow_id} (target: ${res.target})`,
+          "success"
+        );
+        return res;
       } catch (e) {
-        addLog(`Backend unavailable: ${e.message}. Running in offline mode.`, "danger");
-      } finally {
-        setBackendBusy(false);
+        // FIX [F3]: Surface the reason; do not silently fall to mock.
+        addLog(`Live CUQA ingestion unavailable: ${e.message}`, "warn");
+        // On a re-seed the sample fallback would be a downgrade the developer
+        // did not ask for — they pressed "load the repository I just uploaded".
+        if (reason !== "mount") throw e;
       }
-    })();
+
+      const smells = buildBackendSmells();
+      const res = await api.post("/workflows", {
+        target: "ECommerceSystem.java",
+        language: "java",
+        smells,
+      });
+      setWorkflowId(res.workflow_id);
+      setWorkflowLanguage("java");
+      setMetricsBeforeApi(res.metrics_before || null);
+      addLog(`Backend workflow created from sample report: ${res.workflow_id}`, "warn");
+      return res;
+    } catch (e) {
+      addLog(`Backend unavailable: ${e.message}. Running in offline mode.`, "danger");
+      throw e;
+    } finally {
+      setBackendBusy(false);
+    }
   }, []);
+
+  // Nothing is set synchronously in the effect body: the yield below moves the
+  // whole bootstrap — including its first setState — off the render pass.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      await Promise.resolve();
+      if (!cancelled) await bootstrapWorkflow({ reason: "mount" }).catch(() => {});
+    })();
+    return () => { cancelled = true; };
+  }, [bootstrapWorkflow]);
 
   /**
    * Stage 1 fetched (or re-analyzed) the CUQA report on its own — either
@@ -230,7 +273,7 @@ export default function DIWOAgentPage() {
   const handleCuqaReportLoaded = (result) => {
     const summary = result?.report?.summary || {};
     addLog(
-      `CUQA report loaded (${result?.via === "cuqa-direct" ? "direct" : "via backend"}): ` +
+      "CUQA report loaded via the orchestration backend: " +
       `${summary.files_analyzed ?? 0} file(s), ${summary.total_code_smells ?? 0} smell(s)`,
       "info"
     );
@@ -918,6 +961,9 @@ export default function DIWOAgentPage() {
               onProceed={handleSmellsSelected}
               reportData={workflow?.updated_report || cuqaReport || null}
               onReportLoaded={handleCuqaReportLoaded}
+              // Re-analyze re-seeds the workflow rather than only refreshing
+              // what Stage 1 displays — see bootstrapWorkflow.
+              onReloadWorkspace={() => bootstrapWorkflow({ reason: "reload" })}
             />
           )}
           {phase === 1 && (
