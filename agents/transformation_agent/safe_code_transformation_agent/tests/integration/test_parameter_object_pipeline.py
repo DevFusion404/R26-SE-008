@@ -51,6 +51,9 @@ def test_python_parameter_object_full_pipeline_passes_all_checks():
     assert result["rollback_occurred"] is False
     assert result["transformation_applied"] is True
     assert log["metadata"]["final_decision"] == "PASS"
+    ledger = log["metadata"]["parameter_object_ledger_entry"]
+    assert ledger["old_parameters"] == ["customer", "item", "quantity", "price", "discount"]
+    assert ledger["new_signature"] == ["CalculateInvoiceParams"]
     assert all(value == "PASS" for value in log["metadata"]["final_checks"].values())
 
 
@@ -271,7 +274,7 @@ public class Calculator {
     assert "process(ProcessParams params)" in result["refactored_code"]
 
 
-def test_java_parameter_object_cross_file_caller_remains_review_required():
+def test_java_parameter_object_updates_instance_cross_file_caller():
     source = '''class Service {
     int combine(int a, int b, int c) { return a + b + c; }
 }
@@ -281,7 +284,7 @@ def test_java_parameter_object_cross_file_caller_remains_review_required():
 }
 '''
     result = SafeCodeTransformationValidationAgent().execute({
-        "request_id": "java_parameter_object_cross_file_review",
+        "request_id": "java_parameter_object_cross_file_instance",
         "language": "java",
         "source_files": [{
             "file_name": "Service.java",
@@ -295,7 +298,7 @@ def test_java_parameter_object_cross_file_caller_remains_review_required():
             "source_mode": "raw",
         }],
         "refactoring_plan": {
-            "plan_id": "java_parameter_object_cross_file_review_plan",
+            "plan_id": "java_parameter_object_cross_file_instance_plan",
             "actions": [{
                 "action_type": "introduce_java_parameter_object",
                 "parameters": {
@@ -311,10 +314,280 @@ def test_java_parameter_object_cross_file_caller_remains_review_required():
         "execution_options": _options(),
     })
 
+    assert result["success"] is True, result
+    by_file = {item["file_name"]: item for item in result["file_results"]}
+    assert "combine(CombineParams params)" in by_file["Service.java"]["refactored_code"]
+    assert "service.combine(new Service.CombineParams(1, 2, 3))" in by_file["Caller.java"]["refactored_code"]
+
+
+def test_java_parameter_object_ignores_same_name_call_in_unrelated_class():
+    service = '''class CustomerDb {
+    static int insert(String customer, int amount) { return amount; }
+}
+'''
+    unrelated = '''class AuditStore {
+    int insert(String value, int amount) { return amount; }
+    int audit() { return insert("audit", 1); }
+}
+'''
+    result = SafeCodeTransformationValidationAgent().execute({
+        "request_id": "java_parameter_object_unrelated_same_name",
+        "language": "java",
+        "source_files": [
+            {"file_name": "CustomerDb.java", "source_code": service, "language": "java", "source_mode": "raw"},
+            {"file_name": "AuditStore.java", "source_code": unrelated, "language": "java", "source_mode": "raw"},
+        ],
+        "refactoring_plan": {
+            "plan_id": "java_parameter_object_unrelated_same_name_plan",
+            "actions": [{
+                "action_type": "introduce_java_parameter_object",
+                "parameters": {
+                    "source_file": "CustomerDb.java",
+                    "source_class": "CustomerDb",
+                    "method": "insert",
+                    "parameter_object_name": "InsertParams",
+                },
+            }],
+            "behavior_tests": [],
+            "metadata": {},
+        },
+        "execution_options": _options(),
+    })
+    assert result["success"] is True, result
+    assert "insert(InsertParams params)" in result["refactored_code"]
+
+
+def test_java_parameter_object_updates_real_cross_file_callers_as_one_transaction():
+    service = '''class CustomerDb {
+    static int insert(String customer, int amount) { return amount; }
+}
+'''
+    caller = '''class CustomerController {
+    int create() { return CustomerDb.insert("Nimal", 7); }
+}
+'''
+    result = SafeCodeTransformationValidationAgent().execute({
+        "request_id": "java_parameter_object_coordinated_callers",
+        "language": "java",
+        "source_files": [
+            {"file_name": "CustomerDb.java", "source_code": service, "language": "java", "source_mode": "raw"},
+            {"file_name": "CustomerController.java", "source_code": caller, "language": "java", "source_mode": "raw"},
+        ],
+        "refactoring_plan": {
+            "plan_id": "java_parameter_object_coordinated_callers_plan",
+            "actions": [{
+                "action_type": "introduce_java_parameter_object",
+                "parameters": {
+                    "source_file": "CustomerDb.java",
+                    "source_class": "CustomerDb",
+                    "method": "insert",
+                    "parameter_object_name": "InsertParams",
+                },
+            }],
+            "behavior_tests": [],
+            "metadata": {},
+        },
+        "execution_options": _options(require_compilation=True),
+    })
+    assert result["success"] is True, result
+    assert result["rollback_occurred"] is False
+    by_file = {item["file_name"]: item for item in result["file_results"]}
+    assert "insert(InsertParams params)" in by_file["CustomerDb.java"]["refactored_code"]
+    assert "CustomerDb.insert(new CustomerDb.InsertParams(\"Nimal\", 7))" in by_file["CustomerController.java"]["refactored_code"]
+
+
+def test_java_parameter_object_resolves_lowercase_target_class_receivers():
+    service = '''class customer_DBUtil {
+    static int insert(String customer, String address) { return customer.length(); }
+}
+'''
+    caller = '''class CustomerController {
+    int create() { return customer_DBUtil.insert("Nimal", "Colombo"); }
+}
+'''
+    result = SafeCodeTransformationValidationAgent().execute({
+        "request_id": "java_parameter_object_lowercase_class",
+        "language": "java",
+        "source_files": [
+            {"file_name": "customer_DBUtil.java", "source_code": service, "language": "java", "source_mode": "raw"},
+            {"file_name": "CustomerController.java", "source_code": caller, "language": "java", "source_mode": "raw"},
+        ],
+        "refactoring_plan": {
+            "plan_id": "java_parameter_object_lowercase_class_plan",
+            "actions": [{
+                "action_type": "introduce_java_parameter_object",
+                "parameters": {
+                    "source_file": "customer_DBUtil.java",
+                    "source_class": "customer_DBUtil",
+                    "method": "insert",
+                    "parameter_object_name": "InsertParams",
+                },
+            }],
+            "behavior_tests": [],
+            "metadata": {},
+        },
+        "execution_options": _options(require_compilation=True),
+    })
+    assert result["success"] is True, result
+    by_file = {item["file_name"]: item for item in result["file_results"]}
+    assert "customer_DBUtil.insert(new customer_DBUtil.InsertParams" in by_file["CustomerController.java"]["refactored_code"]
+
+
+def test_java_parameter_object_updates_static_import_and_multiple_real_callers():
+    service = '''package shop;
+public class CustomerDb {
+    public static int insert(String customer, int amount) { return amount; }
+}
+'''
+    first_caller = '''package shop;
+import static shop.CustomerDb.insert;
+class FirstController {
+    int create() { return insert("Nimal", 7); }
+}
+'''
+    second_caller = '''package shop;
+class SecondController {
+    int create() { return CustomerDb.insert("Kamal", 9); }
+}
+'''
+    unrelated = '''package shop;
+class AuditStore {
+    static int insert(String label, int code) { return code; }
+    int audit() { return insert("audit", 1); }
+}
+'''
+    result = SafeCodeTransformationValidationAgent().execute({
+        "request_id": "java_parameter_object_multiple_callers",
+        "language": "java",
+        "source_files": [
+            {"file_name": "shop/CustomerDb.java", "source_code": service, "language": "java", "source_mode": "raw"},
+            {"file_name": "shop/FirstController.java", "source_code": first_caller, "language": "java", "source_mode": "raw"},
+            {"file_name": "shop/SecondController.java", "source_code": second_caller, "language": "java", "source_mode": "raw"},
+            {"file_name": "shop/AuditStore.java", "source_code": unrelated, "language": "java", "source_mode": "raw"},
+        ],
+        "refactoring_plan": {
+            "plan_id": "java_parameter_object_multiple_callers_plan",
+            "actions": [{
+                "action_type": "introduce_java_parameter_object",
+                "parameters": {
+                    "source_file": "shop/CustomerDb.java",
+                    "source_class": "CustomerDb",
+                    "method": "insert",
+                    "parameter_object_name": "InsertParams",
+                },
+            }],
+            "behavior_tests": [],
+            "metadata": {},
+        },
+        "execution_options": _options(require_compilation=True),
+    })
+    assert result["success"] is True, result
+    by_file = {item["file_name"]: item for item in result["file_results"]}
+    assert "insert(new CustomerDb.InsertParams(\"Nimal\", 7))" in by_file["shop/FirstController.java"]["refactored_code"]
+    assert "CustomerDb.insert(new CustomerDb.InsertParams(\"Kamal\", 9))" in by_file["shop/SecondController.java"]["refactored_code"]
+    assert "insert(\"audit\", 1)" in unrelated
+
+
+def test_java_parameter_object_unresolved_cross_file_receiver_remains_review_required():
+    service = '''class CustomerDb {
+    static int insert(String customer, int amount) { return amount; }
+}
+'''
+    caller = '''class CustomerController {
+    int create() { return insert("Nimal", 7); }
+}
+'''
+    result = SafeCodeTransformationValidationAgent().execute({
+        "request_id": "java_parameter_object_unresolved_caller",
+        "language": "java",
+        "source_files": [
+            {"file_name": "CustomerDb.java", "source_code": service, "language": "java", "source_mode": "raw"},
+            {"file_name": "CustomerController.java", "source_code": caller, "language": "java", "source_mode": "raw"},
+        ],
+        "refactoring_plan": {
+            "plan_id": "java_parameter_object_unresolved_caller_plan",
+            "actions": [{
+                "action_type": "introduce_java_parameter_object",
+                "parameters": {
+                    "source_file": "CustomerDb.java",
+                    "source_class": "CustomerDb",
+                    "method": "insert",
+                    "parameter_object_name": "InsertParams",
+                },
+            }],
+            "behavior_tests": [],
+            "metadata": {},
+        },
+        "execution_options": _options(),
+    })
     log = result["safety_report"]["transformation_log"][0]
     assert result["transformation_applied"] is False
-    assert log["replacements_count"] == 0
-    assert log["metadata"]["status"] == "review_required"
-    assert log["metadata"]["reason"] == (
-        "CROSS_FILE_CALL_SITES_REQUIRE_COORDINATED_EDIT"
+    assert log["metadata"]["reason"] == "CROSS_FILE_CALL_SITES_REQUIRE_COORDINATED_EDIT"
+
+
+def test_java_parameter_object_selective_replay_preserves_independent_action():
+    source = '''class Service {
+    static int combine(String left, String right) { return left.length() + right.length(); }
+    static int calculate(int quantity, int price) { return quantity * price; }
+    static int sample() { return combine("A", "B") + calculate(2, 3); }
+}
+'''
+    agent = SafeCodeTransformationValidationAgent()
+    original_validate = agent.structural_validator.validate
+    calls = {"count": 0}
+
+    def fail_second_parameter_object_once(**kwargs):
+        result = original_validate(**kwargs)
+        calls["count"] += 1
+        if calls["count"] == 1:
+            checks = result.details["parameter_object_validation"]
+            checks[1]["passed"] = False
+            checks[1]["checks"]["body_access_migrated"] = False
+            result.passed = False
+        return result
+
+    agent.structural_validator.validate = fail_second_parameter_object_once
+    result = agent.execute({
+        "request_id": "java_parameter_object_selective_replay",
+        "language": "java",
+        "source_files": [{
+            "file_name": "Service.java",
+            "source_code": source,
+            "language": "java",
+            "source_mode": "raw",
+        }],
+        "refactoring_plan": {
+            "plan_id": "java_parameter_object_selective_replay_plan",
+            "actions": [
+                {
+                    "action_type": "introduce_java_parameter_object",
+                    "parameters": {
+                        "source_file": "Service.java",
+                        "source_class": "Service",
+                        "method": "combine",
+                        "parameter_object_name": "CombineParams",
+                    },
+                },
+                {
+                    "action_type": "introduce_java_parameter_object",
+                    "parameters": {
+                        "source_file": "Service.java",
+                        "source_class": "Service",
+                        "method": "calculate",
+                        "parameter_object_name": "CalculateParams",
+                    },
+                },
+            ],
+            "behavior_tests": [],
+            "metadata": {},
+        },
+        "execution_options": _options(),
+    })
+    assert result["success"] is True, result
+    assert result["rollback_occurred"] is False
+    assert "combine(CombineParams params)" in result["refactored_code"]
+    assert "calculate(int quantity, int price)" in result["refactored_code"]
+    assert any(
+        "Selective rollback preserved independent accepted actions" in message
+        for message in result["safety_report"]["human_messages"]
     )

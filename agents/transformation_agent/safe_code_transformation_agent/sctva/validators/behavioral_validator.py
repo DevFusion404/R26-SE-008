@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import os
 import re
 import shutil
 import subprocess
@@ -1526,7 +1527,7 @@ class BehavioralValidator:
             )
 
             comparison = compare_fingerprints(original_fp, transformed_fp)
-            dependency_unavailable = self._fingerprints_dependency_unavailable(
+            runtime_infrastructure_unavailable = self._fingerprints_runtime_infrastructure_unavailable(
                 original_fp,
                 transformed_fp,
                 language="java",
@@ -1539,12 +1540,12 @@ class BehavioralValidator:
             )
             if expected_failure:
                 comparison = {"matched": False, "reason": expected_failure}
-                dependency_unavailable = False
+                runtime_infrastructure_unavailable = False
 
-            if dependency_unavailable:
+            if runtime_infrastructure_unavailable:
                 comparison = {
                     "matched": False,
-                    "reason": "runtime_unavailable_due_to_dependencies",
+                    "reason": "runtime_unavailable_due_to_infrastructure",
                 }
 
             java_results.append(
@@ -1560,14 +1561,16 @@ class BehavioralValidator:
                     "original_fingerprint": original_fp,
                     "transformed_fingerprint": transformed_fp,
                     "comparison": comparison,
-                    "dependency_unavailable": dependency_unavailable,
+                    "dependency_unavailable": runtime_infrastructure_unavailable,
+                    "runtime_infrastructure_unavailable": runtime_infrastructure_unavailable,
                 }
             )
 
-            if dependency_unavailable:
+            if runtime_infrastructure_unavailable:
                 dependency_unavailable_count += 1
                 warnings.append(
-                    f"{name}: Java runtime probe could not execute because project or external dependencies were unavailable."
+                    f"{name}: Java runtime probe could not execute because its compile/classpath "
+                    "environment was unavailable."
                 )
                 remaining_tests = runtime_tests[idx:]
                 if remaining_tests and not failures:
@@ -1587,8 +1590,9 @@ class BehavioralValidator:
                                 "name": remaining_name,
                                 "status": "skipped",
                                 "auto_generated": bool(remaining.get("auto_generated")),
-                                "reason": "dependency_unavailable_after_preflight",
+                                "reason": "runtime_infrastructure_unavailable_after_preflight",
                                 "dependency_unavailable": True,
+                                "runtime_infrastructure_unavailable": True,
                             }
                         )
                         dependency_unavailable_count += 1
@@ -1616,10 +1620,28 @@ class BehavioralValidator:
             ]
             static_details["warnings"] = warnings + static_details.get("warnings", [])
             static_details["java_results"] = java_results
-            static_details["runtime_unavailable_reason"] = "missing_java_dependencies"
+            runtime_categories = sorted(
+                {
+                    str(fingerprint.get("runtime_failure_category") or "")
+                    for result in java_results
+                    for fingerprint in (
+                        result.get("original_fingerprint", {}),
+                        result.get("transformed_fingerprint", {}),
+                    )
+                    if fingerprint.get("runtime_infrastructure")
+                }
+                - {""}
+            )
+            static_details["runtime_unavailable_reason"] = (
+                "missing_java_dependencies"
+                if not runtime_categories or runtime_categories == ["MISSING_DEPENDENCY"]
+                else "java_runtime_infrastructure_unavailable"
+            )
+            static_details["runtime_failure_categories"] = runtime_categories
             static_details["fingerprint_status"] = "degraded_static_passed" if static_passed else "failed"
             static_details["fingerprint_summary"] = (
-                "Java runtime probes could not execute because dependencies were unavailable; "
+                "Java runtime probes could not execute because the compile/classpath environment "
+                "was unavailable; "
                 + static_details.get("fingerprint_summary", static_message)
             )
             return static_passed, min(static_score, 0.75), static_message, static_details
@@ -1658,15 +1680,51 @@ class BehavioralValidator:
         *,
         language: str,
     ) -> bool:
+        """Backward-compatible name for Java runtime infrastructure checks."""
+        return cls._fingerprints_runtime_infrastructure_unavailable(
+            original_fp,
+            transformed_fp,
+            language=language,
+        )
+
+    @classmethod
+    def _fingerprints_runtime_infrastructure_unavailable(
+        cls,
+        original_fp: Dict[str, Any],
+        transformed_fp: Dict[str, Any],
+        *,
+        language: str,
+    ) -> bool:
         return (
-            cls._fingerprint_dependency_unavailable(original_fp, language=language)
-            and cls._fingerprint_dependency_unavailable(transformed_fp, language=language)
+            cls._fingerprint_runtime_infrastructure_unavailable(
+                original_fp,
+                language=language,
+            )
+            and cls._fingerprint_runtime_infrastructure_unavailable(
+                transformed_fp,
+                language=language,
+            )
         )
 
     @staticmethod
     def _fingerprint_dependency_unavailable(fp: Dict[str, Any], *, language: str) -> bool:
+        """Backward-compatible dependency-only entry point."""
+        return BehavioralValidator._fingerprint_runtime_infrastructure_unavailable(
+            fp,
+            language=language,
+        )
+
+    @staticmethod
+    def _fingerprint_runtime_infrastructure_unavailable(
+        fp: Dict[str, Any],
+        *,
+        language: str,
+    ) -> bool:
         if fp.get("success"):
             return False
+
+        if fp.get("runtime_infrastructure"):
+            return True
 
         exception_type = str(fp.get("exception_type") or "")
         raw_message = "\n".join(
@@ -1695,6 +1753,12 @@ class BehavioralValidator:
             )
 
         if language == "java":
+            if exception_type == "RuntimeUnavailable":
+                return True
+
+            if exception_type == "RuntimeInfrastructureError":
+                return True
+
             if exception_type != "CompilationError":
                 return False
 
@@ -1834,7 +1898,7 @@ class BehavioralValidator:
         score = (0.6 * (1.0 if matched else 0.0)) + (0.4 * return_similarity)
         validation_mode = (
             "refactoring_aware_static_fallback"
-            if comparison.get("signature_change") == "EXPECTED"
+            if comparison.get("refactoring_aware")
             else "java_static_fallback"
         )
         return (
@@ -1849,7 +1913,7 @@ class BehavioralValidator:
                 "checks": ["java_static_behavioral_fallback"],
                 "failures": [] if matched else [comparison.get("reason", "java_static_summary_mismatch")],
                 "warnings": [
-                    "Used Java static behavioral fallback because runtime probes could not execute with available dependencies."
+                    "Used Java static behavioral fallback because the runtime probe compile/classpath environment was unavailable."
                 ],
                 "return_similarity": round(return_similarity, 4),
                 "behavioral_validation_mode": validation_mode,
@@ -1879,11 +1943,22 @@ class BehavioralValidator:
         )
 
     def _java_static_summary(self, source_code: str) -> Dict[str, Any]:
+        """Build a Java behavior summary from the shared structural parser.
+
+        The old implementation independently parsed method declarations with a
+        ``[^)]*`` regular expression.  Spring parameter annotations such as
+        ``@RequestParam("id")`` therefore terminated the parameter list early
+        and could make annotated methods disappear from the static summary.
+        The summary now consumes ``_extract_java_method_candidates()``, whose
+        primary path reuses the same Java member parser as the transformers.
+        """
+
         source_code = source_code.lstrip("\ufeff")
         clean = self._strip_java_comments_and_literals(source_code)
         class_names = self._extract_java_class_names(clean)
         methods: Dict[str, Dict[str, Any]] = {}
         class_fields: Dict[str, List[Dict[str, str]]] = {}
+        parsed: List[Dict[str, Any]] = []
 
         for class_name in class_names:
             class_fields[class_name] = self._extract_java_class_fields(
@@ -1894,24 +1969,53 @@ class BehavioralValidator:
                 original_code=clean,
                 class_name=class_name,
             ):
-                method_name = candidate["name"]
-                if method_name == class_name:
+                method_name = str(candidate.get("name") or "")
+                if not method_name or method_name == class_name:
                     continue
-                body = self._extract_java_method_body(clean, class_name, method_name)
-                methods[f"{class_name}.{method_name}"] = {
+                body = str(candidate.get("body") or "")
+                item = {
                     "class_name": class_name,
                     "method_name": method_name,
-                    "param_types": candidate.get("param_types", []),
-                    "param_names": candidate.get("param_names", []),
-                    "return_type": candidate.get("return_type", ""),
-                    "access_modifier": candidate.get("access_modifier", "package"),
+                    "param_types": list(candidate.get("param_types") or []),
+                    "param_names": list(candidate.get("param_names") or []),
+                    "return_type": str(candidate.get("return_type") or ""),
+                    "access_modifier": str(
+                        candidate.get("access_modifier") or "package"
+                    ),
                     "is_static": bool(candidate.get("is_static")),
-                    "checked_exceptions": candidate.get("checked_exceptions", []),
+                    "checked_exceptions": list(
+                        candidate.get("checked_exceptions") or []
+                    ),
+                    "annotations": list(candidate.get("annotations") or []),
                     "body": body,
                     "return_count": len(re.findall(r"\breturn\b", body)),
                     "throw_count": len(re.findall(r"\bthrow\b", body)),
-                    "branch_count": len(re.findall(r"\b(?:if|for|while|switch|case|catch)\b", body)),
+                    "branch_count": len(
+                        re.findall(r"\b(?:if|for|while|switch|case|catch)\b", body)
+                    ),
+                    "start_line": candidate.get("start_line"),
+                    "end_line": candidate.get("end_line"),
                 }
+                parsed.append(item)
+
+        pair_counts: Dict[tuple[str, str], int] = {}
+        for item in parsed:
+            pair = (str(item["class_name"]), str(item["method_name"]))
+            pair_counts[pair] = pair_counts.get(pair, 0) + 1
+
+        pair_indexes: Dict[tuple[str, str], int] = {}
+        for item in parsed:
+            pair = (str(item["class_name"]), str(item["method_name"]))
+            base = f"{pair[0]}.{pair[1]}"
+            if pair_counts[pair] == 1:
+                key = base
+            else:
+                signature = ",".join(str(value) for value in item["param_types"])
+                key = f"{base}({signature})"
+                if key in methods:
+                    pair_indexes[pair] = pair_indexes.get(pair, 1) + 1
+                    key = f"{key}#{pair_indexes[pair]}"
+            methods[key] = item
 
         return {
             "class_names": class_names,
@@ -1930,6 +2034,14 @@ class BehavioralValidator:
         *,
         structural_validation_passed: bool | None = None,
     ) -> Dict[str, Any]:
+        """Compare Java summaries while proving approved refactoring lineages.
+
+        Static fallback must not compare an Extract Class delegation wrapper or
+        an Extract Method caller as though it were the unchanged implementation.
+        Such differences are accepted only when the effective transformation
+        metadata and the transformed source prove the expected migration.
+        """
+
         class_renames: Dict[str, str] = {}
         method_renames: Dict[str, str] = {}
         original_classes = set(original_summary.get("class_names", []))
@@ -1949,26 +2061,104 @@ class BehavioralValidator:
 
         original_methods = dict(original_summary.get("methods", {}))
         transformed_methods = dict(transformed_summary.get("methods", {}))
-        transformed_by_pair = {
-            (item.get("class_name"), item.get("method_name")): item
-            for item in transformed_methods.values()
-        }
-        missing_methods = []
-        changed_methods = []
+        transformed_by_pair: Dict[tuple[str, str], List[Dict[str, Any]]] = {}
+        for item in transformed_methods.values():
+            if not isinstance(item, dict):
+                continue
+            pair = (
+                str(item.get("class_name") or ""),
+                str(item.get("method_name") or ""),
+            )
+            transformed_by_pair.setdefault(pair, []).append(item)
+
+        missing_methods: List[Dict[str, Any]] = []
+        changed_methods: List[Dict[str, Any]] = []
         expected_signature_migrations: List[Dict[str, Any]] = []
+        expected_behavior_migrations: List[Dict[str, Any]] = []
 
         for method_key, original_method in original_methods.items():
-            original_class = original_method.get("class_name")
-            original_method_name = original_method.get("method_name")
-            expected_class = class_renames.get(str(original_class), original_class)
-            expected_method = method_renames.get(str(original_method_name), original_method_name)
-            transformed_method = transformed_by_pair.get((expected_class, expected_method))
-            if not transformed_method:
+            original_class = str(original_method.get("class_name") or "")
+            original_method_name = str(original_method.get("method_name") or "")
+            expected_class = str(class_renames.get(original_class, original_class))
+            expected_method = str(
+                method_renames.get(original_method_name, original_method_name)
+            )
+            candidates = transformed_by_pair.get((expected_class, expected_method), [])
+            transformed_method = self._select_java_transformed_method(
+                original_method=original_method,
+                candidates=candidates,
+                actions=actions,
+            )
+            if transformed_method is None:
                 missing_methods.append(
                     {
                         "original_method": method_key,
                         "expected_class": expected_class,
                         "expected_method": expected_method,
+                        "candidate_count": len(candidates),
+                    }
+                )
+                continue
+
+            # Extract Class keeps the public method but intentionally converts
+            # its body into a delegation wrapper.  Validate wrapper -> helper
+            # lineage instead of comparing wrapper return/branch counts with
+            # the original implementation.
+            extract_class_migration = self._validate_java_extract_class_delegation(
+                original_method=original_method,
+                transformed_method=transformed_method,
+                transformed_by_pair=transformed_by_pair,
+                actions=actions,
+                structural_validation_passed=structural_validation_passed,
+            )
+            if extract_class_migration is not None:
+                if extract_class_migration.get("matched"):
+                    expected_behavior_migrations.append(extract_class_migration)
+                    continue
+                changed_methods.append(
+                    {
+                        "method": method_key,
+                        "expected_method": f"{expected_class}.{expected_method}",
+                        "field": "extract_class_behavior_lineage",
+                        "original": "source_implementation",
+                        "transformed": "delegation_wrapper_and_helper",
+                        "signature_compatibility": "FAIL",
+                        "compatibility_reason": extract_class_migration.get(
+                            "compatibility_reason",
+                            "EXTRACT_CLASS_BEHAVIOR_LINEAGE_FAILED",
+                        ),
+                        "compatibility_details": extract_class_migration,
+                    }
+                )
+                continue
+
+            # Extract Method intentionally moves part of the caller body into a
+            # helper.  Prove the helper call, parameter flow, API signature and
+            # transformer postconditions before suppressing body-shape deltas.
+            extract_method_migration = self._validate_java_extract_method_lineage(
+                original_method=original_method,
+                transformed_method=transformed_method,
+                transformed_by_pair=transformed_by_pair,
+                actions=actions,
+                structural_validation_passed=structural_validation_passed,
+            )
+            if extract_method_migration is not None:
+                if extract_method_migration.get("matched"):
+                    expected_behavior_migrations.append(extract_method_migration)
+                    continue
+                changed_methods.append(
+                    {
+                        "method": method_key,
+                        "expected_method": f"{expected_class}.{expected_method}",
+                        "field": "extract_method_behavior_lineage",
+                        "original": "source_implementation",
+                        "transformed": "caller_and_extracted_helper",
+                        "signature_compatibility": "FAIL",
+                        "compatibility_reason": extract_method_migration.get(
+                            "compatibility_reason",
+                            "EXTRACT_METHOD_BEHAVIOR_LINEAGE_FAILED",
+                        ),
+                        "compatibility_details": extract_method_migration,
                     }
                 )
                 continue
@@ -1978,6 +2168,7 @@ class BehavioralValidator:
                 "access_modifier",
                 "is_static",
                 "checked_exceptions",
+                "annotations",
                 "return_count",
                 "throw_count",
             ):
@@ -2021,27 +2212,37 @@ class BehavioralValidator:
 
         matched = not missing_methods and not changed_methods
         expected_signature_change = bool(expected_signature_migrations)
+        expected_behavior_change = bool(expected_behavior_migrations)
+        refactoring_aware = expected_signature_change or expected_behavior_change
+
+        if matched and expected_signature_change and not expected_behavior_change:
+            reason = "INTRODUCE_PARAMETER_OBJECT_MAPPING_PRESERVED"
+            compatibility_reason = "INTRODUCE_PARAMETER_OBJECT_MAPPING_PRESERVED"
+        elif matched and refactoring_aware:
+            reason = "java_refactoring_aware_behavior_preserved"
+            compatibility_reason = "JAVA_REFACTORING_MIGRATIONS_PRESERVED"
+        elif matched:
+            reason = "java_static_summary_preserved"
+            compatibility_reason = "EXACT_SIGNATURE_PRESERVED"
+        else:
+            reason = "java_static_summary_mismatch"
+            compatibility_reason = "JAVA_STATIC_COMPATIBILITY_FAILED"
+
         return {
             "matched": matched,
-            "reason": (
-                "INTRODUCE_PARAMETER_OBJECT_MAPPING_PRESERVED"
-                if matched and expected_signature_change
-                else "java_static_summary_preserved"
-                if matched
-                else "java_static_summary_mismatch"
-            ),
+            "reason": reason,
+            "refactoring_aware": refactoring_aware,
             "signature_change": "EXPECTED" if expected_signature_change else (
                 "NONE" if matched else "UNEXPECTED"
             ),
-            "signature_compatibility": "PASS" if matched else "FAIL",
-            "compatibility_reason": (
-                "INTRODUCE_PARAMETER_OBJECT_MAPPING_PRESERVED"
-                if matched and expected_signature_change
-                else "EXACT_SIGNATURE_PRESERVED"
-                if matched
-                else "JAVA_STATIC_COMPATIBILITY_FAILED"
+            "behavior_change": "EXPECTED" if expected_behavior_change else (
+                "NONE" if matched else "UNEXPECTED"
             ),
+            "signature_compatibility": "PASS" if matched else "FAIL",
+            "compatibility_reason": compatibility_reason,
             "expected_signature_migrations": expected_signature_migrations,
+            "expected_behavior_migrations": expected_behavior_migrations,
+            "unexpected_behavior_changes": changed_methods,
             "original": {
                 "method_count": original_summary.get("method_count", 0),
                 "methods": original_methods,
@@ -2055,6 +2256,463 @@ class BehavioralValidator:
                 "changed_methods": changed_methods,
             },
         }
+
+    def _select_java_transformed_method(
+        self,
+        *,
+        original_method: Dict[str, Any],
+        candidates: Sequence[Dict[str, Any]],
+        actions: Sequence[RefactoringAction],
+    ) -> Dict[str, Any] | None:
+        if not candidates:
+            return None
+        original_types = [
+            self._normalize_java_type_name(item)
+            for item in original_method.get("param_types") or []
+        ]
+        exact = [
+            item for item in candidates
+            if [
+                self._normalize_java_type_name(value)
+                for value in item.get("param_types") or []
+            ] == original_types
+        ]
+        if len(exact) == 1:
+            return exact[0]
+        if len(candidates) == 1:
+            return candidates[0]
+
+        target_class = str(original_method.get("class_name") or "")
+        target_method = str(original_method.get("method_name") or "")
+        for action in actions:
+            if action.action_type not in PARAMETER_OBJECT_ACTIONS:
+                continue
+            applied = (action.parameters or {}).get("applied_transformation_metadata")
+            if not isinstance(applied, dict):
+                continue
+            if str(applied.get("source_class") or "") != target_class:
+                continue
+            if str(applied.get("method") or "") != target_method:
+                continue
+            object_name = str(applied.get("parameter_object_name") or "")
+            expected = [
+                item for item in candidates
+                if list(item.get("param_types") or []) == [object_name]
+            ]
+            if len(expected) == 1:
+                return expected[0]
+        return None
+
+    def _validate_java_extract_class_delegation(
+        self,
+        *,
+        original_method: Dict[str, Any],
+        transformed_method: Dict[str, Any],
+        transformed_by_pair: Dict[tuple[str, str], List[Dict[str, Any]]],
+        actions: Sequence[RefactoringAction],
+        structural_validation_passed: bool | None,
+    ) -> Dict[str, Any] | None:
+        target_class = str(original_method.get("class_name") or "")
+        target_method = str(original_method.get("method_name") or "")
+
+        for action in actions:
+            if action.action_type not in {"extract_class", "extract_java_class"}:
+                continue
+            params = action.parameters or {}
+            applied = params.get("applied_transformation_metadata")
+            if not isinstance(applied, dict):
+                continue
+            if str(applied.get("source_class") or params.get("source_class") or "") != target_class:
+                continue
+            moved = [str(item) for item in applied.get("methods_moved") or []]
+            if target_method not in moved:
+                continue
+            extracted_class = str(applied.get("extracted_class") or "").strip()
+            if not extracted_class:
+                continue
+
+            helper_candidates = transformed_by_pair.get(
+                (extracted_class, target_method), []
+            )
+            original_types = [
+                self._normalize_java_type_name(item)
+                for item in original_method.get("param_types") or []
+            ]
+            helper_matches = [
+                item for item in helper_candidates
+                if [
+                    self._normalize_java_type_name(value)
+                    for value in item.get("param_types") or []
+                ] == original_types
+            ]
+
+            wrapper = self._java_delegation_wrapper_details(
+                transformed_method=transformed_method,
+                delegated_method=target_method,
+            )
+            # Overloaded methods are represented by the same method name in
+            # Extract Class metadata.  If this exact overload has neither a
+            # matching helper nor a delegation wrapper, it was not the moved
+            # overload and should be compared normally.
+            if wrapper is None and not helper_matches:
+                return None
+
+            base = {
+                "method": f"{target_class}.{target_method}",
+                "refactoring": "Extract Class",
+                "extracted_class": extracted_class,
+                "wrapper_validation": "FAIL",
+                "helper_validation": "FAIL",
+                "behavior_lineage": "FAIL",
+            }
+            if structural_validation_passed is not True:
+                return {
+                    **base,
+                    "matched": False,
+                    "compatibility_reason": "STRUCTURAL_VALIDATION_NOT_PASSED",
+                }
+            if len(helper_matches) != 1:
+                return {
+                    **base,
+                    "matched": False,
+                    "compatibility_reason": "EXTRACT_CLASS_HELPER_METHOD_NOT_UNIQUE",
+                }
+            if wrapper is None:
+                return {
+                    **base,
+                    "matched": False,
+                    "compatibility_reason": "EXTRACT_CLASS_DELEGATION_WRAPPER_INVALID",
+                }
+
+            signature_failure = self._java_api_signature_failure(
+                original_method, transformed_method, include_annotations=True
+            )
+            if signature_failure:
+                return {
+                    **base,
+                    "matched": False,
+                    "compatibility_reason": signature_failure,
+                }
+
+            expected_args = [str(item) for item in original_method.get("param_names") or []]
+            if wrapper.get("args") != expected_args:
+                return {
+                    **base,
+                    "matched": False,
+                    "compatibility_reason": "EXTRACT_CLASS_DELEGATION_ARGUMENTS_CHANGED",
+                    "expected_args": expected_args,
+                    "actual_args": wrapper.get("args"),
+                }
+            expected_return = str(original_method.get("return_type") or "") != "void"
+            if bool(wrapper.get("returns_result")) != expected_return:
+                return {
+                    **base,
+                    "matched": False,
+                    "compatibility_reason": "EXTRACT_CLASS_DELEGATION_RETURN_SEMANTICS_CHANGED",
+                }
+
+            helper = helper_matches[0]
+            if (
+                self._normalize_java_type_name(helper.get("return_type"))
+                != self._normalize_java_type_name(original_method.get("return_type"))
+                or [
+                    self._normalize_java_type_name(value)
+                    for value in helper.get("param_types") or []
+                ] != original_types
+            ):
+                return {
+                    **base,
+                    "matched": False,
+                    "compatibility_reason": "EXTRACT_CLASS_HELPER_SIGNATURE_CHANGED",
+                }
+
+            original_body = self._normalize_java_behavior_body(
+                str(original_method.get("body") or "")
+            )
+            helper_body = self._normalize_java_behavior_body(
+                str(helper.get("body") or "")
+            )
+            if not original_body or original_body != helper_body:
+                return {
+                    **base,
+                    "matched": False,
+                    "compatibility_reason": "EXTRACT_CLASS_HELPER_BODY_NOT_PRESERVED",
+                }
+
+            validation = applied.get("validation")
+            if isinstance(validation, dict):
+                critical = {
+                    "dependency",
+                    "full_api_preservation",
+                    "internal_references_updated",
+                    "repository_references",
+                    "single_state_owner",
+                    "structural",
+                    "syntax",
+                }
+                failed = [
+                    key for key in critical
+                    if key in validation and str(validation.get(key)).upper() != "PASS"
+                ]
+                if failed:
+                    return {
+                        **base,
+                        "matched": False,
+                        "compatibility_reason": "EXTRACT_CLASS_POSTCONDITION_FAILED",
+                        "failed_postconditions": failed,
+                    }
+
+            return {
+                **base,
+                "matched": True,
+                "compatibility_reason": "EXTRACT_CLASS_DELEGATION_LINEAGE_PRESERVED",
+                "wrapper_validation": "PASS",
+                "helper_validation": "PASS",
+                "behavior_lineage": "PASS",
+                "delegation_receiver": wrapper.get("receiver"),
+            }
+        return None
+
+    def _validate_java_extract_method_lineage(
+        self,
+        *,
+        original_method: Dict[str, Any],
+        transformed_method: Dict[str, Any],
+        transformed_by_pair: Dict[tuple[str, str], List[Dict[str, Any]]],
+        actions: Sequence[RefactoringAction],
+        structural_validation_passed: bool | None,
+    ) -> Dict[str, Any] | None:
+        target_class = str(original_method.get("class_name") or "")
+        target_method = str(original_method.get("method_name") or "")
+
+        for action in actions:
+            if action.action_type not in {"extract_method", "extract_java_method"}:
+                continue
+            params = action.parameters or {}
+            applied = params.get("applied_transformation_metadata")
+            if not isinstance(applied, dict):
+                continue
+            language = str(applied.get("language") or "java").lower()
+            if language != "java":
+                continue
+            source_class = str(
+                applied.get("source_class")
+                or params.get("source_class")
+                or params.get("class_name")
+                or ""
+            )
+            source_method = str(
+                applied.get("source_method")
+                or params.get("source_method")
+                or params.get("method")
+                or params.get("method_name")
+                or ""
+            )
+            if source_class != target_class or source_method != target_method:
+                continue
+
+            extracted_method = str(
+                applied.get("extracted_method")
+                or params.get("extracted_method")
+                or params.get("new_method_name")
+                or ""
+            ).strip()
+            base = {
+                "method": f"{target_class}.{target_method}",
+                "refactoring": "Extract Method",
+                "extracted_method": extracted_method,
+                "caller_validation": "FAIL",
+                "helper_validation": "FAIL",
+                "behavior_lineage": "FAIL",
+            }
+            if structural_validation_passed is not True:
+                return {
+                    **base,
+                    "matched": False,
+                    "compatibility_reason": "STRUCTURAL_VALIDATION_NOT_PASSED",
+                }
+            if not extracted_method:
+                return {
+                    **base,
+                    "matched": False,
+                    "compatibility_reason": "EXTRACT_METHOD_HELPER_NAME_MISSING",
+                }
+
+            signature_failure = self._java_api_signature_failure(
+                original_method, transformed_method, include_annotations=True
+            )
+            if signature_failure:
+                return {
+                    **base,
+                    "matched": False,
+                    "compatibility_reason": signature_failure,
+                }
+
+            helper_candidates = transformed_by_pair.get(
+                (target_class, extracted_method), []
+            )
+            if len(helper_candidates) != 1:
+                return {
+                    **base,
+                    "matched": False,
+                    "compatibility_reason": "EXTRACT_METHOD_HELPER_NOT_UNIQUE",
+                    "helper_candidate_count": len(helper_candidates),
+                }
+            helper = helper_candidates[0]
+
+            call_pattern = re.compile(
+                rf"(?<![A-Za-z0-9_$]){re.escape(extracted_method)}\s*\((?P<args>.*?)\)\s*;",
+                re.DOTALL,
+            )
+            calls = list(call_pattern.finditer(str(transformed_method.get("body") or "")))
+            if len(calls) != 1:
+                return {
+                    **base,
+                    "matched": False,
+                    "compatibility_reason": "EXTRACT_METHOD_CALL_NOT_EXACTLY_ONCE",
+                    "call_count": len(calls),
+                }
+
+            actual_args = [
+                re.sub(r"\s+", "", item)
+                for item in self._split_java_params(calls[0].group("args"))
+                if item.strip()
+            ]
+            expected_inputs = [
+                str(item) for item in (
+                    applied.get("inputs")
+                    or applied.get("live_in_variables")
+                    or []
+                )
+            ]
+            if expected_inputs and actual_args != expected_inputs:
+                return {
+                    **base,
+                    "matched": False,
+                    "compatibility_reason": "EXTRACT_METHOD_CALL_ARGUMENTS_CHANGED",
+                    "expected_args": expected_inputs,
+                    "actual_args": actual_args,
+                }
+            if expected_inputs and list(helper.get("param_names") or []) != expected_inputs:
+                return {
+                    **base,
+                    "matched": False,
+                    "compatibility_reason": "EXTRACT_METHOD_HELPER_PARAMETERS_CHANGED",
+                }
+            if not str(helper.get("body") or "").strip():
+                return {
+                    **base,
+                    "matched": False,
+                    "compatibility_reason": "EXTRACT_METHOD_HELPER_BODY_EMPTY",
+                }
+
+            validation = applied.get("validation")
+            if not isinstance(validation, dict) or not validation:
+                return {
+                    **base,
+                    "matched": False,
+                    "compatibility_reason": "EXTRACT_METHOD_POSTCONDITIONS_MISSING",
+                }
+            critical = {
+                "target_resolution",
+                "scope_validation",
+                "data_flow",
+                "structural",
+                "long_method_reduction",
+                "no_severe_new_smell",
+            }
+            failed = [
+                key for key in critical
+                if key in validation and str(validation.get(key)).upper() != "PASS"
+            ]
+            missing = [key for key in critical if key not in validation]
+            if failed or missing:
+                return {
+                    **base,
+                    "matched": False,
+                    "compatibility_reason": "EXTRACT_METHOD_POSTCONDITION_FAILED",
+                    "failed_postconditions": failed,
+                    "missing_postconditions": missing,
+                }
+            if str(applied.get("plan_compliance") or "").upper() != "PASS":
+                return {
+                    **base,
+                    "matched": False,
+                    "compatibility_reason": "PLAN_COMPLIANCE_NOT_PASSED",
+                }
+
+            return {
+                **base,
+                "matched": True,
+                "compatibility_reason": "EXTRACT_METHOD_LINEAGE_PRESERVED",
+                "caller_validation": "PASS",
+                "helper_validation": "PASS",
+                "behavior_lineage": "PASS",
+                "helper_arguments": actual_args,
+            }
+        return None
+
+    @staticmethod
+    def _java_api_signature_failure(
+        original_method: Dict[str, Any],
+        transformed_method: Dict[str, Any],
+        *,
+        include_annotations: bool,
+    ) -> str:
+        fields = [
+            "return_type",
+            "access_modifier",
+            "is_static",
+            "checked_exceptions",
+            "param_types",
+        ]
+        if include_annotations:
+            fields.append("annotations")
+        for field in fields:
+            if original_method.get(field) != transformed_method.get(field):
+                return f"METHOD_{field.upper()}_CHANGED"
+        return ""
+
+    def _java_delegation_wrapper_details(
+        self,
+        *,
+        transformed_method: Dict[str, Any],
+        delegated_method: str,
+    ) -> Dict[str, Any] | None:
+        body = str(transformed_method.get("body") or "")
+        pattern = re.compile(
+            rf"^\s*(?P<return>return\s+)?"
+            rf"(?:(?:this\s*\.\s*)?)(?P<receiver>[A-Za-z_$][A-Za-z0-9_$]*)"
+            rf"\s*\.\s*{re.escape(delegated_method)}\s*\((?P<args>.*?)\)\s*;\s*$",
+            re.DOTALL,
+        )
+        match = pattern.match(body)
+        if not match:
+            return None
+        args = [
+            re.sub(r"\s+", "", item)
+            for item in self._split_java_params(match.group("args") or "")
+            if item.strip()
+        ]
+        return {
+            "receiver": match.group("receiver"),
+            "args": args,
+            "returns_result": bool(match.group("return")),
+        }
+
+    def _normalize_java_behavior_body(self, body: str) -> str:
+        normalized = self._strip_java_comments_and_literals(body)
+        # Introduce Constant is behavior-preserving and may replace numeric
+        # literals with generated all-caps constants.  Normalize both forms to
+        # the same token before comparing an Extract Class helper with its
+        # original implementation.
+        normalized = re.sub(r"\b[A-Z][A-Z0-9_]*\b", "NUM", normalized)
+        normalized = re.sub(
+            r"(?<![A-Za-z0-9_$])(?:0[xX][0-9A-Fa-f]+|\d+(?:\.\d+)?(?:[fFdDlL])?)(?![A-Za-z0-9_$])",
+            "NUM",
+            normalized,
+        )
+        return re.sub(r"\s+", "", normalized)
 
     def _validate_java_parameter_object_migration(
         self,
@@ -2209,9 +2867,79 @@ class BehavioralValidator:
                 str(transformed_method.get("body") or ""),
             )
         ]
+        expanded_usage_sequence = self._java_parameter_object_usage_sequence(
+            transformed_summary=transformed_summary,
+            transformed_method=transformed_method,
+            parameter_name=parameter_name,
+            object_name=object_name,
+        )
+        if expanded_usage_sequence:
+            transformed_usage_sequence = expanded_usage_sequence
         if original_usage_sequence != transformed_usage_sequence:
             return "PARAMETER_OBJECT_BODY_MAPPING_NOT_PRESERVED"
         return ""
+
+    def _java_parameter_object_usage_sequence(
+        self,
+        *,
+        transformed_summary: Dict[str, Any],
+        transformed_method: Dict[str, Any],
+        parameter_name: str,
+        object_name: str,
+        max_depth: int = 3,
+    ) -> list[str]:
+        methods = transformed_summary.get("methods") or {}
+        method_lookup = {
+            (
+                str(item.get("class_name") or ""),
+                str(item.get("method_name") or ""),
+            ): item
+            for item in methods.values()
+            if isinstance(item, dict)
+        }
+
+        event_pattern = re.compile(
+            rf"\b(?P<param>{re.escape(parameter_name)})\s*\.\s*(?P<field>[A-Za-z_$][A-Za-z0-9_$]*)\b"
+            rf"|(?:\bthis\s*\.\s*)?(?P<call>[A-Za-z_$][A-Za-z0-9_$]*)\s*\(\s*{re.escape(parameter_name)}\s*\)"
+        )
+
+        def collect(method_info: Dict[str, Any], param_name: str, depth: int, seen: set[tuple[str, str]]) -> list[str]:
+            class_name = str(method_info.get("class_name") or "")
+            method_name = str(method_info.get("method_name") or "")
+            key = (class_name, method_name)
+            if depth > max_depth or key in seen:
+                return []
+            seen.add(key)
+
+            body = str(method_info.get("body") or "")
+            if param_name != parameter_name:
+                local_pattern = re.compile(
+                    rf"\b(?P<param>{re.escape(param_name)})\s*\.\s*(?P<field>[A-Za-z_$][A-Za-z0-9_$]*)\b"
+                    rf"|(?:\bthis\s*\.\s*)?(?P<call>[A-Za-z_$][A-Za-z0-9_$]*)\s*\(\s*{re.escape(param_name)}\s*\)"
+                )
+            else:
+                local_pattern = event_pattern
+
+            sequence: list[str] = []
+            for match in local_pattern.finditer(body):
+                field = match.group("field")
+                if field:
+                    sequence.append(field)
+                    continue
+                helper_name = match.group("call")
+                if not helper_name:
+                    continue
+                helper = method_lookup.get((class_name, helper_name))
+                if not helper:
+                    continue
+                helper_param_types = list(helper.get("param_types") or [])
+                helper_param_names = [str(item) for item in helper.get("param_names") or []]
+                if helper_param_types != [object_name] or len(helper_param_names) != 1:
+                    continue
+                sequence.extend(collect(helper, helper_param_names[0], depth + 1, set(seen)))
+            return sequence
+
+        return collect(transformed_method, parameter_name, 0, set())
 
     @staticmethod
     def _normalize_java_type_name(value: Any) -> str:
@@ -2636,108 +3364,209 @@ class BehavioralValidator:
         original_code: str,
         class_name: str,
     ) -> List[Dict[str, Any]]:
-        original_code = original_code.lstrip("\ufeff")
+        """Return top-level methods owned by ``class_name``.
 
+        The primary path deliberately reuses the Java structural member parser
+        used by Extract Class/Extract Method.  This prevents Spring parameter
+        annotations from being mistaken for method declarations and keeps
+        behavioral validation aligned with transformation target resolution.
+        """
+
+        original_code = original_code.lstrip("\ufeff")
+        try:
+            from ..transformers.java_extract_class import (
+                _mask_java_annotations,
+                _parse_java_class,
+            )
+
+            model = _parse_java_class(original_code, class_name)
+        except (ImportError, TypeError, ValueError, AttributeError):
+            model = None
+
+        if model is not None:
+            candidates: List[Dict[str, Any]] = []
+            for method in model.methods:
+                if method.is_constructor or method.name == class_name:
+                    continue
+                masked_header = _mask_java_annotations(method.header)
+                name_match = None
+                for match in re.finditer(
+                    rf"\b{re.escape(method.name)}\s*\(", masked_header
+                ):
+                    name_match = match
+                if name_match is None:
+                    continue
+                paren_open = masked_header.find("(", name_match.start())
+                paren_close = self._matching_java_parenthesis(
+                    masked_header, paren_open
+                )
+                if paren_close == -1:
+                    continue
+
+                params_raw = masked_header[paren_open + 1 : paren_close]
+                param_list = self._split_java_params(params_raw)
+                param_types = [
+                    self._normalize_java_param_type(item) for item in param_list
+                ]
+                param_types = [item for item in param_types if item]
+                param_names = [
+                    self._java_parameter_name(item) for item in param_list
+                ]
+                param_names = [item for item in param_names if item]
+
+                suffix = masked_header[paren_close + 1 :]
+                throws_match = re.search(r"\bthrows\s+(.+?)\s*$", suffix, re.DOTALL)
+                checked_exceptions = [
+                    re.sub(r"\s+", "", item)
+                    for item in self._split_java_params(
+                        throws_match.group(1) if throws_match else ""
+                    )
+                    if item.strip()
+                ]
+
+                prefix = method.header[: name_match.start()]
+                annotations = [
+                    re.sub(r"\s+", "", match.group(0))
+                    for match in re.finditer(
+                        r"@[A-Za-z_$][A-Za-z0-9_$.]*(?:\s*\([^\n]*?\))?",
+                        prefix,
+                    )
+                ]
+                start_line = original_code.count("\n", 0, method.start) + 1
+                end_line = original_code.count("\n", 0, method.end) + 1
+                access_modifier = next(
+                    (
+                        item for item in ("public", "protected", "private")
+                        if item in method.modifiers
+                    ),
+                    "package",
+                )
+                candidates.append(
+                    {
+                        "name": method.name,
+                        "param_types": param_types,
+                        "param_names": param_names,
+                        "return_type": str(method.return_type or "").strip(),
+                        "access_modifier": access_modifier,
+                        "is_static": "static" in method.modifiers,
+                        "checked_exceptions": checked_exceptions,
+                        "annotations": annotations,
+                        "body": self._strip_java_comments_and_literals(method.body),
+                        "header": method.header,
+                        "start_line": start_line,
+                        "end_line": end_line,
+                    }
+                )
+            return candidates
+
+        # Conservative fallback for malformed/incomplete Java.  It masks
+        # annotations before matching so annotation parentheses cannot truncate
+        # the method parameter list.
         class_match = re.search(
             rf"\bclass\s+{re.escape(class_name)}\b[^{{]*\{{",
             original_code,
         )
-
         if not class_match:
             return []
-
         body_start = class_match.end() - 1
         body_end = self._find_matching_brace(original_code, body_start)
-
         if body_end == -1:
             return []
-
         class_body = original_code[body_start + 1 : body_end]
+        try:
+            from ..transformers.java_extract_class import _mask_java_annotations
+            masked_body = _mask_java_annotations(class_body)
+        except (ImportError, TypeError, ValueError, AttributeError):
+            masked_body = class_body
 
         method_pattern = re.compile(
-            r"(?P<prefix>"
-            r"(?:public|protected|private)?\s*"
-            r"(?:static\s+)?"
-            r"(?:final\s+)?"
-            r"(?:synchronized\s+)?"
-            r"(?:native\s+)?"
-            r"(?:abstract\s+)?"
-            r"(?:strictfp\s+)?"
-            r"[\w$<>\[\], ?.]+\s+"
-            r")"
-            r"(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*"
-            r"\((?P<params>[^)]*)\)\s*"
-            r"(?:throws\s+(?P<throws>[A-Za-z0-9_$.,\s]+?))?\s*(?:\{|;)",
+            r"(?P<prefix>(?:public|protected|private)?\s*(?:static\s+)?"
+            r"(?:final\s+)?(?:synchronized\s+)?(?:native\s+)?"
+            r"(?:abstract\s+)?(?:strictfp\s+)?[\w$<>\[\], ?.]+\s+)"
+            r"(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*\(",
             re.MULTILINE,
         )
-
         candidates: List[Dict[str, Any]] = []
-        seen: set[tuple[str, int]] = set()
-
-        for match in method_pattern.finditer(class_body):
-            if self._java_brace_depth_at(class_body, match.start()) != 0:
+        for match in method_pattern.finditer(masked_body):
+            if self._java_brace_depth_at(masked_body, match.start()) != 0:
                 continue
-            method_name = match.group("name")
-            params_raw = match.group("params") or ""
+            paren_open = masked_body.find("(", match.start())
+            paren_close = self._matching_java_parenthesis(masked_body, paren_open)
+            if paren_close == -1:
+                continue
+            cursor = paren_close + 1
+            while cursor < len(masked_body) and masked_body[cursor].isspace():
+                cursor += 1
+            throws_text = ""
+            throws_match = re.match(r"throws\s+([^\{;]+)", masked_body[cursor:])
+            if throws_match:
+                throws_text = throws_match.group(1)
+                cursor += throws_match.end()
+                while cursor < len(masked_body) and masked_body[cursor].isspace():
+                    cursor += 1
+            if cursor >= len(masked_body) or masked_body[cursor] not in "{;":
+                continue
 
+            params_raw = masked_body[paren_open + 1 : paren_close]
             param_list = self._split_java_params(params_raw)
-            param_types = [self._normalize_java_param_type(p) for p in param_list]
-            param_types = [p for p in param_types if p]
-            param_names = [self._java_parameter_name(p) for p in param_list]
-            param_names = [p for p in param_names if p]
-            prefix = str(match.group("prefix") or "").strip()
-            prefix_without_annotations = re.sub(
-                r"@\w+(?:\s*\([^)]*\))?\s*",
-                "",
-                prefix,
-            )
-            prefix_tokens = prefix_without_annotations.split()
+            prefix_tokens = str(match.group("prefix") or "").split()
             modifier_names = {
-                "public",
-                "protected",
-                "private",
-                "static",
-                "final",
-                "synchronized",
-                "native",
-                "abstract",
-                "strictfp",
+                "public", "protected", "private", "static", "final",
+                "synchronized", "native", "abstract", "strictfp",
             }
             return_type = " ".join(
                 token for token in prefix_tokens if token not in modifier_names
             ).strip()
             access_modifier = next(
                 (
-                    token
-                    for token in prefix_tokens
+                    token for token in prefix_tokens
                     if token in {"public", "protected", "private"}
                 ),
                 "package",
             )
-            checked_exceptions = [
-                item.strip()
-                for item in str(match.group("throws") or "").split(",")
-                if item.strip()
-            ]
-
-            key = (method_name, len(param_types))
-            if key in seen:
-                continue
-            seen.add(key)
-
             candidates.append(
                 {
-                    "name": method_name,
-                    "param_types": param_types,
-                    "param_names": param_names,
+                    "name": match.group("name"),
+                    "param_types": [
+                        value for value in (
+                            self._normalize_java_param_type(item)
+                            for item in param_list
+                        ) if value
+                    ],
+                    "param_names": [
+                        value for value in (
+                            self._java_parameter_name(item)
+                            for item in param_list
+                        ) if value
+                    ],
                     "return_type": return_type,
                     "access_modifier": access_modifier,
                     "is_static": "static" in prefix_tokens,
-                    "checked_exceptions": checked_exceptions,
+                    "checked_exceptions": [
+                        re.sub(r"\s+", "", item)
+                        for item in self._split_java_params(throws_text)
+                        if item.strip()
+                    ],
+                    "annotations": [],
+                    "body": "",
                 }
             )
-
         return candidates
+
+    @staticmethod
+    def _matching_java_parenthesis(text: str, open_index: int) -> int:
+        if open_index < 0 or open_index >= len(text) or text[open_index] != "(":
+            return -1
+        depth = 0
+        for index in range(open_index, len(text)):
+            char = text[index]
+            if char == "(":
+                depth += 1
+            elif char == ")":
+                depth -= 1
+                if depth == 0:
+                    return index
+        return -1
 
     @staticmethod
     def _java_parameter_name(parameter: str) -> str:
@@ -2981,21 +3810,15 @@ class BehavioralValidator:
         javac_exe = shutil.which("javac")
 
         if not java_exe or not javac_exe:
-            return {
-                "success": False,
-                "return_value_repr": None,
-                "return_type": None,
-                "exception_type": "RuntimeUnavailable",
-                "exception_message_category": "java_runtime_unavailable",
-                "stdout": "",
-                "execution_time_ms": 0,
-                "timeout": False,
-                "runtime_error_details": "java/javac not available",
-                "observed_invariants": {
-                    **mine_exception_invariants("RuntimeUnavailable", "java_runtime_unavailable"),
-                    **stdout_invariants(""),
+            return self._java_runtime_probe_failure(
+                category="JAVA_COMPILE_UNAVAILABLE",
+                details="java/javac not available",
+                diagnostics={
+                    "javac_exit_status": None,
+                    "java_exit_status": None,
+                    "dependency_resolution_status": "unavailable",
                 },
-            }
+            )
 
         source_code = source_code.lstrip("\ufeff")
         class_name = self._extract_java_class_name(source_code)
@@ -3007,9 +3830,10 @@ class BehavioralValidator:
 
         temp_path = _make_runtime_temp_dir("java_fp")
         try:
-
             source_path = temp_path / f"{class_name}.java"
             harness_path = temp_path / "JavaRuntimeProbeHarness.java"
+            classes_path = temp_path / "classes"
+            classes_path.mkdir(parents=True, exist_ok=True)
 
             source_path.write_text(source_code, encoding="utf-8")
             project_java_paths = self._write_java_project_sources(
@@ -3030,13 +3854,29 @@ class BehavioralValidator:
             )
 
             started = time.perf_counter()
+            classpath_entries = self._java_runtime_classpath_entries(classes_path)
+            diagnostics = {
+                "source_file": current_file_name or f"{class_name}.java",
+                "package_name": package_name or None,
+                "fully_qualified_class_name": target_class_name,
+                "compiled_classes_directory": str(classes_path),
+                "classpath_entries": classpath_entries,
+                "target_class_file": str(
+                    classes_path / f"{target_class_name.replace('.', '/')}.class"
+                ),
+                "dependency_resolution_status": (
+                    "classpath_available" if len(classpath_entries) > 1 else "source_only"
+                ),
+            }
 
             try:
-                compile_args = [javac_exe, source_path.name, harness_path.name]
+                compile_args = [javac_exe, "-proc:none", "-d", str(classes_path)]
+                dependency_classpath = classpath_entries[1:]
+                if dependency_classpath:
+                    compile_args.extend(["-classpath", os.pathsep.join(dependency_classpath)])
                 compile_args.extend(
                     str(path.relative_to(temp_path)).replace("\\", "/")
-                    for path in project_java_paths
-                    if path.name != source_path.name or path.read_text(encoding="utf-8") != source_code
+                    for path in [source_path, *project_java_paths, harness_path]
                 )
                 compile_proc = subprocess.run(
                     compile_args,
@@ -3046,171 +3886,98 @@ class BehavioralValidator:
                     timeout=timeout_seconds,
                 )
             except subprocess.TimeoutExpired:
-                return {
-                    "success": False,
-                    "return_value_repr": None,
-                    "return_type": None,
-                    "exception_type": "TimeoutError",
-                    "exception_message_category": "javac_timeout",
-                    "stdout": "",
-                    "execution_time_ms": int((time.perf_counter() - started) * 1000),
-                    "timeout": True,
-                    "runtime_error_details": "javac timed out.",
-                    "observed_invariants": {
-                        **mine_exception_invariants("TimeoutError", "javac_timeout"),
-                        **stdout_invariants(""),
-                    },
-                }
+                return self._java_runtime_probe_failure(
+                    category="JAVA_COMPILE_TIMEOUT",
+                    details="javac timed out.",
+                    diagnostics={**diagnostics, "javac_exit_status": None, "java_exit_status": None},
+                    duration_ms=int((time.perf_counter() - started) * 1000),
+                    timeout=True,
+                )
 
             if compile_proc.returncode != 0:
-                missing_symbols = re.findall(
-                    r"symbol:\s+class\s+([A-Za-z_][A-Za-z0-9_]*)",
-                    compile_proc.stderr or "",
-                )
-                missing_symbols = sorted(set(missing_symbols))
-
-                if missing_symbols:
-                    stub_paths: List[Path] = []
-                    for symbol in missing_symbols:
-                        if symbol == class_name:
-                            continue
-                        package_dir = temp_path
-                        package_decl = ""
-                        if package_name:
-                            package_dir = temp_path / package_name.replace(".", "/")
-                            package_dir.mkdir(parents=True, exist_ok=True)
-                            package_decl = f"package {package_name};\n\n"
-
-                        stub_path = package_dir / f"{symbol}.java"
-                        if not stub_path.exists():
-                            stub_path.write_text(
-                                (
-                                    f"{package_decl}public class {symbol} {{\n"
-                                    f"    public {symbol}() {{}}\n"
-                                    f"    public {symbol}(Object... args) {{}}\n"
-                                    f"}}\n"
-                                ),
-                                encoding="utf-8",
-                            )
-                        stub_paths.append(stub_path)
-
-                    if stub_paths:
-                        compile_args = [
-                            javac_exe,
-                            source_path.name,
-                            harness_path.name,
-                        ]
-                        compile_args.extend(
-                            str(path.relative_to(temp_path)).replace("\\", "/")
-                            for path in project_java_paths
-                            if path.exists()
-                        )
-                        compile_args.extend(
-                            str(path.relative_to(temp_path)).replace("\\", "/")
-                            for path in stub_paths
-                        )
-
-                        compile_proc = subprocess.run(
-                            compile_args,
-                            cwd=temp_path,
-                            capture_output=True,
-                            text=True,
-                            timeout=timeout_seconds,
-                        )
-
-                        if compile_proc.returncode == 0:
-                            pass
-                        else:
-                            return {
-                                "success": False,
-                                "return_value_repr": None,
-                                "return_type": None,
-                                "exception_type": "CompilationError",
-                                "exception_message_category": "javac_failed",
-                                "stdout": compile_proc.stdout,
-                                "stderr": compile_proc.stderr,
-                                "execution_time_ms": int((time.perf_counter() - started) * 1000),
-                                "timeout": False,
-                                "runtime_error_details": compile_proc.stderr,
-                                "observed_invariants": {
-                                    **mine_exception_invariants("CompilationError", "javac_failed"),
-                                    **stdout_invariants(compile_proc.stdout or ""),
-                                },
-                            }
-                    else:
-                        return {
-                            "success": False,
-                            "return_value_repr": None,
-                            "return_type": None,
-                            "exception_type": "CompilationError",
-                            "exception_message_category": "javac_failed",
-                            "stdout": compile_proc.stdout,
-                            "stderr": compile_proc.stderr,
-                            "execution_time_ms": int((time.perf_counter() - started) * 1000),
-                            "timeout": False,
-                            "runtime_error_details": compile_proc.stderr,
-                            "observed_invariants": {
-                                **mine_exception_invariants("CompilationError", "javac_failed"),
-                                **stdout_invariants(compile_proc.stdout or ""),
-                            },
-                        }
-                else:
-                    return {
-                        "success": False,
-                        "return_value_repr": None,
-                        "return_type": None,
-                        "exception_type": "CompilationError",
-                        "exception_message_category": "javac_failed",
-                        "stdout": compile_proc.stdout,
-                        "stderr": compile_proc.stderr,
-                        "execution_time_ms": int((time.perf_counter() - started) * 1000),
-                        "timeout": False,
-                        "runtime_error_details": compile_proc.stderr,
-                        "observed_invariants": {
-                            **mine_exception_invariants("CompilationError", "javac_failed"),
-                            **stdout_invariants(compile_proc.stdout or ""),
+                category = self._classify_java_compile_failure(compile_proc.stderr or "")
+                if category:
+                    return self._java_runtime_probe_failure(
+                        category=category,
+                        details=compile_proc.stderr or compile_proc.stdout,
+                        diagnostics={
+                            **diagnostics,
+                            "javac_exit_status": compile_proc.returncode,
+                            "java_exit_status": None,
                         },
-                    }
+                        duration_ms=int((time.perf_counter() - started) * 1000),
+                        stdout=compile_proc.stdout,
+                        stderr=compile_proc.stderr,
+                    )
+                return self._java_runtime_probe_failure(
+                    category="JAVA_COMPILE_FAILED",
+                    details=compile_proc.stderr or compile_proc.stdout,
+                    diagnostics={
+                        **diagnostics,
+                        "javac_exit_status": compile_proc.returncode,
+                        "java_exit_status": None,
+                    },
+                    duration_ms=int((time.perf_counter() - started) * 1000),
+                    stdout=compile_proc.stdout,
+                    stderr=compile_proc.stderr,
+                    infrastructure=False,
+                    exception_type="CompilationError",
+                )
+
+            target_class_file = Path(diagnostics["target_class_file"])
+            diagnostics["target_class_file_exists"] = target_class_file.exists()
+            if not target_class_file.exists():
+                return self._java_runtime_probe_failure(
+                    category="TARGET_CLASS_NOT_COMPILED",
+                    details=f"Compiled target class was not found: {target_class_file}",
+                    diagnostics={**diagnostics, "javac_exit_status": compile_proc.returncode, "java_exit_status": None},
+                    duration_ms=int((time.perf_counter() - started) * 1000),
+                )
 
             try:
                 run_proc = subprocess.run(
-                    [java_exe, "-cp", str(temp_path), "JavaRuntimeProbeHarness"],
+                    [java_exe, "-cp", os.pathsep.join(classpath_entries), "JavaRuntimeProbeHarness"],
                     cwd=temp_path,
                     capture_output=True,
                     text=True,
                     timeout=timeout_seconds,
                 )
             except subprocess.TimeoutExpired:
-                return {
-                    "success": False,
-                    "return_value_repr": None,
-                    "return_type": None,
-                    "exception_type": "TimeoutError",
-                    "exception_message_category": "java_probe_timeout",
-                    "stdout": "",
-                        "execution_time_ms": int((time.perf_counter() - started) * 1000),
-                        "timeout": True,
-                        "runtime_error_details": "Java runtime probe timed out.",
-                        "observed_invariants": {
-                            **mine_exception_invariants("TimeoutError", "java_probe_timeout"),
-                            **stdout_invariants(""),
-                        },
-                    }
+                return self._java_runtime_probe_failure(
+                    category="JAVA_RUNTIME_TIMEOUT",
+                    details="Java runtime probe timed out.",
+                    diagnostics={**diagnostics, "javac_exit_status": compile_proc.returncode, "java_exit_status": None},
+                    duration_ms=int((time.perf_counter() - started) * 1000),
+                    timeout=True,
+                )
 
             stdout_raw = (run_proc.stdout or "").strip()
 
             if run_proc.returncode != 0:
+                runtime_error = run_proc.stderr or run_proc.stdout or ""
+                category = (
+                    "CLASSPATH_CONFIGURATION_ERROR"
+                    if "Could not find or load main class JavaRuntimeProbeHarness" in runtime_error
+                    else "JAVA_PROBE_PROCESS_FAILED"
+                )
                 return {
                     "success": False,
                     "return_value_repr": None,
                     "return_type": None,
-                    "exception_type": "RuntimeError",
-                    "exception_message_category": "java_probe_failed",
+                    "exception_type": "RuntimeInfrastructureError" if category == "CLASSPATH_CONFIGURATION_ERROR" else "RuntimeError",
+                    "exception_message_category": category.lower(),
                     "stdout": stdout_raw,
                     "stderr": run_proc.stderr,
                     "execution_time_ms": int((time.perf_counter() - started) * 1000),
                     "timeout": False,
                     "runtime_error_details": run_proc.stderr,
+                    "runtime_infrastructure": category == "CLASSPATH_CONFIGURATION_ERROR",
+                    "runtime_failure_category": category,
+                    "runtime_diagnostics": {
+                        **diagnostics,
+                        "javac_exit_status": compile_proc.returncode,
+                        "java_exit_status": run_proc.returncode,
+                    },
                     "observed_invariants": {
                         **mine_exception_invariants("RuntimeError", "java_probe_failed"),
                         **stdout_invariants(stdout_raw),
@@ -3240,6 +4007,21 @@ class BehavioralValidator:
                     },
                 }
 
+            if last_line.startswith("INFRA:"):
+                category_part, _, message = last_line.partition("|")
+                return self._java_runtime_probe_failure(
+                    category=category_part.replace("INFRA:", "") or "JAVA_RUNTIME_INFRASTRUCTURE_UNAVAILABLE",
+                    details=message,
+                    diagnostics={
+                        **diagnostics,
+                        "javac_exit_status": compile_proc.returncode,
+                        "java_exit_status": run_proc.returncode,
+                    },
+                    duration_ms=int((time.perf_counter() - started) * 1000),
+                    stdout=stdout_raw,
+                    stderr=run_proc.stderr,
+                )
+
             return_type = "unknown"
             return_value = last_line
 
@@ -3258,6 +4040,12 @@ class BehavioralValidator:
                 "execution_time_ms": int((time.perf_counter() - started) * 1000),
                 "timeout": False,
                 "runtime_error_details": None,
+                "runtime_infrastructure": False,
+                "runtime_diagnostics": {
+                    **diagnostics,
+                    "javac_exit_status": compile_proc.returncode,
+                    "java_exit_status": run_proc.returncode,
+                },
                 "observed_invariants": {
                     "return": mine_value_invariants(return_value),
                     **stdout_invariants(return_value),
@@ -3265,6 +4053,84 @@ class BehavioralValidator:
             }
         finally:
             shutil.rmtree(temp_path, ignore_errors=True)
+
+    @staticmethod
+    def _java_runtime_classpath_entries(classes_path: Path) -> List[str]:
+        """Return an isolated probe classpath rooted at the freshly compiled classes."""
+        entries = [str(classes_path)]
+        inherited = os.environ.get("CLASSPATH", "")
+        for entry in inherited.split(os.pathsep):
+            normalized = entry.strip()
+            if normalized and normalized not in entries:
+                entries.append(normalized)
+        return entries
+
+    @staticmethod
+    def _classify_java_compile_failure(stderr: str) -> str | None:
+        """Classify environment/compiler setup failures without hiding source errors."""
+        message = str(stderr or "").lower()
+        dependency_markers = (
+            "package ",
+            " does not exist",
+            "class file for ",
+            "cannot access ",
+            "bad class file",
+            "module not found",
+        )
+        syntax_or_transform_markers = (
+            "';' expected",
+            "illegal start of",
+            "not a statement",
+            "reached end of file",
+            "missing return statement",
+            "incompatible types",
+            "unclosed string literal",
+            "cannot find symbol",
+        )
+        unresolved_sctva_constant = re.search(
+            r"symbol:\s+(?:variable|class|interface|method)\s+(?:magic|constant)_[a-z0-9_]*",
+            message,
+        )
+        if "cannot find symbol" in message and not unresolved_sctva_constant:
+            return "MISSING_DEPENDENCY"
+        if any(marker in message for marker in dependency_markers) and not any(
+            marker in message for marker in syntax_or_transform_markers
+        ):
+            return "MISSING_DEPENDENCY"
+        return None
+
+    @staticmethod
+    def _java_runtime_probe_failure(
+        *,
+        category: str,
+        details: str | None,
+        diagnostics: Dict[str, Any],
+        duration_ms: int = 0,
+        timeout: bool = False,
+        stdout: str | None = None,
+        stderr: str | None = None,
+        infrastructure: bool = True,
+        exception_type: str = "RuntimeInfrastructureError",
+    ) -> Dict[str, Any]:
+        return {
+            "success": False,
+            "return_value_repr": None,
+            "return_type": None,
+            "exception_type": exception_type,
+            "exception_message_category": category.lower(),
+            "stdout": stdout or "",
+            "stderr": stderr or "",
+            "execution_time_ms": duration_ms,
+            "timeout": timeout,
+            "runtime_error_details": details or "",
+            "runtime_infrastructure": infrastructure,
+            "runtime_failure_category": category,
+            "runtime_diagnostics": diagnostics,
+            "observed_invariants": {
+                **mine_exception_invariants(exception_type, category.lower()),
+                **stdout_invariants(stdout or ""),
+            },
+        }
 
     @classmethod
     def _java_binary_class_name(cls, source_code: str, target_class: str) -> str:
@@ -3370,6 +4236,7 @@ class BehavioralValidator:
         parameter_object: bool = False,
     ) -> str:
         raw_args = BehavioralValidator._java_string_array(args or [])
+        target_package = target_class.rpartition(".")[0]
         expected_arity = "1" if parameter_object else "rawArgs.length"
         build_values = (
             "buildParameterObjectArgs(targetMethod.getParameterTypes()[0], rawArgs)"
@@ -3385,8 +4252,15 @@ import java.util.*;
 public class JavaRuntimeProbeHarness {{
     public static void main(String[] args) throws Exception {{
         try {{
-            Class<?> targetClass = Class.forName("{target_class}");
-            Object instance = targetClass.getDeclaredConstructor().newInstance();
+            Class<?> targetClass;
+            try {{
+                targetClass = Class.forName("{target_class}");
+            }} catch (ClassNotFoundException | LinkageError ex) {{
+                System.out.println(
+                    "INFRA:TARGET_CLASS_LOAD_FAILED|" + String.valueOf(ex.getMessage())
+                );
+                return;
+            }}
             String[] rawArgs = {raw_args};
 
             Method targetMethod = null;
@@ -3411,6 +4285,20 @@ public class JavaRuntimeProbeHarness {{
             targetMethod.setAccessible(true);
 
             Object[] values = {build_values};
+            Object instance = null;
+            if (!Modifier.isStatic(targetMethod.getModifiers())) {{
+                try {{
+                    Constructor<?> constructor = targetClass.getDeclaredConstructor();
+                    constructor.setAccessible(true);
+                    instance = constructor.newInstance();
+                }} catch (ReflectiveOperationException ex) {{
+                    System.out.println(
+                        "INFRA:TARGET_INSTANTIATION_UNAVAILABLE|"
+                        + String.valueOf(ex.getMessage())
+                    );
+                    return;
+                }}
+            }}
             Object result = targetMethod.invoke(instance, values);
 
             String resultType = result == null
@@ -3547,7 +4435,7 @@ public class JavaRuntimeProbeHarness {{
             }}
 
             if (simpleName.equals("Order")) {{
-                Class<?> customerClass = Class.forName("Customer");
+                Class<?> customerClass = Class.forName(siblingClassName("Customer"));
 
                 Object customer = customerClass
                     .getDeclaredConstructor(
@@ -3570,7 +4458,7 @@ public class JavaRuntimeProbeHarness {{
                     .newInstance(1001, customer);
 
                 try {{
-                    Class<?> itemClass = Class.forName("OrderItem");
+                    Class<?> itemClass = Class.forName(siblingClassName("OrderItem"));
 
                     Object item = itemClass
                         .getDeclaredConstructor(
@@ -3613,6 +4501,11 @@ public class JavaRuntimeProbeHarness {{
         }} catch (Exception ex) {{
             return null;
         }}
+    }}
+
+    private static String siblingClassName(String simpleName) {{
+        String targetPackage = "{target_package}";
+        return targetPackage.isEmpty() ? simpleName : targetPackage + "." + simpleName;
     }}
 }}
 """
