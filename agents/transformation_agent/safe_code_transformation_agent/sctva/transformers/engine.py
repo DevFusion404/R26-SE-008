@@ -1025,6 +1025,21 @@ class TransformationEngine:
                             current_code, step_replacements = c_transformers.apply_extract_constant(
                                 current_code, literal_value, name, source_line
                             )
+                            if step_replacements == 0:
+                                c_context = c_transformers.analyze_extract_constant_target(
+                                    current_code,
+                                    literal_value,
+                                    source_line,
+                                )
+                                action_metadata.update({
+                                    "status": "not_applicable",
+                                    "reason": c_context.get(
+                                        "reason",
+                                        "TARGET_NOT_C_NUMERIC_LITERAL",
+                                    ),
+                                    "target_context": c_context,
+                                    "final_decision": "NOT_APPLICABLE",
+                                })
                         else:
                             current_code, step_replacements, introduce_metadata = (
                                 java_transformers.apply_introduce_constant(

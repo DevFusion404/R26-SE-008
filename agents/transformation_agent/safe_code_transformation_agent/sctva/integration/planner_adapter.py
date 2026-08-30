@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import re
+import copy
+from uuid import uuid4
 from typing import Any, Dict, List, Optional
 
 from ..contracts import normalize_move_method_parameters
@@ -34,6 +36,214 @@ from ..constants import (
 
 class PlannerAdapterError(ValueError):
     """Raised when planner payload is malformed or unsupported."""
+
+
+MOVE_METHOD_RDP_FIELDS = (
+    "source_file",
+    "source_class",
+    "source_method",
+    "method",
+    "destination_class",
+    "destination_parameter",
+    "source_line",
+    "target_lines",
+    "source_step_id",
+)
+
+
+def _is_move_method_step(value: Any) -> bool:
+    """Return whether a raw or normalized item represents Python Move Method."""
+
+    if not isinstance(value, dict):
+        return False
+    for raw_value in (
+        value.get("refactoring"),
+        value.get("source_refactoring"),
+        value.get("action_type"),
+        value.get("action"),
+    ):
+        refactoring = str(raw_value or "").strip().lower()
+        ref_key = " ".join(re.sub(r"[_-]+", " ", refactoring).split())
+        if ref_key in {"move method", "feature envy", "move python method"}:
+            return True
+    return False
+
+
+def _raw_move_method_steps(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Find raw RDP steps without relying on one particular request wrapper."""
+
+    candidates: List[Any] = []
+    if isinstance(payload.get("steps"), list):
+        candidates.append(payload)
+    for key in ("plan", "rdp_plan", "planner_output", "generatedPlan", "latestPlan"):
+        nested = payload.get(key)
+        if isinstance(nested, dict) and isinstance(nested.get("steps"), list):
+            candidates.append(nested)
+    refactoring_plan = payload.get("refactoring_plan")
+    if isinstance(refactoring_plan, dict) and isinstance(refactoring_plan.get("steps"), list):
+        candidates.append(refactoring_plan)
+
+    for candidate in candidates:
+        return [step for step in candidate["steps"] if isinstance(step, dict) and _is_move_method_step(step)]
+    return []
+
+
+def _normalized_move_actions(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+    plan = payload.get("refactoring_plan")
+    if not isinstance(plan, dict):
+        return []
+    actions = plan.get("actions")
+    if not isinstance(actions, list):
+        return []
+    return [
+        action for action in actions
+        if isinstance(action, dict) and _is_move_method_step(action)
+    ]
+
+
+def _move_method_integrity_issues(
+    raw_steps: List[Dict[str, Any]],
+    normalized_payload: Dict[str, Any],
+) -> List[Dict[str, Any]]:
+    """Detect target information lost between RDP and the SCTVA contract.
+
+    This is deliberately a boundary check, not an AST check.  It only verifies
+    that values supplied by the planner survive normalization; symbol validity
+    remains the responsibility of the Python resolver.
+    """
+
+    if not raw_steps:
+        return []
+    actions = _normalized_move_actions(normalized_payload)
+    issues: List[Dict[str, Any]] = []
+    actions_by_id = {
+        action.get("source_step_id"): action
+        for action in actions
+        if action.get("source_step_id") is not None
+    }
+
+    for index, raw_step in enumerate(raw_steps):
+        raw_params = raw_step.get("parameters")
+        raw_target = raw_step.get("target")
+        expected = normalize_move_method_parameters({
+            **raw_step,
+            "parameters": raw_params if isinstance(raw_params, dict) else {},
+            "target": raw_target if isinstance(raw_target, dict) else {},
+        })
+        step_id = raw_step.get("step_id")
+        action = actions_by_id.get(step_id)
+        if action is None and index < len(actions):
+            action = actions[index]
+        actual = normalize_move_method_parameters(action or {})
+
+        # A Move Method with no method target cannot be resolved safely.  A
+        # missing source class is allowed here because a module-level function
+        # must reach the AST resolver and be classified as Move Function.
+        required_from_planner = {
+            "source_file": expected.get("source_file", ""),
+            "source_method": expected.get("source_method") or expected.get("method", ""),
+            "destination_class": expected.get("destination_class", ""),
+        }
+        missing_planner_fields = [
+            field for field, value in required_from_planner.items()
+            if not str(value or "").strip()
+        ]
+        lost_fields = [
+            field for field in MOVE_METHOD_RDP_FIELDS
+            if expected.get(field) not in (None, "", [])
+            and actual.get(field) != expected.get(field)
+        ]
+        if missing_planner_fields or lost_fields:
+            issues.append({
+                "status": "REVIEW_REQUIRED",
+                "reason": "RDP_MOVE_METHOD_PARAMETERS_LOST",
+                "source_step_id": step_id,
+                "original": {
+                    field: expected.get(field)
+                    for field in MOVE_METHOD_RDP_FIELDS
+                    if expected.get(field) not in (None, "", [])
+                },
+                "normalized": {
+                    field: actual.get(field)
+                    for field in MOVE_METHOD_RDP_FIELDS
+                    if actual.get(field) not in (None, "", [])
+                },
+                "missing_planner_fields": missing_planner_fields,
+                "lost_fields": lost_fields,
+            })
+    return issues
+
+
+def normalize_sctva_request_payload(
+    payload: Dict[str, Any],
+    *,
+    adapter: Optional["PlannerAdapter"] = None,
+) -> tuple[Dict[str, Any], List[Dict[str, Any]]]:
+    """Normalize every supported RDP request shape before ``agent.execute``.
+
+    Both HTTP entry points use this function.  It is also safe to call for an
+    already-normalized SCTVA request, which makes the behavior consistent for
+    callers that invoke the agent through a wrapper or test harness.
+    """
+
+    if not isinstance(payload, dict):
+        raise PlannerAdapterError("Request payload must be an object.")
+    adapter = adapter or PlannerAdapter()
+    normalized_payload = copy.deepcopy(payload)
+
+    raw_plan: Optional[Dict[str, Any]] = None
+    if isinstance(payload.get("steps"), list):
+        raw_plan = payload
+    else:
+        for key in ("plan", "rdp_plan", "planner_output", "generatedPlan", "latestPlan"):
+            candidate = payload.get(key)
+            if isinstance(candidate, dict) and isinstance(candidate.get("steps"), list):
+                raw_plan = candidate
+                break
+        if raw_plan is None:
+            candidate = payload.get("refactoring_plan")
+            if isinstance(candidate, dict) and isinstance(candidate.get("steps"), list):
+                raw_plan = candidate
+
+    if raw_plan is not None:
+        request_id = str(
+            payload.get("request_id") or f"sctva_{uuid4().hex}"
+        ).strip()
+        correlation_id = str(
+            payload.get("correlation_id")
+            or raw_plan.get("plan_id")
+            or request_id
+        ).strip()
+        normalized_plan = adapter.normalize_plan(raw_plan, correlation_id=correlation_id)
+        normalized_payload["request_id"] = request_id
+        normalized_payload["refactoring_plan"] = normalized_plan
+        for key in ("steps", "plan", "rdp_plan", "planner_output", "generatedPlan", "latestPlan"):
+            normalized_payload.pop(key, None)
+    else:
+        plan = normalized_payload.get("refactoring_plan")
+        if isinstance(plan, dict) and isinstance(plan.get("actions"), list):
+            # A previous adapter may have produced actions but failed to copy
+            # nested target data.  Normalize each action again, idempotently.
+            actions: List[Dict[str, Any]] = []
+            for raw_action in plan["actions"]:
+                if not isinstance(raw_action, dict):
+                    actions.append(raw_action)
+                    continue
+                action = copy.deepcopy(raw_action)
+                if _is_move_method_step(action):
+                    action["parameters"] = normalize_move_method_parameters(action)
+                    action.setdefault(
+                        "source_step_id",
+                        action["parameters"].get("source_step_id"),
+                    )
+                actions.append(action)
+            normalized_payload["refactoring_plan"] = dict(plan, actions=actions)
+
+    issues = _move_method_integrity_issues(
+        _raw_move_method_steps(payload),
+        normalized_payload,
+    )
+    return normalized_payload, issues
 
 
 class PlannerAdapter:
@@ -1032,7 +1242,7 @@ class PlannerAdapter:
             source_line = self._source_line_from_step(step, params=params, target=target)
             if source_line is not None and "source_line" not in action["parameters"]:
                 action["parameters"]["source_line"] = source_line
-            action["source_step_id"] = step.get("step_id")
+            action["source_step_id"] = step.get("source_step_id", step.get("step_id"))
             action["source_refactoring"] = refactoring
             action["warnings"] = []
 
