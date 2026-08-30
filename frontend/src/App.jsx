@@ -166,6 +166,7 @@ export default function App() {
           repoMeta={repoMeta}
           analysisConfig={repoConfig}
           onSendToRdp={handleSendToRdp}
+          onNavigate={navigate}
           pipelineState={pipelineState}
           onPipelineStateChange={setPipelineState}
         />

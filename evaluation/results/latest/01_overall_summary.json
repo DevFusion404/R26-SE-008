@@ -1,0 +1,27 @@
+{
+  "status": "EVALUATED",
+  "evaluation_mode": "Real-World Empirical Evaluation",
+  "total_samples_evaluated": 9517,
+  "total_predictions_emitted": 5247,
+  "overall_macro_precision": 0.0,
+  "overall_macro_recall": 0.0,
+  "overall_macro_f1": null,
+  "overall_micro_precision": 0.0,
+  "overall_micro_recall": 0.0,
+  "overall_micro_f1": null,
+  "bootstrap_95_ci": {
+    "status": "Calculated",
+    "sample_size": 14764,
+    "iterations": 1000,
+    "seed": 42,
+    "precision_95_ci": [
+      0.0,
+      0.0
+    ],
+    "recall_95_ci": [
+      0.0,
+      0.0
+    ],
+    "f1_95_ci": null
+  }
+}

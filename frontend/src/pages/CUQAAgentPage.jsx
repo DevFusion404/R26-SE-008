@@ -502,7 +502,7 @@ function FilesWithSmells({ report, filter = 'all' }) {
 }
 
 // ── Human-in-the-Loop Handoff Panel ───────────────────────────────────────
-function HumanInTheLoopPanel({ report, onContinue, pipelineState }) {
+function HumanInTheLoopPanel({ report, onContinue, onNavigate, pipelineState }) {
   const summary       = report?.summary ?? {};
   const totalSmells   = summary.total_code_smells || 0;
   const highSmells    = summary.smell_severity?.high || 0;
@@ -613,15 +613,66 @@ function HumanInTheLoopPanel({ report, onContinue, pipelineState }) {
         gap: 12, padding: '12px 20px',
       }}>
         {alreadySent ? (
-          <div style={{ fontSize: 12, color: '#4ade80', display: 'flex', alignItems: 'center', gap: 8 }}>
-            <span>✅</span>
-            <span>Report successfully forwarded — navigate to <strong>RDP Agent</strong> to view the plan.</span>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12, width: '100%', justifyContent: 'space-between' }}>
+            <div style={{ fontSize: 12, color: '#4ade80', display: 'flex', alignItems: 'center', gap: 8 }}>
+              <span>✅</span>
+              <span>Report successfully forwarded — navigate to <strong>RDP Agent</strong> or <strong>DIWO Agent</strong> to view feedback.</span>
+            </div>
+            {onNavigate && (
+              <button
+                id="hitl-diwo-btn-sent"
+                onClick={() => onNavigate('orchestrate')}
+                style={{
+                  padding: '8px 18px',
+                  background: 'linear-gradient(135deg, #10b981, #059669)',
+                  color: 'white',
+                  border: 'none',
+                  borderRadius: 8,
+                  fontSize: 12,
+                  fontWeight: 700,
+                  cursor: 'pointer',
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: 6,
+                  boxShadow: '0 0 14px rgba(16,185,129,0.35)',
+                }}
+                title="Navigate to DIWO Orchestration Agent"
+              >
+                <span>Send</span>
+                <span>DIWO Agent</span>
+              </button>
+            )}
           </div>
         ) : (
           <>
             <div style={{ fontSize: 11, color: 'var(--text-muted)', marginRight: 'auto' }}>
               ⚠ Please review the analysis above before continuing.
             </div>
+            {onNavigate && (
+              <button
+                id="hitl-diwo-btn"
+                onClick={() => onNavigate('orchestrate')}
+                style={{
+                  padding: '10px 18px',
+                  background: 'linear-gradient(135deg, rgba(16,185,129,0.18), rgba(5,150,105,0.12))',
+                  color: '#34d399',
+                  border: '1px solid rgba(16,185,129,0.4)',
+                  borderRadius: 8,
+                  fontSize: 13,
+                  fontWeight: 700,
+                  cursor: 'pointer',
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: 6,
+                  transition: 'all 0.2s ease',
+                  boxShadow: '0 0 12px rgba(16,185,129,0.15)',
+                }}
+                title="Navigate to DIWO Orchestration Agent"
+              >
+                <span>🎛</span>
+                <span>DIWO Agent</span>
+              </button>
+            )}
             <button
               id="hitl-continue-btn"
               onClick={() => onContinue(report)}
@@ -655,7 +706,7 @@ function HumanInTheLoopPanel({ report, onContinue, pipelineState }) {
 }
 
 // ── Main CUQAAgentPage ─────────────────────────────────────────────────────
-export default function CUQAAgentPage({ repoLoaded, repoMeta, onSendToRdp, analysisConfig, pipelineState, onPipelineStateChange }) {
+export default function CUQAAgentPage({ repoLoaded, repoMeta, onSendToRdp, onNavigate, analysisConfig, pipelineState, onPipelineStateChange }) {
   // Extract active settings (fall back to sensible defaults if no config provided)
   const threshold     = analysisConfig?.threshold      ?? 75;
   const severityFilts = analysisConfig?.severity_filters ?? { critical: true, naming: true };
@@ -733,6 +784,32 @@ export default function CUQAAgentPage({ repoLoaded, repoMeta, onSendToRdp, analy
             <div className="page-subtitle">Code Understanding &amp; Quality Assessment</div>
           </div>
         </div>
+        {onNavigate && (
+          <div className="page-header-actions">
+            <button
+              id="cuqa-diwo-empty-nav-btn"
+              onClick={() => onNavigate('orchestrate')}
+              title="Navigate to DIWO Orchestration Agent"
+              style={{
+                padding: '8px 16px',
+                background: 'linear-gradient(135deg, #10b981, #059669)',
+                color: 'white',
+                border: 'none',
+                borderRadius: '6px',
+                fontSize: '13px',
+                fontWeight: 700,
+                cursor: 'pointer',
+                boxShadow: '0 0 16px rgba(16,185,129,0.4)',
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: 6,
+              }}
+            >
+              <span>🎛</span>
+              <span>DIWO Agent</span>
+            </button>
+          </div>
+        )}
       </div>
       <div className="empty-state" style={{ flex: 1, justifyContent: 'center' }}>
         <span className="empty-icon">📂</span>
@@ -822,6 +899,32 @@ export default function CUQAAgentPage({ repoLoaded, repoMeta, onSendToRdp, analy
           <button className="btn btn-primary" onClick={() => { fetchTree(); fetchReport(); }}>
             ⟳ RUN ANALYSIS
           </button>
+          {onNavigate && (
+            <button
+              id="cuqa-diwo-nav-btn"
+              onClick={() => onNavigate('orchestrate')}
+              title="Navigate to DIWO Orchestration Agent"
+              style={{
+                padding: '8px 16px',
+                background: 'linear-gradient(135deg, #10b981, #059669)',
+                color: 'white',
+                border: 'none',
+                borderRadius: '6px',
+                fontSize: '13px',
+                fontWeight: 700,
+                cursor: 'pointer',
+                boxShadow: '0 0 16px rgba(16,185,129,0.4)',
+                letterSpacing: '0.3px',
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: 6,
+                transition: 'all 0.2s ease',
+              }}
+            >
+              <span>🎛</span>
+              <span>DIWO Agent</span>
+            </button>
+          )}
           {report && onSendToRdp && (
             <button
               onClick={() => onSendToRdp(report)}
@@ -1115,6 +1218,7 @@ export default function CUQAAgentPage({ repoLoaded, repoMeta, onSendToRdp, analy
       <HumanInTheLoopPanel
         report={report}
         onContinue={onSendToRdp}
+        onNavigate={onNavigate}
         pipelineState={pipelineState}
       />
 
