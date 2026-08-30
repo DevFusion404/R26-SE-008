@@ -1717,13 +1717,21 @@ class TransformationEngine:
                             source_line,
                         )
                         if replacements == 0:
+                            reason = action_metadata.get("reason") or "CANNOT_SAFELY_INVERT_CONDITIONAL"
                             warnings.append(
-                                "Replace Nested Conditional with Guard Clauses: Review Required (cannot be safely transformed automatically)."
+                                f"Replace Nested Conditional with Guard Clauses review_required: {reason}."
                             )
                         else:
                             warnings.append(
-                                f"Replace Nested Conditional with Guard Clauses applied to function {method_name or 'target'}."
+                                f"Replace Nested Conditional with Guard Clauses applied to function {method_name or action_metadata.get('method') or 'target'}."
                             )
+                    else:
+                        warnings.append("Replace Nested Conditional with Guard Clauses is currently supported for C source only.")
+                        action_metadata = {
+                            "status": "not_applicable",
+                            "reason": "UNSUPPORTED_LANGUAGE",
+                            "supported_languages": ["c"],
+                        }
 
                 elif action.action_type in {ACTION_ENCAPSULATE_VARIABLE, ACTION_ENCAPSULATE_C_VARIABLE}:
                     variable_name = str(action.parameters.get("variable_name") or "").strip()
