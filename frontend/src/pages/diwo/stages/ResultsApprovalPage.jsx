@@ -395,9 +395,12 @@ export default function ResultsApprovalPage({
     });
   }, [files, refactoredCode, diffRows, sctva]);
 
-  // Files the developer accepted in the Transformation stage are pre-selected
-  // for the commit; rejected ones are reverted and have nothing to write.
-  const [stagedFiles, setStagedFiles] = useState(() => {
+  // What the commit will write, fixed by the accept/reject verdict taken in the
+  // Transformation stage. There is no per-file toggle on this page: that
+  // decision belongs to the stage that shows the diff next to it, and having
+  // the same file decided in two places meant the Results tree could disagree
+  // with what a download actually contained.
+  const [stagedFiles] = useState(() => {
     const initial = new Set();
     (files || []).forEach((f, idx) => {
       if (f.decision === "accept") initial.add(f.path || f.file || `file-${idx}`);
@@ -420,7 +423,6 @@ export default function ResultsApprovalPage({
     ["code", "Refactored Code"],
     ["validation", "Validation Report"],
     ["summary", "Summary"],
-    ["invariants", "Invariants"],
   ];
   // The tree tab disappears without projectContext, so never leave `tab`
   // pointing at a tab that is not on screen.
@@ -439,22 +441,11 @@ export default function ResultsApprovalPage({
   const revertedEntries = fileEntries.filter((f) => f.rejected);
   const stagedEntries = fileEntries.filter((f) => stagedFiles.has(f.path));
 
-  const toggleStaged = (path) => {
-    setStagedFiles((prev) => {
-      const next = new Set(prev);
-      if (next.has(path)) next.delete(path);
-      else next.add(path);
-      return next;
-    });
-  };
-
   // ── Validation, taken from the agent's own report ─────────────────────────
   const validation = activeFile?.validation || sctva?.validation || null;
   const components = activeFile?.confidence_components || sctva?.confidence_components || null;
   const safetyReport = activeFile?.safety_report || sctva?.safety_report || null;
   const confidence = sctva?.confidence_score ?? activeFile?.confidence_score ?? null;
-  const invariantDetails = validation?.invariant?.details || null;
-  const invariantRecords = invariantDetails?.invariants || [];
 
   const appliedReplacements = acceptedEntries.reduce(
     (sum, f) => sum + (Number(f.total_replacements) || 0),
@@ -968,7 +959,6 @@ export default function ResultsApprovalPage({
               <div style={{ color: C.textMuted, fontSize: 12, padding: 8 }}>No files available.</div>
             )}
             {fileEntries.map((f, idx) => {
-              const isStaged = stagedFiles.has(f.path);
               const rail = f.rejected ? C.danger : C.accent;
               return (
                 <div
@@ -996,26 +986,6 @@ export default function ResultsApprovalPage({
                       color={f.rejected ? C.danger : f.changed ? C.accent : C.textMuted}
                     />
                   </div>
-                  <button
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      toggleStaged(f.path);
-                    }}
-                    style={{
-                      marginTop: 8,
-                      width: "100%",
-                      padding: "5px 10px",
-                      borderRadius: 6,
-                      cursor: "pointer",
-                      border: `1px solid ${isStaged ? C.accent : C.border}`,
-                      background: isStaged ? C.accent : "transparent",
-                      color: isStaged ? "#000" : C.textMuted,
-                      fontSize: 11,
-                      fontWeight: 700,
-                    }}
-                  >
-                    {isStaged ? "✓ Will be written" : "Write this file"}
-                  </button>
                 </div>
               );
             })}
@@ -1084,48 +1054,6 @@ export default function ResultsApprovalPage({
               )}
             </CodeSurface>
           </div>
-        </div>
-      )}
-
-      {/* ── Invariants ────────────────────────────────────────────────────── */}
-      {activeTab === "invariants" && (
-        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-          <div style={{ fontSize: 12, color: C.textSub, marginBottom: 4 }}>
-            {invariantDetails?.summary ||
-              "Program invariants mined from the original and the transformed source."}
-          </div>
-
-          {invariantRecords.length === 0 && (
-            <Card>
-              <div style={{ fontSize: 12, color: C.textMuted }}>
-                {invariantDetails
-                  ? `No individual invariants were recorded (status: ${invariantDetails.status || "unknown"}).`
-                  : "No invariant report is attached to this result."}
-              </div>
-            </Card>
-          )}
-
-          {invariantRecords.map((inv, idx) => {
-            const preserved = inv.status === "preserved" || inv.preserved;
-            const skipped = inv.status === "skipped";
-            const color = skipped ? C.textMuted : preserved ? C.accent : C.danger;
-            return (
-              <div key={`${inv.name}-${idx}`} style={{ background: C.panel, border: `1px solid ${color}25`, borderRadius: 8, padding: "12px 16px" }}>
-                <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-                  <span style={{ color }}>{skipped ? "–" : preserved ? "✓" : "✕"}</span>
-                  <span style={{ fontSize: 12, fontFamily: "monospace", color: C.textSub }}>{inv.name}</span>
-                  <Pill
-                    label={skipped ? "SKIPPED" : preserved ? "PRESERVED" : "VIOLATED"}
-                    color={color}
-                  />
-                  {inv.critical && !preserved && <Badge label="critical" color={C.danger} />}
-                </div>
-                {inv.reason && (
-                  <div style={{ fontSize: 11, color: C.textMuted, marginTop: 6 }}>{inv.reason}</div>
-                )}
-              </div>
-            );
-          })}
         </div>
       )}
 

@@ -271,6 +271,31 @@ export default function RefactoringPlanApprovalPage({
     setAutoOpenSection(false);
   };
 
+  /**
+   * One button, two states — never both on screen.
+   *
+   * Expand opens every method section AND every file inside it, because the
+   * files are what the developer came to read; an "expand" that opened the
+   * method headings and left their contents folded would be a worse version of
+   * clicking each heading. Once anything is open the same button becomes Hide,
+   * so the control always describes what it is about to do rather than
+   * offering a pair where one half is always a no-op.
+   */
+  const expandAll = () => {
+    setOpenSections(new Set(sections.map((sec) => sec.key)));
+    setOpenFiles(new Set(sections.flatMap((sec) =>
+      (sec.files || []).map((group) => `${sec.key}:${group.file}`)
+    )));
+    setAutoOpenSection(false);
+  };
+
+  /** Fold everything, including the section auto-opened on first paint. */
+  const collapseAll = () => {
+    setOpenSections(new Set());
+    setOpenFiles(new Set());
+    setAutoOpenSection(false);
+  };
+
   /** Every step in a group takes the same verdict; re-clicking clears it. */
   const decideAllIn = (groupSteps, val) =>
     setDecisions((prev) => decideGroup(groupSteps, val, prev));
@@ -298,12 +323,11 @@ export default function RefactoringPlanApprovalPage({
   };
 
   /**
-   * Approve exactly the steps the backend marked `auto_select_eligible`.
+   * Take the recommendation as the whole verdict: approve exactly the steps the
+   * backend marked `auto_select_eligible`, and reject the rest.
    *
-   * LOCAL STATE ONLY. No RDP call, no SCTVA call, no plan submission. Review,
-   * not-recommended and manual-only steps are left pending on purpose: they
-   * are the ones worth reading. A step the developer has already decided is
-   * left alone — see selectRecommended().
+   * LOCAL STATE ONLY. No RDP call, no SCTVA call, no plan submission. A step
+   * the developer has already decided is left alone — see selectRecommended().
    */
   const applySelectRecommended = () =>
     setDecisions((prev) => selectRecommended(steps, prev));
@@ -393,6 +417,11 @@ export default function RefactoringPlanApprovalPage({
   const effectiveOpenSections = autoOpenSection && firstSectionKey
     ? new Set([...openSections, firstSectionKey])
     : openSections;
+
+  // Is anything unfolded right now? Only method sections fold, so outside that
+  // mode the question is entirely about the file rows — which is what decides
+  // whether the accordion button reads Expand or Hide.
+  const anyOpen = openFiles.size > 0 || (sectionsFold && effectiveOpenSections.size > 0);
 
   const { approved, rejected, manual, pending } = counts;
   const canProceed = approved > 0 && pending === 0;
@@ -566,6 +595,32 @@ export default function RefactoringPlanApprovalPage({
             }}
             onClear={() => setDecisions({})}
           />
+        </div>
+
+        {/* ONE button, not a pair. Expand all / Hide all as two buttons meant
+            one of them was always a no-op and both were always lit, which is
+            two controls asking to be read to discover that only one applies. */}
+        <div>
+          <ControlLabel>Accordion</ControlLabel>
+          <button
+            type="button"
+            onClick={anyOpen ? collapseAll : expandAll}
+            disabled={sections.length === 0}
+            title={anyOpen
+              ? "Fold every method and file back to its heading"
+              : "Open every method and every file inside it"}
+            style={{
+              padding: "9px 16px", borderRadius: 9,
+              fontSize: 12.5, fontWeight: 700,
+              cursor: sections.length ? "pointer" : "not-allowed",
+              background: C.bg,
+              color: sections.length ? C.textSub : C.textMuted,
+              border: `2px solid ${sections.length ? C.borderAcc : C.border}`,
+              transition: "all 0.2s",
+            }}
+          >
+            {anyOpen ? "Hide all" : "Expand all"}
+          </button>
         </div>
       </div>
 
@@ -970,7 +1025,7 @@ function PlanBulkBar({
         onClick={onSelectRecommended}
         disabled={!autoSelectable}
         title={autoSelectable
-          ? `Approve the ${autoSelectable} step(s) DIWO recommends. Review, not-recommended and manual-only steps are left for you.`
+          ? `Approve the ${autoSelectable} step(s) DIWO recommends and reject the other ${nonGreen}, leaving the plan ready to submit. Decisions you have already made are kept.`
           : "DIWO recommends no step in this plan for automatic approval"}
         aria-pressed={activeBulk === "recommended"}
         style={{
@@ -987,7 +1042,10 @@ function PlanBulkBar({
           color: !autoSelectable
             ? C.textMuted
             : activeBulk === "recommended" ? "#000" : C.accent,
-          border: `1px solid ${autoSelectable ? (activeBulk === "recommended" ? C.accent : `${C.accent}55`) : C.border}`,
+          // A full-strength 2px outline rather than a 33%-alpha hairline: this
+          // is the primary action on the page, and it has to be findable as a
+          // button before it is read as a label.
+          border: `2px solid ${autoSelectable ? C.accent : C.border}`,
           transition: "all 0.2s",
         }}
       >
@@ -1015,7 +1073,7 @@ function PlanBulkBar({
           color: confirming === "all"
             ? C.warn
             : activeBulk === "all" ? "#000" : C.textSub,
-          border: `1px solid ${confirming === "all" ? C.warn : activeBulk === "all" ? C.accent : C.border}`,
+          border: `2px solid ${confirming === "all" ? C.warn : activeBulk === "all" ? C.accent : C.borderAcc}`,
           transition: "all 0.2s",
         }}
       >
@@ -1039,7 +1097,7 @@ function PlanBulkBar({
           color: activeBulk === "reject" && confirming !== "reject"
             ? "#fff"
             : totalSteps ? C.danger : C.textMuted,
-          border: `1px solid ${totalSteps ? C.danger : C.border}`,
+          border: `2px solid ${totalSteps ? C.danger : C.border}`,
           transition: "all 0.2s",
         }}
       >
@@ -1257,7 +1315,7 @@ function CategorySection({
                 title={`${action.label} — a local decision; nothing is submitted`}
                 style={{
                   padding: "5px 12px", borderRadius: 7, fontSize: 11, fontWeight: 700,
-                  cursor: "pointer", border: `1px solid ${action.tone}40`,
+                  cursor: "pointer", border: `2px solid ${action.tone}`,
                   background: `${action.tone}14`, color: action.tone,
                 }}
               >
@@ -1449,7 +1507,9 @@ function BulkVerdict({ label, title, tone, filled, onClick }) {
       title={`${title} — a local decision; nothing is submitted`}
       style={{
         padding: "6px 13px", borderRadius: 7, fontSize: 12, fontWeight: 700,
-        cursor: "pointer", border: `1px solid ${tone}40`,
+        // Solid, full-strength edge. At 25% alpha these read as tinted text
+        // rather than as the two controls that decide a whole group at once.
+        cursor: "pointer", border: `2px solid ${tone}`,
         background: filled ? tone : `${tone}14`,
         color: filled ? (tone === C.danger ? "#fff" : "#000") : tone,
         transition: "all 0.2s",

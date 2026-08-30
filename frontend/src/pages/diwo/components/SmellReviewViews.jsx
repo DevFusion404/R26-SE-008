@@ -146,11 +146,18 @@ function ImpactLine({ record }) {
 /**
  * The glyph that identifies a smell type, a category or a file.
  *
- * The severity colour survives as the tile's tint, so the one bit the old dot
- * carried is not lost — it is now the background of something that also says
- * WHICH smell this is.
+ * Bare — no tile, no border. The icon was drawn inside a tinted, outlined box,
+ * which put a second bordered rectangle inside every already-bordered row and
+ * made the header read as two nested boxes rather than one line. The icon says
+ * WHICH smell this is on its own.
+ *
+ * GroupHeader still computes a per-row `accent` and hands it down, and Glyph
+ * now ignores it — severity is already carried by the severity badge and the
+ * row's own left stripe, so tinting the glyph too spent colour on a signal
+ * that was on screen twice. The prop is left at the call site because that is
+ * the one line to change if the tile is ever wanted back.
  */
-function Glyph({ icon, tone, label, size = 22 }) {
+function Glyph({ icon, label, size = 22 }) {
   if (!icon) return null;
   return (
     <span
@@ -158,11 +165,9 @@ function Glyph({ icon, tone, label, size = 22 }) {
       aria-label={label}
       title={label}
       style={{
-        width: size, height: size, borderRadius: 6, flexShrink: 0, lineHeight: 1,
+        width: size, height: size, flexShrink: 0, lineHeight: 1,
         display: "inline-flex", alignItems: "center", justifyContent: "center",
-        fontSize: size * 0.58,
-        background: tone ? `${tone}1e` : C.bg,
-        border: `1px solid ${tone ? `${tone}55` : C.border}`,
+        fontSize: size * 0.72,
       }}
     >
       {icon}
