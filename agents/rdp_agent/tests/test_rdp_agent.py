@@ -991,10 +991,23 @@ class TestEndToEndWithImpact:
         assert "summary" in plan
 
     def test_feature_envy_move_method_generated_without_rejection(self) -> None:
-        """Verify Move Method is generated for Feature Envy when target parameters exist."""
+        """Verify Move Method is generated for Feature Envy when valid classes exist in AST."""
+        order_code = (
+            "class ShippingCalculator:\n"
+            "    def __init__(self):\n"
+            "        self.rate = 15\n\n"
+            "class OrderService:\n"
+            "    def calculate_shipping(self, target: ShippingCalculator):\n"
+            "        return target.rate + 10\n"
+        )
         report_dict = {
             "target": "order_service.py",
             "language": "python",
+            "source_files": [{
+                "file_name": "order_service.py",
+                "source_code": order_code,
+                "language": "python",
+            }],
             "smells": [{
                 "id": "smell_fe_01",
                 "type": "Feature Envy",
@@ -1004,7 +1017,7 @@ class TestEndToEndWithImpact:
                     "class": "OrderService",
                     "method": "calculate_shipping",
                     "destination_class": "ShippingCalculator",
-                    "lines": [10, 25],
+                    "lines": [6, 8],
                 },
                 "details": "Method calculate_shipping exhibits Feature Envy toward ShippingCalculator",
                 "metrics": {"external_field_accesses": 6, "lines_of_code": 20},
@@ -1017,12 +1030,24 @@ class TestEndToEndWithImpact:
         assert step["refactoring"] == "Move Method"
         assert step["parameters"]["source_class"] == "OrderService"
         assert step["parameters"]["destination_class"] == "ShippingCalculator"
+        assert step["parameters"]["move_method_planning_evidence"]["source_class_exists"] is True
+        assert step["parameters"]["move_method_planning_evidence"]["destination_class_exists"] is True
 
-    def test_feature_envy_without_destination_class_derives_target_class(self) -> None:
-        """Verify Move Method is generated and destination class derived when missing from smell."""
+    def test_feature_envy_without_destination_class_does_not_invent_fake_helper(self) -> None:
+        """Verify Move Method is NOT generated when destination class is missing from AST."""
+        order_code = (
+            "class OrderService:\n"
+            "    def calculate_tax(self, rate):\n"
+            "        return rate * 15\n"
+        )
         report_dict = {
             "target": "order_service.py",
             "language": "python",
+            "source_files": [{
+                "file_name": "order_service.py",
+                "source_code": order_code,
+                "language": "python",
+            }],
             "smells": [{
                 "id": "smell_fe_02",
                 "type": "Feature Envy",
@@ -1031,7 +1056,7 @@ class TestEndToEndWithImpact:
                     "file": "order_service.py",
                     "class": "OrderService",
                     "method": "calculate_tax",
-                    "lines": [30, 45],
+                    "lines": [2, 3],
                 },
                 "details": "Feature envy detected in method calculate_tax",
                 "metrics": {"external_field_accesses": 5, "lines_of_code": 15},
@@ -1039,8 +1064,4 @@ class TestEndToEndWithImpact:
             "metrics_summary": {"total_lines": 100},
         }
         plan = generate_plan_from_dict(report_dict)
-        assert len(plan["steps"]) == 1
-        step = plan["steps"][0]
-        assert step["refactoring"] == "Move Method"
-        assert step["parameters"]["source_class"] == "OrderService"
-        assert step["parameters"]["destination_class"] == "CalculateTaxHelper"
+        assert len(plan["steps"]) == 0
