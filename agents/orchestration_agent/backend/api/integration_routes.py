@@ -30,9 +30,8 @@ from clients.cuqa_client import (
     CUQAError, cuqa_base_url, fetch_project_structure, fetch_quality_report, probe_cuqa,
 )
 from clients.rdp_client import probe_rdp
-from clients.sctva_client import (
-    SCTVAError, fetch_workspace_sources, probe_sctva, sctva_base_url,
-)
+from clients.sctva_client import SCTVAError, probe_sctva, sctva_base_url
+from services.source_service import fetch_workspace_sources
 from domain.cuqa_normalizer import (
     cuqa_report_to_smells, detect_primary_language, normalize_cuqa_report,
 )
@@ -123,10 +122,10 @@ def workspace_sources():
 
     Body: { file_paths: ["src/Order.java", ...] }
 
-    SCTVA owns the workspace reader (/sctva/cuqa-sources), so this is a proxy
-    to it, batched here rather than in the browser. Files that could not be
-    located come back in `missing`; that is not an error, because a project
-    spanning hundreds of files should not fail on one stale path.
+    CUQA owns the workspace, so the text is read from it over HTTP and batched
+    here rather than in the browser. Files that could not be located come back
+    in `missing`; that is not an error, because a project spanning hundreds of
+    files should not fail on one stale path.
     """
     data = request.get_json(force=True, silent=True) or {}
     file_paths = data.get("file_paths") or data.get("paths") or []
