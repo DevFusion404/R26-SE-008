@@ -63,12 +63,14 @@ def apply_extract_method(
     source_file: str = "",
     current_file_name: str = "",
     source_resolution_error: str = "",
+    smell: str = "",
 ) -> tuple[str, int, dict[str, Any]]:
     metadata = _base_metadata(
         method_name=method_name,
         new_method_name=new_method_name,
         source_class=source_class,
         source_file=source_file or current_file_name,
+        smell=smell,
     )
     if source_resolution_error:
         return _review(source_code, source_resolution_error, metadata)
@@ -90,6 +92,32 @@ def apply_extract_method(
     if len(targets) != 1:
         return _review(source_code, "AMBIGUOUS_METHOD_TARGET", metadata)
     target = targets[0]
+    requested_source_class = source_class
+    metadata.update({
+        "requested_source_class": requested_source_class,
+        "source_class": resolved_source_class,
+        "qualified_source_method": (
+            f"{resolved_source_class}.{method_name}"
+            if resolved_source_class
+            else method_name
+        ),
+        "qualified_extracted_method": (
+            f"{resolved_source_class}.{new_method_name}"
+            if resolved_source_class
+            else new_method_name
+        ),
+    })
+    if resolved_source_class != requested_source_class:
+        if not requested_source_class:
+            metadata["source_class_resolution"] = "recovered_from_current_ast"
+        elif target.parent_class is None and not resolved_source_class:
+            # Preserve the existing public diagnostic used for the common RDP
+            # mistake where a Python filename stem is supplied as a class name
+            # for a module-level function.
+            metadata["source_class_resolution"] = "stale_module_class_ignored"
+        else:
+            metadata["source_class_resolution"] = "stale_class_hint_recovered_from_ast"
+
     if any(
         isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)) and item.name == new_method_name
         for item in target.siblings
@@ -119,7 +147,14 @@ def apply_extract_method(
         end_line=end_line,
     )
     if candidate is None:
-        return _review(source_code, "NO_SAFE_COHESIVE_BLOCK", {**metadata, "before_metrics": before_metrics})
+        candidate_metadata = {**metadata, "before_metrics": before_metrics}
+        if _method_too_small_for_useful_extraction(target.node, before_metrics):
+            return _not_applicable(
+                source_code,
+                "METHOD_TOO_SMALL_FOR_USEFUL_EXTRACTION",
+                candidate_metadata,
+            )
+        return _review(source_code, "NO_SAFE_COHESIVE_BLOCK", candidate_metadata)
     selected, flow = candidate
     if len(flow.inputs) + len(flow.outputs) > MAX_EXTRACTED_PARAMETERS:
         return _review(source_code, "TOO_MANY_PARAMETERS", {**metadata, "before_metrics": before_metrics})
@@ -201,9 +236,17 @@ def apply_extract_method(
             "long_method_reduction": "PASS",
         },
         "behavioral_safety": "PENDING_PIPELINE_VALIDATION",
+        "effective_action_parameters": {
+            "method": method_name,
+            "new_method_name": new_method_name,
+            "source_class": resolved_source_class,
+            "method_signature": method_signature,
+            "start_line": start_line,
+            "end_line": end_line,
+            "source_file": source_file or current_file_name,
+            "smell": metadata.get("smell") or "Long Method",
+        },
     })
-    if resolved_source_class != source_class:
-        metadata["source_class_resolution"] = "stale_module_class_ignored"
     return transformed, 1, metadata
 
 
@@ -255,8 +298,17 @@ def _find_targets_with_stale_class_recovery(
         source_class,
         method_signature,
     )
-    if strict_matches or not source_class:
-        return strict_matches, source_class
+    if strict_matches:
+        resolved_owner = source_class
+        if len(strict_matches) == 1:
+            resolved_owner = (
+                strict_matches[0].parent_class.name
+                if strict_matches[0].parent_class is not None
+                else ""
+            )
+        return strict_matches, resolved_owner
+    if not source_class:
+        return [], ""
 
     recovered_matches = _find_targets(tree, method_name, "", method_signature)
     if len(recovered_matches) != 1 and method_signature:
@@ -601,9 +653,57 @@ def _valid_identifier(value: str) -> bool:
     return bool(value and value.isidentifier() and not re.match(r"^\d", value))
 
 
-def _base_metadata(*, method_name: str, new_method_name: str, source_class: str, source_file: str) -> dict[str, Any]:
+def _method_too_small_for_useful_extraction(
+    node: ast.FunctionDef | ast.AsyncFunctionDef,
+    metrics: dict[str, int],
+) -> bool:
+    """Return True only for small, simple routines where extraction adds indirection.
+
+    This deliberately excludes routines with control-flow complexity.  A small
+    method containing branches/loops/try blocks may have failed candidate
+    selection for a safety reason and must remain REVIEW_REQUIRED rather than
+    being silently treated as not applicable.
+    """
+
+    return (
+        metrics.get("statement_count", 0) <= 3
+        and metrics.get("loc", 0) <= 5
+        and metrics.get("complexity", 1) <= 1
+        and metrics.get("nesting_depth", 0) == 0
+        and not any(
+            isinstance(
+                item,
+                (
+                    ast.Raise,
+                    ast.Yield,
+                    ast.YieldFrom,
+                    ast.Await,
+                    ast.Try,
+                    ast.With,
+                    ast.AsyncWith,
+                    ast.For,
+                    ast.AsyncFor,
+                    ast.While,
+                    ast.If,
+                    ast.Match,
+                ),
+            )
+            for item in ast.walk(node)
+            if item is not node
+        )
+    )
+
+
+def _base_metadata(
+    *,
+    method_name: str,
+    new_method_name: str,
+    source_class: str,
+    source_file: str,
+    smell: str = "",
+) -> dict[str, Any]:
     return {
-        "smell": "Long Method",
+        "smell": str(smell or "Long Method"),
         "refactoring": "Extract Method",
         "language": "python",
         "source_method": method_name,

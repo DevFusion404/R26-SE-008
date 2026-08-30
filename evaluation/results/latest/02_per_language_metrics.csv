@@ -1,0 +1,2 @@
+language,evaluated_smells_count,macro_precision,macro_recall,macro_f1,micro_precision,micro_recall,micro_f1,total_samples
+java,7,0.0,0.0,,0.0,0.0,,14764

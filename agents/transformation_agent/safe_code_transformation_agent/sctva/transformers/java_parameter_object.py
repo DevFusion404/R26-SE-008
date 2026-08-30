@@ -38,6 +38,9 @@ def apply_introduce_parameter_object(
     parameter_name: str = "params",
     project_source_files: Sequence[Any] | None = None,
     source_resolution_error: str = "",
+    coordinated_project_callers: Sequence[Dict[str, Any]] | None = None,
+    target_parameter_count: int | None = None,
+    parameter_types: Sequence[str] | None = None,
 ) -> tuple[str, int, Dict[str, Any]]:
     metadata: Dict[str, Any] = {
         "refactoring": "Introduce Parameter Object",
@@ -73,6 +76,20 @@ def apply_introduce_parameter_object(
         for candidate in model.methods
         if candidate.name == method and not candidate.is_constructor
     ]
+    if len(target_matches) > 1 and target_parameter_count is not None:
+        target_matches = [
+            item for item in target_matches
+            if len(item[1].parameters) == int(target_parameter_count)
+        ]
+    if len(target_matches) > 1 and parameter_types:
+        expected_types = [re.sub(r"\s+", "", str(item)) for item in parameter_types]
+        narrowed: list[tuple[JavaClass, JavaMethod]] = []
+        for model, candidate in target_matches:
+            span = _method_parameter_span(source_code, candidate)
+            parsed = _parse_java_parameters(source_code[span[0]:span[1]]) if span else ""
+            if isinstance(parsed, list) and [re.sub(r"\s+", "", item.type_name) for item in parsed] == expected_types:
+                narrowed.append((model, candidate))
+        target_matches = narrowed
     if len(target_matches) != 1:
         reason = "TARGET_NOT_FOUND" if not target_matches else "AMBIGUOUS_OR_OVERLOADED_TARGET_METHOD"
         return _review(source_code, reason, metadata)
@@ -80,13 +97,6 @@ def apply_introduce_parameter_object(
     metadata["source_class"] = source_model.name
     if source_model.nesting_depth and not source_model.is_static:
         return _review(source_code, "NON_STATIC_INNER_CLASS_UNSUPPORTED", metadata)
-    if any(
-        model.name != source_model.name
-        and any(candidate.name == method for candidate in model.methods)
-        for model in models
-    ):
-        return _review(source_code, "AMBIGUOUS_SAME_NAME_CALL_TARGET", metadata)
-
     parameter_span = _method_parameter_span(source_code, target)
     if parameter_span is None:
         return _review(source_code, "METHOD_SIGNATURE_PARSE_FAILED", metadata)
@@ -97,17 +107,39 @@ def apply_introduce_parameter_object(
     parameters = params_or_error
     if len(parameters) < 2:
         return _review(source_code, "PARAMETER_COUNT_NOT_REDUCIBLE", metadata)
+    metadata.update({
+        "parameters_moved": [item.name for item in parameters],
+        "parameter_types": {item.name: item.type_name for item in parameters},
+        "before_parameter_count": len(parameters),
+        "after_parameter_count": 1,
+    })
     if parameter_name in {item.name for item in parameters}:
         return _review(source_code, "PARAMETER_NAME_COLLISION", metadata)
     if re.search(rf"::\s*{re.escape(method)}\b", _mask_c_like(source_code)):
         return _review(source_code, "METHOD_REFERENCE_CALL_SITE_UNSUPPORTED", metadata)
-    external_callers = _java_external_callers(
-        method,
-        project_source_files,
+    call_resolution = resolve_project_call_sites(
+        target_source=source_code,
+        target_class=source_model.name,
+        method=method,
+        parameters=parameters,
+        project_source_files=project_source_files,
         current_file_name=current_file_name or source_file,
     )
-    if external_callers:
-        metadata["unresolved_external_callers"] = external_callers
+    metadata["cross_file_call_site_resolution"] = call_resolution
+    if call_resolution["unresolved"]:
+        return _review(source_code, "CROSS_FILE_CALL_SITES_REQUIRE_COORDINATED_EDIT", metadata)
+    resolved_callers = call_resolution["resolved"]
+    expected_callers = {
+        _normalize_path(str(item.get("file_name") or ""))
+        for item in coordinated_project_callers or []
+        if str(item.get("file_name") or "").strip()
+    }
+    actual_callers = {
+        _normalize_path(str(item.get("file_name") or ""))
+        for item in resolved_callers
+    }
+    if actual_callers and actual_callers != expected_callers:
+        metadata["unresolved_external_callers"] = resolved_callers
         return _review(source_code, "CROSS_FILE_CALL_SITES_REQUIRE_COORDINATED_EDIT", metadata)
 
     call_spans_or_error = _java_call_spans(
@@ -167,11 +199,8 @@ def apply_introduce_parameter_object(
         },
     )
     metadata.update({
-        "parameters_moved": [item.name for item in parameters],
-        "parameter_types": {item.name: item.type_name for item in parameters},
-        "before_parameter_count": len(parameters),
-        "after_parameter_count": 1,
         "call_sites_updated": len(call_spans),
+        "coordinated_external_call_sites": len(resolved_callers),
         "validation": validation,
     })
     if "FAIL" in validation.values():
@@ -281,9 +310,9 @@ def _java_parameter_class_source(
     constructor_params = ", ".join(f"{item.type_name} {item.name}" for item in parameters)
     assignments = "\n".join(f"{nested}    this.{item.name} = {item.name};" for item in parameters)
     return (
-        f"\n{indent}static class {class_name} {{\n"
+        f"\n{indent}public static class {class_name} {{\n"
         f"{fields}\n\n"
-        f"{nested}{class_name}({constructor_params}) {{\n"
+        f"{nested}public {class_name}({constructor_params}) {{\n"
         f"{assignments}\n"
         f"{nested}}}\n"
         f"{indent}}}\n"
@@ -298,22 +327,234 @@ def _member_indent(source: str, model: JavaClass) -> str:
     return class_indent + "    "
 
 
-def _java_external_callers(
-    method: str,
-    project_source_files: Sequence[Any] | None,
+def resolve_project_call_sites(
     *,
+    target_source: str,
+    target_class: str,
+    method: str,
+    parameters: Sequence[JavaParameter],
+    project_source_files: Sequence[Any] | None,
     current_file_name: str,
-) -> list[str]:
-    callers: list[str] = []
-    pattern = re.compile(rf"(?:\.|\b)\s*{re.escape(method)}\s*\(")
+) -> Dict[str, Any]:
+    """Resolve external Java invocations of one exact method conservatively.
+
+    This intentionally uses the parser model already used by SCTVA rather than
+    a name-only scan.  Same-name declarations and calls on typed unrelated
+    receivers are diagnostic *ignored* candidates, never false callers.
+    """
+    package_match = re.search(r"(?m)^\s*package\s+([A-Za-z_$][\w.$]*)\s*;", _mask_c_like(target_source))
+    target_package = package_match.group(1) if package_match else ""
+    target_fqn = f"{target_package}.{target_class}" if target_package else target_class
+    signature = f"{target_fqn}.{method}({', '.join(item.type_name for item in parameters)})"
+    resolved: list[Dict[str, Any]] = []
+    ignored: list[Dict[str, Any]] = []
+    unresolved: list[Dict[str, Any]] = []
+
     for item in project_source_files or []:
         file_name = str(item.get("file_name") if isinstance(item, dict) else getattr(item, "file_name", ""))
-        if _paths_match(file_name, current_file_name):
+        source = str(item.get("source_code") if isinstance(item, dict) else getattr(item, "source_code", ""))
+        if not file_name or _paths_match(file_name, current_file_name):
             continue
-        source = item.get("source_code") if isinstance(item, dict) else getattr(item, "source_code", "")
-        if pattern.search(_mask_c_like(str(source or ""))):
-            callers.append(file_name)
-    return sorted(set(callers))
+        for candidate in _java_method_invocation_candidates(source, method):
+            diagnostic = {
+                "file_name": file_name,
+                "line": candidate["line"],
+                "receiver": candidate["receiver"],
+                "method": method,
+                "argument_count": candidate["argument_count"],
+                "target_class": target_fqn,
+                "target_signature": signature,
+            }
+            if candidate["argument_count"] != len(parameters):
+                diagnostic["resolution"] = "ignored_arity_mismatch"
+                ignored.append(diagnostic)
+                continue
+            resolution = _resolve_java_invocation_owner(
+                source=source,
+                candidate=candidate,
+                target_class=target_class,
+                target_fqn=target_fqn,
+                method=method,
+            )
+            diagnostic.update(resolution)
+            if resolution["status"] == "resolved":
+                resolved.append(diagnostic)
+            elif resolution["status"] == "unresolved":
+                unresolved.append(diagnostic)
+            else:
+                ignored.append(diagnostic)
+
+    return {
+        "status": "review_required" if unresolved else "success",
+        "target_class": target_fqn,
+        "target_signature": signature,
+        "resolved": resolved,
+        "ignored": ignored,
+        "unresolved": unresolved,
+    }
+
+
+def apply_coordinated_call_site_update(
+    source_code: str,
+    *,
+    target_class: str,
+    method: str,
+    parameter_object_name: str,
+    parameter_count: int,
+    target_signature: str = "",
+) -> tuple[str, int, Dict[str, Any]]:
+    """Rewrite every pre-resolved invocation in one external Java file."""
+    metadata: Dict[str, Any] = {
+        "refactoring": "Introduce Parameter Object - coordinated call site",
+        "language": "java",
+        "target_class": target_class,
+        "method": method,
+        "parameter_object_name": parameter_object_name,
+        "target_signature": target_signature,
+        "reclassified_action_type": "noop",
+    }
+    if not all(re.fullmatch(_IDENTIFIER, value or "") for value in (target_class, method, parameter_object_name)):
+        return _review(source_code, "INVALID_COORDINATED_CALL_SITE_TARGET", metadata)
+
+    target_fqn = target_signature.rsplit(".", 1)[0] if "." in target_signature else target_class
+    candidates = _java_method_invocation_candidates(source_code, method)
+    edits: list[tuple[int, int, str]] = []
+    diagnostics: list[Dict[str, Any]] = []
+    for candidate in candidates:
+        if candidate["argument_count"] != parameter_count:
+            continue
+        resolution = _resolve_java_invocation_owner(
+            source=source_code,
+            candidate=candidate,
+            target_class=target_class,
+            target_fqn=target_fqn,
+            method=method,
+        )
+        if resolution["status"] == "unresolved":
+            diagnostic = {
+                "line": candidate["line"],
+                "receiver": candidate["receiver"],
+                "method": method,
+                "target_signature": target_signature,
+                **resolution,
+            }
+            return _review(source_code, "CROSS_FILE_CALL_SITES_REQUIRE_COORDINATED_EDIT", {
+                **metadata,
+                "call_site_diagnostics": [*diagnostics, diagnostic],
+            })
+        if resolution["status"] != "resolved":
+            continue
+        args = source_code[candidate["argument_start"]:candidate["argument_end"]]
+        edits.append((
+            candidate["argument_start"],
+            candidate["argument_end"],
+            f"new {target_class}.{parameter_object_name}({args})",
+        ))
+        diagnostics.append({
+            "line": candidate["line"],
+            "receiver": candidate["receiver"],
+            "resolved_class": resolution.get("resolved_class"),
+            "resolution": resolution.get("resolution"),
+        })
+    if not edits:
+        return _review(source_code, "COORDINATED_CALL_SITE_NOT_FOUND", metadata)
+    transformed = _apply_edits(source_code, edits)
+    metadata.update({
+        "status": "success",
+        "reason": "coordinated_parameter_object_call_sites_updated",
+        "plan_compliance": "PASS",
+        "call_sites_updated": len(edits),
+        "call_site_diagnostics": diagnostics,
+    })
+    return transformed, len(edits), metadata
+
+
+def _java_method_invocation_candidates(source: str, method: str) -> list[Dict[str, Any]]:
+    masked = _mask_c_like(source)
+    candidates: list[Dict[str, Any]] = []
+    for match in re.finditer(rf"\b{re.escape(method)}\s*\(", masked):
+        open_index = masked.find("(", match.start(), match.end())
+        close_index = _matching(masked, open_index, "(", ")")
+        if close_index is None:
+            continue
+        tail = masked[close_index + 1:]
+        # A declaration is followed by a body (or throws + body), not by an
+        # expression delimiter.  This also eliminates same-name definitions.
+        if re.match(r"\s*(?:throws\s+[\w.$\s,]+)?\s*\{", tail):
+            continue
+        prefix = masked[:match.start()].rstrip()
+        receiver_match = re.search(r"(?P<receiver>(?:[A-Za-z_$][\w$]*(?:\s*\.\s*[A-Za-z_$][\w$]*)*|new\s+[A-Za-z_$][\w$.]*\s*\([^)]*\)))\s*\.\s*$", prefix)
+        receiver = receiver_match.group("receiver").replace(" ", "") if receiver_match else ""
+        args = [part for part in _split_top_level(source[open_index + 1:close_index], ",") if part.strip()]
+        candidates.append({
+            "method_start": match.start(),
+            "argument_start": open_index + 1,
+            "argument_end": close_index,
+            "argument_count": len(args),
+            "receiver": receiver,
+            "line": source.count("\n", 0, match.start()) + 1,
+        })
+    return candidates
+
+
+def _resolve_java_invocation_owner(
+    *,
+    source: str,
+    candidate: Dict[str, Any],
+    target_class: str,
+    target_fqn: str,
+    method: str,
+) -> Dict[str, str]:
+    masked = _mask_c_like(source)
+    receiver = str(candidate.get("receiver") or "")
+    imports = set(re.findall(r"(?m)^\s*import\s+([A-Za-z_$][\w.$]*)\s*;", masked))
+    static_imports = set(re.findall(r"(?m)^\s*import\s+static\s+([A-Za-z_$][\w.$]*)\s*;", masked))
+    aliases = {target_class, target_fqn}
+    if target_fqn in imports:
+        aliases.add(target_class)
+    type_map = _java_local_type_map(masked)
+
+    if not receiver:
+        if f"{target_fqn}.{method}" in static_imports or f"{target_class}.{method}" in static_imports:
+            return {"status": "resolved", "resolved_class": target_fqn, "resolution": "static_import"}
+        if any(item.endswith(f".{method}") for item in static_imports):
+            return {"status": "ignored", "resolved_class": "", "resolution": "static_import_other_class"}
+        if _java_source_declares_method(masked, method):
+            return {"status": "ignored", "resolved_class": "", "resolution": "local_same_name_method"}
+        return {"status": "unresolved", "resolved_class": "", "resolution": "unqualified_call_owner_unknown"}
+
+    if receiver.startswith("new"):
+        constructed = re.search(r"new\s+([A-Za-z_$][\w$.]*)", receiver)
+        owner = constructed.group(1).split(".")[-1] if constructed else ""
+    else:
+        receiver_name = receiver.split(".")[-1]
+        owner = type_map.get(receiver_name, receiver_name)
+        if receiver_name == target_class or receiver == target_fqn:
+            return {"status": "resolved", "resolved_class": target_fqn, "resolution": "explicit_target_class_receiver"}
+        if receiver_name not in type_map and receiver_name[:1].islower():
+            return {"status": "unresolved", "resolved_class": "", "resolution": "receiver_type_unknown"}
+    owner_simple = owner.split(".")[-1]
+    if owner in aliases or owner_simple == target_class:
+        return {"status": "resolved", "resolved_class": target_fqn, "resolution": "receiver_type"}
+    if owner:
+        return {"status": "ignored", "resolved_class": owner, "resolution": "receiver_resolves_to_other_class"}
+    return {"status": "unresolved", "resolved_class": "", "resolution": "receiver_owner_unknown"}
+
+
+def _java_local_type_map(masked: str) -> Dict[str, str]:
+    result: Dict[str, str] = {}
+    for match in re.finditer(r"\b([A-Za-z_$][\w$.]*(?:\s*<[^;=(){}]+>)?)\s+([A-Za-z_$][\w$]*)\s*(?=[=;,)])", masked):
+        type_name = re.sub(r"<.*>", "", match.group(1)).strip()
+        result[match.group(2)] = type_name
+    return result
+
+
+def _java_source_declares_method(masked: str, method: str) -> bool:
+    return bool(re.search(rf"\b{re.escape(method)}\s*\([^;{{}}]*\)\s*(?:throws\s+[\w.$\s,]+)?\s*\{{", masked))
+
+
+def _normalize_path(value: str) -> str:
+    return "/".join(part for part in str(value).replace("\\", "/").lower().split("/") if part and part != ".")
 
 
 def _validate_java_result(

@@ -26,7 +26,13 @@ from .extract_method_common import (
     nonblank_loc,
     normalize_signature,
 )
-from .java_extract_class import JavaClass, JavaMethod, _parse_java_class, top_level_class_names
+from .java_extract_class import (
+    JavaClass,
+    JavaMethod,
+    _mask_java_annotations,
+    _parse_java_class,
+    top_level_class_names,
+)
 
 
 REVIEW_REQUIRED = "review_required"
@@ -149,6 +155,7 @@ def apply_extract_method(
     method_signature: str = "",
     start_line: int | None = None,
     end_line: int | None = None,
+    source_line: int | None = None,
     source_file: str = "",
     current_file_name: str = "",
     source_resolution_error: str = "",
@@ -160,13 +167,37 @@ def apply_extract_method(
         return _review(source_code, source_resolution_error, metadata)
     if not _identifier(method_name) or not _identifier(new_method_name):
         return _review(source_code, "INVALID_METHOD_TARGET_OR_NAME", metadata)
-    targets = _resolve_targets(source_code, method_name, source_class, method_signature)
+    targets, resolution = _resolve_targets_with_diagnostics(
+        source_code,
+        method_name,
+        source_class,
+        method_signature,
+        start_line=start_line,
+        end_line=end_line,
+        source_line=source_line,
+    )
+    metadata["method_target_resolution"] = resolution
     if not targets:
-        return _review(source_code, "METHOD_TARGET_NOT_FOUND", metadata)
+        return _review(
+            source_code,
+            str(resolution.get("reason") or "METHOD_TARGET_NOT_FOUND"),
+            metadata,
+        )
     if len(targets) != 1:
-        return _review(source_code, "AMBIGUOUS_OVERLOADED_METHOD_TARGET", metadata)
+        return _review(
+            source_code,
+            str(resolution.get("reason") or "AMBIGUOUS_OVERLOADED_METHOD_TARGET"),
+            metadata,
+        )
     source_model, method = targets[0]
-    metadata["source_class"] = source_model.name
+    metadata.update({
+        "source_class": source_model.name,
+        "qualified_source_method": f"{source_model.name}.{method.name}",
+        "resolved_method_start_line": _line_of(source_code, method.start),
+        "resolved_method_end_line": _line_of(source_code, method.end - 1),
+        "resolved_parameter_types": list(_java_parameter_types(method).values()),
+        "resolved_parameter_count": len(_java_parameter_types(method)),
+    })
     if method.is_constructor:
         return _review(source_code, "CONSTRUCTOR_EXTRACTION_UNSUPPORTED", metadata)
     helper_collisions = source_model.methods_by_name.get(new_method_name, [])
@@ -404,16 +435,276 @@ def _resolve_targets(
     source_class: str,
     method_signature: str,
 ) -> list[tuple[JavaClass, JavaMethod]]:
-    class_names = [source_class] if source_class else sorted(top_level_class_names(source_code))
-    matches: list[tuple[JavaClass, JavaMethod]] = []
+    """Compatibility wrapper used by post-transform validation."""
+
+    matches, _ = _resolve_targets_with_diagnostics(
+        source_code,
+        method_name,
+        source_class,
+        method_signature,
+    )
+    return matches
+
+
+def _resolve_targets_with_diagnostics(
+    source_code: str,
+    method_name: str,
+    source_class: str,
+    method_signature: str,
+    *,
+    start_line: int | None = None,
+    end_line: int | None = None,
+    source_line: int | None = None,
+) -> tuple[list[tuple[JavaClass, JavaMethod]], dict[str, Any]]:
+    """Resolve a Java method from the current source using semantic identity.
+
+    Resolution is intentionally class-scoped and annotation-insensitive.  Line
+    numbers are hints only, because earlier accepted transformations can move
+    the method.  Overloads are never chosen arbitrarily.
+    """
+
+    requested_class = str(source_class or "").strip()
+    requested_method = str(method_name or "").strip()
+    requested_signature = str(method_signature or "").strip()
+    class_names = [requested_class] if requested_class else sorted(top_level_class_names(source_code))
+
+    diagnostics: dict[str, Any] = {
+        "status": "failed",
+        "reason": "METHOD_TARGET_NOT_FOUND",
+        "strategy": "failed",
+        "requested_source_class": requested_class,
+        "requested_source_method": requested_method,
+        "requested_method_signature": requested_signature,
+        "requested_source_line": source_line,
+        "requested_source_range": {"start_line": start_line, "end_line": end_line},
+        "candidates": [],
+    }
+
+    models: list[JavaClass] = []
     for class_name in class_names:
         model = _parse_java_class(source_code, class_name)
-        if model is None:
+        if model is not None:
+            models.append(model)
+
+    if requested_class and not models:
+        diagnostics["reason"] = "SOURCE_CLASS_NOT_FOUND"
+        return [], diagnostics
+
+    name_matches: list[tuple[JavaClass, JavaMethod]] = []
+    for model in models:
+        for method in model.methods_by_name.get(requested_method, []):
+            name_matches.append((model, method))
+            diagnostics["candidates"].append(_java_method_candidate_metadata(source_code, model, method))
+
+    if not name_matches:
+        diagnostics["reason"] = "METHOD_TARGET_NOT_FOUND"
+        return [], diagnostics
+
+    # 1) Exact normalized signature.
+    if requested_signature:
+        signature_matches = [
+            item for item in name_matches
+            if _signature_matches(item[1], requested_signature)
+        ]
+        if len(signature_matches) == 1:
+            diagnostics.update({
+                "status": "success",
+                "reason": "",
+                "strategy": "current_ast_exact_class_method_signature",
+            })
+            return signature_matches, diagnostics
+        if len(signature_matches) > 1:
+            narrowed = _narrow_java_method_candidates_by_line(
+                source_code,
+                signature_matches,
+                start_line=start_line,
+                end_line=end_line,
+                source_line=source_line,
+            )
+            if len(narrowed) == 1:
+                diagnostics.update({
+                    "status": "success",
+                    "reason": "",
+                    "strategy": "current_ast_signature_plus_line_hint",
+                })
+                return narrowed, diagnostics
+            diagnostics["reason"] = "AMBIGUOUS_OVERLOADED_METHOD_TARGET"
+            diagnostics["ambiguity_kind"] = "AMBIGUOUS_METHOD_TARGET"
+            return signature_matches, diagnostics
+
+        # 2) Signature parameter types/count, ignoring annotations and parameter names.
+        requested_types = _requested_signature_parameter_types(
+            requested_signature,
+            requested_method,
+        )
+        if requested_types is not None:
+            typed_matches = []
+            for item in name_matches:
+                actual_types = list(_java_parameter_types(item[1]).values())
+                if len(actual_types) != len(requested_types):
+                    continue
+                if all(
+                    _normalized_java_type(actual) == _normalized_java_type(expected)
+                    for actual, expected in zip(actual_types, requested_types)
+                ):
+                    typed_matches.append(item)
+            if len(typed_matches) == 1:
+                diagnostics.update({
+                    "status": "success",
+                    "reason": "",
+                    "strategy": "current_ast_class_method_parameter_types",
+                })
+                return typed_matches, diagnostics
+            if len(typed_matches) > 1:
+                name_matches = typed_matches
+
+    # 3) Unique class-scoped method name.  This deliberately tolerates stale or
+    # annotation-heavy planner signatures when there is no overload ambiguity.
+    if len(name_matches) == 1:
+        diagnostics.update({
+            "status": "success",
+            "reason": "",
+            "strategy": (
+                "current_ast_unique_class_method_after_signature_mismatch"
+                if requested_signature
+                else "current_ast_unique_class_method"
+            ),
+        })
+        return name_matches, diagnostics
+
+    # 4) Stale-line/source-range recovery for true overloads.
+    narrowed = _narrow_java_method_candidates_by_line(
+        source_code,
+        name_matches,
+        start_line=start_line,
+        end_line=end_line,
+        source_line=source_line,
+    )
+    if len(narrowed) == 1:
+        diagnostics.update({
+            "status": "success",
+            "reason": "",
+            "strategy": "current_ast_class_method_line_hint",
+        })
+        return narrowed, diagnostics
+
+    diagnostics["reason"] = "AMBIGUOUS_OVERLOADED_METHOD_TARGET"
+    diagnostics["ambiguity_kind"] = "AMBIGUOUS_METHOD_TARGET"
+    diagnostics["strategy"] = "current_ast_overload_requires_disambiguation"
+    return name_matches, diagnostics
+
+
+def _java_method_candidate_metadata(
+    source_code: str,
+    model: JavaClass,
+    method: JavaMethod,
+) -> dict[str, Any]:
+    types = list(_java_parameter_types(method).values())
+    return {
+        "source_class": model.name,
+        "source_method": method.name,
+        "qualified_source_method": f"{model.name}.{method.name}",
+        "parameter_count": len(types),
+        "parameter_types": types,
+        "start_line": _line_of(source_code, method.start),
+        "end_line": _line_of(source_code, method.end - 1),
+        "header": re.sub(r"\s+", " ", method.header).strip(),
+    }
+
+
+def _narrow_java_method_candidates_by_line(
+    source_code: str,
+    candidates: Sequence[tuple[JavaClass, JavaMethod]],
+    *,
+    start_line: int | None,
+    end_line: int | None,
+    source_line: int | None,
+) -> list[tuple[JavaClass, JavaMethod]]:
+    hints = [value for value in (source_line, start_line) if isinstance(value, int) and value > 0]
+    if not hints and isinstance(end_line, int) and end_line > 0:
+        hints.append(end_line)
+    if not hints:
+        return list(candidates)
+
+    anchor = hints[0]
+    containing = []
+    for item in candidates:
+        method = item[1]
+        first = _line_of(source_code, method.start)
+        last = _line_of(source_code, method.end - 1)
+        if first <= anchor <= last:
+            containing.append(item)
+    if len(containing) == 1:
+        return containing
+    if len(containing) > 1:
+        return containing
+
+    distances = []
+    for item in candidates:
+        first = _line_of(source_code, item[1].start)
+        distances.append((abs(first - anchor), item))
+    distances.sort(key=lambda value: value[0])
+    if len(distances) == 1 or distances[0][0] < distances[1][0]:
+        return [distances[0][1]]
+    return list(candidates)
+
+
+def _requested_signature_parameter_types(
+    signature: str,
+    method_name: str,
+) -> list[str] | None:
+    text = str(signature or "").strip()
+    if not text:
+        return None
+    masked = mask_c_like(text)
+    match = re.search(rf"\b{re.escape(method_name)}\s*\(", masked)
+    if match is None:
+        match = re.search(r"\(", masked)
+    if match is None:
+        return None
+    open_paren = masked.find("(", match.start())
+    depth = 0
+    close_paren = None
+    for index in range(open_paren, len(masked)):
+        if masked[index] == "(":
+            depth += 1
+        elif masked[index] == ")":
+            depth -= 1
+            if depth == 0:
+                close_paren = index
+                break
+    if close_paren is None:
+        return None
+    raw_params = text[open_paren + 1:close_paren]
+    if not raw_params.strip():
+        return []
+
+    result: list[str] = []
+    for raw in _split_top_level(raw_params):
+        cleaned = _mask_java_annotations(raw).strip()
+        cleaned = re.sub(r"\bfinal\b", " ", cleaned)
+        cleaned = re.sub(r"\s+", " ", cleaned).strip()
+        if not cleaned:
             continue
-        for method in model.methods_by_name.get(method_name, []):
-            if _signature_matches(method, method_signature):
-                matches.append((model, method))
-    return matches
+        name_match = re.search(r"([A-Za-z_$][A-Za-z0-9_$]*)\s*(\[\s*\])?\s*$", cleaned)
+        if name_match is None:
+            result.append(cleaned)
+            continue
+        before_name = cleaned[:name_match.start()].strip()
+        if before_name:
+            type_name = before_name
+            if name_match.group(2):
+                type_name += "[]"
+            result.append(type_name)
+        else:
+            # Signatures such as process(int,int) contain types without names.
+            result.append(cleaned)
+    return result
+
+
+def _normalized_java_type(value: str) -> str:
+    value = re.sub(r"\s+", "", str(value or ""))
+    return value.replace("...", "[]")
 
 
 def _signature_matches(method: JavaMethod, signature: str) -> bool:
@@ -979,7 +1270,7 @@ def _java_parameter_types(method: JavaMethod) -> dict[str, str]:
     params_raw = _params_raw(method.header, method.name)
     result: dict[str, str] = {}
     for raw in _split_top_level(params_raw):
-        cleaned = re.sub(r"@\w+(?:\([^)]*\))?\s*", "", raw).strip()
+        cleaned = _mask_java_annotations(raw).strip()
         cleaned = re.sub(r"\bfinal\s+", "", cleaned).strip()
         match = re.search(r"([A-Za-z_$][A-Za-z0-9_$]*)\s*(\[\s*\])?\s*$", cleaned)
         if not match:

@@ -284,6 +284,59 @@ def test_java_parameter_object_preserves_instance_method_behavior():
     ).passed is True
 
 
+def test_java_parameter_object_structural_validation_counts_helper_body_accesses():
+    original = '''class CustomerService {
+    public static String update(String name, String address, String email) {
+        String combined = name + address;
+        return combined + email;
+    }
+}
+'''
+    transformed = '''class CustomerService {
+    static class UpdateParams {
+        String name;
+        String address;
+        String email;
+
+        UpdateParams(String name, String address, String email) {
+            this.name = name;
+            this.address = address;
+            this.email = email;
+        }
+    }
+
+    public static String update(UpdateParams params) {
+        return buildUpdate(params);
+    }
+
+    private static String buildUpdate(UpdateParams params) {
+        String combined = params.name + params.address;
+        return combined + params.email;
+    }
+}
+'''
+    action = RefactoringAction(
+        action_type="introduce_java_parameter_object",
+        parameters={
+            "method": "update",
+            "source_class": "CustomerService",
+            "parameter_object_name": "UpdateParams",
+        },
+    )
+
+    result = StructuralValidator().validate(
+        language="java",
+        original_code=original,
+        transformed_code=transformed,
+        actions=[action],
+    )
+
+    assert result.passed is True
+    validation = result.details["parameter_object_validation"][0]
+    assert validation["checks"]["body_access_migrated"] is True
+    assert validation["migrated_body_accesses"] == ["address", "email", "name"]
+
+
 def test_parameter_object_rejects_duplicate_class_and_cross_file_callers():
     duplicate = '''class CalculateInvoiceParams:
     pass

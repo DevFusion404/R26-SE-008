@@ -1,0 +1,8 @@
+smell_type,tp,fp,fn,tn,total_samples,precision,recall,f1,accuracy,specificity,mcc
+Comments,0,629,0,0,629,0.0,,,0.0,0.0,
+DataClass,0,0,301,2037,2338,,0.0,,0.8713,1.0,
+FeatureEnvy,0,0,68,2347,2415,,0.0,,0.9718,1.0,
+LargeClass,0,210,254,2080,2544,0.0,0.0,,0.8176,0.9083,-0.0999
+LongMethod,0,632,276,2154,3062,0.0,0.0,,0.7035,0.7732,-0.1605
+MagicNumber,0,3746,0,0,3746,0.0,,,0.0,0.0,
+TooManyParameters,0,30,0,0,30,0.0,,,0.0,0.0,

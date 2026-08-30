@@ -424,13 +424,230 @@ def test_feature_envy_duplicate_source_method_fails_structural_validation():
     assert checks["method_removed_from_source_class"] is False
 
 
-def test_feature_envy_stale_destination_is_recovered_from_ast_evidence():
+def test_feature_envy_missing_explicit_destination_is_not_applicable():
     transformed, replacements, metadata = _move(destination_class="MissingStudent")
 
-    assert transformed != SOURCE
-    assert replacements > 0
-    assert metadata["status"] == "success"
-    assert metadata["destination_class"] == "Student"
+    assert transformed == SOURCE
+    assert replacements == 0
+    assert metadata["status"] == "not_applicable"
+    assert metadata["reason"] == "MOVE_METHOD_DESTINATION_CLASS_NOT_FOUND"
+
+
+def test_module_level_function_is_not_applicable_move_method_target():
+    source = '''def process_report(student):
+    return student.name
+'''
+
+    transformed, replacements, metadata = python_transformers.apply_move_method(
+        source,
+        method_name="process_report",
+        source_class="ReportPrinter",
+        destination_class="Student",
+    )
+
+    assert transformed == source
+    assert replacements == 0
+    assert metadata["status"] == "not_applicable"
+    assert metadata["reason"] == "MOVE_METHOD_TARGET_IS_MODULE_FUNCTION"
+    assert metadata["target_resolution"]["target_kind"] == "MODULE_FUNCTION"
+    assert metadata["target_resolution"]["suggested_refactoring"] == "MOVE_FUNCTION"
+    assert metadata["target_resolution"]["source_class_resolved"] is False
+    assert metadata["target_resolution"]["replacements_count"] == 0
+
+
+def test_missing_source_class_is_not_applicable_move_method_target():
+    source = '''class Student:
+    def name(self):
+        return "Maya"
+
+class ReportPrinter:
+    pass
+'''
+
+    transformed, replacements, metadata = python_transformers.apply_move_method(
+        source,
+        method_name="print_student_report",
+        source_class="MissingPrinter",
+        destination_class="Student",
+    )
+
+    assert transformed == source
+    assert replacements == 0
+    assert metadata["status"] == "not_applicable"
+    assert metadata["reason"] == "MOVE_METHOD_REQUIRES_SOURCE_AND_DESTINATION_CLASSES"
+
+
+def test_one_class_module_is_not_applicable_move_method_target():
+    source = '''class ReportPrinter:
+    def print_student_report(self, student):
+        return student.name
+'''
+
+    transformed, replacements, metadata = python_transformers.apply_move_method(
+        source,
+        method_name="print_student_report",
+        source_class="ReportPrinter",
+        destination_class="Student",
+    )
+
+    assert transformed == source
+    assert replacements == 0
+    assert metadata["status"] == "not_applicable"
+    assert metadata["reason"] == "MOVE_METHOD_DESTINATION_CLASS_NOT_FOUND"
+
+
+def test_missing_explicit_destination_has_specific_not_found_reason():
+    source = '''class SourceClass:
+    def describe(self, target):
+        return target.name + target.kind
+
+
+class Target:
+    pass
+'''
+
+    transformed, replacements, metadata = python_transformers.apply_move_method(
+        source,
+        method_name="describe",
+        source_class="SourceClass",
+        destination_class="MissingTarget",
+        destination_parameter="target",
+    )
+
+    assert transformed == source
+    assert replacements == 0
+    assert metadata["status"] == "not_applicable"
+    assert metadata["reason"] == "MOVE_METHOD_DESTINATION_CLASS_NOT_FOUND"
+    assert metadata["source_class_resolved"] is True
+    assert metadata["destination_class_resolved"] is False
+
+
+def test_source_method_alias_is_resolved_without_trusting_planner_evidence():
+    source = '''class Student:
+    def __init__(self, name, grade):
+        self.name = name
+        self.grade = grade
+
+
+class ReportPrinter:
+    def print_student_report(self, student):
+        return student.name + student.grade
+'''
+
+    action = RefactoringAction(
+        action_type="move_python_method",
+        parameters={
+            "source_method": "print_student_report",
+            "source_class": "ReportPrinter",
+            "destination_class": "Student",
+            "move_method_planning_evidence": {
+                "source_class_exists": True,
+                "destination_class_exists": True,
+                "method_belongs_to_source_class": True,
+            },
+        },
+    )
+
+    transformed, logs, _ = TransformationEngine().apply_actions(
+        language="python",
+        source_code=source,
+        actions=[action],
+        strict_mode=True,
+    )
+
+    assert logs[0].metadata["status"] == "success"
+    assert "def print_student_report(self):" in transformed
+
+
+def test_real_class_named_source_class_wins_over_same_named_module_function():
+    source = '''def describe(target):
+    return target.name
+
+
+class Student:
+    def __init__(self, name, grade):
+        self.name = name
+        self.grade = grade
+
+
+class SourceClass:
+    def describe(self, student):
+        return student.name + student.grade
+'''
+
+    resolved = python_transformers.resolve_move_method_target(
+        source,
+        method_name="describe",
+        source_class="SourceClass",
+        destination_class="Student",
+    )
+
+    assert resolved["status"] == "success"
+    assert resolved["source_class"] == "SourceClass"
+    assert resolved["destination_class"] == "Student"
+
+
+def test_empty_or_null_source_class_is_not_applicable_for_class_move():
+    source = '''class Student:
+    pass
+
+
+class ReportPrinter:
+    def describe(self, student):
+        return student.name + student.grade
+'''
+
+    for missing_source in ("", "None", "null"):
+        resolved = python_transformers.resolve_move_method_target(
+            source,
+            method_name="describe",
+            source_class=missing_source,
+            destination_class="Student",
+        )
+        assert resolved["status"] == "not_applicable"
+        assert resolved["reason"] == "MOVE_METHOD_REQUIRES_SOURCE_AND_DESTINATION_CLASSES"
+        assert resolved["source_class_resolved"] is False
+
+
+def test_reserved_placeholder_source_class_is_never_recovered_as_a_real_class():
+    resolved = python_transformers.resolve_move_method_target(
+        SOURCE,
+        method_name="SourceClass",
+        source_class="SourceClass",
+        destination_class="print_student_report",
+        source_line=11,
+    )
+
+    assert resolved["status"] == "not_applicable"
+    assert resolved["reason"] == "MOVE_METHOD_REQUIRES_SOURCE_AND_DESTINATION_CLASSES"
+    assert resolved["source_class_resolved"] is False
+
+
+def test_engine_keeps_module_function_out_of_move_method_validation():
+    source = '''def process_report(student):
+    return student.name
+'''
+    action = RefactoringAction(
+        action_type="move_python_method",
+        parameters={
+            "method": "process_report",
+            "source_class": "ReportPrinter",
+            "destination_class": "Student",
+        },
+    )
+
+    transformed, logs, warnings = TransformationEngine().apply_actions(
+        language="python",
+        source_code=source,
+        actions=[action],
+        strict_mode=True,
+    )
+
+    assert transformed == source
+    assert logs[0].metadata["status"] == "not_applicable"
+    assert logs[0].metadata["target_kind"] == "MODULE_FUNCTION"
+    assert logs[0].metadata["suggested_refactoring"] == "MOVE_FUNCTION"
+    assert not any("requires review" in warning.lower() for warning in warnings)
 
 
 def test_feature_envy_ambiguous_destination_is_review_required():
@@ -496,6 +713,49 @@ def test_feature_envy_planner_mapping_uses_method_and_classes_not_file_stem():
     assert action["parameters"]["source_file"] == "07_feature_envy_student_report.py"
     assert action["parameters"]["smell"] == "Feature Envy"
     assert action["parameters"]["semantic_recovery_required"] is False
+
+
+def test_move_method_normalization_preserves_nested_and_direct_rdp_fields():
+    normalized = PlannerAdapter().normalize_plan({
+        "plan_id": "move_method_parameter_locations",
+        "steps": [{
+            "step_id": 1,
+            "refactoring": "Move Method",
+            "source_file": "report.py",
+            "source_class": "ReportPrinter",
+            "source_method": "print_student_report",
+            "destination_class": "Student",
+            "parameters": {
+                "destination_parameter": "student",
+            },
+        }],
+    })
+
+    params = normalized["actions"][0]["parameters"]
+    assert params["source_file"] == "report.py"
+    assert params["source_class"] == "ReportPrinter"
+    assert params["source_method"] == "print_student_report"
+    assert params["method"] == "print_student_report"
+    assert params["destination_class"] == "Student"
+    assert params["destination_parameter"] == "student"
+
+
+def test_refactoring_action_normalizes_direct_move_method_fields():
+    action = RefactoringAction.from_dict({
+        "action_type": "move_python_method",
+        "source_file": "report.py",
+        "source_class": "ReportPrinter",
+        "source_method": "print_student_report",
+        "destination_class": "Student",
+        "target": {"method": "stale_target_should_not_win"},
+        "parameters": {},
+    })
+
+    assert action.parameters["source_file"] == "report.py"
+    assert action.parameters["source_class"] == "ReportPrinter"
+    assert action.parameters["source_method"] == "print_student_report"
+    assert action.parameters["method"] == "print_student_report"
+    assert action.parameters["destination_class"] == "Student"
 
 
 MALFORMED_RDP_PLAN = {
