@@ -1363,6 +1363,55 @@ class PlannerAdapter:
                 },
             }
 
+        elif ref_key in {
+            "replace nested conditional with guard clauses",
+            "replace nested conditionals with guard clauses",
+            "replace conditional with guard clauses",
+            "replace nested conditional",
+            "replace nested conditionals",
+            "guard clauses",
+            "guard clause",
+            "simplify conditional loop",
+        }:
+            method = (
+                target.get("method")
+                or target.get("function")
+                or target.get("target_method")
+                or target.get("target_function")
+                or params.get("method")
+                or params.get("method_name")
+                or params.get("function")
+                or params.get("function_name")
+                or params.get("target_method")
+                or params.get("target_function")
+                or ""
+            )
+            source_file = self._source_file_from_step(step, params=params, target=target)
+            source_line = self._source_line_from_step(step, params=params, target=target)
+            raw_lines = target.get("lines")
+            target_lines = (
+                [int(value) for value in raw_lines if isinstance(value, (int, float))]
+                if isinstance(raw_lines, list)
+                else []
+            )
+            start_line, end_line = self._source_range_from_step(
+                step,
+                params=params,
+                target=target,
+            )
+            action = {
+                "action_type": ACTION_REPLACE_NESTED_CONDITIONAL_WITH_GUARD_CLAUSES,
+                "parameters": {
+                    "method": str(method),
+                    "source_file": source_file,
+                    "source_line": source_line,
+                    "target_lines": target_lines,
+                    "start_line": start_line,
+                    "end_line": end_line,
+                    "smell": step.get("smell") or step.get("smell_type") or "Deep Nesting",
+                },
+            }
+
         elif ref_key == "inject syntax error":
             action = {
                 "action_type": "inject_syntax_error",

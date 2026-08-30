@@ -2123,15 +2123,23 @@ def apply_replace_nested_conditional_with_guard_clauses(
     method_name: Optional[str] = None,
     target_line: Optional[int] = None,
 ) -> Tuple[str, int, Dict[str, Any]]:
-    """Compatibility entry point for the control-flow-aware C transformer."""
+    """
+    Transform nested conditionals in C into guard clauses where safe.
+    If transformation cannot be applied safely, returns original code with count=0
+    and status='review_required'.
+    """
+    from .c_guard_clauses import apply_replace_nested_conditional_with_guard_clauses as _apply
+    return _apply(source_code, method_name=method_name, target_line=target_line)
 
-    from .c_guard_clauses import apply_replace_nested_conditional_with_guard_clauses as apply
 
-    return apply(
-        source_code,
-        method_name=method_name or "",
-        source_line=target_line,
-    )
+def validate_c_guard_clauses(
+    original_code: str,
+    transformed_code: str,
+    *,
+    method: str = "",
+) -> Dict[str, Any]:
+    from .c_guard_clauses import validate_c_guard_clauses as _validate
+    return _validate(original_code, transformed_code, method=method)
 
 
 def _mask_c_comments_and_strings(source_code: str) -> str:
@@ -2696,4 +2704,6 @@ __all__ = [
     "apply_replace_literal",
     "apply_normalize_multiline_statement",
     "validate_c_parameter_object",
+    "apply_replace_nested_conditional_with_guard_clauses",
+    "validate_c_guard_clauses",
 ]

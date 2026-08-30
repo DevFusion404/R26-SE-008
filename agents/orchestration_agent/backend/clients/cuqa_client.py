@@ -28,10 +28,16 @@ from config import cuqa_base_url
 QUALITY_REPORT_PATH = "/api/quality-report"
 FILES_PATH = "/api/files"
 PROJECT_STRUCTURE_PATH = "/api/project-structure"
+SOURCE_FILES_PATH = "/api/source-files"
+
+#: Paths per request to /api/source-files, so a whole-project archive of
+#: several thousand files is one call from the caller's point of view.
+SOURCE_BATCH_SIZE = 400
 
 __all__ = [
     "CUQAError", "cuqa_base_url", "fetch_quality_report",
-    "fetch_workspace_files", "fetch_project_structure", "probe_cuqa",
+    "fetch_workspace_files", "fetch_project_structure", "fetch_source_files",
+    "probe_cuqa",
 ]
 
 
@@ -118,6 +124,37 @@ def fetch_project_structure(timeout: int = 30) -> dict:
     contains every file, not only the ones the agents touched.
     """
     return _request("GET", PROJECT_STRUCTURE_PATH, timeout=timeout)
+
+
+def fetch_source_files(file_paths: list, timeout: int = 60) -> dict:
+    """Call POST /api/source-files — the raw text of workspace files.
+
+    The quality report describes files but never carries their contents, and
+    two things downstream need the text itself: the `source_files` field of an
+    SCTVA execute request, and the whole-project archive.
+
+    CUQA is the agent that HOLDS the repository, so it is the one that can
+    always answer this. Entries come back already shaped for `source_files`
+    ({file_name, source_code, language, source_mode}); `missing` lists the
+    paths it could not resolve, which is not by itself an error — a plan
+    spanning ten files should not be blocked by one stale path.
+    """
+    requested = [str(p) for p in (file_paths or [])]
+
+    files, missing = [], []
+    for start in range(0, len(requested), SOURCE_BATCH_SIZE):
+        batch = requested[start:start + SOURCE_BATCH_SIZE]
+        payload = _request("POST", SOURCE_FILES_PATH, body={"file_paths": batch},
+                           timeout=timeout)
+        files.extend(payload.get("files") or [])
+        missing.extend(payload.get("missing") or [])
+
+    return {
+        "files": files,
+        "missing": missing,
+        "imported": len(files),
+        "total": len(requested),
+    }
 
 
 def probe_cuqa(timeout: int = 5) -> dict:

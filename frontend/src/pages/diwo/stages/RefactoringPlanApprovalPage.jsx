@@ -111,7 +111,7 @@ const REVIEW_MODES = [
 ];
 
 /** Matches Stage 1's mode switch, which is the same control doing the same job. */
-const MODE_ACTIVE = "#f97316";
+const MODE_ACTIVE = "#ccbbbc";
 
 const STATUS_FILTERS = [
   { value: "all", label: "All" },

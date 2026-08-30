@@ -26,8 +26,9 @@ from typing import Optional
 
 from clients.sctva_client import (
     SCTVAError, execute_transformation as sctva_execute,
-    fetch_workspace_sources, sctva_base_url,
+    sctva_base_url,
 )
+from services.source_service import fetch_workspace_sources
 from db.workflow_repository import log_event, parse_json_field
 from domain.metrics import compute_metrics_after
 from domain.audit_detail import DETAIL_LIMIT, capped
@@ -70,8 +71,8 @@ def run_transformation(plan: dict, language: Optional[str] = None,
     is carried by the plan on its own:
 
       1. SOURCE TEXT. The CUQA report describes files but never ships their
-         contents. /sctva/cuqa-sources reads them back out of the CUQA temp
-         workspace, already shaped for the `source_files` field.
+         contents. services/source_service reads them back from CUQA over
+         HTTP, already shaped for the `source_files` field.
       2. ACTIONS. domain/sctva_mapper.py translates each approved step into
          the action vocabulary SCTVA executes.
 
@@ -105,9 +106,9 @@ def run_transformation(plan: dict, language: Optional[str] = None,
 
     if not sources["files"]:
         raise TransformationError(
-            f"SCTVA could not read the source of any planned file "
-            f"({len(sources['missing'])} missing). The CUQA temp workspace is where it "
-            "looks, so re-run the analysis in the Code Smell Review stage to recreate it, "
+            f"The source of every planned file was unreadable "
+            f"({len(sources['missing'])} missing). CUQA holds the workspace these are "
+            "read from, so load the repository again in the Code Smell Review stage, "
             "then transform again.",
             status=422,
             detail={"missing": sources["missing"]},

@@ -706,7 +706,7 @@ function HumanInTheLoopPanel({ report, onContinue, onNavigate, pipelineState }) 
 }
 
 // ── Main CUQAAgentPage ─────────────────────────────────────────────────────
-export default function CUQAAgentPage({ repoLoaded, repoMeta, onSendToRdp, onNavigate, analysisConfig, pipelineState, onPipelineStateChange }) {
+export default function CUQAAgentPage({ repoLoaded, repoMeta, onSendToRdp, onReportReady, onNavigate, analysisConfig, pipelineState, onPipelineStateChange }) {
   // Extract active settings (fall back to sensible defaults if no config provided)
   const threshold     = analysisConfig?.threshold      ?? 75;
   const severityFilts = analysisConfig?.severity_filters ?? { critical: true, naming: true };
@@ -752,6 +752,9 @@ export default function CUQAAgentPage({ repoLoaded, repoMeta, onSendToRdp, onNav
     try {
       const d = await CUQAAgentService.getQualityReport();
       setReport(d.report);
+      if (onReportReady && d.report) {
+        onReportReady(d.report);
+      }
     } catch {}
     finally { setLoadingRep(false); }
   }
@@ -784,32 +787,6 @@ export default function CUQAAgentPage({ repoLoaded, repoMeta, onSendToRdp, onNav
             <div className="page-subtitle">Code Understanding &amp; Quality Assessment</div>
           </div>
         </div>
-        {onNavigate && (
-          <div className="page-header-actions">
-            <button
-              id="cuqa-diwo-empty-nav-btn"
-              onClick={() => onNavigate('orchestrate')}
-              title="Navigate to DIWO Orchestration Agent"
-              style={{
-                padding: '8px 16px',
-                background: 'linear-gradient(135deg, #10b981, #059669)',
-                color: 'white',
-                border: 'none',
-                borderRadius: '6px',
-                fontSize: '13px',
-                fontWeight: 700,
-                cursor: 'pointer',
-                boxShadow: '0 0 16px rgba(16,185,129,0.4)',
-                display: 'inline-flex',
-                alignItems: 'center',
-                gap: 6,
-              }}
-            >
-              <span>🎛</span>
-              <span>DIWO Agent</span>
-            </button>
-          </div>
-        )}
       </div>
       <div className="empty-state" style={{ flex: 1, justifyContent: 'center' }}>
         <span className="empty-icon">📂</span>
@@ -899,7 +876,7 @@ export default function CUQAAgentPage({ repoLoaded, repoMeta, onSendToRdp, onNav
           <button className="btn btn-primary" onClick={() => { fetchTree(); fetchReport(); }}>
             ⟳ RUN ANALYSIS
           </button>
-          {onNavigate && (
+          {report && onNavigate && (
             <button
               id="cuqa-diwo-nav-btn"
               onClick={() => onNavigate('orchestrate')}

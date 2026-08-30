@@ -65,7 +65,7 @@ const API_CONFIG = {
 
   // === User Management Service ===
   USER_MANAGEMENT: {
-    baseURL: getEnv('VITE_USER_MANAGEMENT_API_URL', 'http://localhost:6000'),
+    baseURL: getEnv('VITE_USER_MANAGEMENT_API_URL', 'http://localhost:5005'),
     endpoints: {
       health: '/api/auth/health',
       register: '/api/auth/register',

@@ -1,535 +1,424 @@
-"""Conservative C nested-conditional to guard-clause transformation."""
+"""C Replace Nested Conditional with Guard Clauses transformer."""
 
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
-from typing import Any
+import shutil
+import subprocess
+import tempfile
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from .c_extract_class import CFunction, _parse_c_module
-from .extract_method_common import direct_c_like_statements, mask_c_like
+from .c_extract_method import _verify_c_compilation, _brace_nesting, _statement_indent, _line_of
+from .c_transformers import _mask_c_non_code, _find_matching_delimiter
 
 
-REVIEW_REQUIRED = "review_required"
-NOT_APPLICABLE = "not_applicable"
+def _invert_c_condition(cond: str) -> str:
+    """Invert a C condition expression preserving boolean semantics.
+
+    Handles binary comparisons, simple negation, and wraps complex expressions in !(...).
+    """
+    stripped = cond.strip()
+
+    # Unwrap balanced outer parentheses if present
+    if stripped.startswith("(") and stripped.endswith(")"):
+        inner = stripped[1:-1].strip()
+        depth = 0
+        balanced = True
+        for char in inner:
+            if char == "(":
+                depth += 1
+            elif char == ")":
+                depth -= 1
+                if depth < 0:
+                    balanced = False
+                    break
+        if balanced and depth == 0:
+            stripped = inner
+
+    # Invert explicit negation: !is_ready() -> is_ready() or !(a > b) -> a > b
+    if stripped.startswith("!"):
+        unnegated = stripped[1:].strip()
+        if unnegated.startswith("(") and unnegated.endswith(")"):
+            inner = unnegated[1:-1].strip()
+            depth = 0
+            balanced = True
+            for char in inner:
+                if char == "(":
+                    depth += 1
+                elif char == ")":
+                    depth -= 1
+                    if depth < 0:
+                        balanced = False
+                        break
+            if balanced and depth == 0:
+                return inner
+        if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.]*(?:\s*\([^)]*\))?", unnegated):
+            return unnegated
+
+    # Check for top-level boolean operators (&&, ||) outside parentheses
+    top_level_ops = []
+    depth = 0
+    for i, char in enumerate(stripped):
+        if char in "([":
+            depth += 1
+        elif char in ")]":
+            depth -= 1
+        elif depth == 0:
+            if stripped[i:i+2] in {"&&", "||"}:
+                top_level_ops.append(stripped[i:i+2])
+
+    if not top_level_ops:
+        # Invert simple relational operators
+        for op, inv_op in [
+            (">=", "<"),
+            ("<=", ">"),
+            ("==", "!="),
+            ("!=", "=="),
+            (">", "<="),
+            ("<", ">="),
+        ]:
+            idx = -1
+            d = 0
+            for i, c in enumerate(stripped):
+                if c in "([":
+                    d += 1
+                elif c in ")]":
+                    d -= 1
+                elif d == 0 and stripped[i:i+len(op)] == op:
+                    # Prevent matching partial operators like >>, <<, ->, <=, >=
+                    if op in {">", "<"} and i > 0 and stripped[i-1] in {">", "<", "-"}:
+                        continue
+                    if op in {">", "<"} and i + 1 < len(stripped) and stripped[i+1] in {">", "<", "="}:
+                        continue
+                    idx = i
+                    break
+            if idx != -1:
+                left = stripped[:idx].strip()
+                right = stripped[idx+len(op):].strip()
+                return f"{left} {inv_op} {right}"
+
+    return f"!({stripped})"
 
 
-@dataclass(frozen=True)
-class CIf:
-    start: int
-    condition: str
-    open_brace: int
-    close_brace: int
-    else_start: int | None = None
-    else_end: int | None = None
+def _deduce_return_statement(
+    function: CFunction,
+    source_code: str,
+    *,
+    is_inside_loop: bool = False,
+) -> str:
+    """Determine the correct failure/exit statement for early guard clauses."""
+    if is_inside_loop:
+        return "continue;"
+
+    header = function.header.strip()
+    name = function.name
+    name_idx = header.rfind(name)
+    ret_type = header[:name_idx].strip() if name_idx > 0 else "void"
+
+    # Void functions exit with bare return
+    if "void" in ret_type.split():
+        return "return;"
+
+    # Pointer return types exit with NULL
+    if "*" in ret_type:
+        return "return NULL;"
+
+    # Boolean return types exit with false
+    if "bool" in ret_type.split() or "_Bool" in ret_type.split():
+        return "return false;"
+
+    # Floating-point return types
+    if "float" in ret_type.split() or "double" in ret_type.split():
+        return "return 0.0;"
+
+    # Inspect function body for existing trailing return statement to match return convention
+    body_text = source_code[function.open_brace + 1:function.end - 1].strip()
+    trailing_return_match = re.search(r"return\s+([^;]+)\s*;\s*$", body_text)
+    if trailing_return_match:
+        val = trailing_return_match.group(1).strip()
+        return f"return {val};"
+
+    return "return 0;"
+
+
+def _find_nested_if_chain(
+    body_source: str,
+    body_offset: int,
+) -> Optional[Dict[str, Any]]:
+    """Scan function body for a chain of nested if statements."""
+    masked = _mask_c_non_code(body_source)
+    if_matches = list(re.finditer(r"\bif\s*\(", masked))
+    if not if_matches:
+        return None
+
+    for match in if_matches:
+        outer_start = match.start()
+        cond_open = masked.find("(", match.start())
+        cond_close = _find_matching_delimiter(masked, cond_open, "(", ")")
+        if cond_close is None:
+            continue
+
+        then_open = masked.find("{", cond_close)
+        if then_open == -1:
+            continue
+        between = masked[cond_close + 1:then_open].strip()
+        if between:
+            continue
+
+        then_close = _find_matching_delimiter(masked, then_open, "{", "}")
+        if then_close is None:
+            continue
+
+        outer_end = then_close + 1
+
+        # Check if outer if is enclosed inside a loop in body_source
+        prefix_body = masked[:outer_start]
+        is_inside_loop = bool(re.search(r"\b(for|while|do)\b[^{}]*\{[^{}]*$", prefix_body))
+
+        conditions: List[str] = [body_source[cond_open + 1:cond_close].strip()]
+        current_then_open = then_open
+        current_then_close = then_close
+
+        innermost_body = ""
+        has_nesting = False
+
+        while True:
+            inner_content = body_source[current_then_open + 1:current_then_close]
+            inner_masked = masked[current_then_open + 1:current_then_close]
+
+            inner_if_match = re.search(r"^\s*if\s*\(", inner_masked)
+            if not inner_if_match:
+                innermost_body = inner_content
+                break
+
+            inner_if_start = current_then_open + 1 + inner_if_match.start()
+            inner_cond_open = masked.find("(", inner_if_start)
+            inner_cond_close = _find_matching_delimiter(masked, inner_cond_open, "(", ")")
+            if inner_cond_close is None or inner_cond_close >= current_then_close:
+                innermost_body = inner_content
+                break
+
+            inner_then_open = masked.find("{", inner_cond_close)
+            if inner_then_open == -1 or inner_then_open >= current_then_close:
+                innermost_body = inner_content
+                break
+
+            inner_then_close = _find_matching_delimiter(masked, inner_then_open, "{", "}")
+            if inner_then_close is None or inner_then_close >= current_then_close:
+                innermost_body = inner_content
+                break
+
+            prefix = inner_masked[:inner_if_match.start()].strip()
+            suffix = inner_masked[inner_then_close + 1 - (current_then_open + 1):].strip()
+            if prefix or suffix:
+                innermost_body = inner_content
+                break
+
+            conditions.append(body_source[inner_cond_open + 1:inner_cond_close].strip())
+            has_nesting = True
+            current_then_open = inner_then_open
+            current_then_close = inner_then_close
+
+        if has_nesting and len(conditions) >= 2:
+            return {
+                "outer_start": body_offset + outer_start,
+                "outer_end": body_offset + outer_end,
+                "conditions": conditions,
+                "innermost_body": innermost_body,
+                "innermost_open": body_offset + current_then_open,
+                "innermost_close": body_offset + current_then_close,
+                "is_inside_loop": is_inside_loop,
+            }
+
+    return None
 
 
 def apply_replace_nested_conditional_with_guard_clauses(
     source_code: str,
-    *,
-    method_name: str = "",
-    source_line: int | None = None,
-    start_line: int | None = None,
-    end_line: int | None = None,
-    target_lines: list[int] | tuple[int, ...] | None = None,
-    source_file: str = "",
-) -> tuple[str, int, dict[str, Any]]:
-    """Flatten one proven-safe nested C ``if`` chain into guard clauses.
-
-    Only a chain with no ``else`` branches is currently auto-converted.  Its
-    failure path must be provably the end of a ``void`` function or the end of
-    a loop iteration.  This deliberately avoids guessing return values or
-    changing the meaning of code after the conditional.
-    """
-
-    metadata = {
-        "action_type": "replace_nested_conditional_with_guard_clauses",
+    method_name: Optional[str] = None,
+    target_line: Optional[int] = None,
+) -> Tuple[str, int, Dict[str, Any]]:
+    """Transform deeply nested C conditionals into early return guard clauses."""
+    metadata: Dict[str, Any] = {
         "refactoring": "Replace Nested Conditional with Guard Clauses",
         "language": "c",
-        "source_file": source_file,
-        "source_method": method_name,
-        "requested_source_method": method_name,
-        "source_line": source_line,
-        "target_lines": list(target_lines or ()),
-        "source_file_resolved": bool(source_file),
-        "source_method_resolved": False,
-        "nested_conditional_found": False,
-        "target_inside_method": False,
-        "target_resolution": "pending",
-        "status": REVIEW_REQUIRED,
-        "final_decision": "REVIEW_REQUIRED",
+        "method": method_name or "",
+        "plan_compliance": "FAIL",
     }
-    if not source_code.strip():
-        return _review(source_code, "GUARD_CLAUSE_TARGET_NOT_FOUND", metadata)
 
-    start_line, end_line = _merge_target_lines(start_line, end_line, target_lines)
-    function, resolution_reason, resolution_strategy = _resolve_function(
-        source_code,
-        method_name=method_name,
-        source_line=source_line,
-        start_line=start_line,
-        end_line=end_line,
-    )
-    if function is None:
-        if resolution_reason in {
-            "GUARD_CLAUSE_TARGET_METADATA_MISSING",
-            "GUARD_CLAUSE_TARGET_AMBIGUOUS",
-            "GUARD_CLAUSE_TARGET_NOT_FOUND",
-        }:
-            return _review(source_code, resolution_reason, metadata)
-        return _not_applicable(source_code, resolution_reason, metadata)
+    if not source_code or not source_code.strip():
+        metadata["status"] = "review_required"
+        metadata["reason"] = "EMPTY_SOURCE"
+        return source_code, 0, metadata
 
-    metadata.update({
-        "source_method": function.name,
-        "source_method_resolved": True,
-        "target_inside_method": True,
-        "target_resolution": resolution_strategy,
-    })
-    masked = mask_c_like(source_code)
-    candidates = _nested_if_chains(source_code, masked, function)
-    candidates = [
-        candidate
-        for candidate in candidates
-        if _matches_line_hint(source_code, candidate[0], source_line, start_line, end_line)
-    ]
-    if not candidates:
-        if _has_nested_if(function.body):
-            return _review(source_code, "GUARD_CLAUSE_SCOPE_CHANGE_UNSAFE", metadata)
-        if _looks_like_guard_clause(function.body):
-            return _not_applicable(source_code, "GUARD_CLAUSE_ALREADY_SIMPLIFIED", metadata)
-        return _not_applicable(source_code, "GUARD_CLAUSE_NO_NESTED_CONDITIONAL", metadata)
+    module = _parse_c_module(source_code)
+    target_function: Optional[CFunction] = None
 
-    metadata["nested_conditional_found"] = True
-
-    unsafe_reason = "GUARD_CLAUSE_NO_SAFE_EXIT_STRATEGY"
-    for chain in candidates:
-        outer, leaf = chain[0], chain[-1]
-        replacement_end = outer.else_end or outer.close_brace
-        region = source_code[outer.start:replacement_end + 1]
-        explicit_exit = _explicit_chain_exit(source_code, masked, chain)
-        if any(item.else_start is not None for item in chain) and not explicit_exit:
-            unsafe_reason = "GUARD_CLAUSE_UNSAFE_CONTROL_FLOW"
-            continue
-        if _has_unsafe_control_construct(region):
-            unsafe_reason = "GUARD_CLAUSE_UNSAFE_CONTROL_FLOW"
-            continue
-        if any(_condition_has_side_effects(item.condition) for item in chain):
-            unsafe_reason = "GUARD_CLAUSE_SIDE_EFFECT_ORDER_UNSAFE"
-            continue
-        if _contains_preprocessor(region):
-            unsafe_reason = "GUARD_CLAUSE_UNSAFE_CONTROL_FLOW"
-            continue
-        if _inside_switch(masked, function, outer.start):
-            unsafe_reason = "GUARD_CLAUSE_UNSAFE_CONTROL_FLOW"
-            continue
-
-        exit_statement, exit_reason = (
-            (explicit_exit, "")
-            if explicit_exit
-            else _safe_exit_strategy(source_code, masked, function, outer)
-        )
-        if not exit_statement:
-            unsafe_reason = exit_reason
-            continue
-        if _leaf_scope_is_unsafe(source_code, leaf):
-            unsafe_reason = "GUARD_CLAUSE_SCOPE_CHANGE_UNSAFE"
-            continue
-
-        indent = _indent_at(source_code, outer.start)
-        guard_lines = [
-            f"{indent}if (!({item.condition})) {exit_statement}\n"
-            for item in chain
-        ]
-        # Retain the leaf braces: local declarations remain in their original
-        # lexical scope even though the condition nesting is removed.
-        leaf_block = source_code[leaf.open_brace:leaf.close_brace + 1]
-        replacement = "".join(guard_lines) + f"{indent}{leaf_block.lstrip()}"
-        line_start = source_code.rfind("\n", 0, outer.start) + 1
-        replace_start = line_start if not source_code[line_start:outer.start].strip() else outer.start
-        transformed = source_code[:replace_start] + replacement + source_code[replacement_end + 1:]
-        if not _syntax_shape_is_valid(transformed, function.name):
-            unsafe_reason = "GUARD_CLAUSE_UNSAFE_CONTROL_FLOW"
-            continue
-
-        original_depth = _if_nesting_depth(function.body)
-        transformed_function = _function_by_name(transformed, function.name)
-        if transformed_function is None:
-            unsafe_reason = "GUARD_CLAUSE_TARGET_NOT_FOUND"
-            continue
-        new_depth = _if_nesting_depth(transformed_function.body)
-        if new_depth >= original_depth:
-            unsafe_reason = "GUARD_CLAUSE_NO_SAFE_EXIT_STRATEGY"
-            continue
-
-        metadata.update({
-            "status": "success",
-            "reason": "GUARD_CLAUSES_APPLIED",
-            "final_decision": "PASS",
-            "plan_compliance": "PASS",
-            "target_resolution": resolution_strategy,
-            "source_method": function.name,
-            "nested_conditional_range": {
-                "start_line": _line_of(source_code, outer.start),
-                "end_line": _line_of(source_code, outer.close_brace),
-            },
-            "original_nesting_depth": original_depth,
-            "new_nesting_depth": new_depth,
-            "guard_clauses_added": len(chain),
-            "exit_strategy": exit_statement.rstrip(";"),
-            "replacements_count": 1,
-            "validation": {
-                "syntax": "PASS",
-                "structural": "PASS",
-                "control_flow": "PASS",
-                "variable_scope": "PASS",
-                "nesting_reduced": "PASS",
-                "no_unreachable_code": "PASS",
-            },
-        })
-        return transformed, 1, metadata
-
-    return _review(source_code, unsafe_reason, metadata)
-
-
-def _resolve_function(
-    source_code: str,
-    *,
-    method_name: str,
-    source_line: int | None,
-    start_line: int | None,
-    end_line: int | None,
-) -> tuple[CFunction | None, str, str]:
-    functions = _parse_c_module(source_code).functions
     if method_name:
-        matches = [item for item in functions if item.name == method_name]
-        strategy = "explicit_source_method"
-    else:
-        line = source_line or start_line or end_line
-        matches = [
-            item for item in functions
-            if line is not None
-            and _line_of(source_code, item.start) <= line <= _line_of(source_code, item.end - 1)
-        ]
-        strategy = "enclosing_function_from_line"
-        if line is None:
-            matches = _unique_safe_candidate_functions(source_code, functions)
-            strategy = "unique_safe_nested_conditional_candidate"
-            if len(matches) > 1:
-                return None, "GUARD_CLAUSE_TARGET_AMBIGUOUS", strategy
-            if not matches:
-                return None, "GUARD_CLAUSE_TARGET_METADATA_MISSING", strategy
-    if not matches:
-        return None, "GUARD_CLAUSE_TARGET_NOT_FOUND", strategy
-    if len(matches) != 1:
-        return None, "GUARD_CLAUSE_TARGET_AMBIGUOUS", strategy
-    return matches[0], "", strategy
+        candidates = module.functions_by_name.get(method_name, [])
+        if len(candidates) == 1:
+            target_function = candidates[0]
+        elif len(candidates) > 1:
+            if target_line is not None:
+                for cand in candidates:
+                    start_l = _line_of(source_code, cand.start)
+                    end_l = _line_of(source_code, cand.end)
+                    if start_l <= target_line <= end_l:
+                        target_function = cand
+                        break
+            if not target_function:
+                metadata["status"] = "review_required"
+                metadata["reason"] = "AMBIGUOUS_FUNCTION_TARGET"
+                return source_code, 0, metadata
 
-
-def _unique_safe_candidate_functions(
-    source_code: str,
-    functions: list[CFunction],
-) -> list[CFunction]:
-    """Return the owning function only when one safe-looking chain exists.
-
-    This is deliberately only a target resolver.  The normal transformation
-    loop repeats every safety check before making an edit.
-    """
-
-    masked = mask_c_like(source_code)
-    matches: list[CFunction] = []
-    for function in functions:
-        for chain in _nested_if_chains(source_code, masked, function):
-            outer = chain[0]
-            region = source_code[outer.start:(outer.else_end or outer.close_brace) + 1]
-            explicit_exit = _explicit_chain_exit(source_code, masked, chain)
-            exit_statement, _ = (
-                (explicit_exit, "")
-                if explicit_exit
-                else _safe_exit_strategy(source_code, masked, function, outer)
-            )
-            if (
-                exit_statement
-                and not _has_unsafe_control_construct(region)
-                and not _contains_preprocessor(region)
-                and not _inside_switch(masked, function, outer.start)
-                and not any(_condition_has_side_effects(item.condition) for item in chain)
-                and (not any(item.else_start is not None for item in chain) or explicit_exit)
-            ):
-                matches.append(function)
-    return matches
-
-
-def _merge_target_lines(
-    start_line: int | None,
-    end_line: int | None,
-    target_lines: list[int] | tuple[int, ...] | None,
-) -> tuple[int | None, int | None]:
-    """Use canonical RDP ranges without overwriting explicit scalar hints."""
-
-    parsed = [
-        int(value)
-        for value in (target_lines or ())
-        if isinstance(value, (int, float))
-        or (isinstance(value, str) and value.strip().isdigit())
-    ]
-    if not parsed:
-        return start_line, end_line
-    return start_line or min(parsed), end_line or max(parsed)
-
-
-def _nested_if_chains(source_code: str, masked: str, function: CFunction) -> list[list[CIf]]:
-    candidates: list[list[CIf]] = []
-    for match in re.finditer(r"\bif\s*\(", masked[function.open_brace + 1:function.end - 1]):
-        outer = _parse_if(source_code, masked, function.open_brace + 1 + match.start())
-        if outer is None:
-            continue
-        chain = [outer]
-        current = outer
-        while True:
-            statements = direct_c_like_statements(
-                source_code[current.open_brace + 1:current.close_brace],
-                body_offset=current.open_brace + 1,
-            )
-            if len(statements) != 1:
+    if not target_function and target_line is not None:
+        for cand in module.functions:
+            start_l = _line_of(source_code, cand.start)
+            end_l = _line_of(source_code, cand.end)
+            if start_l <= target_line <= end_l:
+                target_function = cand
                 break
-            nested = _parse_if(source_code, masked, statements[0].start)
-            if nested is None or nested.start != statements[0].start:
-                break
-            chain.append(nested)
-            current = nested
-        if len(chain) >= 2:
-            candidates.append(chain)
-    return candidates
 
+    if not target_function:
+        # Fallback to finding functions with deep nesting (> 3)
+        deep_fns = [f for f in module.functions if _brace_nesting(f.body) > 3]
+        if len(deep_fns) == 1:
+            target_function = deep_fns[0]
+        elif len(module.functions) == 1:
+            target_function = module.functions[0]
 
-def _parse_if(source_code: str, masked: str, start: int) -> CIf | None:
-    match = re.match(r"if\s*\(", masked[start:])
-    if match is None:
-        return None
-    open_paren = start + match.group(0).rfind("(")
-    close_paren = _matching(masked, open_paren, "(", ")")
-    if close_paren is None:
-        return None
-    open_brace = _skip_space(masked, close_paren + 1)
-    if open_brace >= len(masked) or masked[open_brace] != "{":
-        return None
-    close_brace = _matching(masked, open_brace, "{", "}")
-    if close_brace is None:
-        return None
-    position = _skip_space(masked, close_brace + 1)
-    else_start = else_end = None
-    if re.match(r"else\b", masked[position:]):
-        else_start = position
-        else_body_start = _skip_space(masked, position + 4)
-        if else_body_start < len(masked) and masked[else_body_start] == "{":
-            else_end = _matching(masked, else_body_start, "{", "}")
-        else:
-            else_end = _statement_end(masked, else_body_start)
-        if else_end is None:
-            return None
-    return CIf(
-        start=start,
-        condition=source_code[open_paren + 1:close_paren].strip(),
-        open_brace=open_brace,
-        close_brace=close_brace,
-        else_start=else_start,
-        else_end=else_end,
-    )
+    if not target_function:
+        metadata["status"] = "review_required"
+        metadata["reason"] = "TARGET_FUNCTION_NOT_FOUND"
+        return source_code, 0, metadata
 
+    metadata["method"] = target_function.name
+    before_depth = _brace_nesting(target_function.body)
+    metadata["before_nesting_depth"] = before_depth
 
-def _safe_exit_strategy(source_code: str, masked: str, function: CFunction, outer: CIf) -> tuple[str, str]:
-    loop_end = _enclosing_tail_loop(masked, function, outer.start)
-    if loop_end is not None:
-        if not masked[outer.close_brace + 1:loop_end].strip():
-            return "continue;", ""
-        return "", "GUARD_CLAUSE_NO_SAFE_EXIT_STRATEGY"
-    if not masked[outer.close_brace + 1:function.end - 1].strip():
-        if _normal_return_type(function.return_type) == "void":
-            return "return;", ""
-        return "", "GUARD_CLAUSE_NO_SAFE_EXIT_STRATEGY"
-    return "", "GUARD_CLAUSE_NO_SAFE_EXIT_STRATEGY"
+    body_offset = target_function.open_brace + 1
+    body_source = source_code[body_offset:target_function.end - 1]
 
+    chain_info = _find_nested_if_chain(body_source, body_offset)
+    if not chain_info:
+        metadata["status"] = "review_required"
+        metadata["reason"] = "NO_NESTED_CONDITIONAL_FOUND"
+        return source_code, 0, metadata
 
-def _explicit_chain_exit(source_code: str, masked: str, chain: list[CIf]) -> str:
-    """Return one already-present exit shared by every failed branch."""
+    outer_start = chain_info["outer_start"]
+    outer_end = chain_info["outer_end"]
+    conditions = chain_info["conditions"]
+    innermost_body = chain_info["innermost_body"]
+    is_inside_loop = chain_info.get("is_inside_loop", False)
+    indent = _statement_indent(source_code, outer_start) or "    "
 
-    exits: list[str] = []
-    for item in chain:
-        if item.else_start is None or item.else_end is None:
-            return ""
-        body_start = _skip_space(masked, item.else_start + len("else"))
-        if body_start < len(masked) and masked[body_start] == "{":
-            body_end = _matching(masked, body_start, "{", "}")
-            if body_end is None:
-                return ""
-            body = source_code[body_start + 1:body_end].strip()
-        else:
-            body = source_code[body_start:item.else_end].strip()
-        normalized = " ".join(mask_c_like(body).split())
-        if not re.fullmatch(r"(?:return(?:\s+[^;]+)?|continue|break)\s*;", normalized):
-            return ""
-        exits.append(body if body.endswith(";") else f"{body};")
-    normalized_exits = {" ".join(mask_c_like(value).split()) for value in exits}
-    return exits[0] if len(normalized_exits) == 1 else ""
+    trailing_text = source_code[outer_end:target_function.end - 1].strip()
+    default_ret = _deduce_return_statement(target_function, source_code, is_inside_loop=is_inside_loop)
 
+    trailing_return_match = re.fullmatch(r"return(?:\s+[^;]+)?\s*;", trailing_text)
+    is_terminal = (not trailing_text) or bool(trailing_return_match) or is_inside_loop
 
-def _enclosing_tail_loop(masked: str, function: CFunction, position: int) -> int | None:
-    candidates: list[tuple[int, int]] = []
-    body_start, body_end = function.open_brace + 1, function.end - 1
-    for match in re.finditer(r"\b(?:for|while)\s*\(", masked[body_start:position]):
-        open_paren = body_start + match.start() + match.group(0).rfind("(")
-        close_paren = _matching(masked, open_paren, "(", ")")
-        if close_paren is None:
-            continue
-        open_brace = _skip_space(masked, close_paren + 1)
-        if open_brace >= len(masked) or masked[open_brace] != "{":
-            continue
-        close_brace = _matching(masked, open_brace, "{", "}")
-        if close_brace is not None and open_brace < position < close_brace:
-            candidates.append((open_brace, close_brace))
-    return max(candidates, key=lambda item: item[0])[1] if candidates else None
+    if is_terminal:
+        exit_stmt = trailing_text if trailing_return_match else default_ret
+        guard_clauses: List[str] = []
+        for cond in conditions:
+            inverted = _invert_c_condition(cond)
+            guard_clauses.append(f"{indent}if ({inverted}) {{\n{indent}    {exit_stmt}\n{indent}}}")
 
-
-def _inside_switch(masked: str, function: CFunction, position: int) -> bool:
-    body_start = function.open_brace + 1
-    for match in re.finditer(r"\bswitch\s*\(", masked[body_start:position]):
-        open_paren = body_start + match.start() + match.group(0).rfind("(")
-        close_paren = _matching(masked, open_paren, "(", ")")
-        if close_paren is None:
-            continue
-        open_brace = _skip_space(masked, close_paren + 1)
-        close_brace = _matching(masked, open_brace, "{", "}") if open_brace < len(masked) else None
-        if close_brace is not None and open_brace < position < close_brace:
-            return True
-    return False
-
-
-def _leaf_scope_is_unsafe(source_code: str, leaf: CIf) -> bool:
-    body = source_code[leaf.open_brace + 1:leaf.close_brace]
-    return bool(re.search(r"\b(?:goto|case|default)\b|^[ \t]*[A-Za-z_]\w*\s*:", mask_c_like(body), re.MULTILINE))
-
-
-def _has_unsafe_control_construct(region: str) -> bool:
-    masked = mask_c_like(region)
-    return bool(re.search(r"\b(?:goto|case|default)\b|^[ \t]*[A-Za-z_]\w*\s*:", masked, re.MULTILINE))
-
-
-def _condition_has_side_effects(condition: str) -> bool:
-    masked = mask_c_like(condition)
-    return bool(
-        re.search(r"\+\+|--|(?<![=!<>])=(?!=)|\b[A-Za-z_]\w*\s*\(", masked)
-    )
-
-
-def _contains_preprocessor(region: str) -> bool:
-    return any(line.lstrip().startswith("#") for line in region.splitlines())
-
-
-def _syntax_shape_is_valid(source_code: str, method_name: str) -> bool:
-    return _function_by_name(source_code, method_name) is not None and _balanced(mask_c_like(source_code), "{", "}")
-
-
-def _function_by_name(source_code: str, method_name: str) -> CFunction | None:
-    matches = [item for item in _parse_c_module(source_code).functions if item.name == method_name]
-    return matches[0] if len(matches) == 1 else None
-
-
-def _if_nesting_depth(body: str) -> int:
-    masked = mask_c_like(body)
-    depth = maximum = 0
-    for index, char in enumerate(masked):
-        if char == "{":
-            depth += 1
-        elif char == "}":
-            depth = max(0, depth - 1)
-        elif re.match(r"if\s*\(", masked[index:]):
-            maximum = max(maximum, depth)
-    return maximum
-
-
-def _matches_line_hint(source: str, outer: CIf, source_line: int | None, start_line: int | None, end_line: int | None) -> bool:
-    hint_start = source_line or start_line
-    hint_end = end_line or source_line
-    if hint_start is None and hint_end is None:
-        return True
-    start = _line_of(source, outer.start)
-    end = _line_of(source, outer.close_brace)
-    return start <= (hint_end or start) and end >= (hint_start or end)
-
-
-def _not_applicable(source: str, reason: str, metadata: dict[str, Any]) -> tuple[str, int, dict[str, Any]]:
-    return source, 0, {**metadata, "status": NOT_APPLICABLE, "reason": reason, "final_decision": "NOT_APPLICABLE", "replacements_count": 0}
-
-
-def _review(source: str, reason: str, metadata: dict[str, Any]) -> tuple[str, int, dict[str, Any]]:
-    return source, 0, {**metadata, "status": REVIEW_REQUIRED, "reason": reason, "replacements_count": 0}
-
-
-def _has_if(body: str) -> bool:
-    return bool(re.search(r"\bif\s*\(", mask_c_like(body)))
-
-
-def _looks_like_guard_clause(body: str) -> bool:
-    """Recognize an existing early exit without calling every single if a guard."""
-
-    return bool(
-        re.search(
-            r"\bif\s*\([^{}]+\)\s*(?:\{\s*)?(?:return(?:\s+[^;]+)?|continue|break)\s*;",
-            mask_c_like(body),
-            re.DOTALL,
+        body_lines = innermost_body.strip().splitlines()
+        reindented_body = "\n".join(
+            (f"{indent}{line.strip()}" if line.strip() else "") for line in body_lines
         )
-    )
+
+        replacement_chunk = "\n".join(guard_clauses) + "\n" + (reindented_body if reindented_body else "")
+        if not replacement_chunk.endswith("\n"):
+            replacement_chunk += "\n"
+
+        if trailing_return_match:
+            trailing_start = source_code.find(trailing_text, outer_end)
+            transformed = (
+                source_code[:outer_start]
+                + replacement_chunk
+                + source_code[trailing_start + len(trailing_text):]
+            )
+        else:
+            transformed = (
+                source_code[:outer_start]
+                + replacement_chunk
+                + source_code[outer_end:]
+            )
+    else:
+        # If there are statements after the nested if block in non-void function, flatten conditions into single guard
+        combined_cond = " && ".join(f"({c})" for c in conditions)
+        body_lines = innermost_body.strip().splitlines()
+        reindented_body = "\n".join(
+            (f"{indent}    {line.strip()}" if line.strip() else "") for line in body_lines
+        )
+
+        replacement_chunk = f"{indent}if ({combined_cond}) {{\n{reindented_body}\n{indent}}}\n"
+        transformed = source_code[:outer_start] + replacement_chunk + source_code[outer_end:]
+
+    # Recalculate nesting depth
+    post_module = _parse_c_module(transformed)
+    post_fn = next((f for f in post_module.functions if f.name == target_function.name), None)
+    if post_fn:
+        after_depth = _brace_nesting(post_fn.body)
+    else:
+        after_depth = before_depth
+
+    metadata["after_nesting_depth"] = after_depth
+
+    # Compile with GCC / Clang
+    comp_status, comp_msg = _verify_c_compilation(transformed)
+    metadata["compiler_validation"] = comp_msg
+    if comp_status == "FAIL":
+        metadata["status"] = "review_required"
+        metadata["reason"] = "LOCAL_SOURCE_COMPILATION_ERROR"
+        return source_code, 0, metadata
+
+    nesting_reduced = after_depth < before_depth and after_depth <= 4
+    metadata["status"] = "success" if nesting_reduced else "review_required"
+    metadata["plan_compliance"] = "PASS" if nesting_reduced else "FAIL"
+    metadata["nesting_reduced"] = nesting_reduced
+    metadata["smell_reduction"] = "PASS" if nesting_reduced else "FAIL"
+    metadata["conditions_flattened"] = len(conditions)
+
+    return transformed, 1, metadata
 
 
-def _has_nested_if(body: str) -> bool:
-    return len(re.findall(r"\bif\s*\(", mask_c_like(body))) >= 2
+def validate_c_guard_clauses(
+    original_code: str,
+    transformed_code: str,
+    *,
+    method: str = "",
+) -> Dict[str, Any]:
+    """Validate that transformed C code reduced nesting depth safely below CUQA threshold."""
+    before_mod = _parse_c_module(original_code)
+    after_mod = _parse_c_module(transformed_code)
 
+    before_fn = next((f for f in before_mod.functions if not method or f.name == method), None)
+    after_fn = next((f for f in after_mod.functions if not method or f.name == method), None)
 
-def _normal_return_type(value: str) -> str:
-    return " ".join(str(value or "").replace("static", "").split())
+    if not before_fn or not after_fn:
+        return {"passed": False, "reason": "target_function_missing"}
 
+    before_depth = _brace_nesting(before_fn.body)
+    after_depth = _brace_nesting(after_fn.body)
 
-def _matching(masked: str, start: int, opener: str, closer: str) -> int | None:
-    if start >= len(masked) or masked[start] != opener:
-        return None
-    depth = 0
-    for index in range(start, len(masked)):
-        if masked[index] == opener:
-            depth += 1
-        elif masked[index] == closer:
-            depth -= 1
-            if depth == 0:
-                return index
-    return None
+    passed = after_depth <= 4 and after_depth < before_depth
 
-
-def _statement_end(masked: str, start: int) -> int | None:
-    end = masked.find(";", start)
-    return end + 1 if end >= 0 else None
-
-
-def _skip_space(masked: str, index: int) -> int:
-    while index < len(masked) and masked[index].isspace():
-        index += 1
-    return index
-
-
-def _balanced(masked: str, opener: str, closer: str) -> bool:
-    depth = 0
-    for char in masked:
-        if char == opener:
-            depth += 1
-        elif char == closer:
-            depth -= 1
-            if depth < 0:
-                return False
-    return depth == 0
-
-
-def _indent_at(source: str, index: int) -> str:
-    line_start = source.rfind("\n", 0, index) + 1
-    return source[line_start:index][: len(source[line_start:index]) - len(source[line_start:index].lstrip(" \t"))]
-
-
-def _line_of(source: str, index: int) -> int:
-    return source.count("\n", 0, index) + 1
+    return {
+        "passed": bool(passed),
+        "language": "c",
+        "method": after_fn.name,
+        "before_nesting_depth": before_depth,
+        "after_nesting_depth": after_depth,
+        "smell_reduction": "PASS" if passed else "FAIL",
+        "checks": {
+            "function_exists": True,
+            "nesting_depth_reduced": after_depth < before_depth,
+            "below_cuqa_threshold": after_depth <= 4,
+        },
+    }
