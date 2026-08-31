@@ -23,15 +23,18 @@ keeps every agent hand-off on one path,
 so the frontend needs exactly one base URL and one CORS origin.
 """
 
+from typing import Any
+
 from flask import Blueprint, jsonify, request
 
+import config
 from api import cuqa_error_response, err
 from clients.cuqa_client import (
     CUQAError, cuqa_base_url, fetch_project_structure, fetch_quality_report, probe_cuqa,
 )
 from clients.rdp_client import probe_rdp
-from db.workflow_repository import active_backend
 from clients.sctva_client import SCTVAError, probe_sctva, sctva_base_url
+from db.workflow_repository import active_backend
 from services.source_service import fetch_workspace_sources
 from domain.cuqa_normalizer import (
     cuqa_report_to_smells, detect_primary_language, normalize_cuqa_report,
@@ -154,9 +157,27 @@ def health():
     # `database` names which persistence backend actually answered — the one
     # question you cannot get from the outside, and the one worth asking after
     # a deployment that was meant to switch to Supabase.
-    return jsonify({
+    payload: dict[str, Any] = {
         "status":   "ok",
         "agent":    "DIWO",
         "version":  "1.1.0",
         "database": active_backend(),
-    })
+    }
+
+    # WHY the backend is SQLite when Supabase was intended. Reading container
+    # logs to find out which of three environment variables failed to arrive is
+    # a slow way to debug a deployment, and on a managed platform the logs are
+    # often a portal blade away. These are PRESENCE booleans and a provider
+    # name — never a URL and never a key — so the endpoint stays safe to call
+    # from anywhere while still naming the one setting that did not land.
+    if payload["database"] != "supabase":
+        payload["database_config"] = {
+            "DATABASE_PROVIDER": config.DATABASE_PROVIDER,
+            "SUPABASE_URL_set": bool(config.SUPABASE_URL),
+            "SUPABASE_KEY_set": bool(config.SUPABASE_KEY),
+            "note": config.supabase_misconfigured()
+                    or ("DATABASE_PROVIDER is 'sqlite', so Supabase is off even "
+                        "if credentials are present."),
+        }
+
+    return jsonify(payload)
