@@ -1112,20 +1112,17 @@ class LocalRefactorDetector:
         file_name: str,
         source_code: str,
     ) -> Iterable[RefactoringAction]:
-        function_re = re.compile(
-            r"(?m)^[ \t]*(?:[A-Za-z_][A-Za-z0-9_\s\*]*?\s+)+"
-            r"(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*\([^;{}]*\)\s*\{"
-        )
-        for match in function_re.finditer(source_code):
-            brace_idx = source_code.find("{", match.end() - 1)
-            end_idx = self._find_matching_brace(source_code, brace_idx)
-            if end_idx is None:
-                continue
-            start_line = self._line_of(source_code, match.start())
-            end_line = self._line_of(source_code, end_idx)
+        # Use the same parser-backed function model as the C transformer.
+        # The previous header regex could start at a statement inside a real
+        # function and misclassify a long ``if (...) { ... }`` as a function.
+        from ..transformers.c_extract_class import _parse_c_module
+
+        for function in _parse_c_module(source_code).functions:
+            start_line = self._line_of(source_code, function.start)
+            end_line = self._line_of(source_code, function.end - 1)
             if end_line - start_line + 1 < self.LONG_METHOD_MIN_LINES:
                 continue
-            function_name = match.group("name")
+            function_name = function.name
             yield self._internal_action(
                 ACTION_EXTRACT_METHOD,
                 file_name=file_name,

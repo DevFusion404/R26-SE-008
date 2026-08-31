@@ -2095,7 +2095,12 @@ class SafeCodeTransformationValidationAgent:
             nesting_reduced = bool(metadata.get("nesting_reduced"))
             after_depth = metadata.get("after_nesting_depth")
             depth_below_threshold = isinstance(after_depth, int) and after_depth <= 4
-            smell_reduced_passed = nesting_reduced and depth_below_threshold
+            conditional_nesting_reduced = bool(
+                metadata.get("conditional_nesting_reduced")
+            )
+            smell_reduced_passed = nesting_reduced and (
+                depth_below_threshold or conditional_nesting_reduced
+            )
 
             checks = {
                 "plan_compliance": "PASS" if metadata.get("plan_compliance") == "PASS" else "FAIL",
@@ -2107,7 +2112,11 @@ class SafeCodeTransformationValidationAgent:
             metadata["final_checks"] = checks
             metadata["syntax"] = checks["compilation_syntax_validation"]
             metadata["behavior"] = checks["behavior_preservation"]
-            metadata["smell_reduction"] = "PASS" if smell_reduced_passed else "FAIL"
+            metadata["smell_reduction"] = (
+                "PASS"
+                if smell_reduced_passed and depth_below_threshold
+                else "REDUCED" if smell_reduced_passed else "FAIL"
+            )
 
             if rollback_occurred:
                 metadata["status"] = "rolled_back"
