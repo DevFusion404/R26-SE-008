@@ -493,17 +493,23 @@ class TransformationEngine:
                 )
                 dead_code_anchors[action_index] = anchor
                 anchor_kind, anchor_fingerprint = anchor
-                if anchor_kind == "unused_callable" and anchor_fingerprint:
+                if anchor_kind in {
+                    "unused_callable",
+                    "live_callable",
+                    "dynamic_callable",
+                } and anchor_fingerprint:
                     resolved_method, resolved_class = (
                         python_transformers.resolve_dead_code_callable_target(
                         source_code,
                         anchor_fingerprint,
                         )
                     )
-                    if resolved_method and (
-                        resolved_method != method_name
-                        or resolved_class != (class_name or "")
-                    ):
+                    if resolved_method:
+                        # Keep the resolved callable identity even when the
+                        # planner targeted it only by line.  A later action can
+                        # then tell whether an accepted semantic refactoring
+                        # already consumed the target, and live-code reports
+                        # can name the reference they preserved.
                         action.parameters["requested_dead_code_method"] = method_name
                         action.parameters["requested_dead_code_class"] = class_name or ""
                         action.parameters["method"] = resolved_method
@@ -766,6 +772,11 @@ class TransformationEngine:
                         "suggested_refactoring",
                         "source_class_resolved",
                         "destination_class_resolved",
+                        "method",
+                        "message_chain_count",
+                        "message_chain_methods",
+                        "message_chains",
+                        "requested_hide_delegate_target",
                     ):
                         if key in action.parameters:
                             action_metadata[key] = action.parameters[key]
@@ -1109,6 +1120,11 @@ class TransformationEngine:
                                     name,
                                     source_line,
                                     reference_source_code=source_code,
+                                    allow_string_literal_extraction=bool(
+                                        action.parameters.get(
+                                            "allow_string_literal_extraction", True
+                                        )
+                                    ),
                                 )
                             )
                             literal_results = action_metadata.setdefault(
@@ -1129,8 +1145,19 @@ class TransformationEngine:
                             == "not_applicable"
                             for item in literal_results
                         ):
-                            action_metadata["status"] = "not_applicable"
-                            if len(literal_results) == 1:
+                            already_handled = all(
+                                str(item.get("reason") or "")
+                                == "TARGET_ALREADY_REFACTORED_BY_PREVIOUS_ACTION"
+                                for item in literal_results
+                            )
+                            action_metadata["status"] = (
+                                "already_handled" if already_handled else "not_applicable"
+                            )
+                            if already_handled:
+                                action_metadata["reason"] = (
+                                    "TARGET_ALREADY_REFACTORED_BY_PREVIOUS_ACTION"
+                                )
+                            elif len(literal_results) == 1:
                                 action_metadata.setdefault(
                                     "reason", literal_results[0].get("reason")
                                 )
@@ -1138,8 +1165,12 @@ class TransformationEngine:
                                 action_metadata["reason"] = (
                                     "ALL_INTRODUCE_CONSTANT_TARGETS_NOT_APPLICABLE"
                                 )
-                            action_metadata["final_status"] = "NOT_APPLICABLE"
-                            action_metadata["final_decision"] = "NOT_APPLICABLE"
+                            action_metadata["final_status"] = (
+                                "ALREADY_HANDLED" if already_handled else "NOT_APPLICABLE"
+                            )
+                            action_metadata["final_decision"] = (
+                                "ALREADY_HANDLED" if already_handled else "NOT_APPLICABLE"
+                            )
                         elif replacements > 0:
                             action_metadata.setdefault("status", "success")
                             action_metadata.setdefault(
@@ -1629,7 +1660,12 @@ class TransformationEngine:
                                 action_metadata.get("inline_mode")
                             )
                         if (
-                            action_metadata.get("inline_mode") == "owner_class"
+                            action_metadata.get("inline_mode")
+                            in {
+                                "owner_class",
+                                "framework_owner_class",
+                                "framework_repeated_owner_class",
+                            }
                             and destination_class
                         ):
                             lineage = action_metadata.get("inline_class_lineage")
@@ -1657,6 +1693,22 @@ class TransformationEngine:
                             effective_parameters["strategy"] = str(
                                 action_metadata.get("strategy")
                             )
+                        for metadata_key in (
+                            "framework_contract",
+                            "moved_field_mapping",
+                            "moved_nested_field_mapping",
+                            "moved_method_mapping",
+                            "owner_attributes",
+                            "registered_submodules_preserved",
+                            "constructor_behavior_preserved",
+                            "forward_behavior_preserved",
+                            "state_dict_key_mapping",
+                            "source_class_resolved",
+                            "destination_class_resolved",
+                            "relationship_verified",
+                        ):
+                            if metadata_key in action_metadata:
+                                effective_parameters[metadata_key] = action_metadata[metadata_key]
                         action_metadata["effective_action_parameters"] = effective_parameters
 
                         if action_metadata.get("inline_mode") == "empty_class_cleanup":
@@ -1664,7 +1716,11 @@ class TransformationEngine:
                                 "Inline Class cleanup applied: "
                                 f"removed proven-unused empty class {class_to_inline}."
                             )
-                        elif action_metadata.get("inline_mode") == "owner_class":
+                        elif action_metadata.get("inline_mode") in {
+                            "owner_class",
+                            "framework_owner_class",
+                            "framework_repeated_owner_class",
+                        }:
                             warnings.append(
                                 "Inline Class applied: "
                                 f"{class_to_inline} was inlined into "
@@ -1722,11 +1778,32 @@ class TransformationEngine:
                     )
 
                 elif action.action_type == ACTION_HIDE_DELEGATE:
+                    hide_delegate_mode = str(
+                        action.parameters.get("hide_delegate_mode") or "owner_class"
+                    ).strip()
                     source_class = str(action.parameters.get("source_class") or "").strip()
                     delegate_member = str(action.parameters.get("delegate_member") or "").strip()
                     delegated_member = str(action.parameters.get("delegated_member") or "").strip()
                     new_method_name = str(action.parameters.get("new_method_name") or "").strip()
-                    if not all((source_class, delegate_member, delegated_member)):
+                    source_method = str(
+                        action.parameters.get("source_method")
+                        or action.parameters.get("method")
+                        or ""
+                    ).strip()
+                    if hide_delegate_mode == "module_facade" and language == "python":
+                        current_code, replacements, action_metadata = (
+                            python_hide_delegate.apply_module_hide_delegate(
+                                current_code,
+                                source_method=source_method,
+                                delegate_member=delegate_member,
+                                delegated_member=delegated_member,
+                                new_method_name=new_method_name,
+                                message_chain_fingerprint=str(
+                                    action.parameters.get("message_chain_fingerprint") or ""
+                                ),
+                            )
+                        )
+                    elif not all((source_class, delegate_member, delegated_member)):
                         action_metadata = {
                             "status": "review_required",
                             "reason": str(
@@ -1766,10 +1843,17 @@ class TransformationEngine:
                         }
                     if action_metadata.get("status") == "success":
                         action_metadata["reclassified_action_type"] = ACTION_HIDE_DELEGATE
-                        warnings.append(
-                            "Hide Delegate applied: "
-                            f"{source_class}.{new_method_name or action_metadata.get('new_method_name')} now hides {delegate_member}."
-                        )
+                        if action_metadata.get("hide_delegate_mode") == "module_facade":
+                            warnings.append(
+                                "Hide Delegate applied: module facade "
+                                f"{action_metadata.get('new_method_name')} now hides the "
+                                f"{delegate_member} message chain."
+                            )
+                        else:
+                            warnings.append(
+                                "Hide Delegate applied: "
+                                f"{source_class}.{new_method_name or action_metadata.get('new_method_name')} now hides {delegate_member}."
+                            )
                     else:
                         warnings.append(
                             "Hide Delegate requires review: "
@@ -2263,20 +2347,85 @@ class TransformationEngine:
                         })
                     elif language == "python" and dead_code_kind == "live_callable":
                         # The plan targeted a real, referenced method/function.
-                        # Removing it would be behavior-changing, so treat this
-                        # planner step as safely NOT_APPLICABLE rather than as a
-                        # failed dead-code transformation.
-                        action_metadata.update({
-                            "dead_code_target_status": "live",
-                            "dead_code_target_kind": "live_callable",
-                            "dead_code_status": "NOT_DEAD",
-                            "status": "not_applicable",
-                            "final_decision": "NOT_APPLICABLE",
-                            "reason": (
-                                "Planner Remove Dead Code target resolves to a live/referenced "
-                                "callable; SCTVA intentionally preserved it."
-                            ),
-                        })
+                        # It may, however, already have been consumed by an
+                        # accepted Inline Class action.  In that case the
+                        # source target is gone for a valid reason, so retain
+                        # the prior transformation rather than misreporting
+                        # this stale planner action as live code.
+                        handled_by = self._python_dead_code_prior_handler(
+                            logs=logs,
+                            method_name=method_name,
+                            class_name=str(class_name or ""),
+                            source_line=source_line,
+                        )
+                        if handled_by is not None:
+                            action_metadata.update({
+                                "dead_code_target_status": "already_handled",
+                                "dead_code_status": "ALREADY_HANDLED",
+                                "status": "already_handled",
+                                "final_decision": "ALREADY_HANDLED",
+                                "reason": str(handled_by["reason"]),
+                                "handled_by_action": handled_by,
+                            })
+                        else:
+                            # Removing it would be behavior-changing.  Keep a
+                            # repository-aware proof in the report so this is
+                            # an auditable decision rather than an unexplained
+                            # "live" result.
+                            repository_snapshot = self._python_project_sources_for_current_code(
+                                project_source_files=project_source_files,
+                                current_file_name=current_file_name,
+                            )
+                            live_proof = python_transformers.analyze_python_dead_code_target(
+                                current_code,
+                                method_name=method_name,
+                                class_name=class_name,
+                                source_line=source_line,
+                                dead_code_kind=dead_code_kind,
+                                target_statement_fingerprint=target_statement_fingerprint,
+                                project_source_files=repository_snapshot,
+                                current_file_name=current_file_name,
+                            )
+                            live_proof_status = str(
+                                live_proof.get("status") or ""
+                            ).upper()
+                            if live_proof_status == "REVIEW_REQUIRED":
+                                # Decorated/framework callables can be reached
+                                # outside the repository AST.  They are not
+                                # proven live by a normal call site, but they
+                                # are also never safe to remove automatically.
+                                action_metadata.update({
+                                    "deadness_proof": dict(live_proof),
+                                    "dead_code_target_status": "review_required",
+                                    "dead_code_target_kind": str(
+                                        live_proof.get("target_kind")
+                                        or "live_callable"
+                                    ),
+                                    "dead_code_status": "REVIEW_REQUIRED",
+                                    "status": "review_required",
+                                    "final_decision": "REVIEW_REQUIRED",
+                                    "reason": str(
+                                        live_proof.get("reason")
+                                        or "REPOSITORY_DEADNESS_UNCERTAIN"
+                                    ),
+                                })
+                                warnings.append(
+                                    "Remove Dead Code requires review: "
+                                    f"{action_metadata['reason']}."
+                                )
+                            else:
+                                action_metadata.update({
+                                    "deadness_proof": dict(live_proof),
+                                    "dead_code_target_status": "live",
+                                    "dead_code_target_kind": "live_callable",
+                                    "dead_code_status": "NOT_DEAD",
+                                    "status": "not_applicable",
+                                    "final_decision": "NOT_APPLICABLE",
+                                    "reason": (
+                                        "Planner Remove Dead Code target resolves to a live/referenced "
+                                        "callable; SCTVA intentionally preserved it."
+                                    ),
+                                })
                     elif legacy_exception_action is not None:
                         legacy_original_type = str(
                             legacy_exception_action.get("original_exception_type") or ""
@@ -2426,16 +2575,20 @@ class TransformationEngine:
                                 "dead_code_status": "NOT_DEAD",
                                 "reason": str(deadness_proof.get("reason") or "REPOSITORY_REFERENCE_DETECTED"),
                             })
-                        elif proof_status == "NOT_APPLICABLE" and self._python_dead_code_was_already_handled(
-                            logs=logs,
-                            method_name=method_name,
-                            source_line=source_line,
-                        ):
+                        elif proof_status == "NOT_APPLICABLE" and (
+                            handled_by := self._python_dead_code_prior_handler(
+                                logs=logs,
+                                method_name=method_name,
+                                class_name=str(class_name or ""),
+                                source_line=source_line,
+                            )
+                        ) is not None:
                             action_metadata.update({
                                 "status": "already_handled",
                                 "dead_code_target_status": "already_handled",
                                 "dead_code_status": "ALREADY_HANDLED",
-                                "reason": "TARGET_ALREADY_HANDLED_BY_PRIOR_ACTION",
+                                "reason": str(handled_by["reason"]),
+                                "handled_by_action": handled_by,
                             })
                         else:
                             action_metadata.update({
@@ -2862,23 +3015,96 @@ class TransformationEngine:
         return sources
 
     @staticmethod
+    def _python_dead_code_prior_handler(
+        *,
+        logs: Sequence[TransformationLogEntry],
+        method_name: str,
+        class_name: str,
+        source_line: int | None,
+    ) -> Dict[str, Any] | None:
+        """Return the accepted action that already removed a dead-code target.
+
+        A Remove Dead Code action runs against the current source.  When an
+        earlier Inline Class moved its source method into the destination and
+        removed the original class, a later planner action still naming that
+        original method must be treated as already handled.  The class match
+        is required for Inline Class lineage so equally named methods in an
+        unrelated class cannot be hidden accidentally.
+        """
+
+        expected_target = method_name or (f"line:{source_line}" if source_line is not None else "")
+        for entry in reversed(logs):
+            metadata = entry.metadata or {}
+            accepted = (
+                entry.replacements_count > 0
+                and str(metadata.get("status") or "success").lower()
+                in {"success", "pass", "accepted", "already_applied"}
+            )
+            if not accepted:
+                continue
+
+            if entry.action_type == ACTION_REMOVE_DEAD_CODE:
+                removed_target = str(
+                    (metadata.get("dead_code_removal_ledger_entry") or {}).get("target")
+                    or ""
+                )
+                if removed_target == expected_target:
+                    return {
+                        "action_index": entry.action_index,
+                        "action_type": entry.action_type,
+                        "reason": "TARGET_ALREADY_HANDLED_BY_PRIOR_ACTION",
+                    }
+
+            if entry.action_type != ACTION_INLINE_PYTHON_CLASS or not class_name or not method_name:
+                continue
+            lineage = metadata.get("inline_class_lineage") or {}
+            if not isinstance(lineage, dict):
+                continue
+            source_class = str(
+                lineage.get("source_class") or metadata.get("class_to_inline") or ""
+            )
+            if source_class != class_name:
+                continue
+            moved_methods = {
+                str(item)
+                for item in metadata.get("inlined_methods") or []
+                if str(item)
+            }
+            method_mapping = metadata.get("moved_method_mapping") or {}
+            if isinstance(method_mapping, dict):
+                moved_methods.update(str(name) for name in method_mapping if str(name))
+            if method_name not in moved_methods:
+                continue
+            return {
+                "action_index": entry.action_index,
+                "action_type": entry.action_type,
+                "source_class": source_class,
+                "destination_class": str(
+                    lineage.get("terminal_destination_class")
+                    or lineage.get("destination_class")
+                    or metadata.get("destination_class")
+                    or ""
+                ),
+                "reason": "TARGET_ALREADY_HANDLED_BY_PRIOR_INLINE_CLASS",
+            }
+        return None
+
+    @classmethod
     def _python_dead_code_was_already_handled(
+        cls,
         *,
         logs: Sequence[TransformationLogEntry],
         method_name: str,
         source_line: int | None,
     ) -> bool:
-        expected_target = method_name or (f"line:{source_line}" if source_line is not None else "")
-        return any(
-            entry.action_type == ACTION_REMOVE_DEAD_CODE
-            and entry.replacements_count > 0
-            and str(
-                (entry.metadata.get("dead_code_removal_ledger_entry") or {}).get("target")
-                or ""
-            )
-            == expected_target
-            for entry in logs
-        )
+        """Compatibility wrapper for callers that only track dead-code removals."""
+
+        return cls._python_dead_code_prior_handler(
+            logs=logs,
+            method_name=method_name,
+            class_name="",
+            source_line=source_line,
+        ) is not None
 
     @staticmethod
     def _python_dead_code_dependency_conflicts(

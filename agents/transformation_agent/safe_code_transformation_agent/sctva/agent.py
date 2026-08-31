@@ -2553,10 +2553,13 @@ class SafeCodeTransformationValidationAgent:
                 )
             ]
             matches: list[tuple[SourceFileContract, dict[str, Any]]] = []
-            failures: list[tuple[str, str]] = []
+            failures: list[tuple[str, str, dict[str, Any]]] = []
             for entry in candidates:
                 source_line = params.get("source_line")
-                source_line = int(source_line) if isinstance(source_line, (int, float)) else None
+                try:
+                    source_line = int(source_line) if source_line not in (None, "") else None
+                except (TypeError, ValueError):
+                    source_line = None
                 resolution = python_hide_delegate.resolve_hide_delegate_target(
                     entry.source_code,
                     source_class=str(params.get("source_class") or ""),
@@ -2576,6 +2579,7 @@ class SafeCodeTransformationValidationAgent:
                     failures.append((
                         str(resolution.get("status") or "review_required"),
                         str(resolution.get("reason") or "HIDE_DELEGATE_TARGET_NOT_FOUND"),
+                        dict(resolution),
                     ))
             if len(matches) == 1:
                 entry, resolution = matches[0]
@@ -2591,6 +2595,17 @@ class SafeCodeTransformationValidationAgent:
                     target_params["hide_delegate_target_resolution"] = str(resolution["strategy"])
                     target_params["source_resolution_status"] = "success"
                     target_params.pop("source_resolution_error", None)
+                    for key in (
+                        "hide_delegate_mode",
+                        "source_method",
+                        "target_line",
+                        "target_end_line",
+                        "message_chain_depth",
+                        "message_chain_expression",
+                        "message_chain_fingerprint",
+                    ):
+                        if key in target:
+                            target_params[key] = target[key]
 
                 apply_target(params, resolved_targets[0])
                 for target in resolved_targets[1:]:
@@ -2605,7 +2620,7 @@ class SafeCodeTransformationValidationAgent:
                     split_action.parameters["split_from_legacy_hide_delegate"] = True
                     expanded_actions.append(split_action)
             else:
-                failure_reasons = [reason for _, reason in failures]
+                failure_reasons = [reason for _, reason, _ in failures]
                 params["source_resolution_error"] = (
                     "AMBIGUOUS_HIDE_DELEGATE_FILE"
                     if len(matches) > 1
@@ -2618,9 +2633,34 @@ class SafeCodeTransformationValidationAgent:
                 params["source_resolution_status"] = (
                     "review_required"
                     if len(matches) > 1
-                    or any(status == "review_required" for status, _ in failures)
+                    or any(status == "review_required" for status, _, _ in failures)
                     else "not_applicable"
                 )
+                if len(candidates) == 1 and failures:
+                    resolution = failures[0][2]
+                    params["hide_delegate_target_resolution"] = resolution
+                    for key in (
+                        "target_kind",
+                        "suggested_refactoring",
+                        "method",
+                        "message_chain_count",
+                        "message_chain_methods",
+                        "message_chains",
+                    ):
+                        if key in resolution:
+                            params[key] = resolution[key]
+                params["requested_hide_delegate_target"] = {
+                    "source_file": configured_file,
+                    "source_class": str(params.get("source_class") or ""),
+                    "method": str(
+                        params.get("method")
+                        or params.get("method_name")
+                        or ""
+                    ),
+                    "delegate_member": str(params.get("delegate_member") or ""),
+                    "delegated_member": str(params.get("delegated_member") or ""),
+                    "source_line": params.get("source_line"),
+                }
         actions.extend(expanded_actions)
 
     @classmethod
@@ -3503,7 +3543,10 @@ class SafeCodeTransformationValidationAgent:
                 params["not_applicable_to_source"] = True
                 params["not_applicable_reason"] = reason
                 params["not_applicable_action_type"] = planned.action_type
-                existing_resolution = params.get("move_method_target_resolution")
+                existing_resolution = (
+                    params.get("move_method_target_resolution")
+                    or params.get("hide_delegate_target_resolution")
+                )
                 if isinstance(existing_resolution, dict):
                     # Preserve the AST decision made by the language-specific
                     # resolver.  Replacing it with a generic stale-target
