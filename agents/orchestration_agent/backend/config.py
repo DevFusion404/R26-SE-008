@@ -14,10 +14,10 @@ own entry point rather than assumed:
     SCTVA  http://localhost:8002   agents/transformation_agent/.../app.py (SCTVA_PORT, default 8002)
     DIWO   http://localhost:5001   this backend
 
-Values are read from the process environment only. A .env file is *not*
-auto-loaded, even though python-dotenv is now in requirements.txt — nothing
-calls load_dotenv(). Exporting the variables, or setting them in the run
-configuration, is what takes effect. See .env.example.
+backend/.env IS loaded, by load_dotenv() below, before any value here is read.
+A real environment variable still wins over the file — python-dotenv does not
+override what is already set — so a container can override the checked-out
+.env without editing it. See .env.example for every name this file reads.
 """
 
 import os
@@ -85,20 +85,42 @@ def archives_dir() -> Path:
 # Database
 # ─────────────────────────────────────────────────────────────────────────────
 #
-# NOT YET CONSUMED. db/database.py still opens SQLite directly, so setting
-# DATABASE_PROVIDER=supabase changes nothing today — the values are declared
-# here so there is one place to read them from when the persistence layer is
-# ported, and so nobody has to guess the variable names in the meantime.
+# TWO BACKENDS, ONE SEAM. Every persistence call in this service goes through
+# db/workflow_repository.py, which dispatches to either db/sqlite_repository.py
+# (the default) or db/supabase_repository.py. Nothing outside db/ knows which
+# one is running, so switching is a matter of environment variables.
 #
-# Porting needs, at minimum:
-#   * db/database.py        sqlite3.connect -> a SQLAlchemy engine / psycopg pool
-#   * the schema DDL        INTEGER PRIMARY KEY AUTOINCREMENT -> GENERATED AS IDENTITY
-#   * the migrations        PRAGMA table_info -> information_schema
-#   * workflow_repository   "?" placeholders -> "%s", and
-#                           INSERT OR REPLACE -> INSERT ... ON CONFLICT DO UPDATE
+# Supabase is selected when SUPABASE_URL and a key are both present — the same
+# pair user_management/config/supabase_client.py reads. Setting
+# DATABASE_PROVIDER=supabase without them is a misconfiguration and is reported
+# at startup rather than silently falling back.
+#
+# DATABASE_URL below is the raw Postgres DSN, which this service does NOT use:
+# the Supabase backend talks to PostgREST over HTTPS through the supabase-py
+# client, exactly as user_management does. The DSN is kept declared for a
+# future direct-psycopg port and for tooling that wants it.
 
-#: "sqlite" (the default, what actually runs) or "supabase" / "postgres".
+#: "sqlite" (the default) or "supabase" / "postgres".
 DATABASE_PROVIDER = os.environ.get("DATABASE_PROVIDER", "sqlite").strip().lower()
+
+#: Supabase project URL, e.g. https://abcdefgh.supabase.co
+#: Project Settings -> API -> Project URL.
+SUPABASE_URL = os.environ.get("SUPABASE_URL", "").strip()
+
+#: The API key, in the order user_management resolves it.
+#:
+#: PREFER THE SERVICE ROLE KEY for this service. The orchestrator is a trusted
+#: backend with no end-user session: it writes audit rows on behalf of the
+#: workflow, and the anon key is subject to row-level security policies written
+#: for browser callers, which would silently reject those writes.
+#: Project Settings -> API -> service_role. It bypasses RLS, so it must never
+#: reach the frontend or a committed file.
+SUPABASE_KEY = (
+    os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
+    or os.environ.get("SUPABASE_KEY")
+    or os.environ.get("SUPABASE_ANON_KEY")
+    or ""
+).strip()
 
 #: Full Postgres DSN. Supabase gives you this under Project Settings ->
 #: Database -> Connection string. It contains the password, so it belongs in
@@ -112,12 +134,45 @@ DB_POOL_MODE = os.environ.get("DB_POOL_MODE", "session").strip().lower()
 
 
 def uses_postgres() -> bool:
-    """True when the backend has been pointed at a Postgres/Supabase database.
+    """True when a raw Postgres DSN has been supplied.
 
-    Nothing branches on this yet; it exists so the port has an obvious switch
-    and so a misconfigured .env can be reported instead of silently ignored.
+    Nothing branches on this: the Supabase backend goes through PostgREST, not
+    the DSN. Kept so a future direct-psycopg port has its switch already named.
     """
     return DATABASE_PROVIDER in ("supabase", "postgres", "postgresql") and bool(DATABASE_URL)
+
+
+def uses_supabase() -> bool:
+    """True when this process should persist through Supabase instead of SQLite.
+
+    Credentials are the deciding fact, not the provider name — a service told
+    to use Supabase with no key cannot, and a service given both plainly can.
+    DATABASE_PROVIDER only has to not say "sqlite", so pointing an existing
+    deployment at Supabase is a matter of adding the two variables.
+    """
+    if DATABASE_PROVIDER == "sqlite":
+        return False
+    return bool(SUPABASE_URL and SUPABASE_KEY)
+
+
+def database_backend() -> str:
+    """Which backend is live: "supabase" or "sqlite". For logs and /api/health."""
+    return "supabase" if uses_supabase() else "sqlite"
+
+
+def supabase_misconfigured() -> str:
+    """The reason Supabase was asked for but cannot be used, or "" when fine."""
+    if DATABASE_PROVIDER in ("supabase", "postgres", "postgresql") and not uses_supabase():
+        missing = []
+        if not SUPABASE_URL:
+            missing.append("SUPABASE_URL")
+        if not SUPABASE_KEY:
+            missing.append("SUPABASE_KEY (or SUPABASE_SERVICE_ROLE_KEY)")
+        return (
+            f"DATABASE_PROVIDER={DATABASE_PROVIDER} but {' and '.join(missing)} "
+            f"{'is' if len(missing) == 1 else 'are'} not set — falling back to SQLite."
+        )
+    return ""
 
 
 #: Remote repositories are cloned here, not into a temp dir: GitHub Desktop has
