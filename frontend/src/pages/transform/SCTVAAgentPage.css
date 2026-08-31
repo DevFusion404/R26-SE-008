@@ -498,6 +498,13 @@
   transition: 0.2s ease;
 }
 
+.sctva-file-tab span {
+  max-width: min(240px, 48vw);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .sctva-file-tab:hover {
   border-color: rgba(96, 165, 250, 0.5);
   color: #e2e8f0;
@@ -509,11 +516,13 @@
   box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.15);
 }
 
+.sctva-file-tab.applied,
 .sctva-file-tab.pass {
   border-color: rgba(34, 197, 94, 0.4);
   color: #bbf7d0;
 }
 
+.sctva-file-tab.rolled-back,
 .sctva-file-tab.fail {
   border-color: rgba(239, 68, 68, 0.45);
   color: #fecaca;
@@ -528,12 +537,18 @@
   font-style: normal;
   font-size: 9px;
   letter-spacing: 0.03em;
-  color: #fca5a5;
+  color: #86efac;
   text-transform: uppercase;
+  white-space: nowrap;
 }
 
 .sctva-file-tab.not-applied em {
   color: #94a3b8;
+}
+
+.sctva-file-tab.rolled-back em,
+.sctva-file-tab.fail em {
+  color: #fca5a5;
 }
 
 .sctva-chip {
