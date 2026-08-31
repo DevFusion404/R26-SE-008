@@ -1,3 +1,4 @@
+from sctva.agent import SafeCodeTransformationValidationAgent
 from sctva.transformers import java_transformers
 
 
@@ -45,6 +46,34 @@ def test_introduce_constant_does_not_fall_back_from_string_line_to_other_code_li
     assert count == 0
     assert transformed == source
     assert metadata["reason"] == "TARGET_NOT_JAVA_NUMERIC_LITERAL"
+
+
+def test_introduce_constant_can_extract_exact_targeted_java_string_when_enabled():
+    source = (
+        "public class T {\n"
+        "    void render() {\n"
+        "        System.out.println(\"<td colspan='6'>Books</td>\");\n"
+        "    }\n"
+        "}\n"
+    )
+
+    transformed, count, metadata = java_transformers.apply_introduce_constant(
+        source,
+        6,
+        "THRESHOLD_LIMIT_6",
+        3,
+        reference_source_code=source,
+        allow_string_literal_extraction=True,
+    )
+
+    constant_name = metadata["constant_name"]
+    assert count == 1
+    assert metadata["status"] == "success"
+    assert metadata["reason"] == "introduce_string_constant_applied"
+    assert metadata["target_context"] == "STRING_LITERAL"
+    assert f"private static final String {constant_name}" in transformed
+    assert f"System.out.println({constant_name});" in transformed
+    assert "colspan='6'" in transformed
 
 
 def test_introduce_constant_applies_only_to_real_java_numeric_literal():
@@ -127,6 +156,123 @@ def test_duplicate_introduce_constant_action_is_safely_not_applicable():
     assert transformed_again == transformed
     assert metadata["status"] == "not_applicable"
     assert metadata["reason"] == "TARGET_ALREADY_REFACTORED_BY_PREVIOUS_ACTION"
+
+
+def test_duplicate_java_introduce_constant_plan_is_reported_as_already_handled():
+    source = (
+        "public class T {\n"
+        "    int value() { return 5; }\n"
+        "}\n"
+    )
+
+    result = SafeCodeTransformationValidationAgent().execute({
+        "request_id": "duplicate_java_introduce_constant",
+        "language": "java",
+        "source_files": [{
+            "file_name": "T.java",
+            "source_code": source,
+            "language": "java",
+            "source_mode": "raw",
+        }],
+        "refactoring_plan": {
+            "plan_id": "duplicate_java_introduce_constant",
+            "actions": [
+                {
+                    "action_type": "introduce_constant",
+                    "parameters": {
+                        "source_file": "T.java",
+                        "literal_value": 5,
+                        "constant_name": "FIVE",
+                        "source_line": 2,
+                    },
+                },
+                {
+                    "action_type": "introduce_constant",
+                    "parameters": {
+                        "source_file": "T.java",
+                        "literal_value": 5,
+                        "constant_name": "FIVE",
+                        "source_line": 2,
+                    },
+                },
+            ],
+            "behavior_tests": [],
+            "metadata": {},
+        },
+        "execution_options": {
+            "strict_mode": True,
+            "enable_behavior_tests": True,
+            "timeout_seconds": 10,
+            "require_compilation": False,
+            "enable_sctva_auto_refactoring": False,
+        },
+    })
+
+    logs = result["safety_report"]["transformation_log"]
+    assert logs[0]["metadata"]["final_decision"] == "ACCEPT"
+    assert logs[1]["metadata"]["status"] == "already_handled"
+    assert logs[1]["metadata"]["final_decision"] == "ALREADY_HANDLED"
+    assert "return FIVE;" in result["refactored_code"]
+
+
+def test_duplicate_java_string_constant_plan_is_reported_as_already_handled():
+    source = (
+        "public class T {\n"
+        "    void render() {\n"
+        "        System.out.println(\"<td colspan='6'>Books</td>\");\n"
+        "    }\n"
+        "}\n"
+    )
+
+    result = SafeCodeTransformationValidationAgent().execute({
+        "request_id": "duplicate_java_string_constant",
+        "language": "java",
+        "source_files": [{
+            "file_name": "T.java",
+            "source_code": source,
+            "language": "java",
+            "source_mode": "raw",
+        }],
+        "refactoring_plan": {
+            "plan_id": "duplicate_java_string_constant",
+            "actions": [
+                {
+                    "action_type": "introduce_constant",
+                    "parameters": {
+                        "source_file": "T.java",
+                        "literal_value": 6,
+                        "constant_name": "THRESHOLD_LIMIT_6",
+                        "source_line": 3,
+                    },
+                },
+                {
+                    "action_type": "introduce_constant",
+                    "parameters": {
+                        "source_file": "T.java",
+                        "literal_value": 6,
+                        "constant_name": "THRESHOLD_LIMIT_6",
+                        "source_line": 3,
+                    },
+                },
+            ],
+            "behavior_tests": [],
+            "metadata": {},
+        },
+        "execution_options": {
+            "strict_mode": True,
+            "enable_behavior_tests": True,
+            "timeout_seconds": 10,
+            "require_compilation": False,
+            "enable_sctva_auto_refactoring": False,
+        },
+    })
+
+    logs = result["safety_report"]["transformation_log"]
+    assert logs[0]["metadata"]["reason"] == "introduce_string_constant_applied"
+    assert logs[1]["metadata"]["status"] == "already_handled"
+    assert logs[1]["metadata"]["final_decision"] == "ALREADY_HANDLED"
+    assert "private static final String" in result["refactored_code"]
+
 
 
 def test_introduce_constant_reuses_exact_requested_existing_constant_only():

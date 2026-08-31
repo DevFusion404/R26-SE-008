@@ -373,6 +373,279 @@ def test_legacy_hide_delegate_splits_safe_members_of_the_same_delegate():
     assert "customer.get_postcode()" in result["refactored_code"]
 
 
+def test_module_external_message_chain_resolves_to_hide_delegate_facade():
+    source = '''model = build_model()
+
+
+def process_image(image):
+    return model(image).data.squeeze().float().clamp_(0, 1).numpy()
+'''
+    resolution = python_hide_delegate.resolve_hide_delegate_target(
+        source,
+        source_class="app",
+        method_name="process_image",
+        source_line=5,
+    )
+
+    assert resolution["status"] == "success"
+    assert resolution["reason"] == "MODULE_FACADE_HIDE_DELEGATE_SAFE"
+    assert resolution["target_kind"] == "MODULE_MESSAGE_CHAIN"
+    assert resolution["hide_delegate_mode"] == "module_facade"
+    assert resolution["source_method"] == "process_image"
+    assert resolution["delegate_member"] == "model"
+    assert resolution["delegated_member"] == "numpy"
+    assert resolution["new_method_name"] == "get_model_result"
+    assert resolution["message_chain_depth"] >= 4
+
+
+def test_classless_hide_delegate_scans_module_when_rdp_method_is_missing():
+    source = '''dependency = build_dependency()
+
+
+def run(value):
+    return dependency(value).result.normalize().serialize()
+'''
+    resolution = python_hide_delegate.resolve_hide_delegate_target(source)
+
+    assert resolution["status"] == "success"
+    assert resolution["reason"] == "MODULE_FACADE_HIDE_DELEGATE_SAFE"
+    assert resolution["strategy"] == "unique_deepest_module_chain"
+    assert resolution["target_kind"] == "MODULE_MESSAGE_CHAIN"
+    assert resolution["source_method"] == "run"
+    assert resolution["new_method_name"] == "get_dependency_result"
+
+
+def test_agent_applies_classless_hide_delegate_module_facade():
+    source = '''model = build_model()
+
+
+def process_image(image):
+    return model(image).data.squeeze().float().clamp_(0, 1).numpy()
+'''
+    result = SafeCodeTransformationValidationAgent().execute({
+        "request_id": "classless_hide_delegate",
+        "language": "python",
+        "source_files": [{
+            "file_name": "app.py",
+            "source_code": source,
+            "language": "python",
+            "source_mode": "raw",
+        }],
+        "refactoring_plan": {
+            "plan_id": "classless_hide_delegate",
+            "actions": [{
+                "action_type": "hide_delegate",
+                "parameters": {
+                    "source_file": "app.py",
+                    "source_class": "app",
+                    "method": "process_image",
+                    "source_line": 5,
+                },
+            }],
+            "behavior_tests": [],
+        },
+        "execution_options": {
+            "strict_mode": True,
+            "enable_behavior_tests": True,
+            "enable_sctva_auto_refactoring": False,
+        },
+    })
+
+    assert result["success"] is True, result
+    assert result["rollback_occurred"] is False
+    assert result["refactored_code"] != source
+    assert result["plan_compliance"]["hide_delegate"] == "PASS"
+    assert "def get_model_result(image):" in result["refactored_code"]
+    assert "return get_model_result(image)" in result["refactored_code"]
+    metadata = result["safety_report"]["transformation_log"][0]["metadata"]
+    assert metadata["status"] == "success"
+    assert metadata["reason"] == "MODULE_FACADE_HIDE_DELEGATE_SAFE"
+    assert metadata["hide_delegate_mode"] == "module_facade"
+    assert metadata["source_method"] == "process_image"
+    validation = result["validation"]["structural"]["details"][
+        "hide_delegate_validation"
+    ][0]
+    assert validation["passed"] is True, validation
+    assert all(validation["checks"].values())
+
+
+def test_incomplete_rdp_hide_delegate_is_promoted_to_module_facade():
+    source = '''model = build_model()
+
+
+def process_image(image):
+    return model(image).data.squeeze().float().clamp_(0, 1).numpy()
+'''
+    plan = PlannerAdapter().normalize_plan({
+        "plan_id": "rdp_module_hide_delegate",
+        "steps": [{
+            "step_id": 7,
+            "refactoring": "Hide Delegate",
+            "target": {"file": "app.py"},
+            "parameters": {},
+        }],
+    })
+    assert plan["actions"][0]["action_type"] == "noop"
+
+    result = SafeCodeTransformationValidationAgent().execute({
+        "request_id": "rdp_module_hide_delegate",
+        "language": "python",
+        "source_files": [{
+            "file_name": "app.py",
+            "source_code": source,
+            "language": "python",
+            "source_mode": "raw",
+        }],
+        "refactoring_plan": plan,
+        "execution_options": {
+            "strict_mode": True,
+            "enable_behavior_tests": True,
+            "enable_sctva_auto_refactoring": False,
+        },
+    })
+
+    assert result["success"] is True, result
+    assert result["plan_compliance"]["hide_delegate"] == "PASS"
+    assert "def get_model_result(image):" in result["refactored_code"]
+    log = result["safety_report"]["transformation_log"][0]
+    assert log["action_type"] == "hide_delegate"
+    assert log["replacements_count"] == 2
+    assert log["metadata"]["hide_delegate_mode"] == "module_facade"
+
+
+def test_module_hide_delegate_preserves_runtime_behavior_with_unrelated_classes():
+    source = '''class Result:
+    def __init__(self, value):
+        self.value = value
+
+    def normalize(self):
+        return self
+
+    def serialize(self):
+        return f"value={self.value}"
+
+
+class Service:
+    def __call__(self, value):
+        return Result(value)
+
+
+service = Service()
+
+
+def run(value):
+    return service(value).normalize().serialize().upper()
+'''
+    resolution = python_hide_delegate.resolve_hide_delegate_target(source)
+    transformed, replacements, metadata = python_hide_delegate.apply_module_hide_delegate(
+        source,
+        source_method=resolution["source_method"],
+        delegate_member=resolution["delegate_member"],
+        delegated_member=resolution["delegated_member"],
+        new_method_name=resolution["new_method_name"],
+        message_chain_fingerprint=resolution["message_chain_fingerprint"],
+    )
+
+    assert replacements == 2
+    assert metadata["status"] == "success"
+    original_namespace = {}
+    transformed_namespace = {}
+    exec(compile(source, "<original-hide-delegate>", "exec"), original_namespace)
+    exec(compile(transformed, "<module-hide-delegate>", "exec"), transformed_namespace)
+    assert transformed_namespace["run"](7) == original_namespace["run"](7)
+
+
+def test_module_hide_delegate_preserves_unrelated_message_chains_in_caller():
+    source = '''def process_image(file_stream):
+    img = cv2.imdecode(np.frombuffer(file_stream.read(), np.uint8), cv2.IMREAD_COLOR)
+    img = torch.from_numpy(np.transpose(img[:, :, [2, 1, 0]], (2, 0, 1))).float()
+    img_LR = img.unsqueeze(0)
+    output = model(img_LR).data.squeeze().float().clamp_(0, 1).numpy()
+    output = (output * 255.0).round().astype(np.uint8)
+    _, buffer = cv2.imencode('.jpg', output)
+    return base64.b64encode(buffer).decode('utf-8'), output
+'''
+    resolution = python_hide_delegate.resolve_hide_delegate_target(
+        source,
+        method_name="process_image",
+        source_line=5,
+    )
+    transformed, replacements, metadata = python_hide_delegate.apply_module_hide_delegate(
+        source,
+        source_method=resolution["source_method"],
+        delegate_member=resolution["delegate_member"],
+        delegated_member=resolution["delegated_member"],
+        new_method_name=resolution["new_method_name"],
+        message_chain_fingerprint=resolution["message_chain_fingerprint"],
+    )
+
+    assert replacements == 2
+    transformed_with_unrelated_constant = (
+        "THRESHOLD_LIMIT_255_0 = 255.0\n"
+        + transformed.replace("255.0", "THRESHOLD_LIMIT_255_0")
+    )
+    validation = python_hide_delegate.validate_module_hide_delegate(
+        source,
+        transformed_with_unrelated_constant,
+        source_method=metadata["source_method"],
+        delegate_member=metadata["delegate_member"],
+        delegated_member=metadata["delegated_member"],
+        new_method_name=metadata["new_method_name"],
+        message_chain_fingerprint=metadata["message_chain_fingerprint"],
+        helper_parameters=metadata["helper_parameters"],
+    )
+
+    assert validation["passed"] is True, validation
+    assert validation["checks"]["unrelated_message_chains_preserved"] is True
+    assert "unrelated_message_chain_diagnostics" not in validation
+
+
+def test_module_hide_delegate_still_rejects_real_unrelated_chain_changes():
+    source = '''def run(value):
+    first = service(value).normalize().serialize()
+    second = audit(value).record().flush()
+    return first, second
+'''
+    transformed = '''def get_service_result(value):
+    return service(value).normalize().serialize()
+
+
+def run(value):
+    first = get_service_result(value)
+    second = audit(value).record()
+    return first, second
+'''
+    target = "Call(func=Attribute(value=Call(func=Attribute(value=Call(func=Attribute(value=Call(func=Name(id='service', ctx=Load()), args=[Name(id='value', ctx=Load())], keywords=[]), attr='normalize', ctx=Load()), args=[], keywords=[]), attr='serialize', ctx=Load()), args=[], keywords=[])"
+
+    validation = python_hide_delegate.validate_module_hide_delegate(
+        source,
+        transformed,
+        source_method="run",
+        delegate_member="service",
+        delegated_member="serialize",
+        new_method_name="get_service_result",
+        message_chain_fingerprint=target,
+        helper_parameters=["value"],
+    )
+
+    assert validation["passed"] is False
+    assert validation["checks"]["unrelated_message_chains_preserved"] is False
+    assert validation["unrelated_message_chain_diagnostics"]
+
+
+def test_module_hide_delegate_rejects_equal_depth_ambiguous_chains():
+    source = '''def run(first, second):
+    left = first().result.normalize().serialize()
+    right = second().result.normalize().serialize()
+    return left, right
+'''
+    resolution = python_hide_delegate.resolve_hide_delegate_target(source)
+
+    assert resolution["status"] == "review_required"
+    assert resolution["reason"] == "AMBIGUOUS_MODULE_HIDE_DELEGATE_TARGET"
+    assert resolution["candidate_count"] == 2
+
+
 def test_stale_unrelated_legacy_actions_do_not_fail_message_chain_plan_compliance():
     file_name = "01_message_chain_hide_delegate_employee.py"
     legacy_warning = "needs richer semantic edits and was not simulated with a rename."
