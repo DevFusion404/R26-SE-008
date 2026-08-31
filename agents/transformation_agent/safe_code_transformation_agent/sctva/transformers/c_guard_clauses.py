@@ -239,12 +239,46 @@ def apply_replace_nested_conditional_with_guard_clauses(
     source_code: str,
     method_name: Optional[str] = None,
     target_line: Optional[int] = None,
+    *,
+    source_line: Optional[int] = None,
+    start_line: Optional[int] = None,
+    end_line: Optional[int] = None,
+    target_lines: Optional[Sequence[Any]] = None,
+    source_file: str = "",
 ) -> Tuple[str, int, Dict[str, Any]]:
-    """Transform deeply nested C conditionals into early return guard clauses."""
+    """Transform deeply nested C conditionals into early return guard clauses.
+
+    ``target_line`` is retained for older callers.  The engine now sends the
+    normalized RDP fields, so accept those aliases here instead of allowing a
+    TypeError to escape through the HTTP endpoint.
+    """
+
+    def as_line(value: Any) -> Optional[int]:
+        if isinstance(value, (int, float)):
+            return int(value)
+        if isinstance(value, str) and value.strip().isdigit():
+            return int(value.strip())
+        return None
+
+    normalized_lines = [
+        line for line in (as_line(value) for value in (target_lines or ()))
+        if line is not None
+    ]
+    resolved_line = (
+        as_line(target_line)
+        or as_line(source_line)
+        or as_line(start_line)
+        or as_line(end_line)
+        or (normalized_lines[0] if normalized_lines else None)
+    )
     metadata: Dict[str, Any] = {
         "refactoring": "Replace Nested Conditional with Guard Clauses",
         "language": "c",
         "method": method_name or "",
+        "source_method": method_name or "",
+        "source_file": source_file,
+        "source_line": resolved_line,
+        "target_lines": normalized_lines,
         "plan_compliance": "FAIL",
     }
 
@@ -261,11 +295,11 @@ def apply_replace_nested_conditional_with_guard_clauses(
         if len(candidates) == 1:
             target_function = candidates[0]
         elif len(candidates) > 1:
-            if target_line is not None:
+            if resolved_line is not None:
                 for cand in candidates:
                     start_l = _line_of(source_code, cand.start)
                     end_l = _line_of(source_code, cand.end)
-                    if start_l <= target_line <= end_l:
+                    if start_l <= resolved_line <= end_l:
                         target_function = cand
                         break
             if not target_function:
@@ -273,11 +307,11 @@ def apply_replace_nested_conditional_with_guard_clauses(
                 metadata["reason"] = "AMBIGUOUS_FUNCTION_TARGET"
                 return source_code, 0, metadata
 
-    if not target_function and target_line is not None:
+    if not target_function and resolved_line is not None:
         for cand in module.functions:
             start_l = _line_of(source_code, cand.start)
             end_l = _line_of(source_code, cand.end)
-            if start_l <= target_line <= end_l:
+            if start_l <= resolved_line <= end_l:
                 target_function = cand
                 break
 
@@ -295,6 +329,7 @@ def apply_replace_nested_conditional_with_guard_clauses(
         return source_code, 0, metadata
 
     metadata["method"] = target_function.name
+    metadata["source_method"] = target_function.name
     before_depth = _brace_nesting(target_function.body)
     metadata["before_nesting_depth"] = before_depth
 

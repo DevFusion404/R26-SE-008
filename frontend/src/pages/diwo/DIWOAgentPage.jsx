@@ -1004,6 +1004,9 @@ export default function DIWOAgentPage() {
                 workflowId={workflowId}
                 language={workflowLanguage}
               auditLogs={backendLog.length ? backendLog : auditLog}
+              // Comparison is a read-only view of a finished run, so stepping
+              // back to Results costs nothing and decides nothing.
+              onBack={() => setPhase(3)}
               onComplete={async (notes) => {
                 if (workflowId) {
                   try {

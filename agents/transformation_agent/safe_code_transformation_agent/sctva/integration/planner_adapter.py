@@ -600,6 +600,61 @@ class PlannerAdapter:
             }
 
         elif ref_key in {
+            "replace nested conditional with guard clauses",
+            "replace nested conditional with guard clause",
+            "replace conditional with guard clauses",
+            "guard clauses",
+            "guard clause",
+        }:
+            source_file = self._source_file_from_step(step, params=params, target=target)
+            location = step.get("location") if isinstance(step.get("location"), dict) else {}
+            source_method = str(
+                target.get("method")
+                or target.get("function")
+                or target.get("target_function")
+                or params.get("source_method")
+                or params.get("method")
+                or params.get("function")
+                or params.get("target_function")
+                or location.get("method")
+                or location.get("function")
+                or step.get("target_function")
+                or step.get("source_method")
+                or ""
+            ).strip()
+            start_line, end_line = self._source_range_from_step(
+                step,
+                params=params,
+                target=target,
+            )
+            target_lines = (
+                params.get("target_lines")
+                or target.get("lines")
+                or target.get("target_lines")
+                or params.get("lines")
+                or step.get("target_lines")
+                or step.get("lines")
+                or []
+            )
+            if not isinstance(target_lines, (list, tuple)):
+                target_lines = [target_lines] if target_lines is not None else []
+            action = {
+                "action_type": ACTION_REPLACE_NESTED_CONDITIONAL_WITH_GUARD_CLAUSES,
+                "parameters": {
+                    "source_file": source_file,
+                    "method": source_method,
+                    "source_method": source_method,
+                    "source_line": self._source_line_from_step(step, params=params, target=target),
+                    "start_line": start_line,
+                    "end_line": end_line,
+                    "target_lines": list(target_lines),
+                    "target_function": source_method,
+                    "target_range": {"start_line": start_line, "end_line": end_line},
+                    "source_step_id": step.get("source_step_id", step.get("step_id")),
+                },
+            }
+
+        elif ref_key in {
             "extract class",
             "extract java class",
             "extract python class",
@@ -1055,6 +1110,15 @@ class PlannerAdapter:
             }
 
         elif ref_key == "remove dead code":
+            smell_evidence = (
+                step.get("smell_evidence")
+                or step.get("evidence")
+                or params.get("smell_evidence")
+                or params.get("evidence")
+                or {}
+            )
+            if not isinstance(smell_evidence, dict):
+                smell_evidence = {}
             method = (
                 params.get("method")
                 or params.get("method_name")
@@ -1068,22 +1132,96 @@ class PlannerAdapter:
                 or target.get("target_function")
                 or target.get("name")
                 or target.get("symbol")
+                or target.get("target")
                 or params.get("name")
                 or params.get("symbol")
+                or step.get("target_name")
+                or step.get("symbol")
+                or step.get("function")
+                or step.get("method")
+                or step.get("variable")
             )
-            source_line = self._source_line_from_step(step, params=params, target=target)
-            source_file = self._source_file_from_step(step, params=params, target=target)
+            source_line = self._source_line_from_step(
+                step, params=params, target=target, evidence=smell_evidence
+            )
+            source_file = self._source_file_from_step(
+                step, params=params, target=target, evidence=smell_evidence
+            )
+            target_name = str(
+                params.get("target_name")
+                or params.get("name")
+                or params.get("symbol")
+                or target.get("target_name")
+                or target.get("name")
+                or target.get("symbol")
+                or target.get("target")
+                or smell_evidence.get("target_name")
+                or smell_evidence.get("name")
+                or smell_evidence.get("symbol")
+                or smell_evidence.get("target")
+                or ""
+            ).strip()
+            if not target_name:
+                target_name = self._dead_code_symbol_from_description(
+                    step.get("description")
+                )
+            if not target_name:
+                target_name = self._dead_code_symbol_from_description(
+                    smell_evidence.get("description")
+                )
+            variable_name = str(
+                params.get("variable")
+                or params.get("variable_name")
+                or target.get("variable")
+                or target.get("variable_name")
+                or smell_evidence.get("variable")
+                or step.get("variable")
+                or ""
+            ).strip()
+            function_name = str(
+                params.get("function")
+                or params.get("function_name")
+                or target.get("function")
+                or target.get("function_name")
+                or smell_evidence.get("function")
+                or step.get("function")
+                or ""
+            ).strip()
+            target_kind = str(
+                params.get("target_kind")
+                or target.get("target_kind")
+                or target.get("kind")
+                or step.get("target_kind")
+                or ""
+            ).strip()
+            if not target_name:
+                target_name = method or function_name or variable_name
+            metadata_present = bool(
+                target_name or method or function_name or variable_name or source_line is not None
+            )
 
             action = {
                 "action_type": ACTION_REMOVE_DEAD_CODE,
                 "parameters": {
                     "method": str(method or ""),
+                    "target_name": target_name,
+                    "function": function_name,
+                    "variable": variable_name,
+                    "symbol": str(params.get("symbol") or target.get("symbol") or ""),
+                    "target_kind": target_kind,
                     "class_name": self._semantic_class_hint(
                         target.get("class") or params.get("source_class"),
                         source_file=source_file,
                     ) or None,
                     "source_line": source_line,
                     "source_file": source_file,
+                    "target_metadata_present": metadata_present,
+                    "target_resolution_evidence": {
+                        "target": dict(target),
+                        "smell_evidence": dict(smell_evidence),
+                        "description": str(step.get("description") or ""),
+                        "smell": str(step.get("smell") or step.get("smell_type") or ""),
+                    },
                 },
             }
 
@@ -1350,12 +1488,15 @@ class PlannerAdapter:
         *,
         params: Dict[str, Any],
         target: Dict[str, Any],
+        evidence: Optional[Dict[str, Any]] = None,
     ) -> str:
         location = step.get("location") or {}
         if not isinstance(location, dict):
             location = {}
 
-        return PlannerAdapter._source_file_from_sources(params, target, location, step)
+        return PlannerAdapter._source_file_from_sources(
+            params, target, evidence or {}, location, step
+        )
 
     @staticmethod
     def _source_file_from_sources(*sources: Dict[str, Any]) -> str:
@@ -1403,12 +1544,13 @@ class PlannerAdapter:
         *,
         params: Dict[str, Any],
         target: Dict[str, Any],
+        evidence: Optional[Dict[str, Any]] = None,
     ) -> Optional[int]:
         location = step.get("location") or {}
         if not isinstance(location, dict):
             location = {}
 
-        for source in (params, target, location, step):
+        for source in (params, target, evidence or {}, location, step):
             if not isinstance(source, dict):
                 continue
 
@@ -1492,6 +1634,21 @@ class PlannerAdapter:
             cleaned = f"R_{cleaned}"
 
         return cleaned
+
+    @staticmethod
+    def _dead_code_symbol_from_description(value: Any) -> str:
+        """Recover an explicitly named symbol from planner prose only."""
+
+        description = str(value or "").strip()
+        if not description:
+            return ""
+        match = re.search(
+            r"\b(?:function|method|variable|symbol|target)\s*(?:name\s*)?(?:is\s*)?"
+            r"(?:[:=\-]\s*)?[`'\"]?([A-Za-z_][A-Za-z0-9_]*)[`'\"]?\b",
+            description,
+            flags=re.IGNORECASE,
+        )
+        return match.group(1) if match else ""
 
     @staticmethod
     def _to_pascal_case(value: str) -> str:

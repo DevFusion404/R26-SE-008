@@ -4,6 +4,7 @@ import shutil
 from sctva.analysis.local_refactor_detector import LocalRefactorDetector
 from sctva.contracts import RefactoringAction
 from sctva.agent import SafeCodeTransformationValidationAgent
+from sctva.integration.planner_adapter import PlannerAdapter
 from sctva.transformers import c_transformers, python_transformers
 from sctva.validators.structural_validator import StructuralValidator
 from sctva.validators.syntax_validator import SyntaxValidator
@@ -617,6 +618,193 @@ int check_number(int value) { return value; }
     assert passed.passed is True
     assert passed.details["dead_code_validation"][0]["checks"]["unrelated_source_preserved"] is True
     assert failed.passed is False
+
+
+def test_c_dead_code_resolution_reports_reference_metrics_and_safe_function_target():
+    source = '''static int unused_function(int value) { return value + 1; }
+static int live_function(int value) { return value + 2; }
+int run(void) { return live_function(1); }
+'''
+    analysis = c_transformers.analyze_c_dead_code_target(
+        source,
+        "unused_function",
+        current_file_name="module.c",
+        project_source_files=[{
+            "file_name": "module.c",
+            "source_code": source,
+            "language": "c",
+        }],
+    )
+
+    assert analysis["status"] == "proven_dead"
+    assert analysis["target_kind"] == "FUNCTION"
+    assert analysis["candidate_count"] == 1
+    assert analysis["definition_count"] == 1
+    assert analysis["call_count"] == 0
+    assert analysis["address_taken"] == 0
+    assert analysis["remaining_references"] == 0
+
+
+def test_c_dead_code_planner_preserves_target_and_line_metadata_from_nested_locations():
+    normalized = PlannerAdapter().normalize_plan({
+        "plan_id": "c_dead_code_target_metadata",
+        "steps": [{
+            "step_id": "dead-1",
+            "refactoring": "Remove Dead Code",
+            "target": {
+                "file": "src/module.c",
+                "target": "unused_function",
+                "lines": [120],
+            },
+            "description": "remove function `unused_function`",
+            "parameters": {},
+        }],
+    })
+
+    action = normalized["actions"][0]
+    assert action["action_type"] == "remove_dead_code"
+    assert action["parameters"]["target_name"] == "unused_function"
+    assert action["parameters"]["method"] == "unused_function"
+    assert action["parameters"]["source_file"] == "src/module.c"
+    assert action["parameters"]["source_line"] == 120
+    assert action["parameters"]["target_metadata_present"] is True
+
+
+def test_c_dead_code_variable_target_name_uses_variable_analysis():
+    source = '''int process(void) {
+    int unused = 7;
+    return 1;
+}
+'''
+    analysis = c_transformers.resolve_c_dead_code_target(
+        source,
+        target_name="unused",
+        target_kind="VARIABLE",
+        current_file_name="module.c",
+        project_source_files=[{
+            "file_name": "module.c",
+            "source_code": source,
+            "language": "c",
+        }],
+    )
+
+    assert analysis["target_kind"] == "VARIABLE"
+    assert analysis["status"] == "proven_dead"
+    transformed, replacements = c_transformers.apply_remove_dead_code(
+        source,
+        "",
+        variable_name="unused",
+        target_kind="VARIABLE",
+        current_file_name="module.c",
+        project_source_files=[{
+            "file_name": "module.c",
+            "source_code": source,
+            "language": "c",
+        }],
+    )
+    assert replacements == 1
+    assert "int unused" not in transformed
+
+
+def test_c_dead_code_resolution_rejects_missing_metadata_before_auto_discovery():
+    source = "static int unused_function(void) { return 1; }\n"
+    analysis = c_transformers.resolve_c_dead_code_target(source)
+
+    assert analysis == {
+        "status": "review_required",
+        "reason": "DEAD_CODE_TARGET_METADATA_MISSING",
+        "target": "",
+        "target_name": "",
+        "target_kind": "",
+        "removable": False,
+        "candidate_count": 0,
+    }
+
+
+def test_c_dead_code_keeps_function_address_taken_and_cross_file_references():
+    source = "static int callback_target(int value) { return value + 1; }\n"
+    consumer = "int (*callback)(int) = callback_target;\n"
+    analysis = c_transformers.analyze_c_dead_code_target(
+        source,
+        "callback_target",
+        current_file_name="module.c",
+        project_source_files=[
+            {"file_name": "module.c", "source_code": source, "language": "c"},
+            {"file_name": "consumer.c", "source_code": consumer, "language": "c"},
+        ],
+    )
+
+    assert analysis["removable"] is False
+    assert analysis["status"] == "live_reference"
+    assert analysis["address_taken"] == 0
+    assert analysis["function_pointer_usage"] == 1
+    assert analysis["cross_file_reference"] == 1
+
+
+def test_c_dead_code_rejects_side_effecting_unused_variable_initializer():
+    source = '''int process(void) {
+    int unused = create_value();
+    return 1;
+}
+'''
+    analysis = c_transformers.resolve_c_dead_code_target(
+        source,
+        variable="unused",
+        target_kind="VARIABLE",
+        current_file_name="module.c",
+        project_source_files=[{
+            "file_name": "module.c",
+            "source_code": source,
+            "language": "c",
+        }],
+    )
+
+    assert analysis["status"] == "review_required"
+    assert analysis["reason"] == "VARIABLE_INITIALIZER_MAY_HAVE_SIDE_EFFECTS"
+    transformed, replacements = c_transformers.apply_remove_dead_code(
+        source,
+        "",
+        variable_name="unused",
+        target_kind="VARIABLE",
+        current_file_name="module.c",
+        project_source_files=[{
+            "file_name": "module.c",
+            "source_code": source,
+            "language": "c",
+        }],
+    )
+    assert transformed == source
+    assert replacements == 0
+
+
+def test_c_dead_code_agent_reports_missing_target_metadata():
+    source = "static int unused_function(void) { return 1; }\n"
+    result = SafeCodeTransformationValidationAgent().execute({
+        "request_id": "c_dead_code_missing_target_metadata",
+        "language": "c",
+        "source_files": [{
+            "file_name": "module.c",
+            "source_code": source,
+            "language": "c",
+            "source_mode": "raw",
+        }],
+        "refactoring_plan": {
+            "plan_id": "c_dead_code_missing_target_metadata",
+            "actions": [{
+                "action_type": "remove_dead_code",
+                "parameters": {"source_file": "module.c"},
+            }],
+            "behavior_tests": [],
+            "metadata": {},
+        },
+        "execution_options": _options(),
+    })
+    log = result["safety_report"]["transformation_log"][0]
+
+    assert log["replacements_count"] == 0
+    assert log["metadata"]["reason"] == "DEAD_CODE_TARGET_METADATA_MISSING"
+    assert log["metadata"]["candidate_count"] == 0
+    assert result["refactored_code"] == source
 
 
 def test_python_dead_code_anchor_marks_referenced_method_as_live_callable():
