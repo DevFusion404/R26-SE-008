@@ -38,7 +38,7 @@ _C_KEYWORDS = {
 _C_STANDARD_SHARED_SYMBOLS = {
     "BUFSIZ", "EOF", "EXIT_FAILURE", "EXIT_SUCCESS", "FILENAME_MAX",
     "L_tmpnam", "NULL", "SEEK_CUR", "SEEK_END", "SEEK_SET", "stderr",
-    "stdin", "stdout", "TMP_MAX",
+    "stdin", "stdout", "TMP_MAX", "false", "true",
 }
 MAX_EXTRACTED_HELPER_LOC = 40
 MAX_CANDIDATE_VALIDATION_ATTEMPTS = 64
@@ -149,6 +149,7 @@ def apply_extract_method(
         helper_matches = transformed_model.functions_by_name.get(new_method_name, [])
         scope_validation = _validate_transformed_scope(
             transformed,
+            original_source_code=source_code,
             source_method=method_name,
             helper_name=new_method_name,
             flow=flow,
@@ -660,6 +661,13 @@ def _c_local_declarations(text: str) -> dict[str, str]:
         if not statement or statement.startswith(("return ", "if ", "for ", "while ", "switch ", "case ")):
             continue
         declarations.update(_parse_c_declaration_statement(statement))
+    # Declarations in a for initializer are scoped variables too. The general
+    # statement scan intentionally skips control statements, so parse this
+    # declaration slot separately.
+    for match in re.finditer(r"\bfor\s*\(\s*(?P<initializer>[^;]+);", masked):
+        declarations.update(
+            _parse_c_declaration_statement(f"{match.group('initializer').strip()};")
+        )
     return declarations
 
 
@@ -792,10 +800,29 @@ def _c_shared_symbols(source_code: str, *, module: Any | None = None) -> set[str
     current_module = module or _parse_c_module(source_code)
     return (
         set(current_module.globals)
+        | {function.name for function in current_module.functions}
+        | _c_top_level_declaration_names(source_code)
         | _c_aggregate_instance_names(source_code)
         | _c_object_macros(source_code)
         | _C_STANDARD_SHARED_SYMBOLS
     )
+
+
+def _c_top_level_declaration_names(source_code: str) -> set[str]:
+    """Return file-scope objects missed by the deliberately narrow C model.
+
+    In particular this covers array objects and comma declarations such as
+    ``pthread_t workers[10]``. Statements inside function/aggregate bodies are
+    excluded by brace depth, so locals never become shared accidentally.
+    """
+
+    masked = mask_c_like(source_code)
+    names: set[str] = set()
+    for match in re.finditer(r"(?ms)(?P<statement>[^;{}]+;)", masked):
+        if _brace_depth_at(masked, match.start()) != 0:
+            continue
+        names.update(_parse_c_declaration_statement(match.group("statement")))
+    return names
 
 
 def _c_aggregate_instance_names(source_code: str) -> set[str]:
@@ -861,6 +888,22 @@ def _declaration_type_identifiers(text: str) -> set[str]:
         before_name = template.split("{name}", 1)[0]
         result.update(re.findall(r"\b[A-Za-z_][A-Za-z0-9_]*\b", before_name))
     return result - _C_KEYWORDS
+
+
+def _c_explicit_type_identifiers(text: str) -> set[str]:
+    """Return identifiers used as C type names rather than value reads."""
+
+    masked = mask_c_like(text)
+    tagged = set(re.findall(r"\b(?:struct|union|enum)\s+([A-Za-z_]\w*)", masked))
+    casts = {
+        match.group(1)
+        for match in re.finditer(
+            r"\(\s*(?:const\s+|volatile\s+|restrict\s+)*(?:struct\s+|union\s+|enum\s+)?"
+            r"([A-Za-z_]\w*)\s*\*+\s*\)",
+            masked,
+        )
+    }
+    return tagged | casts
 
 
 def _is_assigned_before_read(text: str, name: str) -> bool:
@@ -931,13 +974,14 @@ def _c_reads(text: str) -> set[str]:
     declared = set(_c_local_declarations(text))
     calls = set(re.findall(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*\(", masked))
     member_names = set(re.findall(r"(?:\.|->)\s*([A-Za-z_][A-Za-z0-9_]*)", masked))
-    type_names = _declaration_type_identifiers(text)
+    type_names = _declaration_type_identifiers(text) | _c_explicit_type_identifiers(text)
     return names - _C_KEYWORDS - calls - member_names - declared - type_names
 
 
 def _validate_transformed_scope(
     source_code: str,
     *,
+    original_source_code: str | None = None,
     source_method: str,
     helper_name: str,
     flow: CFlow,
@@ -970,13 +1014,33 @@ def _validate_transformed_scope(
     helper_free = _c_reads(helper.body)
     validation["undefined_identifiers"].extend(sorted(helper_free - helper_defined))
 
-    caller_defined = (
+    caller_defined_after = (
         set(_c_parameter_declarations(caller.params_raw))
         | set(_c_local_declarations(caller.body))
         | shared
     )
-    caller_free = _c_reads(caller.body)
-    validation["out_of_scope_identifiers"].extend(sorted(caller_free - caller_defined))
+    caller_unresolved_after = _c_reads(caller.body) - caller_defined_after
+
+    # C identifiers supplied by headers, typedefs and platform APIs cannot all
+    # be reconstructed lexically. Scope safety is about identifiers made
+    # invalid by this extraction, so compare the caller before and after and
+    # reject only newly unresolved names. Existing unresolved names remain the
+    # compiler/static validator's responsibility.
+    caller_unresolved_before: set[str] = set()
+    if original_source_code is not None:
+        original_model = _parse_c_module(original_source_code)
+        original_callers = original_model.functions_by_name.get(source_method, [])
+        if len(original_callers) == 1:
+            original_caller = original_callers[0]
+            original_defined = (
+                set(_c_parameter_declarations(original_caller.params_raw))
+                | set(_c_local_declarations(original_caller.body))
+                | _c_shared_symbols(original_source_code, module=original_model)
+            )
+            caller_unresolved_before = _c_reads(original_caller.body) - original_defined
+    validation["out_of_scope_identifiers"].extend(
+        sorted(caller_unresolved_after - caller_unresolved_before)
+    )
 
     helper_params = set(_c_parameter_declarations(helper.params_raw))
     for name in flow.inputs:
@@ -1163,15 +1227,30 @@ def _meaningfully_reduced(
         return False
     loc_reduction = before["loc"] - after["loc"]
     complexity_reduced = after["complexity"] < before["complexity"]
+    responsibilities_reduced = (
+        before.get("responsibility_count", before.get("statement_count", 0))
+        - after.get("responsibility_count", after.get("statement_count", 0))
+    )
     if before["loc"] > threshold:
         # A single cohesive extraction need not eliminate a Long Function in
         # one step. A straight-line routine can have no cyclomatic decrease,
         # yet still lose a real responsibility and substantial implementation.
         # Keep a non-trivial LOC floor so formatting-only wrappers never pass.
         required_reduction = max(MIN_EXTRACTED_LOC * 2, (before["loc"] + 12) // 13)
-        return after["loc"] <= threshold or (
-            loc_reduction >= required_reduction
-            and (complexity_reduced or selected_loc >= required_reduction)
+        return (
+            after["loc"] <= threshold
+            or (
+                loc_reduction >= required_reduction
+                and (
+                    complexity_reduced
+                    or selected_loc >= required_reduction
+                    or responsibilities_reduced >= 2
+                )
+            )
+            or (
+                complexity_reduced
+                and loc_reduction >= MIN_EXTRACTED_LOC * 2
+            )
         )
     return after["loc"] < before["loc"]
 

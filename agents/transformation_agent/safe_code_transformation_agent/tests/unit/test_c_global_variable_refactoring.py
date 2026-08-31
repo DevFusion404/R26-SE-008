@@ -278,6 +278,36 @@ int can_sell(int quantity) {
         "set_total_stock(get_total_stock() - quantity)" in transformed
 
 
+def test_c_encapsulate_variable_distinguishes_equality_from_assignment():
+    source = """
+int clientCount = 0;
+int Client[10];
+
+void accept_clients(void) {
+    if (clientCount == 1) {
+        Client[clientCount] = 0;
+    }
+    while (clientCount < 10) {
+        Client[clientCount] = clientCount;
+        clientCount++;
+    }
+}
+"""
+    transformed, replacements, metadata = c_transformers.apply_encapsulate_c_variable(
+        source,
+        variable_name="clientCount",
+        getter_name="get_clientCount",
+        setter_name="set_clientCount",
+    )
+
+    assert metadata["status"] == "success"
+    assert replacements > 0
+    assert "if (get_clientCount() == 1)" in transformed
+    assert "while (get_clientCount() < 10)" in transformed
+    assert "Client[get_clientCount()] = get_clientCount();" in transformed
+    assert "set_clientCount(get_clientCount() + 1);" in transformed
+
+
 def test_c_initializer_validation_accepts_equivalent_introduced_constant_macro():
     original = """
 int total_stock = 100;

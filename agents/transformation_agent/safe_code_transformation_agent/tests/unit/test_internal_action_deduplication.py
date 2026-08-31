@@ -115,3 +115,34 @@ def test_different_refactoring_family_or_target_is_retained():
     )
 
     assert retained == [different_method, different_family]
+
+
+def test_local_c_detector_never_classifies_nested_if_as_a_function():
+    nested_body = "\n".join(
+        f"            total += {value};" for value in range(36)
+    )
+    source = f'''int main(void) {{
+    int total = 0;
+    if (total == 0) {{
+        if (total < 10) {{
+{nested_body}
+        }}
+    }}
+    return total;
+}}
+'''
+
+    detected = LocalRefactorDetector().detect(
+        language="c",
+        file_name="Server.c",
+        source_code=source,
+        existing_actions=[],
+    )
+    methods = [
+        action.parameters.get("method")
+        for action in detected
+        if action.action_type == "extract_method"
+    ]
+
+    assert methods == ["main"]
+    assert "if" not in methods

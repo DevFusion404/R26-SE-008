@@ -2338,7 +2338,9 @@ def _c_access_edits(
             statement_mask,
         )
         direct_assignment = re.fullmatch(
-            rf"{re.escape(variable_name)}\s*(?P<operator>=|\+=|-=)\s*(?P<value>.+)",
+            rf"{re.escape(variable_name)}\s*"
+            rf"(?P<operator><<=|>>=|\+=|-=|\*=|/=|%=|&=|\|=|\^=|=(?!=))\s*"
+            rf"(?P<value>.+)",
             statement_mask,
             re.DOTALL,
         )
@@ -2361,7 +2363,7 @@ def _c_access_edits(
                 return [], False, "WRITE_TO_READ_ONLY_GLOBAL"
             operator = direct_assignment.group("operator")
             operator_match = re.match(
-                r"\s*(?P<operator>=|\+=|-=)",
+                r"\s*(?P<operator><<=|>>=|\+=|-=|\*=|/=|%=|&=|\|=|\^=|=(?!=))",
                 masked_code[end:statement_end],
             )
             if operator_match is None:
@@ -2377,7 +2379,11 @@ def _c_access_edits(
             ).strip()
             if not value:
                 return [], False, "ASSIGNMENT_VALUE_UNSUPPORTED"
-            replacement_value = value if operator == "=" else f"{getter_name}() {operator[0]} ({value})"
+            replacement_value = (
+                value
+                if operator == "="
+                else f"{getter_name}() {operator[:-1]} ({value})"
+            )
             edits.append((
                 statement_start,
                 statement_end + 1,
@@ -2390,7 +2396,10 @@ def _c_access_edits(
         # Assignment or ++/-- inside an expression (for example a for-loop or
         # ``total = counter++``) has value semantics that setters cannot safely
         # preserve without a full C AST. Refuse it instead of changing behavior.
-        if re.match(r"\s*(?:=|\+=|-=|\+\+|--)", after) or before.rstrip().endswith(("++", "--")):
+        if re.match(
+            r"\s*(?:<<=|>>=|\+=|-=|\*=|/=|%=|&=|\|=|\^=|\+\+|--|=(?!=))",
+            after,
+        ) or before.rstrip().endswith(("++", "--")):
             return [], False, "COMPLEX_WRITE_CONTEXT_UNSUPPORTED"
         edits.append((start, end, f"{getter_name}()"))
 

@@ -116,6 +116,54 @@ int compute_val(int a, int b, int c, int d, int e) {
 }
 """
 
+LOOP_TAIL_CONDITIONAL_C = """#include <stdio.h>
+
+void ChattingProcess(int list_mode, int client_count, int index) {
+    while (1) {
+        if (list_mode) {
+            int output_length = 0;
+            if (client_count == 1) {
+                output_length += 1;
+            } else {
+                for (int i = 0; i < client_count; i++) {
+                    if (i != index) {
+                        printf("%d\\n", i);
+                    }
+                }
+            }
+        }
+        break;
+    }
+}
+"""
+
+LOOP_TAIL_WITH_OTHER_DEEP_REGION_C = """#include <stdio.h>
+
+void ChattingProcess(int list_mode, int count, int index, int a, int b) {
+    while (1) {
+        if (list_mode) {
+            int output_length = 0;
+            for (int i = 0; i < count; i++) {
+                if (i != index) {
+                    output_length += printf("%d\\n", i);
+                }
+            }
+        } else {
+            int marker = 0;
+            if (a) {
+                marker++;
+                if (b) {
+                    while (marker < 2) {
+                        marker++;
+                    }
+                }
+            }
+        }
+        break;
+    }
+}
+"""
+
 
 def test_invert_c_condition():
     assert _invert_c_condition("a > 0") == "a <= 0"
@@ -191,6 +239,38 @@ def test_apply_replace_nested_conditional_inside_loop():
     assert meta["after_nesting_depth"] <= 2  # for loop (1) + guard ifs (1)
     assert meta["nesting_reduced"] is True
     assert "continue;" in transformed
+
+
+def test_apply_guard_clause_to_single_tail_if_inside_deep_loop():
+    transformed, count, meta = apply_replace_nested_conditional_with_guard_clauses(
+        LOOP_TAIL_CONDITIONAL_C,
+        method_name="ChattingProcess",
+    )
+
+    assert count == 1
+    assert meta["status"] == "success"
+    assert meta["guard_clause_strategy"] == "loop_tail_continue"
+    assert "if (i == index) continue;" in transformed
+    assert meta["after_nesting_depth"] < meta["before_nesting_depth"]
+
+
+def test_guard_clause_accepts_local_reduction_when_other_region_keeps_raw_depth():
+    transformed, count, meta = apply_replace_nested_conditional_with_guard_clauses(
+        LOOP_TAIL_WITH_OTHER_DEEP_REGION_C,
+        method_name="ChattingProcess",
+    )
+    validation = validate_c_guard_clauses(
+        LOOP_TAIL_WITH_OTHER_DEEP_REGION_C,
+        transformed,
+        method="ChattingProcess",
+    )
+
+    assert count == 1
+    assert meta["status"] == "success"
+    assert meta["after_nesting_depth"] == meta["before_nesting_depth"]
+    assert meta["after_conditional_nesting_score"] < meta["before_conditional_nesting_score"]
+    assert meta["smell_reduction"] == "REDUCED"
+    assert validation["passed"] is True
 
 
 def test_apply_replace_nested_conditional_non_terminal():
