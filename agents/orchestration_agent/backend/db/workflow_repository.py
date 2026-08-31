@@ -1,94 +1,102 @@
 """
-Workflow persistence
-====================
+Workflow persistence — the seam
+===============================
 R26-SE-008 | Bandara S M Y M | IT22277886
 
-Every SQL statement the DIWO workflow needs: the workflow rows themselves, the
-audit trail, and the feedback rows the ML Feedback Manager trains on. Route
-handlers never touch SQL — they go through the services, which come here.
+Every persistence call in this service comes through here, and this module
+decides which backend answers it:
 
-Moved out of db/database.py unchanged; the schema is untouched.
+    SUPABASE_URL + SUPABASE_KEY set  ->  db/supabase_repository.py
+    otherwise                        ->  db/sqlite_repository.py
+
+Nothing outside db/ knows which one is running. Services and routes import the
+same fourteen names they always have, so switching a deployment to Supabase is
+two environment variables and a schema, not a change to any caller.
+
+DISPATCHED PER CALL, not bound at import. config reads os.environ at import
+time and db/supabase_client.py calls load_dotenv() when it is first touched, so
+a decision frozen at import would be made before the .env file had been read.
+Resolving on each call also means a test can point the process at Supabase and
+back without reimporting the module tree. The cost is one dict lookup per query,
+against an HTTPS round trip or a SQLite write.
+
+FALLBACK IS DELIBERATE AND LOUD. If Supabase is asked for but unreachable —
+missing package, missing credentials — the first call raises rather than
+quietly writing to a local SQLite file that nobody will think to look in. A
+half-persisted audit trail is worse than a failure, because it looks complete.
 """
 
-import json
+import logging
 
-from db.database import get_db, now_iso
+import config
+from db.supabase_client import SupabaseUnavailable
+
+logger = logging.getLogger("diwo.repository")
 
 __all__ = [
     "create_workflow", "get_workflow", "update_workflow", "list_workflows",
     "log_event", "get_audit_logs", "save_feedback", "export_feedback_dataset",
     "get_impact_records", "save_impact_records", "delete_impact_records",
     "recorded_plan_step_keys", "plan_step_acceptance_stats", "PLAN_STEP_ACTIONS",
-    "parse_json_field", "now_iso",
+    "parse_json_field", "now_iso", "active_backend",
 ]
 
+_warned_misconfigured = False
 
-def parse_json_field(wf: dict, field: str):
-    """Decode one of the workflow row's *_json columns.
 
-    Returns None for an empty column, so callers can `or []` / `or {}` it.
+def _backend():
+    """The module that will answer this call.
+
+    The import is inside the branch on purpose: a SQLite deployment must not
+    need the supabase package installed to start, and this is the only place
+    that can hold that guarantee.
     """
-    val = wf.get(field)
-    if not val:
-        return None
-    return json.loads(val) if isinstance(val, str) else val
+    global _warned_misconfigured
+
+    if config.uses_supabase():
+        from db import supabase_repository
+        return supabase_repository
+
+    reason = config.supabase_misconfigured()
+    if reason and not _warned_misconfigured:
+        _warned_misconfigured = True
+        logger.warning("[DIWO] %s", reason)
+
+    from db import sqlite_repository
+    return sqlite_repository
+
+
+def active_backend() -> str:
+    """"supabase" or "sqlite" — for /api/health and the startup banner."""
+    return config.database_backend()
 
 
 # ---------- Workflow CRUD ----------
 
 def create_workflow(wf_id, target, language, smells):
-    db = get_db()
-    db.execute(
-        """INSERT INTO workflows
-           (id, target, language, status, created_at, updated_at, smells_json)
-           VALUES (?,?,?,?,?,?,?)""",
-        (wf_id, target, language, "smell_review", now_iso(), now_iso(), json.dumps(smells))
-    )
-    db.commit()
+    return _backend().create_workflow(wf_id, target, language, smells)
 
 
 def get_workflow(wf_id):
-    db = get_db()
-    row = db.execute("SELECT * FROM workflows WHERE id=?", (wf_id,)).fetchone()
-    if row is None:
-        return None
-    return dict(row)
+    return _backend().get_workflow(wf_id)
 
 
 def update_workflow(wf_id, **kwargs):
-    db = get_db()
-    kwargs["updated_at"] = now_iso()
-    set_clause = ", ".join(f"{k}=?" for k in kwargs)
-    values = list(kwargs.values()) + [wf_id]
-    db.execute(f"UPDATE workflows SET {set_clause} WHERE id=?", values)
-    db.commit()
+    return _backend().update_workflow(wf_id, **kwargs)
 
 
 def list_workflows():
-    db = get_db()
-    rows = db.execute("SELECT * FROM workflows ORDER BY created_at DESC").fetchall()
-    return [dict(r) for r in rows]
+    return _backend().list_workflows()
 
 
 # ---------- Audit Log ----------
 
 def log_event(workflow_id, stage, action, details=None, actor="developer"):
-    db = get_db()
-    db.execute(
-        """INSERT INTO audit_logs (workflow_id, stage, action, actor, details_json, timestamp)
-           VALUES (?,?,?,?,?,?)""",
-        (workflow_id, stage, action, actor, json.dumps(details or {}), now_iso())
-    )
-    db.commit()
+    return _backend().log_event(workflow_id, stage, action, details=details, actor=actor)
 
 
 def get_audit_logs(workflow_id):
-    db = get_db()
-    rows = db.execute(
-        "SELECT * FROM audit_logs WHERE workflow_id=? ORDER BY timestamp ASC",
-        (workflow_id,)
-    ).fetchall()
-    return [dict(r) for r in rows]
+    return _backend().get_audit_logs(workflow_id)
 
 
 # ---------- Feedback ----------
@@ -96,143 +104,57 @@ def get_audit_logs(workflow_id):
 def save_feedback(workflow_id, stage, action, smell_type=None, refactoring_type=None,
                   severity=None, reason=None, rating=None, accepted=False,
                   step_key=None):
-    db = get_db()
-    db.execute(
-        """INSERT INTO feedback_entries
-           (workflow_id, stage, action, smell_type, refactoring_type, severity, reason, rating, accepted, step_key, timestamp)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
-        (workflow_id, stage, action, smell_type, refactoring_type, severity,
-         reason, rating, 1 if accepted else 0, step_key, now_iso())
+    return _backend().save_feedback(
+        workflow_id, stage, action,
+        smell_type=smell_type, refactoring_type=refactoring_type,
+        severity=severity, reason=reason, rating=rating,
+        accepted=accepted, step_key=step_key,
     )
-    db.commit()
 
 
 def export_feedback_dataset():
-    db = get_db()
-    rows = db.execute("SELECT * FROM feedback_entries ORDER BY timestamp ASC").fetchall()
-    return [dict(r) for r in rows]
+    return _backend().export_feedback_dataset()
 
 
 # ---------- Step-level plan feedback ----------
 
-#: The two step-level Stage 2 actions. Session-level rows (plan_approved,
-#: plan_modified) are deliberately excluded everywhere below: one session-level
-#: approval is not evidence about each of its twelve steps, and counting it as
-#: such is what would make the acceptance statistics meaningless.
-PLAN_STEP_ACTIONS = ("plan_step_accepted", "plan_step_rejected")
+#: Re-exported so callers keep importing it from here. Both backends define the
+#: same tuple; this module is the one place that is allowed to name it.
+from db.sqlite_repository import PLAN_STEP_ACTIONS  # noqa: E402
 
 
 def recorded_plan_step_keys(workflow_id) -> set:
-    """Step identities this workflow has already written a step-level row for.
-
-    The frontend sends `modify` and then `approve` for the same review, so
-    without this the rejections recorded during modify would be written again
-    during approval and every rejected step would count twice.
-    """
-    db = get_db()
-    placeholders = ",".join("?" for _ in PLAN_STEP_ACTIONS)
-    rows = db.execute(
-        f"""SELECT DISTINCT step_key FROM feedback_entries
-            WHERE workflow_id=? AND action IN ({placeholders}) AND step_key IS NOT NULL""",
-        (workflow_id, *PLAN_STEP_ACTIONS),
-    ).fetchall()
-    return {row["step_key"] for row in rows}
+    return _backend().recorded_plan_step_keys(workflow_id)
 
 
 def plan_step_acceptance_stats():
-    """Real acceptance counts per (smell_type, refactoring_type), all workflows.
-
-    Only genuine step-level decisions are counted. Synthetic rows produced by
-    feedback_model/train_feedback_model.py never enter this table, and the
-    session-level actions are filtered out above, so what comes back is
-    developer behaviour and nothing else.
-
-    Returns {"pairs": {(smell_type, refactoring): {...}}, "prior": float|None,
-             "observations": int, "accepted": int}.
-    """
-    db = get_db()
-    placeholders = ",".join("?" for _ in PLAN_STEP_ACTIONS)
-    rows = db.execute(
-        f"""SELECT smell_type, refactoring_type,
-                   COUNT(*) AS observations,
-                   SUM(accepted) AS accepted
-            FROM feedback_entries
-            WHERE action IN ({placeholders})
-            GROUP BY smell_type, refactoring_type""",
-        PLAN_STEP_ACTIONS,
-    ).fetchall()
-
-    pairs = {}
-    total_observations = 0
-    total_accepted = 0
-    for row in rows:
-        observations = int(row["observations"] or 0)
-        accepted = int(row["accepted"] or 0)
-        total_observations += observations
-        total_accepted += accepted
-        pairs[(row["smell_type"], row["refactoring_type"])] = {
-            "observations": observations,
-            "accepted": accepted,
-        }
-
-    return {
-        "pairs": pairs,
-        # The global rate is the prior each pair is smoothed toward, so a
-        # sparse pair leans on this developer's overall behaviour rather than
-        # on a hard-coded 50%.
-        "prior": (total_accepted / total_observations) if total_observations else None,
-        "observations": total_observations,
-        "accepted": total_accepted,
-    }
+    return _backend().plan_step_acceptance_stats()
 
 
 # ---------- Selection Impact Records ----------
 
 def get_impact_records(workflow_id, model_version=None):
-    """Cached per-smell impact records for a workflow, newest model first.
-
-    Filtering by model_version is what keeps a stale record from a previous
-    model revision being served as if it were current.
-    """
-    db = get_db()
-    if model_version:
-        rows = db.execute(
-            """SELECT record_json FROM smell_impacts
-               WHERE workflow_id=? AND model_version=? ORDER BY id ASC""",
-            (workflow_id, model_version),
-        ).fetchall()
-    else:
-        rows = db.execute(
-            "SELECT record_json FROM smell_impacts WHERE workflow_id=? ORDER BY id ASC",
-            (workflow_id,),
-        ).fetchall()
-
-    return [json.loads(r["record_json"]) for r in rows]
+    return _backend().get_impact_records(workflow_id, model_version=model_version)
 
 
 def save_impact_records(workflow_id, records):
-    """Persist a workflow's impact records. Idempotent per (workflow, smell, model)."""
-    if not records:
-        return 0
-
-    db = get_db()
-    stamp = now_iso()
-    db.executemany(
-        """INSERT OR REPLACE INTO smell_impacts
-           (workflow_id, smell_id, model_version, record_json, computed_at)
-           VALUES (?,?,?,?,?)""",
-        [
-            (workflow_id, r.get("smell_id"), r.get("model_version"),
-             json.dumps(r), stamp)
-            for r in records
-        ],
-    )
-    db.commit()
-    return len(records)
+    return _backend().save_impact_records(workflow_id, records)
 
 
 def delete_impact_records(workflow_id):
-    """Drop a workflow's cached records — used when its smell list changes."""
-    db = get_db()
-    db.execute("DELETE FROM smell_impacts WHERE workflow_id=?", (workflow_id,))
-    db.commit()
+    return _backend().delete_impact_records(workflow_id)
+
+
+# ---------- Shared helpers ----------
+#
+# Pure functions with no backend behind them. parse_json_field decodes a value
+# that is a string under SQLite and a dict under Supabase, and already handled
+# both before either backend existed — which is why no caller had to change.
+
+def parse_json_field(wf: dict, field: str):
+    return _backend().parse_json_field(wf, field)
+
+
+def now_iso():
+    from db.sqlite_repository import now_iso as _now_iso
+    return _now_iso()
