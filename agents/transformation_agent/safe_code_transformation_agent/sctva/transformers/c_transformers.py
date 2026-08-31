@@ -1392,6 +1392,126 @@ def _c_string_mentions_identifier(source_code: str, identifier: str) -> bool:
     )
 
 
+def _c_function_reference_metrics(
+    target: str,
+    candidate: dict[str, Any],
+    repository_sources: Sequence[dict[str, Any]],
+) -> dict[str, Any]:
+    """Count C references by meaning before allowing a function deletion."""
+
+    metrics = {
+        "definition_count": 0,
+        "call_count": 0,
+        "address_taken": 0,
+        "function_pointer_usage": 0,
+        "macro_reference": 0,
+        "cross_file_reference": 0,
+        "remaining_references": 0,
+    }
+    for item in repository_sources:
+        code = str(item.get("source_code") or "")
+        definitions = [
+            definition
+            for definition in _c_function_definitions(code)
+            if definition["name"] == target
+        ]
+        metrics["definition_count"] += len(definitions)
+        occurrence_spans = _identifier_occurrences(code, target)
+        definition_spans = {
+            (int(definition["name_start"]), int(definition["name_end"]))
+            for definition in definitions
+        }
+        occurrence_spans = [span for span in occurrence_spans if span not in definition_spans]
+        if item.get("is_current"):
+            occurrence_spans = [
+                span for span in occurrence_spans
+                if span != (candidate["name_start"], candidate["name_end"])
+            ]
+
+        masked = _mask_c_non_code(code)
+        calls = [
+            span for span in occurrence_spans
+            if re.match(r"\s*\(", masked[span[1]:])
+        ]
+        addresses = [
+            span for span in occurrence_spans
+            if re.search(r"&\s*$", masked[:span[0]])
+        ]
+        macro_refs = [
+            span for span in occurrence_spans
+            if masked.rfind("\n", 0, span[0]) + 1 <= span[0]
+            and masked[masked.rfind("\n", 0, span[0]) + 1:span[0]].lstrip().startswith("#")
+        ]
+        non_call_references = [span for span in occurrence_spans if span not in calls]
+        non_call_references = [span for span in non_call_references if span not in macro_refs]
+        non_call_references = [span for span in non_call_references if span not in addresses]
+
+        metrics["call_count"] += len(calls)
+        metrics["address_taken"] += len(addresses)
+        metrics["macro_reference"] += len(macro_refs)
+        metrics["function_pointer_usage"] += len(non_call_references)
+        metrics["remaining_references"] += len(occurrence_spans)
+        if not item.get("is_current"):
+            metrics["cross_file_reference"] += len(occurrence_spans)
+        if _c_string_mentions_identifier(code, target):
+            metrics["remaining_references"] += 1
+            if not item.get("is_current"):
+                metrics["cross_file_reference"] += 1
+    return metrics
+
+
+def resolve_c_dead_code_target(
+    source_code: str,
+    *,
+    target_name: str = "",
+    method_name: str = "",
+    symbol: str = "",
+    function: str = "",
+    variable: str = "",
+    source_line: Optional[int] = None,
+    target_kind: str = "",
+    project_source_files: Sequence[Any] | None = None,
+    current_file_name: str = "",
+) -> dict[str, Any]:
+    """Resolve one C dead-code target without inferring an unnamed target."""
+
+    requested = next(
+        (
+            str(value).strip()
+            for value in (target_name, method_name, symbol, function, variable)
+            if str(value or "").strip()
+        ),
+        "",
+    )
+    requested_kind = str(target_kind or "").strip().upper()
+    if not method_name and requested_kind in {"VARIABLE", "DECLARATION", "DATA"}:
+        variable_target = str(variable or requested).strip()
+        return _analyze_c_variable_target(
+            source_code,
+            variable_target,
+            source_line=source_line,
+            project_source_files=project_source_files,
+            current_file_name=current_file_name,
+        )
+    if not requested and source_line is None:
+        return {
+            "status": "review_required",
+            "reason": "DEAD_CODE_TARGET_METADATA_MISSING",
+            "target": "",
+            "target_name": "",
+            "target_kind": "",
+            "removable": False,
+            "candidate_count": 0,
+        }
+    return analyze_c_dead_code_target(
+        source_code,
+        requested,
+        source_line=source_line,
+        project_source_files=project_source_files,
+        current_file_name=current_file_name,
+    )
+
+
 def analyze_c_dead_code_target(
     source_code: str,
     method_name: str = "",
@@ -1422,10 +1542,14 @@ def analyze_c_dead_code_target(
 
     if len(candidates) != 1:
         return {
-            "status": "not_found" if not candidates else "ambiguous",
+            "status": "review_required",
+            "reason": "DEAD_CODE_TARGET_NOT_FOUND" if not candidates else "AMBIGUOUS_C_DEAD_CODE_TARGET",
             "target": requested,
+            "target_name": requested,
+            "target_kind": "FUNCTION" if requested else "",
             "removable": False,
             "candidate_count": len(candidates),
+            "definition_count": len(candidates),
         }
 
     candidate = candidates[0]
@@ -1433,12 +1557,21 @@ def analyze_c_dead_code_target(
     result = {
         "status": "review_required",
         "target": target,
+        "target_name": target,
+        "target_kind": "FUNCTION",
         "removable": False,
         "candidate_count": 1,
         "static_internal": bool(candidate["static"]),
         "start_line": int(candidate["start_line"]),
         "end_line": int(candidate["end_line"]),
         "repository_reference_count": 0,
+        "definition_count": 1,
+        "call_count": 0,
+        "address_taken": 0,
+        "function_pointer_usage": 0,
+        "macro_reference": 0,
+        "cross_file_reference": 0,
+        "remaining_references": 0,
     }
     if target == "main":
         result.update(status="protected_entry_point", reason="main_is_never_removed")
@@ -1452,20 +1585,10 @@ def analyze_c_dead_code_target(
         project_source_files=project_source_files,
         current_file_name=current_file_name,
     )
-    reference_count = 0
-    for item in repository_sources:
-        occurrences = _identifier_occurrences(item["source_code"], target)
-        if item.get("is_current") is True:
-            occurrences = [
-                span for span in occurrences
-                if span != (candidate["name_start"], candidate["name_end"])
-            ]
-        reference_count += len(occurrences)
-        if _c_string_mentions_identifier(item["source_code"], target):
-            reference_count += 1
-
-    result["repository_reference_count"] = reference_count
-    if reference_count:
+    reference_metrics = _c_function_reference_metrics(target, candidate, repository_sources)
+    result.update(reference_metrics)
+    result["repository_reference_count"] = int(reference_metrics["remaining_references"])
+    if reference_metrics["remaining_references"]:
         result.update(status="live_reference", reason="repository_reference_found")
         return result
 
@@ -1476,6 +1599,98 @@ def analyze_c_dead_code_target(
 
     result.update(status="proven_dead", removable=True, reason="unused_static_internal_function")
     return result
+
+
+def _c_variable_declarations(source_code: str, name: str) -> list[dict[str, Any]]:
+    """Find simple declaration-only targets suitable for conservative removal."""
+
+    if not _C_IDENTIFIER_RE.fullmatch(str(name or "")):
+        return []
+    declarations: list[dict[str, Any]] = []
+    pattern = re.compile(
+        rf"(?m)^(?P<indent>[ \t]*)(?P<storage>(?:(?:static|const|volatile|register|auto)\s+)*)"
+        rf"(?P<type>(?:struct\s+[A-Za-z_]\w*|union\s+[A-Za-z_]\w*|enum\s+[A-Za-z_]\w*|[A-Za-z_]\w*))"
+        rf"(?P<pointers>\s*\**)\s+{re.escape(name)}\b"
+        rf"(?P<array>\s*\[[^\]]*\])?\s*(?:=\s*(?P<initializer>[^;]*))?;[ \t]*(?://.*)?$"
+    )
+    for match in pattern.finditer(_mask_c_non_code(source_code)):
+        line = _line_for_c_index(source_code, match.start())
+        declaration = source_code[match.start():match.end()]
+        initializer_match = re.search(r"=\s*(.*?)\s*;", declaration, flags=re.DOTALL)
+        declarations.append({
+            "name": name,
+            "start": match.start(),
+            "end": match.end(),
+            "line": line,
+            "declaration": declaration,
+            "initializer": str(initializer_match.group(1) if initializer_match else "").strip(),
+            "static": bool(match.group("storage")),
+        })
+    return declarations
+
+
+def _analyze_c_variable_target(
+    source_code: str,
+    variable_name: str,
+    *,
+    source_line: Optional[int],
+    project_source_files: Sequence[Any] | None,
+    current_file_name: str,
+) -> dict[str, Any]:
+    candidates = _c_variable_declarations(source_code, variable_name)
+    if source_line is not None:
+        candidates = [item for item in candidates if item["line"] == source_line]
+    base = {
+        "target": variable_name,
+        "target_name": variable_name,
+        "target_kind": "VARIABLE",
+        "removable": False,
+        "candidate_count": len(candidates),
+        "definition_count": len(candidates),
+        "call_count": 0,
+        "address_taken": 0,
+        "function_pointer_usage": 0,
+        "macro_reference": 0,
+        "cross_file_reference": 0,
+        "remaining_references": 0,
+    }
+    if len(candidates) != 1:
+        return {
+            **base,
+            "status": "review_required",
+            "reason": "DEAD_CODE_TARGET_NOT_FOUND" if not candidates else "AMBIGUOUS_C_DEAD_CODE_TARGET",
+        }
+    candidate = candidates[0]
+    base.update({
+        "start_line": candidate["line"],
+        "end_line": candidate["line"],
+        "initializer_side_effect_free": _is_literal_c_initializer(candidate["initializer"]),
+    })
+    if not base["initializer_side_effect_free"]:
+        return {**base, "status": "review_required", "reason": "VARIABLE_INITIALIZER_MAY_HAVE_SIDE_EFFECTS"}
+
+    repository_sources = _project_c_sources(
+        source_code,
+        project_source_files=project_source_files,
+        current_file_name=current_file_name,
+    )
+    references = 0
+    for item in repository_sources:
+        occurrences = _identifier_occurrences(item["source_code"], variable_name)
+        if item.get("is_current"):
+            occurrences = [
+                span for span in occurrences
+                if not (span[0] >= candidate["start"] and span[1] <= candidate["end"])
+            ]
+        references += len(occurrences)
+        if _c_string_mentions_identifier(item["source_code"], variable_name):
+            references += 1
+    base["remaining_references"] = references
+    base["repository_reference_count"] = references
+    if references:
+        return {**base, "status": "live_reference", "reason": "repository_reference_found"}
+    base.update(status="proven_dead", removable=True, reason="unused_side_effect_free_variable")
+    return base
 
 
 def proven_unused_static_functions(
@@ -1540,7 +1755,28 @@ def apply_remove_dead_code(
     project_source_files: Sequence[Any] | None = None,
     current_file_name: str = "",
     repository_complete: bool = False,
+    variable_name: str = "",
+    target_kind: str = "",
 ) -> Tuple[str, int]:
+    del repository_complete
+    if variable_name or str(target_kind or "").upper() == "VARIABLE":
+        target_variable = variable_name or method_name
+        analysis = _analyze_c_variable_target(
+            source_code,
+            target_variable,
+            source_line=source_line,
+            project_source_files=project_source_files,
+            current_file_name=current_file_name,
+        )
+        if analysis.get("removable") is not True:
+            return source_code, 0
+        declaration = _c_variable_declarations(source_code, target_variable)
+        if source_line is not None:
+            declaration = [item for item in declaration if item["line"] == source_line]
+        if len(declaration) != 1:
+            return source_code, 0
+        return _remove_c_span(source_code, int(declaration[0]["start"]), int(declaration[0]["end"]))
+
     if not method_name and source_line is not None:
         function_analysis = analyze_c_dead_code_target(
             source_code,
@@ -1886,6 +2122,12 @@ def apply_replace_nested_conditional_with_guard_clauses(
     source_code: str,
     method_name: Optional[str] = None,
     target_line: Optional[int] = None,
+    *,
+    source_line: Optional[int] = None,
+    start_line: Optional[int] = None,
+    end_line: Optional[int] = None,
+    target_lines: Optional[Sequence[Any]] = None,
+    source_file: str = "",
 ) -> Tuple[str, int, Dict[str, Any]]:
     """
     Transform nested conditionals in C into guard clauses where safe.
@@ -1893,7 +2135,16 @@ def apply_replace_nested_conditional_with_guard_clauses(
     and status='review_required'.
     """
     from .c_guard_clauses import apply_replace_nested_conditional_with_guard_clauses as _apply
-    return _apply(source_code, method_name=method_name, target_line=target_line)
+    return _apply(
+        source_code,
+        method_name=method_name,
+        target_line=target_line,
+        source_line=source_line,
+        start_line=start_line,
+        end_line=end_line,
+        target_lines=target_lines,
+        source_file=source_file,
+    )
 
 
 def validate_c_guard_clauses(
@@ -2087,7 +2338,9 @@ def _c_access_edits(
             statement_mask,
         )
         direct_assignment = re.fullmatch(
-            rf"{re.escape(variable_name)}\s*(?P<operator>=|\+=|-=)\s*(?P<value>.+)",
+            rf"{re.escape(variable_name)}\s*"
+            rf"(?P<operator><<=|>>=|\+=|-=|\*=|/=|%=|&=|\|=|\^=|=(?!=))\s*"
+            rf"(?P<value>.+)",
             statement_mask,
             re.DOTALL,
         )
@@ -2110,7 +2363,7 @@ def _c_access_edits(
                 return [], False, "WRITE_TO_READ_ONLY_GLOBAL"
             operator = direct_assignment.group("operator")
             operator_match = re.match(
-                r"\s*(?P<operator>=|\+=|-=)",
+                r"\s*(?P<operator><<=|>>=|\+=|-=|\*=|/=|%=|&=|\|=|\^=|=(?!=))",
                 masked_code[end:statement_end],
             )
             if operator_match is None:
@@ -2126,7 +2379,11 @@ def _c_access_edits(
             ).strip()
             if not value:
                 return [], False, "ASSIGNMENT_VALUE_UNSUPPORTED"
-            replacement_value = value if operator == "=" else f"{getter_name}() {operator[0]} ({value})"
+            replacement_value = (
+                value
+                if operator == "="
+                else f"{getter_name}() {operator[:-1]} ({value})"
+            )
             edits.append((
                 statement_start,
                 statement_end + 1,
@@ -2139,7 +2396,10 @@ def _c_access_edits(
         # Assignment or ++/-- inside an expression (for example a for-loop or
         # ``total = counter++``) has value semantics that setters cannot safely
         # preserve without a full C AST. Refuse it instead of changing behavior.
-        if re.match(r"\s*(?:=|\+=|-=|\+\+|--)", after) or before.rstrip().endswith(("++", "--")):
+        if re.match(
+            r"\s*(?:<<=|>>=|\+=|-=|\*=|/=|%=|&=|\|=|\^=|\+\+|--|=(?!=))",
+            after,
+        ) or before.rstrip().endswith(("++", "--")):
             return [], False, "COMPLEX_WRITE_CONTEXT_UNSUPPORTED"
         edits.append((start, end, f"{getter_name}()"))
 

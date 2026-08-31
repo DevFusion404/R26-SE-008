@@ -365,9 +365,13 @@ class StructuralValidator:
                                             "Hide Delegate structural validation failed."
                                             if hide_delegate_checks and not all(item.get("passed") for item in hide_delegate_checks)
                                             else (
-                                                "Rename Method structural validation failed."
-                                                if rename_method_checks and not all(item.get("passed") for item in rename_method_checks)
-                                                else f"Structural validation failed with score {score:.3f} < {threshold:.3f}."
+                                                "Replace Nested Conditional with Guard Clauses structural validation failed."
+                                                if guard_clause_checks and not all(item.get("passed") for item in guard_clause_checks)
+                                                else (
+                                                    "Rename Method structural validation failed."
+                                                    if rename_method_checks and not all(item.get("passed") for item in rename_method_checks)
+                                                    else f"Structural validation failed with score {score:.3f} < {threshold:.3f}."
+                                                )
                                             )
                                         )
                                     )
@@ -404,6 +408,7 @@ class StructuralValidator:
                 "move_method_validation": move_method_checks,
                 "inline_class_validation": inline_class_checks,
                 "inline_class_lineage": inline_class_lineage,
+                "guard_clause_validation": guard_clause_checks,
                 "c_global_variable_validation": c_global_variable_checks,
                 "hide_delegate_validation": hide_delegate_checks,
                 "rename_method_validation": rename_method_checks,
@@ -693,7 +698,25 @@ class StructuralValidator:
                 object_name=object_name,
                 parameter_name=parameter_name,
             )
-        return {"passed": False, "reason": "unsupported_language"}
+        if language == "c":
+            return c_transformers.validate_c_parameter_object(
+                original_code,
+                transformed_code,
+                method=method,
+                object_name=object_name,
+                parameter_name=parameter_name,
+            )
+        else:
+            result = {"passed": False, "reason": "unsupported_language"}
+        result["action_index"] = params.get("_sctva_action_index")
+        result["ledger_entry"] = dict(
+            params.get("parameter_object_ledger_entry")
+            or (params.get("applied_transformation_metadata") or {}).get(
+                "parameter_object_ledger_entry"
+            )
+            or {}
+        )
+        return result
 
     @staticmethod
     def _validate_python_parameter_object(
@@ -811,6 +834,9 @@ class StructuralValidator:
                 transformed_code,
                 method=method,
                 source_line=source_line,
+                target_name=str(params.get("target_name") or "").strip(),
+                target_kind=str(params.get("target_kind") or "").strip(),
+                applied_metadata=applied,
             )
         return {"passed": False, "reason": "unsupported_language"}
 
@@ -1347,11 +1373,17 @@ class StructuralValidator:
             or ""
         ).strip()
         helper_name = str(
+            (params.get("applied_transformation_metadata") or {}).get("extracted_method")
+            or (params.get("transformation_metadata") or {}).get("extracted_method")
+            or ""
+        ).strip() or str(
             params.get("new_method_name")
             or params.get("new_function_name")
             or params.get("extracted_method_name")
             or ""
         ).strip()
+        applied = params.get("applied_transformation_metadata")
+        applied = applied if isinstance(applied, dict) else {}
 
         before_module = _parse_c_module(original_code)
         after_module = _parse_c_module(transformed_code)
@@ -1370,12 +1402,33 @@ class StructuralValidator:
         before_target = next((f for f in before_module.functions if f.name == method_name), None) if method_name else None
         after_target = next((f for f in after_module.functions if f.name == method_name), None) if method_name else None
 
-        if before_target and after_target:
-            called = bool(re.search(rf"\b{re.escape(helper_name)}\s*\(", after_target.body))
-            loc_reduced = len(after_target.body.splitlines()) <= len(before_target.body.splitlines())
-            passed = helper_exists and (called or loc_reduced)
-        else:
-            passed = helper_exists
+        called = bool(
+            before_target
+            and after_target
+            and helper_name
+            and re.search(rf"\b{re.escape(helper_name)}\s*\(", after_target.body)
+        )
+        loc_reduced = bool(
+            before_target
+            and after_target
+            and len(after_target.body.splitlines()) < len(before_target.body.splitlines())
+        )
+        scope_validation = applied.get("scope_validation")
+        scope_validation = scope_validation if isinstance(scope_validation, dict) else {}
+        scope_data_flow = bool(scope_validation) and all(
+            not scope_validation.get(key)
+            for key in (
+                "undefined_identifiers",
+                "out_of_scope_identifiers",
+                "missing_inputs",
+                "missing_outputs",
+            )
+        )
+        data_flow_status = str((applied.get("validation") or {}).get("data_flow") or "")
+        if data_flow_status:
+            scope_data_flow = scope_data_flow and data_flow_status == "PASS"
+
+        passed = helper_exists and called and loc_reduced and scope_data_flow
 
         return {
             "passed": bool(passed),
@@ -1384,6 +1437,69 @@ class StructuralValidator:
             "helper": helper_name,
             "checks": {
                 "helper_exists": helper_exists,
+                "helper_called": called,
+                "source_loc_reduced": loc_reduced,
+                "scope_data_flow": scope_data_flow,
+            },
+        }
+
+    @staticmethod
+    def _validate_c_guard_clause_action(
+        *,
+        original_code: str,
+        transformed_code: str,
+        action: RefactoringAction,
+    ) -> Dict[str, Any]:
+        """Prove the expected C nesting reduction without relaxing safety."""
+
+        from ..transformers.c_extract_class import _parse_c_module
+        from ..transformers.c_guard_clauses import _if_nesting_depth
+
+        params = action.parameters or {}
+        applied = params.get("applied_transformation_metadata")
+        applied = applied if isinstance(applied, dict) else {}
+        method_name = str(
+            applied.get("source_method")
+            or params.get("source_method")
+            or params.get("method")
+            or params.get("function")
+            or ""
+        ).strip()
+        before = next(
+            (item for item in _parse_c_module(original_code).functions if item.name == method_name),
+            None,
+        )
+        after = next(
+            (item for item in _parse_c_module(transformed_code).functions if item.name == method_name),
+            None,
+        )
+        expected_guards = int(applied.get("guard_clauses_added") or 0)
+        before_depth = _if_nesting_depth(before.body) if before else 0
+        after_depth = _if_nesting_depth(after.body) if after else before_depth
+        guard_count = len(re.findall(r"\bif\s*\(!\s*\(", after.body if after else ""))
+        header_preserved = bool(before and after and before.header == after.header)
+        before_unsafe = len(re.findall(r"\b(?:goto|case|default)\b", _mask_c_like(before.body if before else "")))
+        after_unsafe = len(re.findall(r"\b(?:goto|case|default)\b", _mask_c_like(after.body if after else "")))
+        no_unsafe_constructs = after_unsafe <= before_unsafe
+        passed = bool(
+            before
+            and after
+            and header_preserved
+            and expected_guards > 0
+            and guard_count >= expected_guards
+            and after_depth < before_depth
+            and no_unsafe_constructs
+        )
+        return {
+            "passed": passed,
+            "language": "c",
+            "method": method_name,
+            "checks": {
+                "target_method_preserved": bool(before and after),
+                "signature_preserved": header_preserved,
+                "guard_clauses_present": guard_count >= expected_guards > 0,
+                "nesting_reduced": after_depth < before_depth,
+                "no_unsafe_control_construct": no_unsafe_constructs,
             },
         }
 
@@ -3085,26 +3201,56 @@ class StructuralValidator:
         *,
         method: str,
         source_line: int | None,
+        target_name: str = "",
+        target_kind: str = "",
+        applied_metadata: Dict[str, Any] | None = None,
     ) -> Dict[str, Any]:
-        from ..transformers.c_transformers import apply_remove_dead_code
+        from ..transformers.c_transformers import (
+            _identifier_occurrences,
+            apply_remove_dead_code,
+            resolve_c_dead_code_target,
+        )
 
-        expected, replacements = apply_remove_dead_code(
+        applied_metadata = applied_metadata if isinstance(applied_metadata, dict) else {}
+        effective_target = str(target_name or method or "").strip()
+        effective_kind = str(target_kind or applied_metadata.get("target_kind") or "").strip()
+        variable_name = effective_target if effective_kind.upper() == "VARIABLE" else ""
+        resolution = resolve_c_dead_code_target(
             original,
-            method,
+            target_name=effective_target,
+            method_name=method if not variable_name else "",
+            variable=variable_name,
+            target_kind=effective_kind,
             source_line=source_line,
         )
-        target_existed = replacements == 1
+        expected, replacements = apply_remove_dead_code(
+            original,
+            method if not variable_name else "",
+            source_line=source_line,
+            variable_name=variable_name,
+            target_kind=effective_kind,
+        )
+        target_existed = bool(
+            resolution.get("candidate_count") == 1
+            and resolution.get("removable") is True
+        )
+        if not effective_target and source_line is not None:
+            target_existed = replacements == 1
         original_summary = summarize_c_source(original)
         transformed_summary = summarize_c_source(transformed)
         original_count = int(original_summary.get("function_count", 0))
         transformed_count = int(transformed_summary.get("function_count", 0))
-        expected_removed = [method] if method else []
+        expected_removed = [effective_target] if effective_target else []
         original_functions = set((original_summary.get("functions") or {}).keys())
         transformed_functions = set((transformed_summary.get("functions") or {}).keys())
         function_count_changed_as_expected = (
             transformed_count >= original_count - 1
-            if method
+            if effective_kind.upper() != "VARIABLE" and effective_target
             else transformed_count == original_count
+        )
+        transformed_occurrences = (
+            _identifier_occurrences(transformed, effective_target)
+            if effective_target else []
         )
         checks = {
             "target_existed_before": target_existed,
@@ -3112,29 +3258,33 @@ class StructuralValidator:
                 target_existed
                 and transformed != original
                 and (
-                    not method
-                    or not re.search(rf"\b{re.escape(method)}\b", transformed)
+                    not effective_target
+                    or not transformed_occurrences
                 )
             ),
             "no_required_referenced_code_removed": (
-                not method or len(re.findall(rf"\b{re.escape(method)}\b", original)) == 1
+                not effective_target
+                or int(resolution.get("remaining_references") or 0) == 0
             ),
             "unrelated_source_preserved": (
                 target_existed
                 and (
-                    (original_functions - {method}) <= transformed_functions
-                    if method
+                    (original_functions - {effective_target}) <= transformed_functions
+                    if effective_target and effective_kind.upper() != "VARIABLE"
                     else expected == transformed
                 )
             ),
             "function_count_changed_as_expected": function_count_changed_as_expected,
+            "target_resolved": target_existed,
+            "remaining_references": int(resolution.get("remaining_references") or 0) == 0,
         }
         return {
             "passed": all(checks.values()),
             "status": "PASS" if all(checks.values()) else "FAIL",
             "language": "c",
-            "target_kind": "static_function" if method else "line_target",
-            "target": method,
+            "target_kind": effective_kind or ("FUNCTION" if effective_target else "line_target"),
+            "target": effective_target,
+            "resolution": resolution,
             "original_function_count": original_count,
             "transformed_function_count": transformed_count,
             "expected_removed": expected_removed,

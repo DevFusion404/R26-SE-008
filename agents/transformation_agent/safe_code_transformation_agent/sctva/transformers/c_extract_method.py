@@ -35,6 +35,13 @@ _C_KEYWORDS = {
     "restrict", "return", "short", "signed", "sizeof", "static", "struct", "switch", "typedef",
     "union", "unsigned", "void", "volatile", "while", "_Bool", "_Complex", "_Imaginary",
 }
+_C_STANDARD_SHARED_SYMBOLS = {
+    "BUFSIZ", "EOF", "EXIT_FAILURE", "EXIT_SUCCESS", "FILENAME_MAX",
+    "L_tmpnam", "NULL", "SEEK_CUR", "SEEK_END", "SEEK_SET", "stderr",
+    "stdin", "stdout", "TMP_MAX", "false", "true",
+}
+MAX_EXTRACTED_HELPER_LOC = 40
+MAX_CANDIDATE_VALIDATION_ATTEMPTS = 64
 
 
 @dataclass
@@ -45,6 +52,7 @@ class CFlow:
     declarations: dict[str, str]
     defined_before: set[str]
     pointer_like: set[str]
+    scope_validation: dict[str, list[str]]
 
 
 def target_match_count(
@@ -109,7 +117,7 @@ def apply_extract_method(
 
     parameter_declarations = _c_parameter_declarations(function.params_raw)
     before_metrics = _function_metrics(source_code, function)
-    candidate = _select_candidate(
+    candidates, candidate_reason = _select_candidates(
         source_code,
         function,
         statements,
@@ -117,55 +125,84 @@ def apply_extract_method(
         start_line=start_line,
         end_line=end_line,
     )
-    if candidate is None:
-        return _review(source_code, "NO_SAFE_COHESIVE_BLOCK", {**metadata, "before_metrics": before_metrics})
-
-    selected, flow = candidate
-    parameter_count = len(flow.inputs) + len(flow.outputs)
-    if parameter_count > MAX_EXTRACTED_PARAMETERS:
-        return _review(source_code, "TOO_MANY_PARAMETERS", {**metadata, "before_metrics": before_metrics})
-
-    transformed = _rewrite(
-        source_code,
-        function=function,
-        selected=selected,
-        flow=flow,
-        new_method_name=new_method_name,
-    )
-
-    transformed_targets = _resolve_targets(transformed, method_name, method_signature)
-    transformed_model = _parse_c_module(transformed)
-    if len(transformed_targets) != 1:
-        return _review(source_code, "POST_TRANSFORM_TARGET_VALIDATION_FAILED", {**metadata, "before_metrics": before_metrics})
-
-    after_function = transformed_targets[0]
-    after_metrics = _function_metrics(transformed, after_function)
-    helper_matches = transformed_model.functions_by_name.get(new_method_name, [])
-
-    # Check extracted helper metrics to ensure it does NOT introduce a LongFunction smell (>40 LOC)
-    helper_loc = _line_of(transformed, helper_matches[0].end - 1) - _line_of(transformed, helper_matches[0].start) + 1 if helper_matches else 0
-
-    structural_passed = len(helper_matches) == 1 and re.search(
-        rf"\b{re.escape(new_method_name)}\s*\(", after_function.body
-    ) is not None
-    reduction_passed = _meaningfully_reduced(before_metrics, after_metrics, selected, threshold=40)
-    helper_smell_free = helper_loc <= 40
-
-    if not structural_passed or not reduction_passed or not helper_smell_free:
-        reason = "EXTRACT_FUNCTION_STRUCTURE_NOT_PROVEN" if not structural_passed else ("HELPER_LONG_FUNCTION_SMELL" if not helper_smell_free else "LONG_FUNCTION_NOT_REDUCED")
-        return _review(
+    if not candidates:
+        return _review(source_code, candidate_reason, {**metadata, "before_metrics": before_metrics})
+    candidate_attempts: list[dict[str, Any]] = []
+    last_reason = candidate_reason or "NO_SAFE_COHESIVE_BLOCK"
+    for selected, flow in candidates:
+        transformed = _rewrite(
             source_code,
-            reason,
-            {**metadata, "before_metrics": before_metrics, "after_metrics": after_metrics},
+            function=function,
+            selected=selected,
+            flow=flow,
+            new_method_name=new_method_name,
         )
+        transformed_targets = _resolve_targets(transformed, method_name, method_signature)
+        transformed_model = _parse_c_module(transformed)
+        if len(transformed_targets) != 1:
+            last_reason = "POST_TRANSFORM_TARGET_VALIDATION_FAILED"
+            candidate_attempts.append(_candidate_attempt(selected, last_reason))
+            continue
 
-    # Compiler validation using GCC/Clang if available
-    compile_status, compile_msg = _verify_c_compilation(transformed)
-    if compile_status == "FAIL":
+        after_function = transformed_targets[0]
+        after_metrics = _function_metrics(transformed, after_function)
+        helper_matches = transformed_model.functions_by_name.get(new_method_name, [])
+        scope_validation = _validate_transformed_scope(
+            transformed,
+            original_source_code=source_code,
+            source_method=method_name,
+            helper_name=new_method_name,
+            flow=flow,
+        )
+        helper_loc = (
+            _line_of(transformed, helper_matches[0].end - 1)
+            - _line_of(transformed, helper_matches[0].start)
+            + 1
+            if helper_matches
+            else 0
+        )
+        structural_passed = len(helper_matches) == 1 and re.search(
+            rf"\b{re.escape(new_method_name)}\s*\(", after_function.body
+        ) is not None
+        reduction_passed = _meaningfully_reduced(
+            before_metrics,
+            after_metrics,
+            selected,
+            threshold=MAX_EXTRACTED_HELPER_LOC,
+        )
+        helper_smell_free = helper_loc <= MAX_EXTRACTED_HELPER_LOC
+        if not _scope_validation_passed(scope_validation):
+            last_reason = "UNSAFE_C_EXTRACT_METHOD_DATA_FLOW"
+        elif not structural_passed:
+            last_reason = "EXTRACT_FUNCTION_STRUCTURE_NOT_PROVEN"
+        elif not helper_smell_free:
+            last_reason = "HELPER_LONG_FUNCTION_SMELL"
+        elif not reduction_passed:
+            last_reason = "LONG_FUNCTION_NOT_REDUCED"
+        else:
+            compile_status, compile_msg = _verify_c_compilation(transformed)
+            if compile_status != "FAIL":
+                break
+            last_reason = f"COMPILATION_FAILED: {compile_msg}"
+
+        candidate_attempts.append(
+            _candidate_attempt(
+                selected,
+                last_reason,
+                after_metrics=after_metrics,
+                helper_loc=helper_loc,
+                scope_validation=scope_validation,
+            )
+        )
+    else:
         return _review(
             source_code,
-            f"COMPILATION_FAILED: {compile_msg}",
-            {**metadata, "before_metrics": before_metrics, "after_metrics": after_metrics},
+            last_reason,
+            {
+                **metadata,
+                "before_metrics": before_metrics,
+                "candidate_attempts": candidate_attempts,
+            },
         )
 
     metadata.update({
@@ -185,9 +222,12 @@ def apply_extract_method(
         "before_metrics": before_metrics,
         "after_metrics": after_metrics,
         "compiler_validation": compile_msg,
+        "scope_validation": scope_validation,
+        "candidate_attempts": candidate_attempts,
         "validation": {
             "target_resolution": "PASS",
-            "data_flow": "PASS",
+            "data_flow": "PASS" if _scope_validation_passed(scope_validation) else "FAIL",
+            "scope": "PASS" if _scope_validation_passed(scope_validation) else "FAIL",
             "structural": "PASS",
             "no_severe_new_smell": "PASS" if helper_smell_free else "FAIL",
             "long_method_reduction": "PASS" if reduction_passed else "FAIL",
@@ -216,7 +256,7 @@ def _signature_matches(function: CFunction, signature: str) -> bool:
     return normalized in {normalize_signature(rendered), normalize_signature(function.header)}
 
 
-def _select_candidate(
+def _select_candidates(
     source_code: str,
     function: CFunction,
     statements: Sequence[StatementSpan],
@@ -224,51 +264,72 @@ def _select_candidate(
     *,
     start_line: int | None,
     end_line: int | None,
-    target_loc_threshold: int = 40,
-) -> tuple[list[StatementSpan], CFlow] | None:
+    target_loc_threshold: int = MAX_EXTRACTED_HELPER_LOC,
+) -> tuple[list[tuple[list[StatementSpan], CFlow]], str]:
+    """Return safe extraction alternatives, best first.
+
+    A C function often contains one long loop or conditional.  Treating that
+    compound statement as indivisible pushes the entire block into one helper,
+    which simply recreates the Long Function smell.  We also inspect complete
+    direct statements in nested control blocks, while retaining the enclosing
+    function as the data-flow boundary.
+    """
+
     before_loc = _line_of(source_code, function.end - 1) - _line_of(source_code, function.start) + 1
-    windows = candidate_windows(
+    windows = _candidate_windows_for_function(
+        source_code,
+        function,
         statements,
         start_line=start_line,
         end_line=end_line,
-        source=source_code,
     )
+    module = _parse_c_module(source_code)
+    shared_symbols = _c_shared_symbols(source_code, module=module)
     scored: list[tuple[float, list[StatementSpan], CFlow]] = []
+    saw_unsafe_data_flow = False
     for window in windows:
         text = source_code[window[0].start:window[-1].end]
         if has_unsafe_cross_boundary_flow(text, language="c"):
             continue
         if re.search(r"\b(?:typedef|struct|union|enum)\b[^;{]*\{", mask_c_like(text)):
             continue
-        first_index = statements.index(window[0])
-        last_index = statements.index(window[-1]) + 1
-        if len(statements) - len(window) < 1:
+        if window[0].start <= function.open_brace + 1 and window[-1].end >= function.end - 1:
             continue
-        flow = _c_flow(
+        flow = _c_flow_for_selection(
             source_code,
-            statements,
-            first_index,
-            last_index,
+            function,
+            window,
             parameter_declarations,
+            shared_symbols=shared_symbols,
         )
-        if flow is None or len(flow.inputs) + len(flow.outputs) > MAX_EXTRACTED_PARAMETERS:
+        if flow is None:
+            saw_unsafe_data_flow = True
+            continue
+        if not _scope_validation_passed(flow.scope_validation):
+            saw_unsafe_data_flow = True
+            continue
+        if len(flow.inputs) + len(flow.outputs) > MAX_EXTRACTED_PARAMETERS:
             continue
         loc = nonblank_loc(text)
         complexity = control_complexity(text)
         if not (start_line and end_line) and loc < MIN_EXTRACTED_LOC and complexity <= 1:
             continue
 
-        estimated_after_loc = before_loc - loc + 2
+        estimated_after_loc = before_loc - loc + 1
         estimated_helper_loc = loc + 3
+        # Never prefer a candidate that is predicted to create another Long
+        # Function.  Actual helper metrics are checked again after rewriting.
+        if estimated_helper_loc > target_loc_threshold:
+            continue
 
-        threshold_reducing_bonus = 0.0
+        reduction_bonus = 0.0
         if before_loc > target_loc_threshold:
-            if estimated_after_loc <= target_loc_threshold and estimated_helper_loc <= target_loc_threshold:
-                threshold_reducing_bonus = 1000.0
-            elif estimated_after_loc <= target_loc_threshold:
-                threshold_reducing_bonus = 500.0
-            else:
-                threshold_reducing_bonus = -500.0
+            if estimated_after_loc <= target_loc_threshold:
+                reduction_bonus = 1000.0
+            elif estimated_after_loc < before_loc:
+                # A sound extraction can still be valuable when a very large
+                # function needs several successive, bounded extractions.
+                reduction_bonus = min(loc * 3.0, 120.0)
 
         hint_bonus = 0.0
         if start_line and end_line:
@@ -281,18 +342,196 @@ def _select_candidate(
 
         cohesion = len(set(flow.inputs) & identifiers(text)) + len(flow.outputs)
         score = (
-            threshold_reducing_bonus
+            reduction_bonus
             + hint_bonus
-            + complexity * 4.0
-            + loc * 2.0
+            + complexity * 5.0
+            + loc * 3.0
             + cohesion
             - (len(flow.inputs) + len(flow.outputs)) * 0.5
         )
         scored.append((score, list(window), flow))
     if not scored:
-        return None
-    scored.sort(key=lambda item: (item[0], len(item[1])), reverse=True)
-    return scored[0][1], scored[0][2]
+        return [], "UNSAFE_C_EXTRACT_METHOD_DATA_FLOW" if saw_unsafe_data_flow else "NO_SAFE_COHESIVE_BLOCK"
+    scored.sort(key=lambda item: (item[0], nonblank_loc("".join(part.text for part in item[1]))), reverse=True)
+    # Candidate generation is intentionally broad, but transformation and
+    # compiler validation are comparatively expensive. The best ranked safe
+    # alternatives provide useful fallback without unbounded work on a large
+    # repository.
+    return [
+        (window, flow)
+        for _, window, flow in scored[:MAX_CANDIDATE_VALIDATION_ATTEMPTS]
+    ], ""
+
+
+def _select_candidate(
+    source_code: str,
+    function: CFunction,
+    statements: Sequence[StatementSpan],
+    parameter_declarations: dict[str, str],
+    *,
+    start_line: int | None,
+    end_line: int | None,
+    target_loc_threshold: int = MAX_EXTRACTED_HELPER_LOC,
+) -> tuple[tuple[list[StatementSpan], CFlow] | None, str]:
+    """Compatibility wrapper for callers that need only the best candidate."""
+
+    candidates, reason = _select_candidates(
+        source_code,
+        function,
+        statements,
+        parameter_declarations,
+        start_line=start_line,
+        end_line=end_line,
+        target_loc_threshold=target_loc_threshold,
+    )
+    return (candidates[0], "") if candidates else (None, reason)
+
+
+def _candidate_windows_for_function(
+    source_code: str,
+    function: CFunction,
+    statements: Sequence[StatementSpan],
+    *,
+    start_line: int | None,
+    end_line: int | None,
+) -> list[list[StatementSpan]]:
+    """Collect direct windows at the function and safe nested-block levels."""
+
+    groups: list[list[StatementSpan]] = [list(statements)]
+    seen_blocks: set[tuple[int, int]] = set()
+
+    def visit(block_start: int, block_end: int) -> None:
+        key = (block_start, block_end)
+        if key in seen_blocks or block_end <= block_start:
+            return
+        seen_blocks.add(key)
+        nested = direct_c_like_statements(
+            source_code[block_start:block_end],
+            body_offset=block_start,
+        )
+        if len(nested) >= 2:
+            groups.append(nested)
+        for statement in nested:
+            for child_start, child_end in _control_block_bodies(source_code, statement):
+                visit(child_start, child_end)
+
+    for statement in statements:
+        for block_start, block_end in _control_block_bodies(source_code, statement):
+            visit(block_start, block_end)
+
+    windows: list[list[StatementSpan]] = []
+    seen_windows: set[tuple[int, int]] = set()
+    for group in groups:
+        for window in candidate_windows(
+            group,
+            start_line=start_line,
+            end_line=end_line,
+            source=source_code,
+        ):
+            key = (window[0].start, window[-1].end)
+            if key not in seen_windows:
+                seen_windows.add(key)
+                windows.append(window)
+    return windows
+
+
+def _control_block_bodies(source_code: str, statement: StatementSpan) -> list[tuple[int, int]]:
+    """Return bodies belonging to C control statements, never initializers."""
+
+    text = source_code[statement.start:statement.end]
+    masked = mask_c_like(text)
+    bodies: list[tuple[int, int]] = []
+    for match in re.finditer(r"\{", masked):
+        prefix = masked[:match.start()]
+        # The last control token before this brace must be uninterrupted by a
+        # statement terminator. This excludes C aggregate initializers.
+        tail = prefix[max(prefix.rfind(";"), prefix.rfind("{"), prefix.rfind("}")) + 1:]
+        if not re.search(r"\b(?:if|else|for|while|switch|do)\b", tail):
+            continue
+        close = _find_matching_c_delimiter(masked, match.start(), "{", "}")
+        if close is not None and close > match.start() + 1:
+            bodies.append((statement.start + match.start() + 1, statement.start + close))
+    return bodies
+
+
+def _c_flow_for_selection(
+    source_code: str,
+    function: CFunction,
+    selected: Sequence[StatementSpan],
+    parameter_declarations: dict[str, str],
+    *,
+    shared_symbols: set[str] | None = None,
+) -> CFlow | None:
+    """Compute data flow against the full function, including nested scopes."""
+
+    selection_start, selection_end = selected[0].start, selected[-1].end
+    body_start, body_end = function.open_brace + 1, function.end - 1
+    before_text = source_code[body_start:selection_start]
+    selected_text = source_code[selection_start:selection_end]
+    after_text = source_code[selection_end:body_end]
+    before_declarations = _c_local_declarations(before_text)
+    selected_declarations = _c_local_declarations(selected_text)
+    if shared_symbols is None:
+        module = _parse_c_module(source_code)
+        shared_symbols = _c_shared_symbols(source_code, module=module)
+    declarations = {**parameter_declarations, **before_declarations, **selected_declarations}
+    defined_before = set(parameter_declarations) | set(before_declarations)
+    pointer_like = {
+        name
+        for name, declaration in declarations.items()
+        if _is_pointer_like_declaration(declaration)
+    }
+    reads = _c_reads(selected_text)
+    direct_writes = _c_writes(selected_text) - (_c_member_writes(selected_text) & pointer_like) - shared_symbols
+    address_writes = _c_address_output_writes(selected_text, declarations)
+    writes = direct_writes | address_writes | set(selected_declarations)
+    reads_after = _c_reads(after_text)
+    # A nested extraction can execute repeatedly inside an enclosing loop.
+    # A value written in the helper may therefore be required by the next loop
+    # iteration even when it is not textually read after the selected range.
+    nested_selection = _brace_depth_at(mask_c_like(source_code), selection_start) > 1
+    required_after = reads_after | (defined_before if nested_selection else set())
+    outputs = sorted(writes & required_after)
+    helper_locals = {
+        name
+        for name in before_declarations
+        if name not in outputs
+        and _is_assigned_before_read(selected_text, name)
+        and _can_redeclare_in_helper(before_declarations[name])
+    }
+    inputs = sorted((reads & defined_before) - set(outputs) - helper_locals)
+    locals_only = sorted((set(selected_declarations) - set(outputs)) | helper_locals)
+    missing_inputs = sorted(reads - defined_before - set(selected_declarations) - shared_symbols)
+    selected_outputs = set(selected_declarations) & reads_after
+    unsupported_selected_outputs = {
+        name
+        for name in selected_outputs
+        if name in pointer_like or _is_multi_declaration(selected_text, name)
+    }
+    missing_outputs = sorted(
+        unsupported_selected_outputs | {
+            name for name in (writes & reads_after) if name not in outputs
+        }
+    )
+    scope_validation = {
+        "undefined_identifiers": [],
+        "out_of_scope_identifiers": [],
+        "missing_inputs": missing_inputs,
+        "missing_outputs": missing_outputs,
+    }
+    if any(name not in declarations for name in [*inputs, *outputs]):
+        scope_validation["missing_inputs"] = sorted(set(scope_validation["missing_inputs"]) | {
+            name for name in [*inputs, *outputs] if name not in declarations
+        })
+    return CFlow(
+        inputs,
+        outputs,
+        locals_only,
+        declarations,
+        defined_before,
+        pointer_like,
+        scope_validation,
+    )
 
 
 def _c_flow(
@@ -307,6 +546,8 @@ def _c_flow(
     after_text = "".join(item.text for item in statements[end_index:])
     before_declarations = _c_local_declarations(before_text)
     selected_declarations = _c_local_declarations(selected_text)
+    module = _parse_c_module(source_code)
+    shared_symbols = _c_shared_symbols(source_code, module=module)
     declarations = {**parameter_declarations, **before_declarations, **selected_declarations}
     defined_before = set(parameter_declarations) | set(before_declarations)
     pointer_like = {
@@ -315,18 +556,52 @@ def _c_flow(
         if _is_pointer_like_declaration(declaration)
     }
     reads = _c_reads(selected_text)
-    direct_writes = _c_writes(selected_text)
+    direct_writes = _c_writes(selected_text) - (_c_member_writes(selected_text) & pointer_like) - shared_symbols
     address_writes = _c_address_output_writes(selected_text, declarations)
     writes = direct_writes | address_writes | set(selected_declarations)
     reads_after = _c_reads(after_text)
-    if direct_writes & reads_after & pointer_like:
-        return None
-    outputs = sorted(name for name in (writes & reads_after) if name not in pointer_like)
-    inputs = sorted((reads & defined_before) - set(outputs))
-    locals_only = sorted(writes - set(outputs))
+    outputs = sorted(writes & reads_after)
+    helper_locals = {
+        name
+        for name in before_declarations
+        if name not in outputs
+        and _is_assigned_before_read(selected_text, name)
+        and _can_redeclare_in_helper(before_declarations[name])
+    }
+    inputs = sorted((reads & defined_before) - set(outputs) - helper_locals)
+    locals_only = sorted((set(selected_declarations) - set(outputs)) | helper_locals)
+    missing_inputs = sorted(reads - defined_before - set(selected_declarations) - shared_symbols)
+    selected_outputs = set(selected_declarations) & reads_after
+    unsupported_selected_outputs = {
+        name
+        for name in selected_outputs
+        if name in pointer_like or _is_multi_declaration(selected_text, name)
+    }
+    missing_outputs = sorted(
+        unsupported_selected_outputs | {
+            name for name in (writes & reads_after)
+            if name not in outputs
+        }
+    )
+    scope_validation = {
+        "undefined_identifiers": [],
+        "out_of_scope_identifiers": [],
+        "missing_inputs": missing_inputs,
+        "missing_outputs": missing_outputs,
+    }
     if any(name not in declarations for name in [*inputs, *outputs]):
-        return None
-    return CFlow(inputs, outputs, locals_only, declarations, defined_before, pointer_like)
+        scope_validation["missing_inputs"] = sorted(set(scope_validation["missing_inputs"]) | {
+            name for name in [*inputs, *outputs] if name not in declarations
+        })
+    return CFlow(
+        inputs,
+        outputs,
+        locals_only,
+        declarations,
+        defined_before,
+        pointer_like,
+        scope_validation,
+    )
 
 
 def _c_parameter_declarations(params_raw: str) -> dict[str, str]:
@@ -372,21 +647,278 @@ def _split_top_level(value: str) -> list[str]:
 
 
 def _c_local_declarations(text: str) -> dict[str, str]:
+    """Return simple local declaration templates, including comma declarators.
+
+    This deliberately recognises only declarations that can be reproduced in a
+    helper signature.  Ambiguous C declarators are left unresolved and cause
+    the Extract Method candidate to be rejected by the data-flow gate.
+    """
+
     masked = mask_c_like(text)
     declarations: dict[str, str] = {}
-    pattern = re.compile(
-        r"(?m)(?:^|[;{}])\s*"
-        r"((?:(?:const|volatile|signed|unsigned|short|long|struct\s+[A-Za-z_]\w*|union\s+[A-Za-z_]\w*|enum\s+[A-Za-z_]\w*|[A-Za-z_]\w*)\s+)+(?:\*\s*)*)"
-        r"([A-Za-z_][A-Za-z0-9_]*)\s*(\[[^]]*\])?\s*(?==|;)"
-    )
-    for match in pattern.finditer(masked):
-        prefix = " ".join(match.group(1).split()).replace(" *", "*")
-        first = prefix.split()[0] if prefix.split() else ""
-        if first in {"return", "if", "for", "while", "switch", "case"}:
+    for match in re.finditer(r"(?ms)(?P<statement>[^;{}]+;)", masked):
+        statement = match.group("statement").strip()
+        if not statement or statement.startswith(("return ", "if ", "for ", "while ", "switch ", "case ")):
             continue
-        suffix = match.group(3) or ""
-        declarations[match.group(2)] = f"{prefix} {{name}}{suffix}"
+        declarations.update(_parse_c_declaration_statement(statement))
+    # Declarations in a for initializer are scoped variables too. The general
+    # statement scan intentionally skips control statements, so parse this
+    # declaration slot separately.
+    for match in re.finditer(r"\bfor\s*\(\s*(?P<initializer>[^;]+);", masked):
+        declarations.update(
+            _parse_c_declaration_statement(f"{match.group('initializer').strip()};")
+        )
     return declarations
+
+
+def _parse_c_declaration_statement(statement: str) -> dict[str, str]:
+    """Parse safe, non-function C declarations into reusable templates."""
+
+    text = statement.strip().rstrip(";").strip()
+    if not text or text.startswith(("typedef ", "extern ", "return ")):
+        return {}
+    declarators = _split_top_level(text)
+    if not declarators:
+        return {}
+
+    first = declarators[0]
+    left = _split_first_top_level(first, "=")[0].strip()
+    # Parentheses in an initializer (for example ``sizeof(value)`` or a
+    # function call) do not make this a function declaration. Only reject
+    # parenthesized declarators such as function pointers.
+    if "(" in left:
+        return {}
+    first_match = re.fullmatch(
+        r"(?P<prefix>(?:(?:const|volatile|restrict|signed|unsigned|short|long|struct\s+[A-Za-z_]\w*|union\s+[A-Za-z_]\w*|enum\s+[A-Za-z_]\w*|[A-Za-z_]\w*)\s+)+)(?P<pointers>(?:\*\s*)*)(?P<name>[A-Za-z_]\w*)(?P<suffix>(?:\s*\[[^]]*\])*)",
+        left,
+    )
+    if not first_match:
+        return {}
+    type_prefix = " ".join(first_match.group("prefix").split())
+    if type_prefix.split()[0] in {"if", "for", "while", "switch", "case", "goto"}:
+        return {}
+
+    declarations: dict[str, str] = {}
+    parsed_first = _declaration_template(
+        type_prefix,
+        first_match.group("pointers"),
+        first_match.group("name"),
+        first_match.group("suffix"),
+    )
+    if parsed_first is None:
+        return {}
+    name, template = parsed_first
+    declarations[name] = template
+
+    for raw in declarators[1:]:
+        fragment = _split_first_top_level(raw, "=")[0].strip()
+        if "(" in fragment:
+            return {}
+        match = re.fullmatch(
+            r"(?P<pointers>(?:\*\s*)*)(?P<name>[A-Za-z_]\w*)(?P<suffix>(?:\s*\[[^]]*\])*)",
+            fragment,
+        )
+        if not match:
+            return {}
+        parsed = _declaration_template(
+            type_prefix,
+            match.group("pointers"),
+            match.group("name"),
+            match.group("suffix"),
+        )
+        if parsed is None:
+            return {}
+        name, template = parsed
+        declarations[name] = template
+    return declarations
+
+
+def _declaration_template(
+    type_prefix: str,
+    pointers: str,
+    name: str,
+    suffix: str,
+) -> tuple[str, str] | None:
+    if not _identifier(name):
+        return None
+    pointer_text = "".join(pointers.split())
+    suffix_text = "".join(suffix.split())
+    rendered_prefix = f"{type_prefix} {pointer_text}".rstrip()
+    return name, f"{rendered_prefix} {{name}}{suffix_text}"
+
+
+def _split_first_top_level(value: str, separator: str) -> tuple[str, str]:
+    parens = brackets = braces = 0
+    for index, char in enumerate(value):
+        if char == "(":
+            parens += 1
+        elif char == ")" and parens:
+            parens -= 1
+        elif char == "[":
+            brackets += 1
+        elif char == "]" and brackets:
+            brackets -= 1
+        elif char == "{":
+            braces += 1
+        elif char == "}" and braces:
+            braces -= 1
+        elif char == separator and parens == brackets == braces == 0:
+            return value[:index], value[index + 1:]
+    return value, ""
+
+
+def _is_multi_declaration(text: str, name: str) -> bool:
+    masked = mask_c_like(text)
+    for match in re.finditer(r"(?ms)(?P<statement>[^;{}]+;)", masked):
+        statement = match.group("statement")
+        if name not in _parse_c_declaration_statement(statement):
+            continue
+        return len(_split_top_level(statement.rstrip(";"))) > 1
+    return False
+
+
+def _c_object_macros(source_code: str) -> set[str]:
+    return {
+        match.group(1)
+        for match in re.finditer(
+            r"(?m)^\s*#\s*define\s+([A-Za-z_][A-Za-z0-9_]*)\b(?!\s*\()",
+            source_code,
+        )
+    }
+
+
+def _c_shared_symbols(source_code: str, *, module: Any | None = None) -> set[str]:
+    """Return identifiers that are valid outside a function's local scope.
+
+    ``_parse_c_module`` deliberately keeps its global parser narrow for the
+    Extract Class transformation. Extract Method needs one additional C form:
+    an object declared immediately after a top-level aggregate definition,
+    e.g. ``struct Customer { ... } customer;``. That object is shared state,
+    not an undeclared helper/caller dependency.
+    """
+
+    current_module = module or _parse_c_module(source_code)
+    return (
+        set(current_module.globals)
+        | {function.name for function in current_module.functions}
+        | _c_top_level_declaration_names(source_code)
+        | _c_aggregate_instance_names(source_code)
+        | _c_object_macros(source_code)
+        | _C_STANDARD_SHARED_SYMBOLS
+    )
+
+
+def _c_top_level_declaration_names(source_code: str) -> set[str]:
+    """Return file-scope objects missed by the deliberately narrow C model.
+
+    In particular this covers array objects and comma declarations such as
+    ``pthread_t workers[10]``. Statements inside function/aggregate bodies are
+    excluded by brace depth, so locals never become shared accidentally.
+    """
+
+    masked = mask_c_like(source_code)
+    names: set[str] = set()
+    for match in re.finditer(r"(?ms)(?P<statement>[^;{}]+;)", masked):
+        if _brace_depth_at(masked, match.start()) != 0:
+            continue
+        names.update(_parse_c_declaration_statement(match.group("statement")))
+    return names
+
+
+def _c_aggregate_instance_names(source_code: str) -> set[str]:
+    """Find top-level struct/union/enum instances following a definition."""
+
+    masked = mask_c_like(source_code)
+    names: set[str] = set()
+    pattern = re.compile(r"\b(?:struct|union|enum)\b[^;{]*\{")
+    for match in pattern.finditer(masked):
+        if _brace_depth_at(masked, match.start()) != 0:
+            continue
+        prefix = masked[masked.rfind(";", 0, match.start()) + 1:match.start()]
+        if re.search(r"\btypedef\b", prefix):
+            continue
+        open_brace = masked.find("{", match.start(), match.end())
+        close_brace = _find_matching_c_delimiter(masked, open_brace, "{", "}")
+        if close_brace is None:
+            continue
+        semicolon = masked.find(";", close_brace + 1)
+        if semicolon < 0:
+            continue
+        declarators = masked[close_brace + 1:semicolon]
+        if not declarators.strip() or "{" in declarators:
+            continue
+        for raw in _split_top_level(declarators):
+            declaration = _split_first_top_level(raw, "=")[0].strip()
+            instance = re.search(
+                r"(?:\*\s*)*([A-Za-z_][A-Za-z0-9_]*)\s*(?:\[[^]]*\])?\s*$",
+                declaration,
+            )
+            if instance:
+                names.add(instance.group(1))
+    return names
+
+
+def _brace_depth_at(masked_source: str, offset: int) -> int:
+    return masked_source[:offset].count("{") - masked_source[:offset].count("}")
+
+
+def _find_matching_c_delimiter(
+    masked_source: str,
+    start: int,
+    opener: str,
+    closer: str,
+) -> int | None:
+    if start < 0 or start >= len(masked_source) or masked_source[start] != opener:
+        return None
+    depth = 0
+    for index in range(start, len(masked_source)):
+        char = masked_source[index]
+        if char == opener:
+            depth += 1
+        elif char == closer:
+            depth -= 1
+            if depth == 0:
+                return index
+    return None
+
+
+def _declaration_type_identifiers(text: str) -> set[str]:
+    result: set[str] = set()
+    for template in _c_local_declarations(text).values():
+        before_name = template.split("{name}", 1)[0]
+        result.update(re.findall(r"\b[A-Za-z_][A-Za-z0-9_]*\b", before_name))
+    return result - _C_KEYWORDS
+
+
+def _c_explicit_type_identifiers(text: str) -> set[str]:
+    """Return identifiers used as C type names rather than value reads."""
+
+    masked = mask_c_like(text)
+    tagged = set(re.findall(r"\b(?:struct|union|enum)\s+([A-Za-z_]\w*)", masked))
+    casts = {
+        match.group(1)
+        for match in re.finditer(
+            r"\(\s*(?:const\s+|volatile\s+|restrict\s+)*(?:struct\s+|union\s+|enum\s+)?"
+            r"([A-Za-z_]\w*)\s*\*+\s*\)",
+            masked,
+        )
+    }
+    return tagged | casts
+
+
+def _is_assigned_before_read(text: str, name: str) -> bool:
+    masked = mask_c_like(text)
+    first_use = re.search(rf"\b{re.escape(name)}\b", masked)
+    assignment = re.search(
+        rf"(?<![A-Za-z0-9_.*>&])\b{re.escape(name)}\s*=(?!=)",
+        masked,
+    )
+    return bool(first_use and assignment and first_use.start() == assignment.start())
+
+
+def _can_redeclare_in_helper(template: str) -> bool:
+    normalized = " ".join(template.split())
+    return not normalized.startswith(("static ", "extern ", "volatile "))
 
 
 def _c_writes(text: str) -> set[str]:
@@ -406,7 +938,24 @@ def _c_writes(text: str) -> set[str]:
         var = match.group(1)
         if var not in _C_KEYWORDS:
             writes.add(var)
+    # Mutating a member changes the owning aggregate. Treat the base object as
+    # an output so nested helpers receive an address rather than a by-value
+    # copy that would silently lose the mutation in the caller.
+    for var in _c_member_writes(text):
+        if var not in _C_KEYWORDS:
+            writes.add(var)
     return writes
+
+
+def _c_member_writes(text: str) -> set[str]:
+    masked = mask_c_like(text)
+    return {
+        match.group(1)
+        for match in re.finditer(
+            r"\b([A-Za-z_][A-Za-z0-9_]*)\s*(?:\.|->)\s*[A-Za-z_][A-Za-z0-9_]*\s*(?:\+\+|--|[+\-*/%&|^]?=(?!=))",
+            masked,
+        )
+    }
 
 
 def _c_address_output_writes(text: str, declarations: dict[str, str]) -> set[str]:
@@ -425,7 +974,101 @@ def _c_reads(text: str) -> set[str]:
     declared = set(_c_local_declarations(text))
     calls = set(re.findall(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*\(", masked))
     member_names = set(re.findall(r"(?:\.|->)\s*([A-Za-z_][A-Za-z0-9_]*)", masked))
-    return names - _C_KEYWORDS - calls - member_names - declared
+    type_names = _declaration_type_identifiers(text) | _c_explicit_type_identifiers(text)
+    return names - _C_KEYWORDS - calls - member_names - declared - type_names
+
+
+def _validate_transformed_scope(
+    source_code: str,
+    *,
+    original_source_code: str | None = None,
+    source_method: str,
+    helper_name: str,
+    flow: CFlow,
+) -> dict[str, list[str]]:
+    """Prove that generated helper/caller identifiers remain lexically valid."""
+
+    validation = {
+        key: sorted(set(values))
+        for key, values in flow.scope_validation.items()
+    }
+    model = _parse_c_module(source_code)
+    helpers = model.functions_by_name.get(helper_name, [])
+    callers = model.functions_by_name.get(source_method, [])
+    shared = _c_shared_symbols(source_code, module=model)
+
+    if len(helpers) != 1:
+        validation["undefined_identifiers"].append(helper_name)
+        return _normalized_scope_validation(validation)
+    if len(callers) != 1:
+        validation["out_of_scope_identifiers"].append(source_method)
+        return _normalized_scope_validation(validation)
+
+    helper = helpers[0]
+    caller = callers[0]
+    helper_defined = (
+        set(_c_parameter_declarations(helper.params_raw))
+        | set(_c_local_declarations(helper.body))
+        | shared
+    )
+    helper_free = _c_reads(helper.body)
+    validation["undefined_identifiers"].extend(sorted(helper_free - helper_defined))
+
+    caller_defined_after = (
+        set(_c_parameter_declarations(caller.params_raw))
+        | set(_c_local_declarations(caller.body))
+        | shared
+    )
+    caller_unresolved_after = _c_reads(caller.body) - caller_defined_after
+
+    # C identifiers supplied by headers, typedefs and platform APIs cannot all
+    # be reconstructed lexically. Scope safety is about identifiers made
+    # invalid by this extraction, so compare the caller before and after and
+    # reject only newly unresolved names. Existing unresolved names remain the
+    # compiler/static validator's responsibility.
+    caller_unresolved_before: set[str] = set()
+    if original_source_code is not None:
+        original_model = _parse_c_module(original_source_code)
+        original_callers = original_model.functions_by_name.get(source_method, [])
+        if len(original_callers) == 1:
+            original_caller = original_callers[0]
+            original_defined = (
+                set(_c_parameter_declarations(original_caller.params_raw))
+                | set(_c_local_declarations(original_caller.body))
+                | _c_shared_symbols(original_source_code, module=original_model)
+            )
+            caller_unresolved_before = _c_reads(original_caller.body) - original_defined
+    validation["out_of_scope_identifiers"].extend(
+        sorted(caller_unresolved_after - caller_unresolved_before)
+    )
+
+    helper_params = set(_c_parameter_declarations(helper.params_raw))
+    for name in flow.inputs:
+        if name not in helper_params:
+            validation["missing_inputs"].append(name)
+    for name in flow.outputs:
+        output_parameter = f"{name}_out"
+        if not any(param == output_parameter or param.startswith(f"{output_parameter}_") for param in helper_params):
+            validation["missing_outputs"].append(name)
+    return _normalized_scope_validation(validation)
+
+
+def _normalized_scope_validation(validation: dict[str, list[str]]) -> dict[str, list[str]]:
+    return {
+        "undefined_identifiers": sorted(set(validation.get("undefined_identifiers", []))),
+        "out_of_scope_identifiers": sorted(set(validation.get("out_of_scope_identifiers", []))),
+        "missing_inputs": sorted(set(validation.get("missing_inputs", []))),
+        "missing_outputs": sorted(set(validation.get("missing_outputs", []))),
+    }
+
+
+def _scope_validation_passed(validation: dict[str, list[str]]) -> bool:
+    return all(not validation.get(name) for name in (
+        "undefined_identifiers",
+        "out_of_scope_identifiers",
+        "missing_inputs",
+        "missing_outputs",
+    ))
 
 
 def _rewrite(
@@ -455,6 +1098,17 @@ def _rewrite(
 
     if selected_text and not selected_text.endswith(("\n", "\r")):
         selected_text += "\n"
+
+    helper_local_declarations = [
+        flow.declarations[name].format(name=name)
+        for name in flow.locals
+        if name in flow.defined_before
+    ]
+    if helper_local_declarations:
+        selected_text = "".join(
+            f"{body_indent}{declaration};\n"
+            for declaration in helper_local_declarations
+        ) + selected_text
 
     input_params = [flow.declarations[name].format(name=name) for name in flow.inputs]
     new_output_params = [
@@ -571,8 +1225,33 @@ def _meaningfully_reduced(
     selected_loc = sum(nonblank_loc(item.text) for item in selected)
     if selected_loc < MIN_EXTRACTED_LOC:
         return False
+    loc_reduction = before["loc"] - after["loc"]
+    complexity_reduced = after["complexity"] < before["complexity"]
+    responsibilities_reduced = (
+        before.get("responsibility_count", before.get("statement_count", 0))
+        - after.get("responsibility_count", after.get("statement_count", 0))
+    )
     if before["loc"] > threshold:
-        return after["loc"] <= threshold
+        # A single cohesive extraction need not eliminate a Long Function in
+        # one step. A straight-line routine can have no cyclomatic decrease,
+        # yet still lose a real responsibility and substantial implementation.
+        # Keep a non-trivial LOC floor so formatting-only wrappers never pass.
+        required_reduction = max(MIN_EXTRACTED_LOC * 2, (before["loc"] + 12) // 13)
+        return (
+            after["loc"] <= threshold
+            or (
+                loc_reduction >= required_reduction
+                and (
+                    complexity_reduced
+                    or selected_loc >= required_reduction
+                    or responsibilities_reduced >= 2
+                )
+            )
+            or (
+                complexity_reduced
+                and loc_reduction >= MIN_EXTRACTED_LOC * 2
+            )
+        )
     return after["loc"] < before["loc"]
 
 
@@ -613,6 +1292,29 @@ def _base_metadata(method_name: str, new_method_name: str, source_class: str, so
         "extracted_method": new_method_name,
         "plan_compliance": "UNKNOWN",
         "behavioral_safety": "NOT_EVALUATED",
+    }
+
+
+def _candidate_attempt(
+    selected: Sequence[StatementSpan],
+    reason: str,
+    *,
+    after_metrics: dict[str, int] | None = None,
+    helper_loc: int | None = None,
+    scope_validation: dict[str, list[str]] | None = None,
+) -> dict[str, Any]:
+    """Compact diagnostics for rejected candidates; source stays untouched."""
+
+    return {
+        "candidate_range": {
+            "start_offset": selected[0].start,
+            "end_offset": selected[-1].end,
+        },
+        "candidate_loc": nonblank_loc("".join(item.text for item in selected)),
+        "reason": reason,
+        **({"after_metrics": after_metrics} if after_metrics else {}),
+        **({"helper_loc": helper_loc} if helper_loc is not None else {}),
+        **({"scope_validation": scope_validation} if scope_validation else {}),
     }
 
 

@@ -173,9 +173,16 @@ def _find_nested_if_chain(
 
         outer_end = then_close + 1
 
-        # Check if outer if is enclosed inside a loop in body_source
-        prefix_body = masked[:outer_start]
-        is_inside_loop = bool(re.search(r"\b(for|while|do)\b[^{}]*\{[^{}]*$", prefix_body))
+        # An outer else belongs to the same decision.  Removing only its if
+        # arm would change behavior, so it is not a guard-clause candidate.
+        after_outer = outer_end
+        while after_outer < len(masked) and masked[after_outer].isspace():
+            after_outer += 1
+        if re.match(r"else\b", masked[after_outer:]):
+            continue
+
+        loop_bounds = _enclosing_braced_loop(masked, outer_start)
+        is_inside_loop = loop_bounds is not None
 
         conditions: List[str] = [body_source[cond_open + 1:cond_close].strip()]
         current_then_open = then_open
@@ -221,7 +228,20 @@ def _find_nested_if_chain(
             current_then_open = inner_then_open
             current_then_close = inner_then_close
 
-        if has_nesting and len(conditions) >= 2:
+        single_tail_loop_guard = False
+        if not has_nesting and len(conditions) == 1 and loop_bounds is not None:
+            loop_open, loop_close = loop_bounds
+            before_if = masked[loop_open + 1:outer_start].strip()
+            after_if = masked[outer_end:loop_close].strip()
+            # Moving declarations out of the if block widens their scope.
+            # Restrict this strategy to a sole, declaration-free loop action.
+            single_tail_loop_guard = (
+                not before_if
+                and not after_if
+                and not _contains_probable_c_declaration(innermost_body)
+            )
+
+        if (has_nesting and len(conditions) >= 2) or single_tail_loop_guard:
             return {
                 "outer_start": body_offset + outer_start,
                 "outer_end": body_offset + outer_end,
@@ -230,21 +250,138 @@ def _find_nested_if_chain(
                 "innermost_open": body_offset + current_then_open,
                 "innermost_close": body_offset + current_then_close,
                 "is_inside_loop": is_inside_loop,
+                "single_tail_loop_guard": single_tail_loop_guard,
             }
 
     return None
+
+
+def _enclosing_braced_loop(masked_source: str, position: int) -> Optional[Tuple[int, int]]:
+    """Return the innermost braced for/while loop containing ``position``."""
+
+    candidates: List[Tuple[int, int]] = []
+    for match in re.finditer(r"\b(?:for|while)\s*\(", masked_source[:position]):
+        condition_open = masked_source.find("(", match.start())
+        condition_close = _find_matching_delimiter(
+            masked_source, condition_open, "(", ")"
+        )
+        if condition_close is None:
+            continue
+        body_open = condition_close + 1
+        while body_open < len(masked_source) and masked_source[body_open].isspace():
+            body_open += 1
+        if body_open >= len(masked_source) or masked_source[body_open] != "{":
+            continue
+        body_close = _find_matching_delimiter(masked_source, body_open, "{", "}")
+        if body_close is not None and body_open < position < body_close:
+            candidates.append((body_open, body_close))
+    return max(candidates, key=lambda bounds: bounds[0]) if candidates else None
+
+
+def _contains_probable_c_declaration(source: str) -> bool:
+    """Conservatively identify declarations whose lexical scope would widen."""
+
+    masked = _mask_c_non_code(source)
+    return bool(
+        re.search(
+            r"(?:^|;)\s*(?:(?:const|volatile|static|register|unsigned|signed|long|short)\s+)*"
+            r"(?:void|char|int|float|double|bool|_Bool|struct\s+\w+|union\s+\w+|enum\s+\w+|\w+_t)"
+            r"\s+[*\s]*[A-Za-z_]\w*",
+            masked,
+            flags=re.MULTILINE,
+        )
+    )
+
+
+def _conditional_nesting_score(source: str) -> int:
+    """Measure nested decision weight while discounting true early-exit guards."""
+
+    masked = _mask_c_non_code(source)
+    depth = 0
+    score = 0
+    index = 0
+    while index < len(masked):
+        char = masked[index]
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth = max(0, depth - 1)
+        elif re.match(r"if\s*\(", masked[index:]):
+            if not _is_early_exit_guard(masked, index):
+                score += max(1, depth + 1)
+        index += 1
+    return score
+
+
+def _is_early_exit_guard(masked: str, if_start: int) -> bool:
+    condition_open = masked.find("(", if_start)
+    condition_close = _find_matching_delimiter(masked, condition_open, "(", ")")
+    if condition_close is None:
+        return False
+    statement_start = condition_close + 1
+    while statement_start < len(masked) and masked[statement_start].isspace():
+        statement_start += 1
+    if statement_start >= len(masked):
+        return False
+    if masked[statement_start] == "{":
+        statement_end = _find_matching_delimiter(masked, statement_start, "{", "}")
+        if statement_end is None:
+            return False
+        body = masked[statement_start + 1:statement_end].strip()
+    else:
+        statement_end = masked.find(";", statement_start)
+        if statement_end < 0:
+            return False
+        body = masked[statement_start:statement_end + 1].strip()
+    if re.search(r"\b(?:if|for|while|switch|goto)\b", body):
+        return False
+    return bool(re.search(r"(?:return(?:\s+[^;]+)?|break|continue)\s*;\s*$", body))
 
 
 def apply_replace_nested_conditional_with_guard_clauses(
     source_code: str,
     method_name: Optional[str] = None,
     target_line: Optional[int] = None,
+    *,
+    source_line: Optional[int] = None,
+    start_line: Optional[int] = None,
+    end_line: Optional[int] = None,
+    target_lines: Optional[Sequence[Any]] = None,
+    source_file: str = "",
 ) -> Tuple[str, int, Dict[str, Any]]:
-    """Transform deeply nested C conditionals into early return guard clauses."""
+    """Transform deeply nested C conditionals into early return guard clauses.
+
+    ``target_line`` is retained for older callers.  The engine now sends the
+    normalized RDP fields, so accept those aliases here instead of allowing a
+    TypeError to escape through the HTTP endpoint.
+    """
+
+    def as_line(value: Any) -> Optional[int]:
+        if isinstance(value, (int, float)):
+            return int(value)
+        if isinstance(value, str) and value.strip().isdigit():
+            return int(value.strip())
+        return None
+
+    normalized_lines = [
+        line for line in (as_line(value) for value in (target_lines or ()))
+        if line is not None
+    ]
+    resolved_line = (
+        as_line(target_line)
+        or as_line(source_line)
+        or as_line(start_line)
+        or as_line(end_line)
+        or (normalized_lines[0] if normalized_lines else None)
+    )
     metadata: Dict[str, Any] = {
         "refactoring": "Replace Nested Conditional with Guard Clauses",
         "language": "c",
         "method": method_name or "",
+        "source_method": method_name or "",
+        "source_file": source_file,
+        "source_line": resolved_line,
+        "target_lines": normalized_lines,
         "plan_compliance": "FAIL",
     }
 
@@ -261,11 +398,11 @@ def apply_replace_nested_conditional_with_guard_clauses(
         if len(candidates) == 1:
             target_function = candidates[0]
         elif len(candidates) > 1:
-            if target_line is not None:
+            if resolved_line is not None:
                 for cand in candidates:
                     start_l = _line_of(source_code, cand.start)
                     end_l = _line_of(source_code, cand.end)
-                    if start_l <= target_line <= end_l:
+                    if start_l <= resolved_line <= end_l:
                         target_function = cand
                         break
             if not target_function:
@@ -273,11 +410,11 @@ def apply_replace_nested_conditional_with_guard_clauses(
                 metadata["reason"] = "AMBIGUOUS_FUNCTION_TARGET"
                 return source_code, 0, metadata
 
-    if not target_function and target_line is not None:
+    if not target_function and resolved_line is not None:
         for cand in module.functions:
             start_l = _line_of(source_code, cand.start)
             end_l = _line_of(source_code, cand.end)
-            if start_l <= target_line <= end_l:
+            if start_l <= resolved_line <= end_l:
                 target_function = cand
                 break
 
@@ -295,8 +432,11 @@ def apply_replace_nested_conditional_with_guard_clauses(
         return source_code, 0, metadata
 
     metadata["method"] = target_function.name
+    metadata["source_method"] = target_function.name
     before_depth = _brace_nesting(target_function.body)
+    before_conditional_score = _conditional_nesting_score(target_function.body)
     metadata["before_nesting_depth"] = before_depth
+    metadata["before_conditional_nesting_score"] = before_conditional_score
 
     body_offset = target_function.open_brace + 1
     body_source = source_code[body_offset:target_function.end - 1]
@@ -312,6 +452,7 @@ def apply_replace_nested_conditional_with_guard_clauses(
     conditions = chain_info["conditions"]
     innermost_body = chain_info["innermost_body"]
     is_inside_loop = chain_info.get("is_inside_loop", False)
+    single_tail_loop_guard = bool(chain_info.get("single_tail_loop_guard"))
     indent = _statement_indent(source_code, outer_start) or "    "
 
     trailing_text = source_code[outer_end:target_function.end - 1].strip()
@@ -325,7 +466,10 @@ def apply_replace_nested_conditional_with_guard_clauses(
         guard_clauses: List[str] = []
         for cond in conditions:
             inverted = _invert_c_condition(cond)
-            guard_clauses.append(f"{indent}if ({inverted}) {{\n{indent}    {exit_stmt}\n{indent}}}")
+            if single_tail_loop_guard:
+                guard_clauses.append(f"{indent}if ({inverted}) {exit_stmt}")
+            else:
+                guard_clauses.append(f"{indent}if ({inverted}) {{\n{indent}    {exit_stmt}\n{indent}}}")
 
         body_lines = innermost_body.strip().splitlines()
         reindented_body = "\n".join(
@@ -365,10 +509,17 @@ def apply_replace_nested_conditional_with_guard_clauses(
     post_fn = next((f for f in post_module.functions if f.name == target_function.name), None)
     if post_fn:
         after_depth = _brace_nesting(post_fn.body)
+        after_conditional_score = _conditional_nesting_score(post_fn.body)
     else:
         after_depth = before_depth
+        after_conditional_score = before_conditional_score
 
     metadata["after_nesting_depth"] = after_depth
+    metadata["after_conditional_nesting_score"] = after_conditional_score
+    metadata["raw_max_nesting_reduced"] = after_depth < before_depth
+    metadata["conditional_nesting_reduced"] = (
+        after_conditional_score < before_conditional_score
+    )
 
     # Compile with GCC / Clang
     comp_status, comp_msg = _verify_c_compilation(transformed)
@@ -378,12 +529,23 @@ def apply_replace_nested_conditional_with_guard_clauses(
         metadata["reason"] = "LOCAL_SOURCE_COMPILATION_ERROR"
         return source_code, 0, metadata
 
-    nesting_reduced = after_depth < before_depth and after_depth <= 4
+    nesting_reduced = (
+        after_depth < before_depth
+        or after_conditional_score < before_conditional_score
+    )
     metadata["status"] = "success" if nesting_reduced else "review_required"
     metadata["plan_compliance"] = "PASS" if nesting_reduced else "FAIL"
     metadata["nesting_reduced"] = nesting_reduced
-    metadata["smell_reduction"] = "PASS" if nesting_reduced else "FAIL"
+    metadata["smell_reduction"] = (
+        "PASS"
+        if after_depth < before_depth and after_depth <= 4
+        else "REDUCED" if nesting_reduced else "FAIL"
+    )
     metadata["conditions_flattened"] = len(conditions)
+    metadata["guard_clauses_added"] = len(conditions)
+    metadata["guard_clause_strategy"] = (
+        "loop_tail_continue" if single_tail_loop_guard else "nested_if_chain"
+    )
 
     return transformed, 1, metadata
 
@@ -406,8 +568,12 @@ def validate_c_guard_clauses(
 
     before_depth = _brace_nesting(before_fn.body)
     after_depth = _brace_nesting(after_fn.body)
+    before_conditional_score = _conditional_nesting_score(before_fn.body)
+    after_conditional_score = _conditional_nesting_score(after_fn.body)
 
-    passed = after_depth <= 4 and after_depth < before_depth
+    max_depth_reduced = after_depth < before_depth
+    conditional_nesting_reduced = after_conditional_score < before_conditional_score
+    passed = max_depth_reduced or conditional_nesting_reduced
 
     return {
         "passed": bool(passed),
@@ -415,10 +581,18 @@ def validate_c_guard_clauses(
         "method": after_fn.name,
         "before_nesting_depth": before_depth,
         "after_nesting_depth": after_depth,
-        "smell_reduction": "PASS" if passed else "FAIL",
+        "before_conditional_nesting_score": before_conditional_score,
+        "after_conditional_nesting_score": after_conditional_score,
+        "smell_reduction": (
+            "PASS"
+            if max_depth_reduced and after_depth <= 4
+            else "REDUCED" if passed else "FAIL"
+        ),
         "checks": {
             "function_exists": True,
-            "nesting_depth_reduced": after_depth < before_depth,
+            "nesting_depth_reduced": max_depth_reduced or conditional_nesting_reduced,
+            "raw_max_depth_reduced": max_depth_reduced,
+            "conditional_nesting_reduced": conditional_nesting_reduced,
             "below_cuqa_threshold": after_depth <= 4,
         },
     }

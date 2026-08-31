@@ -106,7 +106,7 @@ CMD ["python", "-m", "gunicorn", \
      "--bind", "0.0.0.0:8002", \
      "--workers", "1", \
      "--threads", "4", \
-     "--timeout", "300", \
+     "--timeout", "3000", \
      "--access-logfile", "-", \
      "--error-logfile", "-", \
      "--capture-output", \
