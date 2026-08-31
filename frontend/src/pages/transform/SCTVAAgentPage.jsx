@@ -157,6 +157,10 @@ function buildPipelineTimeline({
   });
 }
 
+function isAppliedFileResult(result) {
+  return result?.transformation_applied === true && result?.rollback_occurred !== true;
+}
+
 const DEFAULT_TIMELINE = buildPipelineTimeline({
   phase: 'idle',
   planLoaded: false,
@@ -2443,21 +2447,27 @@ export default function SCTVAAgentPage() {
     []
   );
 
+  const appliedFileResults = fileResults.filter(isAppliedFileResult);
+  const activeAppliedResult = appliedFileResults.find(item => item.file_name === activeFileName) || null;
   const activeSource = sourceFiles.find(file => file.name === activeFileName) || sourceFiles[0];
   const activeSourceName = activeSource ? activeSource.name : '';
   const activeSourceCode = activeSource ? activeSource.code : '';
-  const activeFileDisplay = activeFileName || activeSourceName || 'No file selected';
+  const activeFileDisplay = fileResults.length
+    ? activeAppliedResult?.file_name || 'No applied files'
+    : activeFileName || activeSourceName || 'No file selected';
   const confidenceFileDisplay = activeFileDisplay === 'No file selected'
     ? activeFileDisplay
     : activeFileDisplay.split(/[\\/]/).filter(Boolean).pop() || activeFileDisplay;
   const fileTabs = fileResults.length
-    ? fileResults.map(item => ({
+    ? appliedFileResults.map(item => ({
       name: item.file_name,
+      displayName: String(item.file_name || '').split(/[\\/]/).filter(Boolean).pop() || item.file_name,
       success: item.success,
-      rollback: item.rollback_occurred,
-      transformationApplied: item.transformation_applied !== false,
     }))
-    : sourceFiles.map(file => ({ name: file.name }));
+    : sourceFiles.map(file => ({
+      name: file.name,
+      displayName: String(file.name || '').split(/[\\/]/).filter(Boolean).pop() || file.name,
+    }));
 
   function pushLog(level, message) {
     setLogs(prev => [...prev, { level, message }]);
@@ -2963,6 +2973,7 @@ export default function SCTVAAgentPage() {
 
     const results = normalizeFileResults(data);
     setFileResults(results);
+    const appliedResults = results.filter(isAppliedFileResult);
 
     const artifact = buildSctvaStorageArtifact({
       data,
@@ -2982,20 +2993,26 @@ export default function SCTVAAgentPage() {
       pushLog('WARN', `Could not store final artifacts in browser storage: ${storageInfo.message}`);
     }
 
-    const preferredName = activeFileName && results.some(item => item.file_name === activeFileName)
+    const preferredName = activeFileName && appliedResults.some(item => item.file_name === activeFileName)
       ? activeFileName
-      : results[0]?.file_name;
+      : appliedResults[0]?.file_name;
 
     if (preferredName) {
       setActiveFileName(preferredName);
+    } else {
+      setActiveFileName('');
     }
 
-    const selected = results.find(item => item.file_name === preferredName) || results[0];
+    const selected = appliedResults.find(item => item.file_name === preferredName) || results[0];
     const originalSource = sourceFiles.find(file => file.name === selected?.file_name)?.code
       || activeSourceCode
       || '';
 
     applyActiveResult(selected, originalSource);
+    if (!appliedResults.length) {
+      setFinalCode('');
+      renderDiff('', '');
+    }
   }
 
   function handleSelectFile(fileName) {
@@ -3480,12 +3497,11 @@ export default function SCTVAAgentPage() {
                 <button
                   key={item.name}
                   type="button"
-                  className={`sctva-file-tab ${item.name === activeFileName ? 'active' : ''} ${item.rollback ? 'fail' : item.success === true ? 'pass' : item.transformationApplied === false ? 'not-applied' : ''}`}
+                  className={`sctva-file-tab ${item.name === activeFileName ? 'active' : ''} ${item.success === true ? 'pass' : ''}`}
                   onClick={() => handleSelectFile(item.name)}
+                  title={item.name}
                 >
-                  <span>{item.name}</span>
-                  {item.rollback ? <em>Rolled Back</em> : null}
-                  {!item.rollback && item.transformationApplied === false ? <em>Not Applied</em> : null}
+                  <span>{item.displayName}</span>
                 </button>
               ))}
             </div>

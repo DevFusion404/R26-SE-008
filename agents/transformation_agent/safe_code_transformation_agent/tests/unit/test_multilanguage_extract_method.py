@@ -994,3 +994,50 @@ int update_total(int value) {
         require_compilation=True,
         timeout_seconds=10,
     ).passed is True
+
+
+def test_c_extract_method_scope_validation_compares_caller_before_and_after(monkeypatch):
+    monkeypatch.setattr(
+        c_extract_method,
+        "_verify_c_compilation",
+        lambda source: ("UNAVAILABLE", "test compiler unavailable"),
+    )
+    source = '''void receive_callback(void *socket_id) {
+    (void) socket_id;
+}
+
+int connect_client(void) {
+    int socket_id = socket(AF_INET, SOCK_STREAM, 0);
+    int first = socket_id + 1;
+    int second = first + 1;
+    register_callback(receive_callback, &socket_id);
+    log_value(first);
+    log_value(second);
+    return socket_id;
+}
+'''
+
+    transformed, count, metadata = extract_c_method(
+        source,
+        new_method_name="register_client_callback",
+        method_name="connect_client",
+        start_line=8,
+        end_line=11,
+    )
+
+    assert count == 1
+    assert "register_client_callback" in transformed
+    assert metadata["scope_validation"] == {
+        "undefined_identifiers": [],
+        "out_of_scope_identifiers": [],
+        "missing_inputs": [],
+        "missing_outputs": [],
+    }
+
+
+def test_c_extract_method_detects_for_initializer_variables_as_locals():
+    declarations = c_extract_method._c_local_declarations(
+        "for (int i = 0; i < count; ++i) { total += i; }"
+    )
+
+    assert declarations["i"] == "int {name}"
