@@ -201,6 +201,9 @@ function BulkDecisionBar({ total, accepted, rejected, pending, onAcceptAll, onRe
   );
 }
 
+/** Windows paths come back with backslashes; plan paths do not. */
+const normPath = (value = "") => String(value).replace(/\\/g, "/");
+
 /**
  * Rollback to Stage 2. The approved plan is what SCTVA executes, so changing
  * what gets transformed means going back and re-deciding the steps; the parent
@@ -382,6 +385,74 @@ export default function TransformationApprovalPage({
   const safetyReport = activeFile?.safety_report || result?.safetyReport || null;
 
   const confidence = activeFile?.confidence_score ?? result?.confidenceScore ?? null;
+
+  /**
+   * file path -> { smells, methods }, folded once out of the approved plan.
+   *
+   * Counted rather than listed, because a file with six Magic Numbers should
+   * read "Magic Number ×6" and not print the same chip six times.
+   */
+  const planContext = useMemo(() => {
+    const byFile = new Map();
+
+    ((plan?.steps) || []).forEach((step) => {
+      const file = normPath(step?.target?.file || "");
+      if (!file) return;
+
+      const entry = byFile.get(file) || { smells: new Map(), methods: new Map() };
+
+      if (step.smell_type) {
+        const prev = entry.smells.get(step.smell_type);
+        entry.smells.set(step.smell_type, {
+          name: step.smell_type,
+          // The worst severity seen for this type wins the chip's colour.
+          severity: prev?.severity === "high" ? prev.severity : (step.severity || prev?.severity),
+          count: (prev?.count || 0) + 1,
+        });
+      }
+      if (step.refactoring) {
+        const prev = entry.methods.get(step.refactoring);
+        entry.methods.set(step.refactoring, {
+          name: step.refactoring,
+          count: (prev?.count || 0) + 1,
+        });
+      }
+
+      byFile.set(file, entry);
+    });
+
+    return byFile;
+  }, [plan]);
+
+  /**
+   * The plan context for one transformed file.
+   *
+   * Falls back to matching on the file NAME: SCTVA echoes the path it was given
+   * and the plan carries the path CUQA reported, which agree today but have no
+   * contract saying they must — and a chip strip that silently disappears on a
+   * path-shape mismatch is worse than one matched a little more loosely.
+   */
+  const contextFor = useCallback((path) => {
+    const key = normPath(path || "");
+    const hit = planContext.get(key);
+    if (hit) return hit;
+
+    const base = key.split("/").pop();
+    for (const [file, entry] of planContext) {
+      if (file.split("/").pop() === base) return entry;
+    }
+    return null;
+  }, [planContext]);
+
+  /** "Long Method, Magic Number ×2" — counted names, in one line. */
+  const noteFrom = (items) =>
+    items.map((i) => (i.count > 1 ? `${i.name} ×${i.count}` : i.name)).join(", ");
+
+  // What the diff's two group headers say this change is for. Computed here
+  // rather than inside DiffBlock because the plan is this stage's to read.
+  const activeContext = activeFile ? contextFor(activeFile.path) : null;
+  const beforeNote = activeContext ? noteFrom(Array.from(activeContext.smells.values())) : "";
+  const afterNote = activeContext ? noteFrom(Array.from(activeContext.methods.values())) : "";
 
   // ── Per-file accept / reject ──────────────────────────────────────────────
   const changedFiles = useMemo(() => files.filter((f) => f.changed), [files]);
@@ -835,7 +906,11 @@ export default function TransformationApprovalPage({
 
           <CodeSurface>
             {view === "diff" ? (
-              <DiffBlock rows={activeFile?.diff_rows} />
+              <DiffBlock
+                rows={activeFile?.diff_rows}
+                beforeNote={beforeNote}
+                afterNote={afterNote}
+              />
             ) : (
               <CodeBlock
                 code={view === "before" ? activeFile?.before : activeFile?.after}

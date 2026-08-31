@@ -352,7 +352,12 @@ function CodeLines({ lines, coverage, focusedSmell, focusLineRef }) {
             key={lineNo}
             ref={isAnchor ? focusLineRef : null}
             style={{
-              display: "flex", alignItems: "stretch",
+              // WRAPS, so the badge is the only thing that can move. A
+              // non-wrapping row put it past the end of the code, which on a
+              // line wider than the pane means off-screen — the label was
+              // missing on exactly the lines that most needed one. A long line
+              // now pushes it to a second visual line instead.
+              display: "flex", alignItems: "stretch", flexWrap: "wrap",
               background: inFocus
                 ? `${severityColor(focusedSmell.severity)}22`
                 : hit ? `${color}0e` : "transparent",
@@ -360,6 +365,12 @@ function CodeLines({ lines, coverage, focusedSmell, focusLineRef }) {
               outlineOffset: -1,
             }}
           >
+            {/* Gutter and code in one non-shrinking block. Without it the wrap
+                would break between the line number and the code it numbers. */}
+            <div style={{
+              display: "flex", alignItems: "stretch",
+              flexGrow: 1, flexShrink: 0, minWidth: 0,
+            }}>
             {/* The marker bar: the file's own margin, coloured by the worst
                 severity covering this line. */}
             <div style={{
@@ -388,16 +399,23 @@ function CodeLines({ lines, coverage, focusedSmell, focusLineRef }) {
               )}
             </span>
 
+            {/* flexShrink 0 so a long line keeps its full width and forces the
+                wrap, rather than being squeezed to fit beside the badge. */}
             <pre style={{
               margin: 0, paddingRight: 20, whiteSpace: "pre", color: hit ? C.text : C.textSub,
-              flex: 1, minWidth: 0,
+              flexGrow: 1, flexShrink: 0,
             }}>
               {text || " "}
             </pre>
+            </div>
 
+            {/* Right-hand side of the line — and of the wrapped line too, which
+                is what `marginLeft: auto` keeps true in both places. Nothing is
+                repeated when it wraps: it is a continuation of the row above,
+                not a row of its own, so the gutter stays empty beside it. */}
             {hit && hit.anchors.length > 0 && (
               <span style={{
-                flexShrink: 0, alignSelf: "center", marginRight: 12,
+                flexShrink: 0, marginLeft: "auto", alignSelf: "center", marginRight: 12,
                 fontSize: 10, fontWeight: 700, color: severityColor(hit.worst),
                 background: `${severityColor(hit.worst)}1a`,
                 border: `1px solid ${severityColor(hit.worst)}40`,

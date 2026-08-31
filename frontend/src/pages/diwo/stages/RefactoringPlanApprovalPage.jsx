@@ -1089,10 +1089,23 @@ function PlanBulkBar({
           background: confirming === "all"
             ? `${C.warn}1e`
             : activeBulk === "all" ? C.accent : C.bg,
+          // OUTLINED IN THE ACCENT AT REST, the way Reject all is outlined in
+          // danger. It used to rest on C.borderAcc with muted text, which on
+          // this panel is very nearly invisible — so before anything was
+          // selected the row read as one button and a pair of labels, and the
+          // second bulk action went unnoticed.
+          //
+          // Outlined, not filled: Select recommended is the filled accent and
+          // stays the primary action. Filled teal / outlined teal / outlined
+          // red is the whole hierarchy of this row.
           color: confirming === "all"
             ? C.warn
-            : activeBulk === "all" ? "#000" : C.textSub,
-          border: `2px solid ${confirming === "all" ? C.warn : activeBulk === "all" ? C.accent : C.borderAcc}`,
+            : activeBulk === "all" ? "#000" : totalSteps ? C.accent : C.textMuted,
+          border: `2px solid ${
+            confirming === "all"
+              ? C.warn
+              : totalSteps ? C.accent : C.border
+          }`,
           transition: "all 0.2s",
         }}
       >
