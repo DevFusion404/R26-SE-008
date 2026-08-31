@@ -57,11 +57,13 @@ def _not_applicable(
     *,
     class_to_inline: str,
     reason: str,
+    **metadata: Any,
 ) -> Tuple[str, int, dict[str, Any]]:
     return source_code, 0, {
         "status": "not_applicable",
         "reason": reason,
         "class_to_inline": class_to_inline,
+        **metadata,
     }
 
 
@@ -630,17 +632,19 @@ def select_python_inline_class_strategy(
 
         base_name = str(item["bases"][0])
         base_node = _local_base_node(source_code, base_name=base_name)
+        # An external base is a framework/library contract, even when the
+        # candidate has no ordinary business method.  Resolve it here instead
+        # of falling through to a misleading generic ``super`` diagnostic.
+        if base_node is None:
+            framework_strategy = _select_external_framework_owner_inline(
+                source_code=source_code,
+                item=item,
+                profile=profile,
+                project_source_files=project_source_files or [],
+                current_file_name=current_file_name,
+            )
+            return {**resolution, **framework_strategy}
         if business_methods:
-            # If the base is not local, this is typically a framework/library
-            # extension point.  The per-file engine cannot safely transfer the
-            # override into that external class.
-            if base_node is None:
-                return {
-                    **resolution,
-                    "status": "not_applicable",
-                    "reason": "EXTERNAL_BASE_CLASS_CONTRACT_REQUIRED",
-                    "strategy": "external_base_identity_protection",
-                }
             return {
                 **resolution,
                 "status": "review_required",
@@ -723,6 +727,329 @@ def select_python_inline_class_strategy(
         **resolution,
         "status": "success",
         "strategy": "composition_or_plain_inline",
+    }
+
+
+def _is_pytorch_module_base(base_name: str) -> bool:
+    normalized = str(base_name or "").replace(" ", "")
+    return normalized in {"nn.Module", "torch.nn.Module"}
+
+
+def _class_has_pytorch_module_base(class_node: ast.ClassDef) -> bool:
+    return len(class_node.bases) == 1 and _is_pytorch_module_base(
+        _dotted_name(class_node.bases[0]) or ast.unparse(class_node.bases[0])
+    )
+
+
+def _pytorch_module_constructor_model(
+    constructor: ast.FunctionDef | None,
+) -> tuple[list[str], dict[str, ast.AST], dict[str, ast.AST], str]:
+    """Model a direct ``nn.Module`` constructor without discarding its state.
+
+    The constructor may allocate registered submodules such as ``nn.Conv2d``;
+    those assignments are relocated to the owner after the owner's own
+    ``super().__init__`` call. Arbitrary control flow or self-dependent setup
+    remains unsafe.
+    """
+
+    if constructor is None:
+        return [], {}, {}, "FRAMEWORK_CONSTRUCTOR_REQUIRED"
+    args = constructor.args
+    if (
+        constructor.decorator_list
+        or args.posonlyargs
+        or args.vararg
+        or args.kwarg
+        or args.kwonlyargs
+        or not args.args
+        or args.args[0].arg != "self"
+    ):
+        return [], {}, {}, "FRAMEWORK_CONSTRUCTOR_SIGNATURE_UNSUPPORTED"
+
+    parameters = [argument.arg for argument in args.args[1:]]
+    defaults: dict[str, ast.AST] = {}
+    if args.defaults:
+        default_names = parameters[-len(args.defaults):]
+        defaults = {
+            name: copy.deepcopy(value)
+            for name, value in zip(default_names, args.defaults)
+        }
+
+    body = [
+        statement for statement in _strip_docstring(constructor.body)
+        if not isinstance(statement, ast.Pass)
+    ]
+    if not body or not _is_direct_super_init_call(body[0]):
+        return [], {}, {}, "FRAMEWORK_SUPER_INIT_REQUIRED"
+
+    fields: dict[str, ast.AST] = {}
+    parameter_names = set(parameters)
+    for statement in body[1:]:
+        if not (
+            isinstance(statement, ast.Assign)
+            and len(statement.targets) == 1
+            and isinstance(statement.targets[0], ast.Attribute)
+            and isinstance(statement.targets[0].value, ast.Name)
+            and statement.targets[0].value.id == "self"
+            and isinstance(statement.targets[0].ctx, ast.Store)
+        ):
+            return [], {}, {}, "FRAMEWORK_CONSTRUCTOR_STATE_UNSAFE"
+        field_name = statement.targets[0].attr
+        if field_name in fields:
+            return [], {}, {}, "FRAMEWORK_DUPLICATE_CONSTRUCTOR_FIELD"
+        for node in ast.walk(statement.value):
+            if isinstance(node, (ast.Await, ast.Yield, ast.YieldFrom, ast.Lambda)):
+                return [], {}, {}, "FRAMEWORK_CONSTRUCTOR_STATE_UNSAFE"
+            if (
+                isinstance(node, ast.Attribute)
+                and isinstance(node.value, ast.Name)
+                and node.value.id == "self"
+            ):
+                return [], {}, {}, "FRAMEWORK_CONSTRUCTOR_SELF_DEPENDENCY"
+            if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
+                if node.id not in parameter_names and node.id == constructor.name:
+                    return [], {}, {}, "FRAMEWORK_CONSTRUCTOR_STATE_UNSAFE"
+        fields[field_name] = copy.deepcopy(statement.value)
+
+    if not fields:
+        return [], {}, {}, "FRAMEWORK_REGISTERED_STATE_NOT_FOUND"
+    return parameters, defaults, fields, ""
+
+
+def _is_direct_super_init_call(statement: ast.stmt) -> bool:
+    if not isinstance(statement, ast.Expr) or not isinstance(statement.value, ast.Call):
+        return False
+    call = statement.value
+    return (
+        isinstance(call.func, ast.Attribute)
+        and call.func.attr == "__init__"
+        and isinstance(call.func.value, ast.Call)
+        and isinstance(call.func.value.func, ast.Name)
+        and call.func.value.func.id == "super"
+    )
+
+
+def _is_likely_torch_registered_module(expression: ast.AST) -> bool:
+    """Return whether a constructor assignment is visibly an ``nn`` module.
+
+    This is used for state-dict diagnostics only.  The actual assignment is
+    retained regardless, but a scalar such as ``self.width = width`` must not
+    be reported as if it created a state-dict key.
+    """
+
+    if not isinstance(expression, ast.Call):
+        return False
+    dotted = _dotted_name(expression.func) or ""
+    return dotted.startswith("nn.") or dotted.startswith("torch.nn.")
+
+
+def _pytorch_framework_responsibility_profile(
+    target: ast.ClassDef,
+    methods: Sequence[ast.FunctionDef],
+) -> dict[str, Any]:
+    """Decide whether an ``nn.Module`` is genuinely small enough to inline."""
+
+    constructor = next((method for method in methods if method.name == "__init__"), None)
+    forward = next((method for method in methods if method.name == "forward"), None)
+    instance_fields = {
+        node.attr
+        for node in (ast.walk(constructor) if constructor is not None else [])
+        if (
+            isinstance(node, ast.Attribute)
+            and isinstance(node.value, ast.Name)
+            and node.value.id == "self"
+            and isinstance(node.ctx, ast.Store)
+        )
+    }
+    forward_statements = len(_strip_docstring(forward.body)) if forward else 0
+    forward_calls = (
+        sum(isinstance(node, ast.Call) for node in ast.walk(forward))
+        if forward is not None
+        else 0
+    )
+    forward_control_flow = (
+        sum(
+            isinstance(node, (ast.If, ast.For, ast.AsyncFor, ast.While, ast.Try, ast.Match))
+            for node in ast.walk(forward)
+        )
+        if forward is not None
+        else 0
+    )
+    additional_methods = sorted(
+        method.name
+        for method in methods
+        if method.name not in {"__init__", "forward"}
+    )
+    meaningful = bool(
+        len(instance_fields) >= 5
+        or forward_statements >= 5
+        or forward_calls >= 8
+        or forward_control_flow > 0
+        or additional_methods
+    )
+    return {
+        "class_name": target.name,
+        "instance_field_count": len(instance_fields),
+        "instance_fields": sorted(instance_fields),
+        "forward_statement_count": forward_statements,
+        "forward_call_count": forward_calls,
+        "forward_control_flow_count": forward_control_flow,
+        "additional_methods": additional_methods,
+        "meaningful_framework_component": meaningful,
+    }
+
+
+def _select_external_framework_owner_inline(
+    *,
+    source_code: str,
+    item: dict[str, Any],
+    profile: dict[str, Any],
+    project_source_files: Sequence[dict[str, Any]],
+    current_file_name: str,
+) -> dict[str, Any]:
+    """Select the conservative owner-module strategy for ``nn.Module``.
+
+    This intentionally handles one physical child module only. Repeated blocks
+    and generated containers have identity-sensitive state-dict/module-tree
+    semantics and must be reviewed instead of flattened heuristically.
+    """
+
+    base_name = str((item.get("bases") or [""])[0])
+    if not _is_pytorch_module_base(base_name):
+        return {
+            "status": "review_required",
+            "reason": "INLINE_CLASS_EXTERNAL_BASE_CONTRACT_UNSAFE",
+            "strategy": "external_base_contract_analysis",
+        }
+    if item.get("subclasses"):
+        return {
+            "status": "review_required",
+            "reason": "INLINE_CLASS_PUBLIC_API_DEPENDENCY",
+            "strategy": "pytorch_module_contract_analysis",
+        }
+
+    target = profile.get("node")
+    methods = list(profile.get("methods") or [])
+    if not isinstance(target, ast.ClassDef) or any(
+        isinstance(method, ast.AsyncFunctionDef) or method.decorator_list
+        for method in methods
+    ):
+        return {
+            "status": "review_required",
+            "reason": "INLINE_CLASS_EXTERNAL_BASE_CONTRACT_UNSAFE",
+            "strategy": "pytorch_module_contract_analysis",
+        }
+    constructor = next((method for method in methods if method.name == "__init__"), None)
+    business_methods = [method for method in methods if method.name != "__init__"]
+    if not business_methods or "forward" not in {method.name for method in business_methods}:
+        return {
+            "status": "review_required",
+            "reason": "INLINE_CLASS_FRAMEWORK_REGISTRATION_UNSAFE",
+            "strategy": "pytorch_module_contract_analysis",
+        }
+    try:
+        tree = ast.parse(source_code)
+    except SyntaxError:
+        return {"status": "review_required", "reason": "SOURCE_PARSE_FAILED"}
+    constructions = _find_owned_constructions(tree=tree, target_class=target)
+    if not constructions:
+        return {
+            "status": "not_applicable",
+            "reason": "INLINE_CLASS_DESTINATION_NOT_FOUND",
+            "strategy": "pytorch_module_owner_resolution",
+        }
+    owner_ids = {id(item["owner_class"]) for item in constructions}
+    same_owner_repeated = len(constructions) > 1 and len(owner_ids) == 1
+    responsibility = _pytorch_framework_responsibility_profile(target, methods)
+    if len(constructions) != 1 and not same_owner_repeated:
+        return {
+            "status": "review_required",
+            "reason": "INLINE_CLASS_MULTIPLE_OWNERS",
+            "strategy": "pytorch_module_owner_resolution",
+            "construction_count": len(constructions),
+        }
+    if responsibility["meaningful_framework_component"] and not same_owner_repeated:
+        return {
+            "status": "not_applicable",
+            "reason": "INLINE_CLASS_SOURCE_HAS_MEANINGFUL_FRAMEWORK_RESPONSIBILITY",
+            "strategy": "framework_component_not_lazy",
+            "responsibility_profile": responsibility,
+        }
+
+    # Constructor-transfer safety only matters after a unique owner has been
+    # established. An independent class is simply not an Inline Class target.
+    parameters, defaults, fields, constructor_error = _pytorch_module_constructor_model(constructor)
+    del parameters, defaults
+    if constructor_error:
+        return {
+            "status": "review_required",
+            "reason": constructor_error,
+            "strategy": "pytorch_module_contract_analysis",
+            "responsibility_profile": responsibility,
+        }
+
+    construction = constructions[0]
+    owner = construction["owner_class"]
+    owner_constructor = construction["owner_constructor"]
+    if not _class_has_pytorch_module_base(owner) or not any(
+        _is_direct_super_init_call(statement) for statement in owner_constructor.body
+    ):
+        return {
+            "status": "review_required",
+            "reason": "INLINE_CLASS_EXTERNAL_BASE_CONTRACT_UNSAFE",
+            "strategy": "pytorch_module_owner_resolution",
+        }
+
+    external_reference_files = _repository_reference_files(
+        project_source_files=project_source_files,
+        current_file_name=current_file_name,
+        class_name=str(item.get("class_name") or ""),
+    )
+    if external_reference_files:
+        return {
+            "status": "review_required",
+            "reason": "INLINE_CLASS_PUBLIC_API_DEPENDENCY",
+            "strategy": "pytorch_module_repository_analysis",
+            "reference_files": external_reference_files,
+        }
+
+    if same_owner_repeated:
+        if {method.name for method in business_methods} != {"forward"}:
+            return {
+                "status": "review_required",
+                "reason": "INLINE_CLASS_REPEATED_OWNER_METHOD_CONTRACT_UNSAFE",
+                "strategy": "pytorch_repeated_module_owner_analysis",
+            }
+        return {
+            "status": "success",
+            "reason": "INLINE_CLASS_EXTERNAL_BASE_SAFE",
+            "strategy": "pytorch_repeated_module_owner_inline",
+            "destination_class": owner.name,
+            "owner_attributes": [
+                str(item["owner_attribute"])
+                for item in constructions
+            ],
+            "framework_contract": "torch.nn.Module",
+            "responsibility_profile": responsibility,
+            "registered_fields": sorted(
+                field
+                for field, value in fields.items()
+                if _is_likely_torch_registered_module(value)
+            ),
+        }
+
+    return {
+        "status": "success",
+        "reason": "INLINE_CLASS_EXTERNAL_BASE_SAFE",
+        "strategy": "pytorch_nn_module_owner_inline",
+        "destination_class": owner.name,
+        "owner_attribute": str(construction["owner_attribute"]),
+        "framework_contract": "torch.nn.Module",
+        "registered_fields": sorted(
+            field
+            for field, value in fields.items()
+            if _is_likely_torch_registered_module(value)
+        ),
     }
 
 def _apply_simple_inheritance_collapse(
@@ -2195,6 +2522,733 @@ def _find_owned_constructions(
     return constructions
 
 
+class _FrameworkInlineSelfMemberRewriter(ast.NodeTransformer):
+    """Rewrite a child module's ``self.member`` accesses for its owner."""
+
+    def __init__(self, member_mapping: dict[str, str]) -> None:
+        self.member_mapping = member_mapping
+
+    def visit_Attribute(self, node: ast.Attribute) -> ast.AST:
+        node = self.generic_visit(node)
+        if (
+            isinstance(node, ast.Attribute)
+            and isinstance(node.value, ast.Name)
+            and node.value.id == "self"
+            and node.attr in self.member_mapping
+        ):
+            return ast.copy_location(
+                ast.Attribute(
+                    value=ast.Name(id="self", ctx=ast.Load()),
+                    attr=self.member_mapping[node.attr],
+                    ctx=node.ctx,
+                ),
+                node,
+            )
+        return node
+
+
+class _FrameworkModuleParameterRewriter(ast.NodeTransformer):
+    """Rewrite the inlined module method body from ``self`` to ``module``."""
+
+    def visit_Name(self, node: ast.Name) -> ast.AST:
+        if node.id != "self":
+            return node
+        return ast.copy_location(
+            ast.Name(id="module", ctx=node.ctx),
+            node,
+        )
+
+
+def _pytorch_repeated_source_reference_error(
+    *,
+    tree: ast.Module,
+    target_class: ast.ClassDef,
+    construction_calls: Sequence[ast.Call],
+    class_name: str,
+) -> str:
+    parents = _parents(tree)
+    allowed_calls = {id(call) for call in construction_calls}
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Name) and node.id == class_name):
+            continue
+        if _is_descendant(node, target_class, parents):
+            continue
+        parent = parents.get(node)
+        if isinstance(parent, ast.Call) and id(parent) in allowed_calls and parent.func is node:
+            continue
+        return "INLINE_CLASS_PUBLIC_API_DEPENDENCY"
+    return ""
+
+
+def _pytorch_repeated_owner_call_edits(
+    *,
+    source_code: str,
+    owner: ast.ClassDef,
+    owner_attributes: set[str],
+    helper_method: str,
+    construction_statements: Sequence[ast.AST],
+) -> tuple[list[tuple[int, int, str]], int, str]:
+    """Rewrite repeated child calls while retaining their module containers."""
+
+    parents = _parents(owner)
+    line_offsets = _line_offsets(source_code)
+    construction_ids = {id(statement) for statement in construction_statements}
+    handled_calls: set[int] = set()
+    edits: list[tuple[int, int, str]] = []
+
+    def owner_handle(node: ast.AST) -> str:
+        if (
+            isinstance(node, ast.Attribute)
+            and isinstance(node.value, ast.Name)
+            and node.value.id == "self"
+            and node.attr in owner_attributes
+        ):
+            return node.attr
+        return ""
+
+    def called_owner_attribute(node: ast.Call) -> str:
+        attribute = owner_handle(node.func)
+        if (
+            not attribute
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "forward"
+        ):
+            attribute = owner_handle(node.func.value)
+        return attribute
+
+    matching_calls = [
+        node
+        for node in ast.walk(owner)
+        if isinstance(node, ast.Call) and called_owner_attribute(node)
+    ]
+    matching_ids = {id(node) for node in matching_calls}
+    handled_calls.update(matching_ids)
+
+    class _RepeatedOwnerCallRewriter(ast.NodeTransformer):
+        def visit_Call(self, node: ast.Call) -> ast.AST:
+            node = self.generic_visit(node)
+            attribute = called_owner_attribute(node)
+            if not attribute:
+                return node
+            node.func = ast.Attribute(
+                value=ast.Name(id="self", ctx=ast.Load()),
+                attr=helper_method,
+                ctx=ast.Load(),
+            )
+            node.args = [
+                ast.Attribute(
+                    value=ast.Name(id="self", ctx=ast.Load()),
+                    attr=attribute,
+                    ctx=ast.Load(),
+                ),
+                *node.args,
+            ]
+            return node
+
+    # Nested calls overlap textually. Rewrite each outermost matching call as
+    # one AST fragment so inner calls retain their original evaluation order.
+    outermost_calls: list[ast.Call] = []
+    for node in matching_calls:
+        current = parents.get(node)
+        has_matching_ancestor = False
+        while current is not None:
+            if isinstance(current, ast.Call) and id(current) in matching_ids:
+                has_matching_ancestor = True
+                break
+            current = parents.get(current)
+        if not has_matching_ancestor:
+            outermost_calls.append(node)
+
+    for node in outermost_calls:
+        rewritten = _RepeatedOwnerCallRewriter().visit(copy.deepcopy(node))
+        ast.fix_missing_locations(rewritten)
+        start = _position_offset(line_offsets, node.lineno, node.col_offset)
+        end = _position_offset(line_offsets, node.end_lineno, node.end_col_offset)
+        if start < 0 or end < start:
+            return [], 0, "ATTRIBUTE_REWRITE_POSITION_FAILED"
+        edits.append((start, end, ast.unparse(rewritten)))
+
+    for node in ast.walk(owner):
+        attribute = owner_handle(node)
+        if not attribute:
+            continue
+        current: ast.AST | None = node
+        inside_construction = False
+        inside_handled_call = False
+        while current is not None:
+            if id(current) in construction_ids:
+                inside_construction = True
+                break
+            if isinstance(current, ast.Call) and id(current) in handled_calls:
+                inside_handled_call = True
+                break
+            current = parents.get(current)
+        if inside_construction or inside_handled_call:
+            continue
+        parent = parents.get(node)
+        if isinstance(parent, ast.Attribute) and parent.value is node:
+            # Direct field access remains valid on the generic module container.
+            continue
+        return [], 0, "INLINE_CLASS_FRAMEWORK_REGISTRATION_UNSAFE"
+
+    return edits, len(matching_calls), ""
+
+
+def _pytorch_module_method_contract_error(
+    methods: Sequence[ast.FunctionDef],
+    *,
+    field_names: set[str],
+) -> str:
+    method_names = {method.name for method in methods}
+    for method in methods:
+        if method.decorator_list or method.args.vararg or method.args.kwarg:
+            return "INLINE_CLASS_EXTERNAL_BASE_CONTRACT_UNSAFE"
+        for node in ast.walk(method):
+            if isinstance(node, (ast.Await, ast.Yield, ast.YieldFrom, ast.Lambda)):
+                return "INLINE_CLASS_EXTERNAL_BASE_CONTRACT_UNSAFE"
+            if (
+                isinstance(node, ast.Attribute)
+                and isinstance(node.value, ast.Name)
+                and node.value.id == "self"
+                and node.attr not in field_names | method_names
+            ):
+                return "INLINE_CLASS_EXTERNAL_BASE_CONTRACT_UNSAFE"
+    return ""
+
+
+def _pytorch_source_class_reference_error(
+    *,
+    tree: ast.Module,
+    target_class: ast.ClassDef,
+    construction_call: ast.Call,
+    class_name: str,
+) -> str:
+    parents = _parents(tree)
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Name) and node.id == class_name):
+            continue
+        if _is_descendant(node, target_class, parents):
+            continue
+        if parents.get(node) is construction_call and construction_call.func is node:
+            continue
+        return "INLINE_CLASS_PUBLIC_API_DEPENDENCY"
+    return ""
+
+
+def _pytorch_owner_reference_edits(
+    *,
+    source_code: str,
+    owner: ast.ClassDef,
+    owner_attribute: str,
+    field_mapping: dict[str, str],
+    method_mapping: dict[str, str],
+    construction_statement: ast.AST,
+) -> tuple[list[tuple[int, int, str]], int, str]:
+    """Rewrite accesses from an owner to its flattened child module."""
+
+    parents = _parents(owner)
+    line_offsets = _line_offsets(source_code)
+    edits: list[tuple[int, int, str]] = []
+    updated = 0
+
+    def is_owner_handle(node: ast.AST) -> bool:
+        return (
+            isinstance(node, ast.Attribute)
+            and isinstance(node.value, ast.Name)
+            and node.value.id == "self"
+            and node.attr == owner_attribute
+        )
+
+    for node in ast.walk(owner):
+        if node is construction_statement or _is_descendant(node, construction_statement, parents):
+            continue
+        if not isinstance(node, ast.Attribute):
+            continue
+
+        parent = parents.get(node)
+        replacement = ""
+        if is_owner_handle(node):
+            if isinstance(parent, ast.Call) and parent.func is node:
+                replacement = f"self.{method_mapping['forward']}"
+            elif isinstance(parent, ast.Attribute) and parent.value is node:
+                # The outer member is handled below, which avoids overlapping
+                # edits for expressions such as ``self.block.forward(x)``.
+                continue
+            else:
+                return [], 0, "INLINE_CLASS_FRAMEWORK_REGISTRATION_UNSAFE"
+        elif is_owner_handle(node.value):
+            if node.attr in field_mapping:
+                replacement = f"self.{field_mapping[node.attr]}"
+            elif node.attr in method_mapping:
+                replacement = f"self.{method_mapping[node.attr]}"
+            else:
+                return [], 0, "INLINE_CLASS_FRAMEWORK_REGISTRATION_UNSAFE"
+        else:
+            continue
+
+        start = _position_offset(line_offsets, node.lineno, node.col_offset)
+        end = _position_offset(line_offsets, node.end_lineno, node.end_col_offset)
+        if start < 0 or end < start:
+            return [], 0, "ATTRIBUTE_REWRITE_POSITION_FAILED"
+        edits.append((start, end, replacement))
+        updated += 1
+
+    return edits, updated, ""
+
+
+def _apply_pytorch_nn_module_owner_inline(
+    source_code: str,
+    *,
+    class_to_inline: str,
+    destination_class: str,
+    owner_attribute: str,
+) -> Tuple[str, int, dict[str, Any]]:
+    """Inline one uniquely owned ``torch.nn.Module`` into another module.
+
+    The owner's existing ``super().__init__`` remains untouched. Every child
+    field assignment is rebuilt as an owner assignment, so PyTorch continues
+    to register parameters and submodules on the surviving module.
+    """
+
+    try:
+        tree = ast.parse(source_code)
+    except SyntaxError:
+        return _review(source_code, class_to_inline=class_to_inline, reason="SOURCE_PARSE_FAILED")
+    targets = [
+        node for node in tree.body
+        if isinstance(node, ast.ClassDef) and node.name == class_to_inline
+    ]
+    owners = [
+        node for node in tree.body
+        if isinstance(node, ast.ClassDef) and node.name == destination_class
+    ]
+    if len(targets) != 1 or len(owners) != 1 or not owner_attribute:
+        return _not_applicable(
+            source_code,
+            class_to_inline=class_to_inline,
+            reason="INLINE_CLASS_DESTINATION_NOT_FOUND",
+        )
+    target_class = targets[0]
+    owner = owners[0]
+    if not (_class_has_pytorch_module_base(target_class) and _class_has_pytorch_module_base(owner)):
+        return _review(
+            source_code,
+            class_to_inline=class_to_inline,
+            reason="INLINE_CLASS_EXTERNAL_BASE_CONTRACT_UNSAFE",
+        )
+
+    constructors = [
+        node for node in target_class.body
+        if isinstance(node, ast.FunctionDef) and node.name == "__init__"
+    ]
+    methods = [
+        node for node in target_class.body
+        if isinstance(node, ast.FunctionDef) and node.name != "__init__"
+    ]
+    if len(constructors) != 1 or not methods or "forward" not in {method.name for method in methods}:
+        return _review(
+            source_code,
+            class_to_inline=class_to_inline,
+            reason="INLINE_CLASS_FRAMEWORK_REGISTRATION_UNSAFE",
+        )
+    parameters, defaults, field_expressions, constructor_error = _pytorch_module_constructor_model(constructors[0])
+    if constructor_error:
+        return _review(source_code, class_to_inline=class_to_inline, reason=constructor_error)
+    field_names = set(field_expressions)
+    method_error = _pytorch_module_method_contract_error(methods, field_names=field_names)
+    if method_error:
+        return _review(source_code, class_to_inline=class_to_inline, reason=method_error)
+
+    constructions = [
+        item for item in _find_owned_constructions(tree=tree, target_class=target_class)
+        if item["owner_class"] is owner and item["owner_attribute"] == owner_attribute
+    ]
+    if len(constructions) != 1:
+        return _review(
+            source_code,
+            class_to_inline=class_to_inline,
+            reason="INLINE_CLASS_MULTIPLE_OWNERS" if constructions else "INLINE_CLASS_DESTINATION_NOT_FOUND",
+        )
+    construction = constructions[0]
+    construction_call: ast.Call = construction["call"]
+    source_reference_error = _pytorch_source_class_reference_error(
+        tree=tree,
+        target_class=target_class,
+        construction_call=construction_call,
+        class_name=class_to_inline,
+    )
+    if source_reference_error:
+        return _review(source_code, class_to_inline=class_to_inline, reason=source_reference_error)
+    bound, bind_error = _bind_constructor_arguments(
+        call=construction_call,
+        parameters=parameters,
+        defaults=defaults,
+    )
+    if bind_error:
+        return _review(source_code, class_to_inline=class_to_inline, reason=bind_error)
+
+    field_mapping = {
+        name: f"{owner_attribute}_{name}"
+        for name in field_expressions
+    }
+    method_mapping = {
+        method.name: f"_sctva_inline_{owner_attribute}_{method.name}"
+        for method in methods
+    }
+    owner_fields = _owner_self_fields(owner)
+    owner_methods = _owner_method_names(owner)
+    collisions = sorted(
+        (set(field_mapping.values()) & owner_fields)
+        | (set(method_mapping.values()) & owner_methods)
+    )
+    if collisions:
+        return _review(
+            source_code,
+            class_to_inline=class_to_inline,
+            reason="DESTINATION_FIELD_COLLISION",
+            collisions=collisions,
+        )
+
+    member_rewriter = _FrameworkInlineSelfMemberRewriter({
+        **field_mapping,
+        **method_mapping,
+    })
+    field_assignment_lines: list[str] = []
+    indent = " " * int(getattr(construction["statement"], "col_offset", 0) or 0)
+    for field_name, expression in field_expressions.items():
+        value = _ParameterSubstituter(bound).visit(copy.deepcopy(expression))
+        value = member_rewriter.visit(value)
+        assignment = ast.Assign(
+            targets=[ast.Attribute(
+                value=ast.Name(id="self", ctx=ast.Load()),
+                attr=field_mapping[field_name],
+                ctx=ast.Store(),
+            )],
+            value=value,
+        )
+        ast.fix_missing_locations(assignment)
+        field_assignment_lines.append(f"{indent}{ast.unparse(assignment)}\n")
+
+    rendered_methods: list[str] = []
+    for method in methods:
+        moved = copy.deepcopy(method)
+        moved.name = method_mapping[method.name]
+        moved = member_rewriter.visit(moved)
+        ast.fix_missing_locations(moved)
+        rendered_methods.append(textwrap.indent(ast.unparse(moved), " " * (owner.col_offset + 4)))
+
+    chain_edits, updated_accesses, chain_error = _pytorch_owner_reference_edits(
+        source_code=source_code,
+        owner=owner,
+        owner_attribute=owner_attribute,
+        field_mapping=field_mapping,
+        method_mapping=method_mapping,
+        construction_statement=construction["statement"],
+    )
+    if chain_error:
+        return _review(source_code, class_to_inline=class_to_inline, reason=chain_error)
+
+    line_offsets = _line_offsets(source_code)
+    edits: list[tuple[int, int, str]] = [
+        (
+            _position_offset(line_offsets, target_class.lineno, 0),
+            _line_end_offset(source_code, line_offsets, target_class.end_lineno),
+            "",
+        ),
+        (
+            _position_offset(line_offsets, construction["statement"].lineno, 0),
+            _line_end_offset(source_code, line_offsets, construction["statement"].end_lineno),
+            "".join(field_assignment_lines),
+        ),
+        (
+            _line_end_offset(source_code, line_offsets, owner.end_lineno),
+            _line_end_offset(source_code, line_offsets, owner.end_lineno),
+            "\n" + "\n\n".join(rendered_methods) + "\n",
+        ),
+        *chain_edits,
+    ]
+    if not _edits_do_not_overlap(edits):
+        return _review(source_code, class_to_inline=class_to_inline, reason="OVERLAPPING_INLINE_EDITS")
+    transformed = _apply_edits(source_code, edits)
+    try:
+        transformed_tree = ast.parse(transformed)
+        compile(transformed, "<sctva-pytorch-inline-class>", "exec")
+    except (SyntaxError, ValueError, TypeError):
+        return _review(source_code, class_to_inline=class_to_inline, reason="TRANSFORMED_SOURCE_PARSE_FAILED")
+    if any(
+        isinstance(node, ast.ClassDef) and node.name == class_to_inline
+        for node in transformed_tree.body
+    ) or any(
+        isinstance(node, ast.Name) and node.id == class_to_inline
+        for node in ast.walk(transformed_tree)
+    ):
+        return _review(source_code, class_to_inline=class_to_inline, reason="UNRESOLVED_CLASS_REFERENCE_AFTER_INLINE")
+
+    return transformed, len(edits), {
+        "status": "success",
+        "reason": "INLINE_CLASS_EXTERNAL_BASE_SAFE",
+        "inline_mode": "framework_owner_class",
+        "strategy": "pytorch_nn_module_owner_inline",
+        "framework_contract": "torch.nn.Module",
+        "class_to_inline": class_to_inline,
+        "destination_class": destination_class,
+        "owner_attribute": owner_attribute,
+        "source_class_resolved": True,
+        "destination_class_resolved": True,
+        "relationship_verified": True,
+        "inlined_fields": sorted(field_mapping),
+        "moved_field_mapping": field_mapping,
+        "inlined_methods": [method.name for method in methods],
+        "moved_method_mapping": method_mapping,
+        "registered_submodules_preserved": True,
+        "constructor_behavior_preserved": True,
+        "forward_behavior_preserved": "forward" in method_mapping,
+        "state_dict_key_mapping": {
+            f"{owner_attribute}.{field}": mapped
+            for field, mapped in field_mapping.items()
+            if _is_likely_torch_registered_module(field_expressions[field])
+        },
+        "updated_owner_member_accesses": updated_accesses,
+        "inline_class_lineage": {
+            "source_class": class_to_inline,
+            "destination_class": destination_class,
+            "owner_attribute": owner_attribute,
+            "moved_fields": sorted(field_mapping.values()),
+            "moved_methods": sorted(method_mapping.values()),
+        },
+    }
+
+
+def _apply_pytorch_repeated_module_owner_inline(
+    source_code: str,
+    *,
+    class_to_inline: str,
+    destination_class: str,
+    owner_attributes: Sequence[str],
+) -> Tuple[str, int, dict[str, Any]]:
+    """Inline repeated instances into one owner without changing state keys."""
+
+    try:
+        tree = ast.parse(source_code)
+    except SyntaxError:
+        return _review(source_code, class_to_inline=class_to_inline, reason="SOURCE_PARSE_FAILED")
+    targets = [
+        node for node in tree.body
+        if isinstance(node, ast.ClassDef) and node.name == class_to_inline
+    ]
+    owners = [
+        node for node in tree.body
+        if isinstance(node, ast.ClassDef) and node.name == destination_class
+    ]
+    requested_attributes = [str(value) for value in owner_attributes if str(value)]
+    if len(targets) != 1 or len(owners) != 1 or len(requested_attributes) < 2:
+        return _not_applicable(
+            source_code,
+            class_to_inline=class_to_inline,
+            reason="INLINE_CLASS_DESTINATION_NOT_FOUND",
+        )
+    target_class = targets[0]
+    owner = owners[0]
+    if not (_class_has_pytorch_module_base(target_class) and _class_has_pytorch_module_base(owner)):
+        return _review(
+            source_code,
+            class_to_inline=class_to_inline,
+            reason="INLINE_CLASS_EXTERNAL_BASE_CONTRACT_UNSAFE",
+        )
+
+    constructor = _class_method(target_class, "__init__")
+    methods = [
+        node for node in target_class.body
+        if isinstance(node, ast.FunctionDef) and node.name != "__init__"
+    ]
+    if len(methods) != 1 or methods[0].name != "forward":
+        return _review(
+            source_code,
+            class_to_inline=class_to_inline,
+            reason="INLINE_CLASS_REPEATED_OWNER_METHOD_CONTRACT_UNSAFE",
+        )
+    parameters, defaults, field_expressions, constructor_error = (
+        _pytorch_module_constructor_model(constructor)
+    )
+    if constructor_error:
+        return _review(source_code, class_to_inline=class_to_inline, reason=constructor_error)
+    method_error = _pytorch_module_method_contract_error(
+        methods,
+        field_names=set(field_expressions),
+    )
+    if method_error:
+        return _review(source_code, class_to_inline=class_to_inline, reason=method_error)
+
+    all_constructions = _find_owned_constructions(tree=tree, target_class=target_class)
+    constructions = [
+        item for item in all_constructions
+        if item["owner_class"] is owner
+        and str(item["owner_attribute"]) in requested_attributes
+    ]
+    if (
+        len(constructions) != len(requested_attributes)
+        or len(all_constructions) != len(constructions)
+        or len({str(item["owner_attribute"]) for item in constructions}) != len(constructions)
+    ):
+        return _review(
+            source_code,
+            class_to_inline=class_to_inline,
+            reason="INLINE_CLASS_MULTIPLE_OWNERS",
+        )
+    source_reference_error = _pytorch_repeated_source_reference_error(
+        tree=tree,
+        target_class=target_class,
+        construction_calls=[item["call"] for item in constructions],
+        class_name=class_to_inline,
+    )
+    if source_reference_error:
+        return _review(source_code, class_to_inline=class_to_inline, reason=source_reference_error)
+
+    helper_method = f"_sctva_inline_{class_to_inline.lower()}_forward"
+    if helper_method in _owner_method_names(owner):
+        return _review(
+            source_code,
+            class_to_inline=class_to_inline,
+            reason="DESTINATION_METHOD_COLLISION",
+        )
+    call_edits, updated_calls, call_error = _pytorch_repeated_owner_call_edits(
+        source_code=source_code,
+        owner=owner,
+        owner_attributes=set(requested_attributes),
+        helper_method=helper_method,
+        construction_statements=[item["statement"] for item in constructions],
+    )
+    if call_error:
+        return _review(source_code, class_to_inline=class_to_inline, reason=call_error)
+    if updated_calls == 0:
+        return _review(
+            source_code,
+            class_to_inline=class_to_inline,
+            reason="INLINE_CLASS_AFFECTED_CALL_SITES_NOT_FOUND",
+        )
+
+    base_expression = _dotted_name(target_class.bases[0]) or "nn.Module"
+    nested_mapping: dict[str, dict[str, str]] = {}
+    construction_replacements: list[tuple[ast.AST, str]] = []
+    for construction in constructions:
+        attribute = str(construction["owner_attribute"])
+        bound, bind_error = _bind_constructor_arguments(
+            call=construction["call"],
+            parameters=parameters,
+            defaults=defaults,
+        )
+        if bind_error:
+            return _review(source_code, class_to_inline=class_to_inline, reason=bind_error)
+        indent = " " * int(getattr(construction["statement"], "col_offset", 0) or 0)
+        lines = [f"{indent}self.{attribute} = {base_expression}()\n"]
+        nested_mapping[attribute] = {}
+        for field_name, expression in field_expressions.items():
+            value = _ParameterSubstituter(bound).visit(copy.deepcopy(expression))
+            ast.fix_missing_locations(value)
+            nested_name = f"{attribute}.{field_name}"
+            nested_mapping[attribute][field_name] = nested_name
+            lines.append(
+                f"{indent}self.{nested_name} = {ast.unparse(value)}\n"
+            )
+        construction_replacements.append((construction["statement"], "".join(lines)))
+
+    moved = copy.deepcopy(methods[0])
+    moved.name = helper_method
+    moved.args.args = [
+        moved.args.args[0],
+        ast.arg(arg="module"),
+        *moved.args.args[1:],
+    ]
+    moved = _FrameworkModuleParameterRewriter().visit(moved)
+    ast.fix_missing_locations(moved)
+    rendered_method = textwrap.indent(ast.unparse(moved), " " * (owner.col_offset + 4))
+
+    line_offsets = _line_offsets(source_code)
+    edits: list[tuple[int, int, str]] = [
+        (
+            _position_offset(line_offsets, target_class.lineno, 0),
+            _line_end_offset(source_code, line_offsets, target_class.end_lineno),
+            "",
+        ),
+        (
+            _line_end_offset(source_code, line_offsets, owner.end_lineno),
+            _line_end_offset(source_code, line_offsets, owner.end_lineno),
+            f"\n{rendered_method}\n",
+        ),
+        *call_edits,
+    ]
+    for statement, replacement in construction_replacements:
+        edits.append((
+            _position_offset(line_offsets, statement.lineno, 0),
+            _line_end_offset(source_code, line_offsets, statement.end_lineno),
+            replacement,
+        ))
+    if not _edits_do_not_overlap(edits):
+        return _review(source_code, class_to_inline=class_to_inline, reason="OVERLAPPING_INLINE_EDITS")
+    transformed = _apply_edits(source_code, edits)
+    try:
+        transformed_tree = ast.parse(transformed)
+        compile(transformed, "<sctva-pytorch-repeated-inline>", "exec")
+    except (SyntaxError, ValueError, TypeError):
+        return _review(
+            source_code,
+            class_to_inline=class_to_inline,
+            reason="TRANSFORMED_SOURCE_PARSE_FAILED",
+        )
+    if any(
+        isinstance(node, (ast.ClassDef, ast.Name))
+        and getattr(node, "name", getattr(node, "id", "")) == class_to_inline
+        for node in ast.walk(transformed_tree)
+    ):
+        return _review(
+            source_code,
+            class_to_inline=class_to_inline,
+            reason="UNRESOLVED_CLASS_REFERENCE_AFTER_INLINE",
+        )
+
+    state_mapping = {
+        path: path
+        for fields in nested_mapping.values()
+        for path in fields.values()
+        if _is_likely_torch_registered_module(
+            field_expressions[path.split(".", 1)[1]]
+        )
+    }
+    return transformed, len(edits), {
+        "status": "success",
+        "reason": "INLINE_CLASS_EXTERNAL_BASE_SAFE",
+        "inline_mode": "framework_repeated_owner_class",
+        "strategy": "pytorch_repeated_module_owner_inline",
+        "framework_contract": "torch.nn.Module",
+        "class_to_inline": class_to_inline,
+        "destination_class": destination_class,
+        "owner_attributes": requested_attributes,
+        "source_class_resolved": True,
+        "destination_class_resolved": True,
+        "relationship_verified": True,
+        "inlined_fields": sorted(field_expressions),
+        "moved_nested_field_mapping": nested_mapping,
+        "inlined_methods": ["forward"],
+        "moved_method_mapping": {"forward": helper_method},
+        "registered_submodules_preserved": True,
+        "constructor_behavior_preserved": True,
+        "forward_behavior_preserved": True,
+        "state_dict_key_mapping": state_mapping,
+        "updated_owner_member_accesses": updated_calls,
+        "inline_class_lineage": {
+            "source_class": class_to_inline,
+            "destination_class": destination_class,
+            "owner_attributes": requested_attributes,
+            "moved_fields": sorted(
+                path
+                for fields in nested_mapping.values()
+                for path in fields.values()
+            ),
+            "moved_methods": [helper_method],
+        },
+    }
+
+
 def _class_reference_is_allowed(
     *,
     node: ast.Name,
@@ -2333,6 +3387,10 @@ def apply_owned_inline_class(
                 source_code,
                 class_to_inline=str(class_to_inline or ""),
                 reason=str(strategy.get("reason") or "INLINE_CLASS_TARGET_NOT_FOUND"),
+                strategy=str(strategy.get("strategy") or ""),
+                responsibility_profile=dict(
+                    strategy.get("responsibility_profile") or {}
+                ),
             )
         return _review(
             source_code,
@@ -2349,6 +3407,66 @@ def apply_owned_inline_class(
             class_to_inline=str(strategy.get("class_name") or class_to_inline),
             project_source_files=project_source_files,
             current_file_name=current_file_name,
+        )
+    if strategy.get("strategy") == "pytorch_repeated_module_owner_inline":
+        resolved_destination = str(strategy.get("destination_class") or "")
+        resolved_attributes = [
+            str(value)
+            for value in strategy.get("owner_attributes") or []
+            if str(value)
+        ]
+        if (
+            preferred_destination_class
+            and preferred_destination_class != resolved_destination
+        ) or (
+            preferred_owner_attribute
+            and preferred_owner_attribute not in resolved_attributes
+        ):
+            return _review(
+                source_code,
+                class_to_inline=class_to_inline,
+                reason="INLINE_CLASS_DESTINATION_RELATIONSHIP_UNVERIFIED",
+                requested_destination_class=preferred_destination_class,
+                resolved_destination_class=resolved_destination,
+                requested_owner_attribute=preferred_owner_attribute,
+                resolved_owner_attributes=resolved_attributes,
+            )
+        return _apply_pytorch_repeated_module_owner_inline(
+            source_code,
+            class_to_inline=str(strategy.get("class_name") or class_to_inline),
+            destination_class=resolved_destination,
+            owner_attributes=resolved_attributes,
+        )
+    if strategy.get("strategy") == "pytorch_nn_module_owner_inline":
+        resolved_destination = str(strategy.get("destination_class") or "")
+        resolved_owner_attribute = str(strategy.get("owner_attribute") or "")
+        if (
+            preferred_destination_class
+            and preferred_destination_class != resolved_destination
+        ):
+            return _review(
+                source_code,
+                class_to_inline=class_to_inline,
+                reason="INLINE_CLASS_DESTINATION_RELATIONSHIP_UNVERIFIED",
+                requested_destination_class=preferred_destination_class,
+                resolved_destination_class=resolved_destination,
+            )
+        if (
+            preferred_owner_attribute
+            and preferred_owner_attribute != resolved_owner_attribute
+        ):
+            return _review(
+                source_code,
+                class_to_inline=class_to_inline,
+                reason="INLINE_CLASS_DESTINATION_RELATIONSHIP_UNVERIFIED",
+                requested_owner_attribute=preferred_owner_attribute,
+                resolved_owner_attribute=resolved_owner_attribute,
+            )
+        return _apply_pytorch_nn_module_owner_inline(
+            source_code,
+            class_to_inline=str(strategy.get("class_name") or class_to_inline),
+            destination_class=resolved_destination,
+            owner_attribute=resolved_owner_attribute,
         )
     class_to_inline = str(strategy.get("class_name") or class_to_inline)
 

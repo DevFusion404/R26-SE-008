@@ -3425,6 +3425,9 @@ def apply_inline_class(
             "qualified_class_name": str(strategy.get("qualified_class_name") or ""),
             "strategy": str(strategy.get("strategy") or ""),
             "class_model": dict(strategy.get("class_model") or {}),
+            "responsibility_profile": dict(
+                strategy.get("responsibility_profile") or {}
+            ),
             "reference_files": list(strategy.get("reference_files") or []),
         }
 
@@ -3433,7 +3436,11 @@ def apply_inline_class(
     # the engine's owned-composition pre-pass could reach the inheritance
     # collapse implementation, so direct calls silently fell back to the old
     # module-function transformer.
-    if strategy.get("strategy") == "simple_inheritance_collapse":
+    if strategy.get("strategy") in {
+        "simple_inheritance_collapse",
+        "pytorch_nn_module_owner_inline",
+        "pytorch_repeated_module_owner_inline",
+    }:
         return python_inline_class.apply_owned_inline_class(
             source_code,
             class_to_inline=str(strategy.get("class_name") or resolution["class_to_inline"]),
@@ -4760,13 +4767,6 @@ def analyze_python_dead_code_target(
             "target_kind": kind,
             "target_fingerprint": fingerprint,
             "reason": "DYNAMIC_REFERENCE_DETECTED",
-        }
-    if kind == "live_callable":
-        return {
-            "status": "NOT_DEAD",
-            "target_kind": kind,
-            "target_fingerprint": fingerprint,
-            "reason": "LOCAL_REFERENCE_DETECTED",
         }
     if not method_name and source_line is not None:
         # A line-only plan action must not expand into the enclosing function

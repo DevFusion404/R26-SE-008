@@ -161,6 +161,30 @@ function isAppliedFileResult(result) {
   return result?.transformation_applied === true && result?.rollback_occurred !== true;
 }
 
+function fileResultStatus(result) {
+  if (result?.rollback_occurred === true) {
+    return {
+      key: 'rolled-back',
+      label: 'ROLLED BACK',
+      title: 'Validation rolled this file back to its original source.',
+    };
+  }
+
+  if (isAppliedFileResult(result)) {
+    return {
+      key: 'applied',
+      label: 'APPLIED',
+      title: 'A validated refactoring was applied to this file.',
+    };
+  }
+
+  return {
+    key: 'not-applied',
+    label: 'NOT APPLIED',
+    title: 'No source-code change was applied to this file.',
+  };
+}
+
 const DEFAULT_TIMELINE = buildPipelineTimeline({
   phase: 'idle',
   planLoaded: false,
@@ -2447,26 +2471,33 @@ export default function SCTVAAgentPage() {
     []
   );
 
-  const appliedFileResults = fileResults.filter(isAppliedFileResult);
-  const activeAppliedResult = appliedFileResults.find(item => item.file_name === activeFileName) || null;
+  const activeFileResult = fileResults.find(item => item.file_name === activeFileName) || null;
   const activeSource = sourceFiles.find(file => file.name === activeFileName) || sourceFiles[0];
   const activeSourceName = activeSource ? activeSource.name : '';
   const activeSourceCode = activeSource ? activeSource.code : '';
   const activeFileDisplay = fileResults.length
-    ? activeAppliedResult?.file_name || 'No applied files'
+    ? activeFileResult?.file_name || activeFileName || 'No file selected'
     : activeFileName || activeSourceName || 'No file selected';
   const confidenceFileDisplay = activeFileDisplay === 'No file selected'
     ? activeFileDisplay
     : activeFileDisplay.split(/[\\/]/).filter(Boolean).pop() || activeFileDisplay;
   const fileTabs = fileResults.length
-    ? appliedFileResults.map(item => ({
-      name: item.file_name,
-      displayName: String(item.file_name || '').split(/[\\/]/).filter(Boolean).pop() || item.file_name,
-      success: item.success,
-    }))
+    ? fileResults.map(item => {
+      const status = fileResultStatus(item);
+      return {
+        name: item.file_name,
+        displayName: String(item.file_name || '').split(/[\\/]/).filter(Boolean).pop() || item.file_name,
+        statusKey: status.key,
+        statusLabel: status.label,
+        statusTitle: status.title,
+      };
+    })
     : sourceFiles.map(file => ({
       name: file.name,
       displayName: String(file.name || '').split(/[\\/]/).filter(Boolean).pop() || file.name,
+      statusKey: '',
+      statusLabel: '',
+      statusTitle: '',
     }));
 
   function pushLog(level, message) {
@@ -2993,9 +3024,9 @@ export default function SCTVAAgentPage() {
       pushLog('WARN', `Could not store final artifacts in browser storage: ${storageInfo.message}`);
     }
 
-    const preferredName = activeFileName && appliedResults.some(item => item.file_name === activeFileName)
+    const preferredName = activeFileName && results.some(item => item.file_name === activeFileName)
       ? activeFileName
-      : appliedResults[0]?.file_name;
+      : appliedResults[0]?.file_name || results[0]?.file_name;
 
     if (preferredName) {
       setActiveFileName(preferredName);
@@ -3009,10 +3040,6 @@ export default function SCTVAAgentPage() {
       || '';
 
     applyActiveResult(selected, originalSource);
-    if (!appliedResults.length) {
-      setFinalCode('');
-      renderDiff('', '');
-    }
   }
 
   function handleSelectFile(fileName) {
@@ -3443,7 +3470,7 @@ export default function SCTVAAgentPage() {
               <span></span>
               {isRunning ? 'Running...' : 'Run Transformation'}
             </button>
-            <button
+            {/* <button
               className="sctva-btn sctva-btn-secondary"
               type="button"
               onClick={handleDownloadTransformedProject}
@@ -3451,7 +3478,7 @@ export default function SCTVAAgentPage() {
             >
               <span></span>
               Download ZIP
-            </button>
+            </button> */}
           </div>
         </form>
       </section>
@@ -3497,11 +3524,12 @@ export default function SCTVAAgentPage() {
                 <button
                   key={item.name}
                   type="button"
-                  className={`sctva-file-tab ${item.name === activeFileName ? 'active' : ''} ${item.success === true ? 'pass' : ''}`}
+                  className={`sctva-file-tab ${item.name === activeFileName ? 'active' : ''} ${item.statusKey || ''}`}
                   onClick={() => handleSelectFile(item.name)}
-                  title={item.name}
+                  title={item.statusTitle ? `${item.name} - ${item.statusTitle}` : item.name}
                 >
                   <span>{item.displayName}</span>
+                  {item.statusLabel ? <em>{item.statusLabel}</em> : null}
                 </button>
               ))}
             </div>
