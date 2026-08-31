@@ -72,6 +72,7 @@ import TradeOffPanel from "../components/TradeOffPanel.jsx";
 import SmellCategoryOverview from "../components/SmellCategoryOverview.jsx";
 import QuickSelectDropdown from "../components/QuickSelectDropdown.jsx";
 import SelectionSummaryPanel from "../components/SelectionSummaryPanel.jsx";
+import StickyActionBar from "../components/StickyActionBar.jsx";
 import {
   CategoryWiseView, FileWiseView, SmellWiseView,
 } from "../components/SmellReviewViews.jsx";
@@ -1062,30 +1063,29 @@ function ReportSourceCard({ origin, report, meta, loading, error, onRefresh, res
 /**
  * The sticky footer. `onContinue` is the ONLY submit path — the same
  * handleApproveSelection the page has always used, not a second one.
+ *
+ * The chrome comes from components/StickyActionBar, which Stages 2 and 3 also
+ * use. This shell was defined here first and copied nowhere; the two later
+ * stages ended on plain rows that scrolled away, and sharing it is what stops
+ * the three footers drifting into three shapes again.
  */
 function ActionBar({ selectionCount, findingCount, isSubmitting, submitPhase, onContinue }) {
   const ready = selectionCount > 0 && !isSubmitting;
 
   return (
-    <div style={{
-      position: "sticky", bottom: 0, marginTop: 16, zIndex: 20,
-      display: "flex", alignItems: "center", justifyContent: "space-between",
-      gap: 14, flexWrap: "wrap",
-      padding: "13px 18px", borderRadius: 12,
-      background: C.panel, border: `1px solid ${selectionCount ? C.accent : C.border}`,
-      boxShadow: "0 -6px 24px rgba(4,6,10,0.45)",
-    }}>
-      <div style={{ fontSize: 12.5, color: selectionCount ? C.text : C.textMuted }}>
-        {selectionCount > 0 ? (
+    <StickyActionBar
+      active={selectionCount > 0}
+      status={
+        selectionCount > 0 ? (
           <>
             <b style={{ color: C.accent, fontFamily: "monospace" }}>{findingCount}</b>{" "}
             finding{findingCount === 1 ? "" : "s"} selected for planning
           </>
         ) : (
           "Select findings to continue to the Refactoring Planning Agent"
-        )}
-      </div>
-
+        )
+      }
+    >
       <button
         onClick={onContinue}
         disabled={!ready}
@@ -1110,7 +1110,7 @@ function ActionBar({ selectionCount, findingCount, isSubmitting, submitPhase, on
           ? submitPhase === "planning" ? "Planning refactorings…" : "Filtering selection…"
           : "Continue to Refactoring Plan →"}
       </button>
-    </div>
+    </StickyActionBar>
   );
 }
 
