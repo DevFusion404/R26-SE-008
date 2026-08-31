@@ -12,7 +12,7 @@ proxy the Code Smell Review stage reads from:
     GET|POST /api/cuqa/quality-report    proxy Agent 1's report
     GET      /api/cuqa/project-structure proxy Agent 1's repository file tree
     POST     /api/workspace/sources      read source text out of the workspace
-    GET      /api/health                 this backend
+    GET      /api/health                 this backend, and which database it uses
 
 The last three are proxies on purpose. The browser used to call CUQA :8080 and
 SCTVA :8002 itself to assemble the whole-project archive; routing them here
@@ -30,6 +30,7 @@ from clients.cuqa_client import (
     CUQAError, cuqa_base_url, fetch_project_structure, fetch_quality_report, probe_cuqa,
 )
 from clients.rdp_client import probe_rdp
+from db.workflow_repository import active_backend
 from clients.sctva_client import SCTVAError, probe_sctva, sctva_base_url
 from services.source_service import fetch_workspace_sources
 from domain.cuqa_normalizer import (
@@ -150,8 +151,12 @@ def workspace_sources():
 
 @integration_bp.route("/health", methods=["GET"])
 def health():
+    # `database` names which persistence backend actually answered — the one
+    # question you cannot get from the outside, and the one worth asking after
+    # a deployment that was meant to switch to Supabase.
     return jsonify({
-        "status":  "ok",
-        "agent":   "DIWO",
-        "version": "1.1.0",
+        "status":   "ok",
+        "agent":    "DIWO",
+        "version":  "1.1.0",
+        "database": active_backend(),
     })

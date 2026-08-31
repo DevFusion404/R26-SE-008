@@ -265,7 +265,9 @@ function TreeNode({ node, depth = 0, onSelect, selectedPath }) {
               // Every file that CUQA flagged carries a red rail, whatever
               // happened to it afterwards; the badge says how it ended up.
               borderLeft: `3px solid ${file.smells > 0 ? C.danger : "transparent"}`,
-              border: `1px solid ${isSelected ? C.accent : "transparent"}`,
+              borderTop: `1px solid ${isSelected ? C.accent : "transparent"}`,
+              borderRight: `1px solid ${isSelected ? C.accent : "transparent"}`,
+              borderBottom: `1px solid ${isSelected ? C.accent : "transparent"}`,
             }}
           >
             <span style={{ fontSize: 10 }}>{file.smells > 0 ? "🔴" : "📄"}</span>
@@ -861,7 +863,7 @@ export default function ResultsApprovalPage({
               { label: "Plan dropped", val: project.planDropped.length, color: C.warn },
               { label: "Change not kept", val: project.changeRejected.length, color: C.danger },
             ].map(({ label, val, color }) => (
-              <div key={label} style={{ background: C.panel, border: `1px solid ${C.border}`, borderLeft: `3px solid ${color}`, borderRadius: 8, padding: "12px 14px" }}>
+              <div key={label} style={{ background: C.panel, borderTop: `1px solid ${C.border}`, borderRight: `1px solid ${C.border}`, borderBottom: `1px solid ${C.border}`, borderLeft: `3px solid ${color}`, borderRadius: 8, padding: "12px 14px" }}>
                 <div style={{ fontSize: 22, fontWeight: 800, color, fontFamily: "monospace" }}>{val}</div>
                 <div style={{ fontSize: 10, color: C.textMuted, textTransform: "uppercase", letterSpacing: 1, marginTop: 2 }}>{label}</div>
               </div>
@@ -970,7 +972,9 @@ export default function ResultsApprovalPage({
                     cursor: "pointer",
                     marginBottom: 6,
                     background: selectedFileIndex === idx ? `${C.accent}12` : "transparent",
-                    border: `1px solid ${selectedFileIndex === idx ? C.accent : C.border}`,
+                    borderTop: `1px solid ${selectedFileIndex === idx ? C.accent : C.border}`,
+                    borderRight: `1px solid ${selectedFileIndex === idx ? C.accent : C.border}`,
+                    borderBottom: `1px solid ${selectedFileIndex === idx ? C.accent : C.border}`,
                     borderLeft: `3px solid ${rail}`,
                   }}
                 >

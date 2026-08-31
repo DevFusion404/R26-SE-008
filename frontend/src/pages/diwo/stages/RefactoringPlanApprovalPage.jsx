@@ -75,6 +75,7 @@
 import { useState } from "react";
 import { PLAN_DATA } from "../data/diwoData";
 import { C, Card, Badge, Pill, impactColor, riskColor, severityColor } from "../diwoTheme.jsx";
+import StickyActionBar from "../components/StickyActionBar.jsx";
 import PlanningDecisionSummary from "../components/PlanningDecisionSummary";
 import PlanningRecommendationBadge from "../components/PlanningRecommendationBadge";
 import PlanStepDrawer from "../components/PlanStepDrawer";
@@ -815,23 +816,41 @@ export default function RefactoringPlanApprovalPage({
         )}
       </div>
 
-      <div style={{ display: "flex", gap: 12, marginTop: 16, justifyContent: "flex-end", flexWrap: "wrap" }}>
+      {/* The commit row, pinned. A plan of 134 steps put this button a screen
+          and a half below the fold, so the developer decided, scrolled, and
+          had nothing to act with once they had finished deciding. */}
+      <StickyActionBar
+        active={canProceed}
+        status={
+          canProceed ? (
+            <>
+              <b style={{ color: C.accent, fontFamily: "monospace" }}>{approved}</b>{" "}
+              step{approved === 1 ? "" : "s"} approved for transformation
+              {(rejected > 0 || manual > 0) && (
+                <span style={{ color: C.textMuted }}>
+                  {" · "}
+                  {[rejected > 0 && `${rejected} rejected`, manual > 0 && `${manual} manual`]
+                    .filter(Boolean).join(", ")}
+                </span>
+              )}
+            </>
+          ) : pending > 0 ? (
+            <span style={{ color: C.warn }}>
+              ⚠ Decide the {pending} remaining step{pending > 1 ? "s" : ""} to proceed
+            </span>
+          ) : (
+            <span style={{ color: C.warn }}>
+              ⚠ At least one step must be approved for automatic transformation
+            </span>
+          )
+        }
+      >
         <button onClick={onFallback} style={{
           padding: "10px 22px", borderRadius: 8, fontWeight: 700, fontSize: 13, cursor: "pointer",
           background: `${C.danger}15`, color: C.danger, border: `1px solid ${C.danger}30`
         }}>
           ← Fallback to Smell Review
         </button>
-        {!canProceed && pending > 0 && (
-          <div style={{ display: "flex", alignItems: "center", fontSize: 12, color: C.warn }}>
-            ⚠ Decide the {pending} remaining step{pending > 1 ? "s" : ""} to proceed
-          </div>
-        )}
-        {!canProceed && pending === 0 && approved === 0 && (
-          <div style={{ display: "flex", alignItems: "center", fontSize: 12, color: C.warn }}>
-            ⚠ At least one step must be approved for automatic transformation
-          </div>
-        )}
         <button onClick={submit} disabled={!canProceed} title={
           `${approved} approved step(s) will be transformed by SCTVA` +
           (manual > 0 ? `; ${manual} marked for manual work are not sent` : "") +
@@ -849,7 +868,7 @@ export default function RefactoringPlanApprovalPage({
             </span>
           )}
         </button>
-      </div>
+      </StickyActionBar>
 
       {/* Mounted only while a step is being explained, so a twelve-step plan
           never builds twelve score breakdowns nobody opened. Looked up against

@@ -13,5 +13,9 @@ gunicorn>=21.0.0
 SQLAlchemy>=2.0
 psycopg[binary]>=3.2
 
+# Supabase persistence backend (db/supabase_repository.py). Same major version
+# user_management pins, so the two services share one client contract.
+supabase>=2.0.0
+
 # Environment variable loading
 python-dotenv>=1.0
