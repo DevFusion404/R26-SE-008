@@ -228,17 +228,27 @@ def expected_c_transform_summary(actions: Sequence[RefactoringAction]) -> Dict[s
             variable_name = str(
                 params.get("variable_name") or params.get("variable") or ""
             ).strip()
+            applied_metadata = params.get("applied_transformation_metadata")
+            if not isinstance(applied_metadata, dict):
+                applied_metadata = {}
             getter_name = str(
                 params.get("getter_name") or (f"get_{variable_name}" if variable_name else "")
             ).strip()
-            setter_name = str(
-                params.get("setter_name") or (f"set_{variable_name}" if variable_name else "")
-            ).strip()
+            # The C transformer deliberately omits a setter when no write to
+            # the global exists.  An empty *effective* setter value is
+            # meaningful; do not turn it back into a required ``set_<name>``
+            # merely because the original planner action had no setter field.
+            if "setter_name" in params:
+                setter_name = str(params.get("setter_name") or "").strip()
+            elif applied_metadata.get("writable") is False:
+                setter_name = ""
+            else:
+                setter_name = f"set_{variable_name}" if variable_name else ""
             if getter_name:
                 expected_added_functions[getter_name] = ""
-            # A const global does not require a setter. The static comparer is
-            # permissive here; action-specific structural validation decides
-            # whether a required writable setter was actually generated.
+            # A no-write global, including a non-const one, does not require a
+            # setter. Action-specific structural validation independently
+            # proves whether a setter was required and generated.
             if setter_name:
                 expected_added_functions[setter_name] = ""
 

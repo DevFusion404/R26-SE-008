@@ -43,6 +43,7 @@ from ..constants import (
 )
 from ..contracts import RefactoringAction
 from ..models import TransformationLogEntry
+from ..validators.syntax_validator import SyntaxValidator
 from . import (
     c_extract_class,
     c_extract_method,
@@ -382,6 +383,15 @@ class TransformationEngine:
 
     @staticmethod
     def _candidate_syntax_issue(language: str, source_code: str) -> str:
+        """Run a cheap per-action syntax guard without contradicting final validators.
+
+        C is special because raw delimiter counting is not preprocessor aware.  A
+        valid translation unit can contain mutually-exclusive function bodies
+        under ``#ifdef/#else/#endif`` (for example WinMain vs main).  Reuse the
+        real C syntax validator here so the per-action checkpoint and the final
+        syntax stage apply the same branch-aware rules.
+        """
+
         if language == "python":
             try:
                 ast.parse(source_code)
@@ -389,6 +399,18 @@ class TransformationEngine:
                 return f"Python syntax error: {exc.msg} at line {exc.lineno}."
             return ""
 
+        if language == "c":
+            result = SyntaxValidator().validate(
+                language="c",
+                source_code=source_code,
+                require_compilation=False,
+                timeout_seconds=5,
+            )
+            return "" if result.passed else result.message
+
+        # Java keeps the small comment/string-aware delimiter check here.  Its
+        # syntax does not have C-style conditional compilation that can make
+        # two mutually-exclusive brace shapes appear in one raw source file.
         pairs = {")": "(", "]": "[", "}": "{"}
         stack: list[str] = []
         state = "code"
@@ -1060,6 +1082,17 @@ class TransformationEngine:
                             current_code, literal_value, constant_name, source_line
                         )
                     elif language == "c":
+                        planned_literal = literal_value
+                        literal_value = c_transformers.normalize_planned_numeric_literal(
+                            literal_value
+                        )
+                        if literal_value != planned_literal:
+                            action.parameters["literal_value"] = literal_value
+                            action_metadata["literal_value_normalization"] = {
+                                "original": planned_literal,
+                                "normalized": literal_value,
+                                "strategy": "planner_decimal_string",
+                            }
                         current_code, replacements = c_transformers.apply_extract_constant(
                             current_code, literal_value, constant_name, source_line
                         )
@@ -1094,24 +1127,40 @@ class TransformationEngine:
                                 current_code, literal_value, name, source_line
                             )
                         elif language == "c":
-                            current_code, step_replacements = c_transformers.apply_extract_constant(
-                                current_code, literal_value, name, source_line
+                            planned_literal = literal_value
+                            literal_value = c_transformers.normalize_planned_numeric_literal(
+                                literal_value
                             )
-                            if step_replacements == 0:
-                                c_context = c_transformers.analyze_extract_constant_target(
+                            if literal_value != planned_literal:
+                                if "literal_value" in action.parameters:
+                                    action.parameters["literal_value"] = literal_value
+                                elif isinstance(action.parameters.get("literal_values"), list):
+                                    action.parameters["literal_values"][index - 1] = literal_value
+                                normalizations = action_metadata.setdefault(
+                                    "literal_value_normalizations", []
+                                )
+                                normalizations.append(
+                                    {
+                                        "original": planned_literal,
+                                        "normalized": literal_value,
+                                        "strategy": "planner_decimal_string",
+                                    }
+                                )
+                            current_code, step_replacements, introduce_metadata = (
+                                c_transformers.apply_introduce_constant(
                                     current_code,
                                     literal_value,
+                                    name,
                                     source_line,
+                                    reference_source_code=source_code,
                                 )
-                                action_metadata.update({
-                                    "status": "not_applicable",
-                                    "reason": c_context.get(
-                                        "reason",
-                                        "TARGET_NOT_C_NUMERIC_LITERAL",
-                                    ),
-                                    "target_context": c_context,
-                                    "final_decision": "NOT_APPLICABLE",
-                                })
+                            )
+                            literal_results = action_metadata.setdefault(
+                                "literal_results", []
+                            )
+                            literal_results.append(dict(introduce_metadata))
+                            if len(literal_values) == 1:
+                                action_metadata.update(introduce_metadata)
                         else:
                             current_code, step_replacements, introduce_metadata = (
                                 java_transformers.apply_introduce_constant(
@@ -1138,39 +1187,77 @@ class TransformationEngine:
                                 action_metadata.update(introduce_metadata)
                         replacements += step_replacements
 
-                    if language == "java" and literal_values:
+                    if language in {"java", "c"} and literal_values:
                         literal_results = action_metadata.get("literal_results") or []
-                        if replacements <= 0 and literal_results and all(
+                        statuses = {
                             str(item.get("status") or "").lower()
-                            == "not_applicable"
                             for item in literal_results
-                        ):
-                            already_handled = all(
-                                str(item.get("reason") or "")
-                                == "TARGET_ALREADY_REFACTORED_BY_PREVIOUS_ACTION"
-                                for item in literal_results
-                            )
-                            action_metadata["status"] = (
-                                "already_handled" if already_handled else "not_applicable"
-                            )
-                            if already_handled:
+                        }
+                        if replacements <= 0 and literal_results:
+                            if statuses <= {
+                                "already_handled",
+                                "already_applied",
+                                "satisfied",
+                                "not_applicable",
+                            } and statuses:
+                                all_symbolically_handled = "not_applicable" not in statuses
+                                action_metadata["status"] = (
+                                    "already_handled"
+                                    if all_symbolically_handled
+                                    else "not_applicable"
+                                )
                                 action_metadata["reason"] = (
-                                    "TARGET_ALREADY_REFACTORED_BY_PREVIOUS_ACTION"
+                                    literal_results[0].get("reason")
+                                    if len(literal_results) == 1
+                                    else (
+                                        "ALL_INTRODUCE_CONSTANT_TARGETS_ALREADY_HANDLED"
+                                        if all_symbolically_handled
+                                        else "ALL_INTRODUCE_CONSTANT_TARGETS_SAFELY_NON_ACTIONABLE"
+                                    )
                                 )
-                            elif len(literal_results) == 1:
-                                action_metadata.setdefault(
-                                    "reason", literal_results[0].get("reason")
+                                final = (
+                                    "ALREADY_HANDLED"
+                                    if all_symbolically_handled
+                                    else "NOT_APPLICABLE"
                                 )
-                            else:
+                                action_metadata["final_status"] = final
+                                action_metadata["final_decision"] = final
+                            elif "review_required" in statuses:
+                                action_metadata["status"] = "review_required"
                                 action_metadata["reason"] = (
-                                    "ALL_INTRODUCE_CONSTANT_TARGETS_NOT_APPLICABLE"
+                                    literal_results[0].get("reason")
+                                    if len(literal_results) == 1
+                                    else "INTRODUCE_CONSTANT_TARGET_REQUIRES_REVIEW"
                                 )
-                            action_metadata["final_status"] = (
-                                "ALREADY_HANDLED" if already_handled else "NOT_APPLICABLE"
-                            )
-                            action_metadata["final_decision"] = (
-                                "ALREADY_HANDLED" if already_handled else "NOT_APPLICABLE"
-                            )
+                                action_metadata["final_status"] = "REVIEW_REQUIRED"
+                                action_metadata["final_decision"] = "REVIEW_REQUIRED"
+                            elif statuses <= {"not_applicable"}:
+                                already_handled = all(
+                                    str(item.get("reason") or "")
+                                    == "TARGET_ALREADY_REFACTORED_BY_PREVIOUS_ACTION"
+                                    for item in literal_results
+                                )
+                                action_metadata["status"] = (
+                                    "already_handled" if already_handled else "not_applicable"
+                                )
+                                if already_handled:
+                                    action_metadata["reason"] = (
+                                        "TARGET_ALREADY_REFACTORED_BY_PREVIOUS_ACTION"
+                                    )
+                                elif len(literal_results) == 1:
+                                    action_metadata.setdefault(
+                                        "reason", literal_results[0].get("reason")
+                                    )
+                                else:
+                                    action_metadata["reason"] = (
+                                        "ALL_INTRODUCE_CONSTANT_TARGETS_NOT_APPLICABLE"
+                                    )
+                                action_metadata["final_status"] = (
+                                    "ALREADY_HANDLED" if already_handled else "NOT_APPLICABLE"
+                                )
+                                action_metadata["final_decision"] = (
+                                    "ALREADY_HANDLED" if already_handled else "NOT_APPLICABLE"
+                                )
                         elif replacements > 0:
                             action_metadata.setdefault("status", "success")
                             action_metadata.setdefault(
@@ -2217,6 +2304,11 @@ class TransformationEngine:
                             warnings.append(
                                 f"C Global Variable encapsulated: {variable_name} now uses {getter_name}"
                                 + (f"/{setter_name}." if action_metadata.get("writable") else ".")
+                            )
+                        elif action_metadata.get("status") == "not_applicable":
+                            warnings.append(
+                                "C Encapsulate Variable is not applicable to this planner target: "
+                                f"{action_metadata.get('reason') or 'target is not a C global variable'}."
                             )
                         else:
                             warnings.append(

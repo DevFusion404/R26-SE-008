@@ -161,6 +161,13 @@ function isAppliedFileResult(result) {
   return result?.transformation_applied === true && result?.rollback_occurred !== true;
 }
 
+function isAlreadyHandledFileResult(result) {
+  const status = String(
+    result?.application_status || result?.status || ''
+  ).trim().toUpperCase();
+  return status === 'ALREADY_HANDLED' || status === 'ALREADY_APPLIED';
+}
+
 function fileResultStatus(result) {
   if (result?.rollback_occurred === true) {
     return {
@@ -175,6 +182,14 @@ function fileResultStatus(result) {
       key: 'applied',
       label: 'APPLIED',
       title: 'A validated refactoring was applied to this file.',
+    };
+  }
+
+  if (isAlreadyHandledFileResult(result)) {
+    return {
+      key: 'already-handled',
+      label: 'ALREADY HANDLED',
+      title: 'The requested refactoring is already represented safely in this file.',
     };
   }
 
@@ -2175,6 +2190,8 @@ function buildStoredFileArtifact({ result, source, index }) {
     success: Boolean(result?.success),
     rollback_occurred: Boolean(result?.rollback_occurred),
     transformation_applied: result?.transformation_applied !== false,
+    status: result?.status || '',
+    application_status: result?.application_status || '',
     confidence_score: typeof result?.confidence_score === 'number' ? result.confidence_score : null,
     validation_score: typeof result?.validation_score === 'number' ? result.validation_score : null,
     confidence_applicable: result?.confidence_applicable !== false,
@@ -2218,6 +2235,8 @@ function buildSctvaStorageArtifact({
         success: file.success,
         rollback_occurred: file.rollback_occurred,
         transformation_applied: file.transformation_applied,
+        status: file.status,
+        application_status: file.application_status,
         confidence_score: file.confidence_score,
         validation_score: file.validation_score,
         report: file.safety_report,
@@ -2988,6 +3007,8 @@ export default function SCTVAAgentPage() {
       success: data.success,
       rollback_occurred: data.rollback_occurred,
       transformation_applied: data.transformation_applied,
+      status: data.status,
+      application_status: data.application_status,
       confidence_applicable: data.confidence_applicable,
       confidence_score: data.confidence_score,
       validation_score: data.validation_score,

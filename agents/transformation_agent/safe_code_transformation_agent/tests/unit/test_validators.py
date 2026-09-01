@@ -270,6 +270,105 @@ def test_c_syntax_validator_accepts_header_without_function_body():
     assert "header/declaration unit" in " ".join(result.details["warnings"])
 
 
+def test_c_syntax_validator_accepts_typedef_enum_header():
+    source = (
+        "#ifndef ERRORS_H\n"
+        "#define ERRORS_H\n"
+        "typedef enum {\n"
+        "    ERROR_NONE = 0,\n"
+        "    ERROR_INVALID = -1\n"
+        "} error_t;\n"
+        "#endif\n"
+    )
+
+    result = SyntaxValidator().validate(
+        language="c",
+        source_code=source,
+        require_compilation=False,
+        timeout_seconds=5,
+    )
+
+    assert result.passed is True
+
+
+def test_c_syntax_validator_accepts_preprocessor_only_multiline_macro_header():
+    source = (
+        "#ifndef VERSION_H\n"
+        "#define VERSION_H\n"
+        "#define VERSION_NUMBER \\\n"
+        "    ((1 * 10000) + (2 * 100) + 3)\n"
+        "#endif\n"
+    )
+
+    result = SyntaxValidator().validate(
+        language="c",
+        source_code=source,
+        require_compilation=False,
+        timeout_seconds=5,
+    )
+
+    assert result.passed is True
+
+
+def test_c_syntax_validator_accepts_conditional_platform_entry_points():
+    source = (
+        "#ifdef _WIN32\n"
+        "int WINAPI WinMain(void) {\n"
+        "#else\n"
+        "int main(void) {\n"
+        "#endif\n"
+        "    return 0;\n"
+        "}\n"
+    )
+
+    result = SyntaxValidator().validate(
+        language="c",
+        source_code=source,
+        require_compilation=False,
+        timeout_seconds=5,
+    )
+
+    assert result.passed is True
+
+
+def test_c_syntax_validator_accepts_multiline_assignment_initializer():
+    source = (
+        "#include <stdlib.h>\n"
+        "int create(void) {\n"
+        "    int *value =\n"
+        "        (int *)malloc(sizeof(int));\n"
+        "    free(value);\n"
+        "    return 0;\n"
+        "}\n"
+    )
+
+    result = SyntaxValidator().validate(
+        language="c",
+        source_code=source,
+        require_compilation=False,
+        timeout_seconds=5,
+    )
+
+    assert result.passed is True
+
+
+def test_c_syntax_validator_accepts_multiline_string_assignment():
+    source = (
+        "static const char html[] = \"first\\\n"
+        "second\";\n"
+        "int main(void) { return html[0] == 'f' ? 0 : 1; }\n"
+    )
+
+    result = SyntaxValidator().validate(
+        language="c",
+        source_code=source,
+        require_compilation=False,
+        timeout_seconds=5,
+    )
+
+    assert result.passed is True
+
+
 def test_c_syntax_validator_accepts_cpp_header_like_unit():
     validator = SyntaxValidator()
     source = (

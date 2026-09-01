@@ -522,6 +522,11 @@
   color: #bbf7d0;
 }
 
+.sctva-file-tab.already-handled {
+  border-color: rgba(34, 211, 238, 0.48);
+  color: #a5f3fc;
+}
+
 .sctva-file-tab.rolled-back,
 .sctva-file-tab.fail {
   border-color: rgba(239, 68, 68, 0.45);
@@ -544,6 +549,10 @@
 
 .sctva-file-tab.not-applied em {
   color: #94a3b8;
+}
+
+.sctva-file-tab.already-handled em {
+  color: #67e8f9;
 }
 
 .sctva-file-tab.rolled-back em,

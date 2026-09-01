@@ -25,6 +25,7 @@ from ..constants import (
     ACTION_REPLACE_CONDITIONAL_WITH_POLYMORPHISM,
 )
 from ..contracts import RefactoringAction
+from ..transformers import c_transformers
 
 
 class _PythonRiskyExceptionVisitor(ast.NodeVisitor):
@@ -1240,16 +1241,32 @@ class LocalRefactorDetector:
             return
 
         masked = self._mask_c_family_comments_and_strings(source_code)
+        source_lines = source_code.splitlines()
         for match in self._NUMBER_RE.finditer(masked):
             literal_text = match.group(0)
             value = self._number_value(literal_text)
             if value is None or value in {-1, 0, 1}:
                 continue
             line_no = self._line_of(masked, match.start())
-            line = source_code.splitlines()[line_no - 1] if line_no <= len(source_code.splitlines()) else ""
+            line = source_lines[line_no - 1] if line_no <= len(source_lines) else ""
             stripped = line.strip()
             if stripped.startswith(("#", "import ", "package ")) or "static final" in stripped:
                 continue
+
+            if language == "c":
+                # Use the same target classifier as the C transformer.  This
+                # prevents SCTVA's own detector from creating actions for enum
+                # members, macro values, strings/comments, runtime array indexes
+                # or unsupported C declaration contexts.  Fixed array extents
+                # remain eligible and are safely rewritten to a same-value macro.
+                analysis = c_transformers.analyze_extract_constant_target(
+                    source_code,
+                    value,
+                    line_no,
+                )
+                if not analysis.get("eligible"):
+                    continue
+
             yield self._internal_action(
                 ACTION_INTRODUCE_CONSTANT,
                 file_name=file_name,

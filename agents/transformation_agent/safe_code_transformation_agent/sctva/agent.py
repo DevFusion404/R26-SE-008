@@ -302,7 +302,22 @@ class SafeCodeTransformationValidationAgent:
         files_succeeded = sum(bool(result.get("success")) for result in file_results)
         files_rolled_back = sum(bool(result.get("rollback_occurred")) for result in file_results)
         files_applied = sum(bool(result.get("transformation_applied")) for result in file_results)
-        files_not_applied = files_total - files_applied - files_rolled_back
+        files_no_change_required = sum(
+            1
+            for result in file_results
+            if isinstance(result, dict)
+            and result.get("status") == "NOT_APPLICABLE"
+            and not result.get("rollback_occurred")
+        )
+        # Keep true zero-change failures/reviews separate from safe no-op files.
+        # Older UI code used ``not_applied`` for both, which made valid C/H
+        # enum/macro targets look like transformation failures.
+        files_not_applied = (
+            files_total
+            - files_applied
+            - files_rolled_back
+            - files_no_change_required
+        )
         total_replacements = sum(
             int(result.get("total_replacements", 0) or 0)
             for result in file_results
@@ -404,6 +419,7 @@ class SafeCodeTransformationValidationAgent:
                 "applied": files_applied,
                 "rolled_back": files_rolled_back,
                 "not_applied": max(0, files_not_applied),
+                "no_change_required": files_no_change_required,
             },
             "file_results": file_results,
             "transformed_workspace_files": all_workspace_files,
@@ -1415,11 +1431,20 @@ class SafeCodeTransformationValidationAgent:
             for entry in transformation_log
             if entry.action_type != ACTION_NOOP
             and str(entry.metadata.get("status") or "").lower()
-            in {"not_applicable", "already_applied", "satisfied"}
+            in {"not_applicable", "already_applied", "already_handled", "satisfied"}
         ]
         all_executable_actions_safely_not_applicable = (
             bool(executable_actions)
             and len(safely_not_applicable_logs) == len(executable_actions)
+        )
+        all_executable_actions_already_handled = (
+            bool(executable_actions)
+            and len(safely_not_applicable_logs) == len(executable_actions)
+            and all(
+                str(entry.metadata.get("status") or "").lower()
+                in {"already_applied", "already_handled", "satisfied"}
+                for entry in safely_not_applicable_logs
+            )
         )
 
         if not transformation_attempted:
@@ -1795,14 +1820,36 @@ class SafeCodeTransformationValidationAgent:
             ).strip() == ACTION_ENCAPSULATE_C_VARIABLE
             and str(log_entry.metadata.get("status") or "success").lower() == "success"
         )
+        not_applicable_global_variable_count = sum(
+            1
+            for log_entry in transformation_log
+            if str(
+                log_entry.metadata.get("reclassified_action_type")
+                or log_entry.action_type
+            ).strip() in {ACTION_ENCAPSULATE_C_VARIABLE, ACTION_ENCAPSULATE_VARIABLE}
+            and str(log_entry.metadata.get("status") or "").lower()
+            in {"not_applicable", "already_handled", "satisfied"}
+        )
+        review_global_variable_count = sum(
+            1
+            for log_entry in transformation_log
+            if str(
+                log_entry.metadata.get("reclassified_action_type")
+                or log_entry.action_type
+            ).strip() in {ACTION_ENCAPSULATE_C_VARIABLE, ACTION_ENCAPSULATE_VARIABLE}
+            and str(log_entry.metadata.get("status") or "").lower() == "review_required"
+        )
         global_variable_plan_complete = (
             requested_global_variable_count == 0
-            or successful_global_variable_count == requested_global_variable_count
+            or successful_global_variable_count + not_applicable_global_variable_count
+            == requested_global_variable_count
         )
-        if requested_global_variable_count and not global_variable_plan_complete:
+        if requested_global_variable_count and (
+            review_global_variable_count or not global_variable_plan_complete
+        ):
             safety_report.risk_flags.append("plan_compliance_failed:global_variable")
             safety_report.human_messages.append(
-                "Global Variable plan compliance failed: not every requested Encapsulate Variable action was applied."
+                "Global Variable plan compliance requires review: at least one requested C global target could not be proven applicable or safely dismissed."
             )
 
         requested_hide_delegate_count = sum(
@@ -1921,43 +1968,13 @@ class SafeCodeTransformationValidationAgent:
         result["source_mode"] = file_entry.source_mode
         result["origin"] = file_entry.origin
         result["confidence_components"] = confidence_details
-        result["plan_compliance"] = {
-            "move_method": (
-                "NOT_APPLICABLE"
-                if requested_move_count > 0
-                and unresolved_move_count == requested_move_count
-                else "REVIEW_REQUIRED"
-                if unresolved_move_count or review_move_count
-                else ("PASS" if move_method_plan_complete else "FAIL")
-            ),
-            "inline_class": (
-                "NOT_APPLICABLE"
-                if requested_inline_count > 0
-                and unresolved_inline_count == requested_inline_count
-                else "REVIEW_REQUIRED"
-                if unresolved_inline_count or review_inline_count
-                else ("PASS" if inline_class_plan_complete else "FAIL")
-            ),
-            "global_variable": (
-                "PASS" if global_variable_plan_complete else "FAIL"
-            ),
-            "hide_delegate": (
-                "NOT_APPLICABLE"
-                if requested_hide_delegate_count > 0
-                and unresolved_hide_delegate_count == requested_hide_delegate_count
-                else "REVIEW_REQUIRED"
-                if unresolved_hide_delegate_count or review_hide_delegate_count
-                else ("PASS" if hide_delegate_plan_complete else "FAIL")
-            ),
-            "replace_conditional_with_polymorphism": (
-                "NOT_APPLICABLE"
-                if requested_polymorphism_count > 0
-                and not_applicable_polymorphism_count == requested_polymorphism_count
-                else "REVIEW_REQUIRED"
-                if not_applicable_polymorphism_count or review_polymorphism_count
-                else ("PASS" if polymorphism_plan_complete else "FAIL")
-            ),
-        }
+        # Report only transformations that were actually accepted for this
+        # file.  The earlier fixed five-family summary made every unrelated
+        # family look like PASS whenever its requested count was zero.
+        result["plan_compliance"] = self._file_plan_compliance(
+            transformation_log,
+            rollback_occurred=rollback_occurred,
+        )
         has_review = any(
             str(e.metadata.get("status") if hasattr(e, "metadata") else "").lower() == "review_required"
             or any("review" in str(w).lower() for w in (e.warnings if hasattr(e, "warnings") else []))
@@ -1967,6 +1984,8 @@ class SafeCodeTransformationValidationAgent:
             file_status = "FAILED"
         elif has_review:
             file_status = "REVIEW_REQUIRED"
+        elif all_executable_actions_already_handled and not transformation_applied:
+            file_status = "ALREADY_HANDLED"
         elif all_executable_actions_safely_not_applicable and not transformation_applied:
             file_status = "NOT_APPLICABLE"
         elif success:
@@ -1977,6 +1996,17 @@ class SafeCodeTransformationValidationAgent:
             file_status = "FAILED"
 
         result["status"] = file_status
+        result["application_status"] = (
+            "ROLLED_BACK"
+            if rollback_occurred
+            else "APPLIED"
+            if transformation_applied
+            else "ALREADY_HANDLED"
+            if file_status == "ALREADY_HANDLED"
+            else "NO_CHANGE_REQUIRED"
+            if file_status == "NOT_APPLICABLE"
+            else "NOT_APPLIED"
+        )
         return result
 
 
@@ -4448,7 +4478,51 @@ class SafeCodeTransformationValidationAgent:
                 "extract_python_method",
             }:
                 return ACTION_EXTRACT_METHOD
+            if normalized in {
+                ACTION_ENCAPSULATE_VARIABLE,
+                ACTION_ENCAPSULATE_C_VARIABLE,
+                "encapsulate_variable",
+                "global_variable",
+            }:
+                return "global_variable"
         return str(action.action_type or "").strip().lower()
+
+    @classmethod
+    def _file_plan_compliance(
+        cls,
+        transformation_log: List[TransformationLogEntry],
+        *,
+        rollback_occurred: bool,
+    ) -> Dict[str, str]:
+        """Summarize only the refactorings that affected one file.
+
+        This is intentionally based on the execution ledger rather than a
+        fixed list of capabilities.  A file that only receives Extract Method
+        should therefore report ``{"extract_method": "PASS"}``, not unrelated
+        Move Method, Hide Delegate, Inline Class, or Global Variable entries.
+        """
+
+        accepted_statuses = {"success", "pass", "accepted", "already_applied"}
+        compliance: Dict[str, str] = {}
+
+        for entry in transformation_log:
+            metadata = entry.metadata or {}
+            status = str(metadata.get("status") or "success").strip().lower()
+            action_type = str(
+                metadata.get("reclassified_action_type") or entry.action_type or ""
+            ).strip()
+            if not action_type or action_type == ACTION_NOOP:
+                continue
+
+            family = cls._canonical_refactoring_family(
+                RefactoringAction(action_type=action_type)
+            )
+            if entry.replacements_count > 0 and status in accepted_statuses:
+                compliance[family] = "ROLLED_BACK" if rollback_occurred else "PASS"
+            elif status in {"already_handled", "satisfied"}:
+                compliance.setdefault(family, "ALREADY_HANDLED")
+
+        return compliance
 
     @staticmethod
     def _action_target_method(action: RefactoringAction) -> str:
