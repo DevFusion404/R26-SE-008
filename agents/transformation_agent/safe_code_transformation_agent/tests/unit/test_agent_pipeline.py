@@ -79,6 +79,44 @@ def test_c_introduce_constant_normalizes_planner_decimal_string():
             "strategy": "planner_decimal_string",
         }
     ]
+    assert result["plan_compliance"] == {"introduce_constant": "PASS"}
+
+
+def test_plan_compliance_lists_only_refactorings_applied_to_the_file():
+    agent = SafeCodeTransformationValidationAgent()
+    result = agent.execute(
+        {
+            "request_id": "file_specific_plan_compliance",
+            "language": "c",
+            "source_code": "int value(void) { return 10; }\n",
+            "refactoring_plan": {
+                "plan_id": "file_specific_plan_compliance_plan",
+                "actions": [
+                    {
+                        "action_type": "introduce_constant",
+                        "parameters": {
+                            "literal_value": 10,
+                            "constant_name": "RESULT_VALUE",
+                            "source_line": 1,
+                        },
+                    }
+                ],
+                "behavior_tests": [],
+            },
+            "execution_options": {
+                "strict_mode": True,
+                "enable_behavior_tests": True,
+                "require_compilation": False,
+                "enable_sctva_auto_refactoring": False,
+            },
+        }
+    )
+
+    assert result["success"] is True, result
+    assert result["plan_compliance"] == {"introduce_constant": "PASS"}
+    assert "move_method" not in result["plan_compliance"]
+    assert "hide_delegate" not in result["plan_compliance"]
+    assert "inline_class" not in result["plan_compliance"]
 
 
 def test_c_introduce_parameter_object_executes_successfully():
