@@ -266,6 +266,23 @@ def test_planner_adapter_maps_encapsulate_variable():
     assert action["parameters"]["variable_name"] == "counter"
 
 
+def test_planner_adapter_preserves_constant_target_file_and_line():
+    normalized = PlannerAdapter().normalize_plan({
+        "plan_id": "constant_target_context",
+        "steps": [{
+            "step_id": "constant_step",
+            "refactoring": "Introduce Constant",
+            "target": {"file": "examples/basic.c", "lines": [20]},
+            "parameters": {"literal_value": "480", "constant_name": "WIDTH"},
+        }],
+    })
+
+    action = normalized["actions"][0]
+    assert action["action_type"] == "introduce_constant"
+    assert action["parameters"]["source_file"] == "examples/basic.c"
+    assert action["parameters"]["source_line"] == 20
+
+
 def test_planner_adapter_maps_fault_injection_to_fault_injection_action():
     adapter = PlannerAdapter()
     planner_output = {
