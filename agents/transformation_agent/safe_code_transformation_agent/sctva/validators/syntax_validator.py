@@ -462,14 +462,23 @@ class SyntaxValidator:
             ]
         )
 
-        scan_ok, scan_msg = self._scan_delimiters(source, language="c")
+        # A C translation unit contains only one side of a conditional
+        # preprocessor group.  Scanning both sides together makes otherwise
+        # valid platform entry-points look like they have unmatched braces.
+        delimiter_source = self._select_c_preprocessor_branch_for_scan(source)
+        scan_ok, scan_msg = self._scan_delimiters(delimiter_source, language="c")
         if not scan_ok:
             return self._syntax_failure(details, "C", scan_msg)
 
-        clean = self._strip_comments_and_literals(source)
         clean_without_comments = strip_c_comments(source)
+        code_without_directives = self._mask_c_preprocessor_directives(clean_without_comments)
+        clean = self._strip_comments_and_literals(code_without_directives)
         has_function_definition = bool(self._C_FUNCTION_RE.search(clean_without_comments))
-        if not has_function_definition and not self._looks_like_c_header_or_declaration_unit(clean_without_comments):
+        preprocessor_only = self._is_preprocessor_only_unit(clean_without_comments)
+        if not has_function_definition and not (
+            preprocessor_only
+            or self._looks_like_c_header_or_declaration_unit(code_without_directives)
+        ):
             return self._syntax_failure(
                 details,
                 "C",
@@ -492,7 +501,7 @@ class SyntaxValidator:
         if terminator_issue:
             return self._syntax_failure(details, "C", terminator_issue)
 
-        if ";" not in clean_without_comments and not self._is_preprocessor_only_unit(clean_without_comments):
+        if ";" not in code_without_directives and not preprocessor_only:
             return self._syntax_failure(details, "C", "no semicolon found.")
 
         return True, "C syntax validation passed."
@@ -595,6 +604,69 @@ class SyntaxValidator:
         return True, "balanced"
 
     @staticmethod
+    def _mask_c_preprocessor_directives(source: str) -> str:
+        """Replace C preprocessor directives with whitespace, preserving lines.
+
+        Directive bodies are not C statements.  In particular, a continued
+        ``#define`` must not be mistaken for an unterminated declaration by
+        the lightweight terminator checker.
+        """
+        masked: list[str] = []
+        directive_continues = False
+        for raw_line in source.splitlines(keepends=True):
+            stripped = raw_line.lstrip()
+            is_directive = directive_continues or stripped.startswith("#")
+            if is_directive:
+                newline = "\n" if raw_line.endswith("\n") else ""
+                content = raw_line[:-1] if newline else raw_line
+                masked.append(" " * len(content) + newline)
+                directive_continues = content.rstrip().endswith("\\")
+            else:
+                masked.append(raw_line)
+                directive_continues = False
+        return "".join(masked)
+
+    @staticmethod
+    def _select_c_preprocessor_branch_for_scan(source: str) -> str:
+        """Mask inactive conditional-preprocessor branches for delimiter scans.
+
+        The lexical validator cannot evaluate build flags.  Selecting the
+        first branch in each conditional group still validates a coherent
+        translation-unit shape and avoids combining mutually exclusive C
+        entry-point declarations.  Newlines are kept so diagnostics retain
+        their original line numbers.
+        """
+        lines = source.splitlines(keepends=True)
+        active_stack: list[bool] = []
+        selected: list[str] = []
+
+        def mask(raw_line: str) -> str:
+            newline = "\n" if raw_line.endswith("\n") else ""
+            content = raw_line[:-1] if newline else raw_line
+            return " " * len(content) + newline
+
+        for raw_line in lines:
+            directive = raw_line.lstrip()
+            directive_match = re.match(r"#\s*(ifdef|ifndef|if|elif|else|endif)\b", directive)
+            currently_active = all(active_stack)
+            if not directive_match:
+                selected.append(raw_line if currently_active else mask(raw_line))
+                continue
+
+            kind = directive_match.group(1)
+            # Keep directives blank: their tokens are irrelevant to brace
+            # pairing and may contain arbitrary expressions.
+            selected.append(mask(raw_line))
+            if kind in {"ifdef", "ifndef", "if"}:
+                active_stack.append(currently_active)
+            elif kind in {"elif", "else"} and active_stack:
+                active_stack[-1] = False
+            elif kind == "endif" and active_stack:
+                active_stack.pop()
+
+        return "".join(selected)
+
+    @staticmethod
     def _strip_comments_and_literals(source: str) -> str:
         result: list[str] = []
         state = "normal"
@@ -625,7 +697,10 @@ class SyntaxValidator:
 
             if state in {"string", "char"}:
                 if char == "\\":
-                    result.append(" ")
+                    # Preserve a physical line-continuation marker.  The C
+                    # terminator scan needs it to know that an assignment to
+                    # a multiline string literal has not ended yet.
+                    result.append("\\" if nxt == "\n" else " ")
                     if nxt:
                         result.append("\n" if nxt == "\n" else " ")
                     i += 2
@@ -684,7 +759,9 @@ class SyntaxValidator:
 
     @staticmethod
     def _find_malformed_assignment(clean_source: str) -> str:
-        match = re.search(r"=\s*(?:[;,)}}]|$)", clean_source, re.MULTILINE)
+        # Do not let ``\s*`` consume a newline: C and Java both permit a
+        # declaration/assignment to continue on the following line.
+        match = re.search(r"=[^\S\r\n]*(?:[;,)}}]|$)", clean_source)
         if not match:
             return ""
         line = clean_source[: match.start()].count("\n") + 1
@@ -905,17 +982,26 @@ class SyntaxValidator:
 
     @staticmethod
     def _is_preprocessor_only_unit(source: str) -> bool:
-        meaningful = [
-            line.strip()
-            for line in source.splitlines()
-            if line.strip()
-        ]
-        return bool(meaningful) and all(line.startswith("#") for line in meaningful)
+        saw_directive = False
+        directive_continues = False
+        for raw_line in source.splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            if directive_continues:
+                directive_continues = line.endswith("\\")
+                continue
+            if not line.startswith("#"):
+                return False
+            saw_directive = True
+            directive_continues = line.endswith("\\")
+        return saw_directive
 
     @classmethod
     def _find_c_terminator_issue(cls, clean_source: str) -> str:
         statement_re = re.compile(r"^\s*(?:return|break|continue|goto)\b")
         delimiter_depth = 0
+        enum_depth = 0
         pending_line: int | None = None
         pending_kind = ""
         lines = clean_source.splitlines()
@@ -924,6 +1010,11 @@ class SyntaxValidator:
             line = raw_line.strip()
             if not line or line.startswith("#") or line.startswith("*"):
                 continue
+            opens_enum = bool(
+                re.search(r"\b(?:typedef\s+)?enum(?:\s+[A-Za-z_][A-Za-z0-9_]*)?\s*\{", line)
+            )
+            inside_enum = enum_depth > 0 or opens_enum
+            enum_depth += line.count("{") if opens_enum else 0
             previous_depth = delimiter_depth
             delimiter_depth = max(0, delimiter_depth + cls._paren_bracket_delta(line))
             is_complete = line.endswith((";", "{", "}", ":", ","))
@@ -935,6 +1026,12 @@ class SyntaxValidator:
             )
             is_statement = bool(statement_re.match(line))
             is_assignment = cls._has_assignment_operator(line) and not re.search(r"\b(?:if|while|for|switch)\s*\(", line)
+
+            # Enum members are comma-separated, not semicolon-terminated.
+            # The last member is also allowed to omit its trailing comma.
+            if inside_enum:
+                enum_depth = max(0, enum_depth - line.count("}"))
+                continue
 
             if pending_line is not None and is_complete and (is_statement or is_assignment):
                 if pending_kind == "statement":

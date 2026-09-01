@@ -302,7 +302,22 @@ class SafeCodeTransformationValidationAgent:
         files_succeeded = sum(bool(result.get("success")) for result in file_results)
         files_rolled_back = sum(bool(result.get("rollback_occurred")) for result in file_results)
         files_applied = sum(bool(result.get("transformation_applied")) for result in file_results)
-        files_not_applied = files_total - files_applied - files_rolled_back
+        files_no_change_required = sum(
+            1
+            for result in file_results
+            if isinstance(result, dict)
+            and result.get("status") == "NOT_APPLICABLE"
+            and not result.get("rollback_occurred")
+        )
+        # Keep true zero-change failures/reviews separate from safe no-op files.
+        # Older UI code used ``not_applied`` for both, which made valid C/H
+        # enum/macro targets look like transformation failures.
+        files_not_applied = (
+            files_total
+            - files_applied
+            - files_rolled_back
+            - files_no_change_required
+        )
         total_replacements = sum(
             int(result.get("total_replacements", 0) or 0)
             for result in file_results
@@ -404,6 +419,7 @@ class SafeCodeTransformationValidationAgent:
                 "applied": files_applied,
                 "rolled_back": files_rolled_back,
                 "not_applied": max(0, files_not_applied),
+                "no_change_required": files_no_change_required,
             },
             "file_results": file_results,
             "transformed_workspace_files": all_workspace_files,
@@ -1415,11 +1431,20 @@ class SafeCodeTransformationValidationAgent:
             for entry in transformation_log
             if entry.action_type != ACTION_NOOP
             and str(entry.metadata.get("status") or "").lower()
-            in {"not_applicable", "already_applied", "satisfied"}
+            in {"not_applicable", "already_applied", "already_handled", "satisfied"}
         ]
         all_executable_actions_safely_not_applicable = (
             bool(executable_actions)
             and len(safely_not_applicable_logs) == len(executable_actions)
+        )
+        all_executable_actions_already_handled = (
+            bool(executable_actions)
+            and len(safely_not_applicable_logs) == len(executable_actions)
+            and all(
+                str(entry.metadata.get("status") or "").lower()
+                in {"already_applied", "already_handled", "satisfied"}
+                for entry in safely_not_applicable_logs
+            )
         )
 
         if not transformation_attempted:
@@ -1795,14 +1820,36 @@ class SafeCodeTransformationValidationAgent:
             ).strip() == ACTION_ENCAPSULATE_C_VARIABLE
             and str(log_entry.metadata.get("status") or "success").lower() == "success"
         )
+        not_applicable_global_variable_count = sum(
+            1
+            for log_entry in transformation_log
+            if str(
+                log_entry.metadata.get("reclassified_action_type")
+                or log_entry.action_type
+            ).strip() in {ACTION_ENCAPSULATE_C_VARIABLE, ACTION_ENCAPSULATE_VARIABLE}
+            and str(log_entry.metadata.get("status") or "").lower()
+            in {"not_applicable", "already_handled", "satisfied"}
+        )
+        review_global_variable_count = sum(
+            1
+            for log_entry in transformation_log
+            if str(
+                log_entry.metadata.get("reclassified_action_type")
+                or log_entry.action_type
+            ).strip() in {ACTION_ENCAPSULATE_C_VARIABLE, ACTION_ENCAPSULATE_VARIABLE}
+            and str(log_entry.metadata.get("status") or "").lower() == "review_required"
+        )
         global_variable_plan_complete = (
             requested_global_variable_count == 0
-            or successful_global_variable_count == requested_global_variable_count
+            or successful_global_variable_count + not_applicable_global_variable_count
+            == requested_global_variable_count
         )
-        if requested_global_variable_count and not global_variable_plan_complete:
+        if requested_global_variable_count and (
+            review_global_variable_count or not global_variable_plan_complete
+        ):
             safety_report.risk_flags.append("plan_compliance_failed:global_variable")
             safety_report.human_messages.append(
-                "Global Variable plan compliance failed: not every requested Encapsulate Variable action was applied."
+                "Global Variable plan compliance requires review: at least one requested C global target could not be proven applicable or safely dismissed."
             )
 
         requested_hide_delegate_count = sum(
@@ -1939,7 +1986,12 @@ class SafeCodeTransformationValidationAgent:
                 else ("PASS" if inline_class_plan_complete else "FAIL")
             ),
             "global_variable": (
-                "PASS" if global_variable_plan_complete else "FAIL"
+                "NOT_APPLICABLE"
+                if requested_global_variable_count > 0
+                and not_applicable_global_variable_count == requested_global_variable_count
+                else "REVIEW_REQUIRED"
+                if review_global_variable_count or not global_variable_plan_complete
+                else "PASS"
             ),
             "hide_delegate": (
                 "NOT_APPLICABLE"
@@ -1967,6 +2019,8 @@ class SafeCodeTransformationValidationAgent:
             file_status = "FAILED"
         elif has_review:
             file_status = "REVIEW_REQUIRED"
+        elif all_executable_actions_already_handled and not transformation_applied:
+            file_status = "ALREADY_HANDLED"
         elif all_executable_actions_safely_not_applicable and not transformation_applied:
             file_status = "NOT_APPLICABLE"
         elif success:
@@ -1977,6 +2031,17 @@ class SafeCodeTransformationValidationAgent:
             file_status = "FAILED"
 
         result["status"] = file_status
+        result["application_status"] = (
+            "ROLLED_BACK"
+            if rollback_occurred
+            else "APPLIED"
+            if transformation_applied
+            else "ALREADY_HANDLED"
+            if file_status == "ALREADY_HANDLED"
+            else "NO_CHANGE_REQUIRED"
+            if file_status == "NOT_APPLICABLE"
+            else "NOT_APPLIED"
+        )
         return result
 
 

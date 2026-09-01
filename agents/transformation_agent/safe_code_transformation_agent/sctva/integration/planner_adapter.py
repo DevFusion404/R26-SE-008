@@ -1047,13 +1047,31 @@ class PlannerAdapter:
                 "parameters": {
                     "literal_value": params["literal_value"],
                     "constant_name": params.get("constant_name", "EXTRACTED_CONSTANT"),
+                    "source_file": target.get("file") or params.get("source_file"),
+                    "source_line": self._source_line_from_step(
+                        step, params=params, target=target
+                    ),
                 },
             }
 
         elif ref_key == "introduce constant":
-            literal_value = params.get("literal_value") if "literal_value" in params else None
-            literal_values = params.get("literal_values") if isinstance(params.get("literal_values"), list) else None
-            hint = params.get("hint")
+            literal_value = (
+                params.get("literal_value")
+                if "literal_value" in params
+                else target.get("literal_value")
+                if "literal_value" in target
+                else target.get("literal")
+                if "literal" in target
+                else target.get("value")
+            )
+            literal_values = (
+                params.get("literal_values")
+                if isinstance(params.get("literal_values"), list)
+                else target.get("literal_values")
+                if isinstance(target.get("literal_values"), list)
+                else None
+            )
+            hint = params.get("hint") or target.get("hint")
 
             if literal_value is None and not literal_values and not hint:
                 raise PlannerAdapterError(
@@ -1065,10 +1083,29 @@ class PlannerAdapter:
                 "parameters": {
                     "literal_value": literal_value,
                     "literal_values": literal_values,
-                    "constant_name": params.get("constant_name", "EXTRACTED_CONSTANT"),
+                    "constant_name": (
+                        params.get("constant_name")
+                        or target.get("constant_name")
+                        or "EXTRACTED_CONSTANT"
+                    ),
                     "hint": hint,
-                    "source_file": params.get("source_file"),
-                    "source_line": params.get("source_line"),
+                    "source_file": self._source_file_from_step(
+                        step, params=params, target=target
+                    ),
+                    "source_line": self._source_line_from_step(
+                        step, params=params, target=target
+                    ),
+                    # Preserve richer CUQA/RDP location metadata.  C/H target
+                    # recovery should never have to guess when the planner
+                    # already knows a column, node kind, or semantic context.
+                    "source_column": (
+                        params.get("source_column")
+                        or params.get("column")
+                        or target.get("source_column")
+                        or target.get("column")
+                    ),
+                    "target_kind": params.get("target_kind") or target.get("kind"),
+                    "target_context": params.get("target_context") or target.get("context"),
                     "target_class": target.get("class") or params.get("source_class"),
                     "target_method": target.get("method") or params.get("method"),
                 },
