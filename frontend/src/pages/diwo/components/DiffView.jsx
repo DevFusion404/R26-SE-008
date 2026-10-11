@@ -16,12 +16,12 @@ import { useMemo } from "react";
 import { C } from "../diwoTheme.jsx";
 import { buildDiffSegments } from "../utils/diffMapper";
 
-/** Scrollable dark panel every code and diff view sits in. */
+/** Scrollable theme-aware panel every code and diff view sits in. */
 export function CodeSurface({ children, maxHeight = 460, style = {} }) {
   return (
     <div
       style={{
-        background: "#0b1020",
+        background: "var(--bg-code)",
         border: `1px solid ${C.border}`,
         borderRadius: 10,
         overflow: "auto",
@@ -39,8 +39,8 @@ export function CodeSurface({ children, maxHeight = 460, style = {} }) {
 }
 
 const DIFF_TONES = {
-  before: { rail: "#ef4444", fill: "rgba(239,68,68,0.12)", text: "#fecaca", label: "Original" },
-  after: { rail: "#3b82f6", fill: "rgba(59,130,246,0.12)", text: "#bfdbfe", label: "Refactored" },
+  before: { rail: "#ef4444", fill: "rgba(239,68,68,0.12)", text: "var(--text-danger)", label: "Original" },
+  after: { rail: "#3b82f6", fill: "rgba(59,130,246,0.12)", text: "var(--text-info)", label: "Refactored" },
 };
 
 /** "lines 12–15", or "line 12" for a single line. */
@@ -80,10 +80,10 @@ export function CodeBlock({ code, emptyMessage = "No code to display." }) {
           key={`line-${idx}`}
           style={{ display: "grid", gridTemplateColumns: "56px 1fr", padding: "1px 0" }}
         >
-          <span style={{ color: "#64748b", textAlign: "right", paddingRight: 10, userSelect: "none" }}>
+          <span style={{ color: "var(--text-muted)", textAlign: "right", paddingRight: 10, userSelect: "none" }}>
             {idx + 1}
           </span>
-          <span style={{ whiteSpace: "pre", color: "#cbd5e1", padding: "0 12px 0 6px" }}>
+          <span style={{ whiteSpace: "pre", color: "var(--text-primary)", padding: "0 12px 0 6px" }}>
             {line || " "}
           </span>
         </div>
@@ -95,7 +95,7 @@ export function CodeBlock({ code, emptyMessage = "No code to display." }) {
 function DiffLine({ row, tone }) {
   return (
     <div style={{ display: "grid", gridTemplateColumns: "56px 24px 1fr", padding: "1px 0" }}>
-      <span style={{ color: "#64748b", textAlign: "right", paddingRight: 8, userSelect: "none" }}>
+      <span style={{ color: "var(--text-muted)", textAlign: "right", paddingRight: 8, userSelect: "none" }}>
         {row.lineNo}
       </span>
       <span style={{ color: tone.rail, textAlign: "center", userSelect: "none", fontWeight: 700 }}>
