@@ -104,7 +104,7 @@ function InlineCodeSmellOverview({ overview }) {
       <div style={{
         padding: '14px 20px', borderBottom: '1px solid var(--border)',
         display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-        background: 'linear-gradient(135deg,#0f1e30 0%,#0a1520 100%)',
+        background: 'var(--gradient-card)',
       }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
           <span style={{ fontSize: 15 }}>🗂</span>
@@ -271,7 +271,7 @@ function ASTGraph({ ast }) {
           {edges.map(({ from, to }, i) => {
             const f = nodes[from], t = nodes[to];
             if (!f || !t) return null;
-            return <line key={i} x1={f.x} y1={f.y + nodeH} x2={t.x} y2={t.y} stroke="#1e3a5f" strokeWidth={1.5} />;
+            return <line key={i} x1={f.x} y1={f.y + nodeH} x2={t.x} y2={t.y} stroke="var(--diagram-edge)" strokeWidth={1.5} />;
           })}
           {nodes.map(n => {
             const c = getColor(n.type);
@@ -281,21 +281,21 @@ function ASTGraph({ ast }) {
               <g key={n.id} transform={`translate(${n.x - nodeW / 2}, ${n.y})`}>
                 <rect width={nodeW} height={nodeH}
                   rx={5} ry={5}
-                  fill={isSmell ? '#2d0a0a' : '#0f1f35'}
+                  fill={isSmell ? 'var(--diagram-danger)' : 'var(--diagram-node)'}
                   stroke={isSmell ? '#ef4444' : c}
                   strokeWidth={1.5}
                 />
                 <text
                   x={nodeW / 2} y={nodeH / 2 - 4}
                   textAnchor="middle"
-                  fill={isSmell ? '#f87171' : '#e2eaf4'}
+                  fill={isSmell ? 'var(--color-critical)' : 'var(--text-primary)'}
                   fontSize={9.5}
                   fontFamily="'JetBrains Mono', monospace"
                   fontWeight={500}
                 >
                   {label.length > 22 ? label.slice(0, 22) + '…' : label}
                 </text>
-                {n.line && <text x={nodeW / 2} y={nodeH / 2 + 9} textAnchor="middle" fill="#3d5166" fontSize={9}>L{n.line}</text>}
+                {n.line && <text x={nodeW / 2} y={nodeH / 2 + 9} textAnchor="middle" fill="var(--text-muted)" fontSize={9}>L{n.line}</text>}
               </g>
             );
           })}
