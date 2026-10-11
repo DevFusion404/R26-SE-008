@@ -461,8 +461,8 @@ export default function ResultsViewer({ plan, stats, onDownload, onCopy }) {
               padding: '8px 12px',
               borderRadius: '6px',
               border: '1px solid rgba(139,92,246,0.35)',
-              background: '#1e1b2e',
-              color: '#e2e8f0',
+              background: 'var(--bg-input)',
+              color: 'var(--text-primary)',
               fontSize: '12px',
               outline: 'none',
             }}
@@ -476,18 +476,18 @@ export default function ResultsViewer({ plan, stats, onDownload, onCopy }) {
               padding: '8px 12px',
               borderRadius: '6px',
               border: '1px solid rgba(139,92,246,0.35)',
-              background: '#1e1b2e',
-              color: '#e2e8f0',
+              background: 'var(--bg-input)',
+              color: 'var(--text-primary)',
               fontSize: '12px',
               outline: 'none',
               cursor: 'pointer',
-              colorScheme: 'dark',
+              colorScheme: 'inherit',
             }}
           >
-            <option value="none" style={{ background: '#1e1b2e', color: '#f8fafc' }}>Group By: None (Sequential)</option>
-            <option value="refactoring" style={{ background: '#1e1b2e', color: '#f8fafc' }}>Group By: Refactoring Type</option>
-            <option value="file" style={{ background: '#1e1b2e', color: '#f8fafc' }}>Group By: Target File / Class</option>
-            <option value="risk" style={{ background: '#1e1b2e', color: '#f8fafc' }}>Group By: Risk &amp; Impact Category</option>
+            <option value="none">Group By: None (Sequential)</option>
+            <option value="refactoring">Group By: Refactoring Type</option>
+            <option value="file">Group By: Target File / Class</option>
+            <option value="risk">Group By: Risk &amp; Impact Category</option>
           </select>
 
           {/* Refactoring Type filter */}
@@ -498,16 +498,16 @@ export default function ResultsViewer({ plan, stats, onDownload, onCopy }) {
               padding: '8px 12px',
               borderRadius: '6px',
               border: '1px solid rgba(139,92,246,0.35)',
-              background: '#1e1b2e',
-              color: '#e2e8f0',
+              background: 'var(--bg-input)',
+              color: 'var(--text-primary)',
               fontSize: '12px',
               outline: 'none',
               cursor: 'pointer',
-              colorScheme: 'dark',
+              colorScheme: 'inherit',
             }}
           >
             {refactoringTypes.map(type => (
-              <option key={type} value={type} style={{ background: '#1e1b2e', color: '#f8fafc' }}>
+              <option key={type} value={type}>
                 {type === 'ALL' ? 'Technique: All Types' : type}
               </option>
             ))}
@@ -521,16 +521,16 @@ export default function ResultsViewer({ plan, stats, onDownload, onCopy }) {
               padding: '8px 12px',
               borderRadius: '6px',
               border: '1px solid rgba(139,92,246,0.35)',
-              background: '#1e1b2e',
-              color: '#e2e8f0',
+              background: 'var(--bg-input)',
+              color: 'var(--text-primary)',
               fontSize: '12px',
               outline: 'none',
               cursor: 'pointer',
-              colorScheme: 'dark',
+              colorScheme: 'inherit',
             }}
           >
             {fileList.map(f => (
-              <option key={f} value={f} style={{ background: '#1e1b2e', color: '#f8fafc' }}>
+              <option key={f} value={f}>
                 {f === 'ALL' ? 'Target: All Files' : f}
               </option>
             ))}

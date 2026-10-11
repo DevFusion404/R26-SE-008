@@ -200,7 +200,7 @@ function CodeSmellOverview({ overview }) {
         padding: '16px 20px',
         borderBottom: '1px solid var(--border)',
         display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-        background: 'linear-gradient(135deg, #0f1e30 0%, #0a1520 100%)',
+        background: 'var(--gradient-card)',
       }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
           <span style={{ fontSize: 16 }}>🗂</span>
