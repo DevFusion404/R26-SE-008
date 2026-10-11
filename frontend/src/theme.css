@@ -8,6 +8,7 @@
 
 /* ── Dark Theme (Default) ──────────────────────────────────── */
 :root {
+  color-scheme: dark;
   /* ── Base colours ──────────────────────────────────────── */
   --bg-root:        #080d14;
   --bg-base:        #0a0f1a;
@@ -17,6 +18,9 @@
   --bg-elevated:    #152234;
   --bg-hover:       #1a2a3d;
   --bg-input:       #0e1c2c;
+  --bg-code:        #050a15;
+  --bg-code-elevated: #101a2b;
+  --bg-subtle:      rgba(8, 17, 31, 0.55);
   --bg-overlay:     rgba(8, 13, 20, 0.85);
 
   /* ── Accent — cyan teal (CUQA / primary) ──────────────── */
@@ -46,6 +50,18 @@
   --text-muted:     #3d5166;
   --text-accent:    #00d4e8;
   --text-code:      #a5d6ff;
+  --text-on-accent: #041014;
+  --text-success:   #86efac;
+  --text-danger:    #fecaca;
+  --text-warning:   #fde68a;
+  --text-info:      #bfdbfe;
+  --metric-green:   #86efac;
+  --metric-blue:    #93c5fd;
+  --metric-purple:  #d8b4fe;
+  --metric-orange:  #fdba74;
+  --diagram-node:   #0f1f35;
+  --diagram-danger: #2d0a0a;
+  --diagram-edge:   #1e3a5f;
 
   /* ── Borders ───────────────────────────────────────────── */
   --border:         #1a2d42;
@@ -62,15 +78,15 @@
   --font-body: 'Inter', system-ui, sans-serif;
   --font-mono: 'JetBrains Mono', 'Fira Code', monospace;
 
-  --text-xs:   11px;
-  --text-sm:   12px;
-  --text-base: 13px;
-  --text-md:   14px;
-  --text-lg:   16px;
-  --text-xl:   20px;
-  --text-2xl:  24px;
-  --text-3xl:  32px;
-  --text-4xl:  40px;
+  --text-xs:   13px;
+  --text-sm:   14px;
+  --text-base: 15px;
+  --text-md:   16px;
+  --text-lg:   18px;
+  --text-xl:   22px;
+  --text-2xl:  26px;
+  --text-3xl:  34px;
+  --text-4xl:  42px;
 
   /* ── Radii ─────────────────────────────────────────────── */
   --r-xs:  4px;
@@ -113,6 +129,7 @@
    no JSX component changes needed.
    ================================================================ */
 [data-theme="light"] {
+  color-scheme: light;
   /* ── Base colours ──────────────────────────────────────── */
   --bg-root:        #f0f4f8;
   --bg-base:        #f5f7fa;
@@ -122,6 +139,9 @@
   --bg-elevated:    #e8edf4;
   --bg-hover:       #e2e8f0;
   --bg-input:       #f0f4f8;
+  --bg-code:        #f8fafc;
+  --bg-code-elevated: #eef2f7;
+  --bg-subtle:      rgba(241, 245, 249, 0.78);
   --bg-overlay:     rgba(240, 244, 248, 0.92);
 
   /* ── Accent ─────────────────────────────────────────────── */
@@ -151,6 +171,18 @@
   --text-muted:     #94a3b8;
   --text-accent:    #0099b5;
   --text-code:      #1d4ed8;
+  --text-on-accent: #ffffff;
+  --text-success:   #15803d;
+  --text-danger:    #b91c1c;
+  --text-warning:   #a16207;
+  --text-info:      #1d4ed8;
+  --metric-green:   #15803d;
+  --metric-blue:    #2563eb;
+  --metric-purple:  #7e22ce;
+  --metric-orange:  #c2410c;
+  --diagram-node:   #ffffff;
+  --diagram-danger: #fef2f2;
+  --diagram-edge:   #94a3b8;
 
   /* ── Borders ───────────────────────────────────────────── */
   --border:         #cbd5e1;
