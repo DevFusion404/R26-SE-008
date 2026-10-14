@@ -952,6 +952,217 @@
   font-size: 13px;
 }
 
+/* Light theme -------------------------------------------------------
+   SCTVA originally shipped as a dark-only workspace.  Keep its blue
+   identity while moving every reading surface onto the shared tokens. */
+[data-theme="light"] .sctva-page {
+  color: var(--text-primary);
+}
+
+[data-theme="light"] .sctva-hero h1,
+[data-theme="light"] .sctva-control-head h2,
+[data-theme="light"] .sctva-validation-card h2,
+[data-theme="light"] .sctva-confidence-card h2,
+[data-theme="light"] .sctva-report-card h2,
+[data-theme="light"] .sctva-raw-card h2,
+[data-theme="light"] .sctva-panel-title,
+[data-theme="light"] .sctva-upload-zone strong,
+[data-theme="light"] .sctva-cuqa-strip strong,
+[data-theme="light"] .sctva-toggle summary,
+[data-theme="light"] .sctva-timeline-item strong,
+[data-theme="light"] .sctva-check-item strong,
+[data-theme="light"] .sctva-mini-metrics strong,
+[data-theme="light"] .sctva-storage-status strong {
+  color: var(--text-primary);
+}
+
+[data-theme="light"] .sctva-hero p,
+[data-theme="light"] .sctva-label,
+[data-theme="light"] .sctva-upload-zone p,
+[data-theme="light"] .sctva-cuqa-strip span,
+[data-theme="light"] .sctva-file-name,
+[data-theme="light"] .sctva-timeline-item p,
+[data-theme="light"] .sctva-diff-stats,
+[data-theme="light"] .sctva-check-item small,
+[data-theme="light"] .sctva-confidence-copy,
+[data-theme="light"] .sctva-mini-metrics span,
+[data-theme="light"] .sctva-report-list,
+[data-theme="light"] .sctva-logs-top,
+[data-theme="light"] .sctva-storage-status span,
+[data-theme="light"] .sctva-empty-state {
+  color: var(--text-secondary);
+}
+
+[data-theme="light"] .sctva-card,
+[data-theme="light"] .sctva-timeline-card,
+[data-theme="light"] .sctva-code-card,
+[data-theme="light"] .sctva-validation-card,
+[data-theme="light"] .sctva-confidence-card,
+[data-theme="light"] .sctva-report-card,
+[data-theme="light"] .sctva-logs-card,
+[data-theme="light"] .sctva-raw-card {
+  background: var(--bg-card);
+  border-color: var(--border);
+  box-shadow: var(--shadow-card);
+}
+
+[data-theme="light"] .sctva-hero-icon,
+[data-theme="light"] .sctva-btn-secondary,
+[data-theme="light"] .sctva-mini-btn,
+[data-theme="light"] .sctva-step-count {
+  background: rgba(37, 99, 235, 0.08);
+  border-color: rgba(37, 99, 235, 0.25);
+  color: #1d4ed8;
+}
+
+[data-theme="light"] .sctva-field,
+[data-theme="light"] .sctva-textarea {
+  background: var(--bg-input);
+  border-color: var(--border);
+  color: var(--text-primary);
+}
+
+[data-theme="light"] .sctva-field::placeholder,
+[data-theme="light"] .sctva-textarea::placeholder {
+  color: var(--text-muted);
+}
+
+[data-theme="light"] .sctva-upload-zone {
+  background: rgba(37, 99, 235, 0.05);
+  border-color: rgba(37, 99, 235, 0.3);
+}
+
+[data-theme="light"] .sctva-cuqa-strip > div,
+[data-theme="light"] .sctva-toggle,
+[data-theme="light"] .sctva-check-item,
+[data-theme="light"] .sctva-mini-metrics > div,
+[data-theme="light"] .sctva-report-list-inner li,
+[data-theme="light"] .sctva-storage-status {
+  background: var(--bg-subtle);
+  border-color: var(--border-light);
+}
+
+[data-theme="light"] .sctva-alert-error { color: #b91c1c; }
+[data-theme="light"] .sctva-alert-info { color: #1d4ed8; }
+[data-theme="light"] .sctva-alert-success { color: #15803d; }
+[data-theme="light"] .sctva-alert-warn { color: #a16207; }
+
+[data-theme="light"] .sctva-timeline-item.pending span,
+[data-theme="light"] .sctva-timeline-item.pending strong,
+[data-theme="light"] .sctva-timeline-item.pending p {
+  color: var(--text-muted);
+}
+
+[data-theme="light"] .sctva-timeline-item.failed span,
+[data-theme="light"] .sctva-timeline-item.failed strong,
+[data-theme="light"] .sctva-timeline-item.failed p,
+[data-theme="light"] .sctva-danger-text {
+  color: #b91c1c;
+}
+
+[data-theme="light"] .sctva-timeline-item.warn span,
+[data-theme="light"] .sctva-timeline-item.warn strong,
+[data-theme="light"] .sctva-timeline-item.warn p {
+  color: #a16207;
+}
+
+[data-theme="light"] .sctva-code-topbar,
+[data-theme="light"] .sctva-file-tabs,
+[data-theme="light"] .sctva-logs-top {
+  background: var(--bg-surface);
+  border-color: var(--border);
+}
+
+[data-theme="light"] .sctva-file-tab {
+  background: var(--bg-card);
+  border-color: var(--border);
+  color: var(--text-secondary);
+}
+
+[data-theme="light"] .sctva-file-tab:hover,
+[data-theme="light"] .sctva-file-tab.active {
+  color: var(--text-primary);
+}
+
+[data-theme="light"] .sctva-file-tab.applied,
+[data-theme="light"] .sctva-file-tab.pass,
+[data-theme="light"] .sctva-file-tab.applied em,
+[data-theme="light"] .sctva-file-tab.pass em {
+  color: #15803d;
+}
+
+[data-theme="light"] .sctva-file-tab.already-handled,
+[data-theme="light"] .sctva-file-tab.already-handled em {
+  color: #0e7490;
+}
+
+[data-theme="light"] .sctva-file-tab.rolled-back,
+[data-theme="light"] .sctva-file-tab.fail,
+[data-theme="light"] .sctva-file-tab.rolled-back em,
+[data-theme="light"] .sctva-file-tab.fail em {
+  color: #b91c1c;
+}
+
+[data-theme="light"] .sctva-code-diff,
+[data-theme="light"] .sctva-logs-output,
+[data-theme="light"] .sctva-json-output {
+  background: var(--bg-code);
+  border-color: var(--border);
+  color: var(--text-primary);
+}
+
+[data-theme="light"] .sctva-diff-line {
+  color: var(--text-primary);
+}
+
+[data-theme="light"] .sctva-diff-line.add {
+  background: rgba(22, 163, 74, 0.09);
+  color: #166534;
+}
+
+[data-theme="light"] .sctva-diff-line.del {
+  background: rgba(220, 38, 38, 0.08);
+  color: #991b1b;
+}
+
+[data-theme="light"] .sctva-line-no,
+[data-theme="light"] .sctva-chip-muted {
+  color: var(--text-muted);
+}
+
+[data-theme="light"] .sctva-check-item.pass .sctva-check-icon {
+  background: #dcfce7;
+  color: #15803d;
+}
+
+[data-theme="light"] .sctva-check-item.fail .sctva-check-icon {
+  color: #b91c1c;
+}
+
+[data-theme="light"] .sctva-check-item.warn .sctva-check-icon {
+  color: #a16207;
+}
+
+[data-theme="light"] .sctva-confidence-ring {
+  background:
+    radial-gradient(circle at center, var(--bg-card) 0 54%, transparent 55%),
+    conic-gradient(#2563eb var(--score), #dbe3ee 0);
+}
+
+[data-theme="light"] .sctva-confidence-ring.not-applicable {
+  background:
+    radial-gradient(circle at center, var(--bg-card) 0 54%, transparent 55%),
+    conic-gradient(#94a3b8 100%, #dbe3ee 0);
+}
+
+[data-theme="light"] .sctva-ring-inner {
+  background: var(--bg-card);
+}
+
+[data-theme="light"] .sctva-ring-inner span {
+  color: #1d4ed8;
+}
+
 @media (max-width: 1180px) {
   .sctva-agent-grid {
     grid-template-columns: 1fr 1fr;

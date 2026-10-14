@@ -1,10 +1,10 @@
 export const C = {
-  bg: "#0d0f14", panel: "#12151c", border: "#1e2330", borderAcc: "#2a3040",
+  bg: "var(--bg-root)", panel: "var(--bg-card)", border: "var(--border)", borderAcc: "var(--border-light)",
   accent: "#00d4aa", accentDim: "#00a882", accentGlow: "rgba(0,212,170,0.12)",
   warn: "#f59e0b", warnGlow: "rgba(245,158,11,0.12)",
   danger: "#ef4444", dangerGlow: "rgba(239,68,68,0.12)",
   info: "#3b82f6", infoGlow: "rgba(59,130,246,0.12)",
-  text: "#e2e8f0", textMuted: "#64748b", textSub: "#94a3b8",
+  text: "var(--text-primary)", textMuted: "var(--text-muted)", textSub: "var(--text-secondary)",
   high: "#ef4444", medium: "#f59e0b", low: "#22c55e",
   gradient: "linear-gradient(135deg, #00d4aa 0%, #3b82f6 100%)",
 };
@@ -14,11 +14,11 @@ export const impactColor = (i) => ({ high: C.accent, medium: C.warn, low: C.text
 export const riskColor = (r) => ({ low: C.low, medium: C.warn, high: C.danger }[r] || C.textMuted);
 
 export const Badge = ({ label, color, bg }) => (
-  <span style={{ fontSize: 10, fontWeight: 700, letterSpacing: 1, padding: "2px 8px", borderRadius: 4, background: bg || `${color}18`, color: color || C.textMuted, textTransform: "uppercase", border: `1px solid ${color || C.textMuted}30` }}>{label}</span>
+  <span style={{ fontSize: 10, fontWeight: 700, letterSpacing: 1, padding: "2px 8px", borderRadius: 4, background: bg || `color-mix(in srgb, ${color || C.textMuted} 10%, transparent)`, color: color || C.textMuted, textTransform: "uppercase", border: `1px solid color-mix(in srgb, ${color || C.textMuted} 22%, transparent)` }}>{label}</span>
 );
 
 export const Pill = ({ label, color }) => (
-  <span style={{ fontSize: 11, fontWeight: 600, padding: "3px 10px", borderRadius: 20, background: `${color}15`, color, border: `1px solid ${color}30` }}>{label}</span>
+  <span style={{ fontSize: 11, fontWeight: 600, padding: "3px 10px", borderRadius: 20, background: `color-mix(in srgb, ${color} 9%, transparent)`, color, border: `1px solid color-mix(in srgb, ${color} 20%, transparent)` }}>{label}</span>
 );
 
 export const Card = ({ children, style = {}, glow }) => (

@@ -18,6 +18,17 @@ html, body, #root {
   -webkit-font-smoothing: antialiased;
 }
 
+/* Keep small inline labels readable across pages that define local sizes. */
+#root [style*="font-size: 9px"],
+#root [style*="font-size: 10px"],
+#root [style*="font-size: 11px"] {
+  font-size: 13px !important;
+}
+
+#root [style*="font-size: 12px"] {
+  font-size: 14px !important;
+}
+
 ::-webkit-scrollbar { width: 5px; height: 5px; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: var(--border-light); border-radius: 3px; }
@@ -735,56 +746,25 @@ input[type="range"] {
 
 /* ── Divider ────────────────────────────────────────────────  */
 .divider { height: 1px; background: var(--border); margin: var(--sp-2) 0; }
+/* Compatibility aliases for the small set of legacy starter styles below.
+   They deliberately reference the application tokens instead of redefining
+   --accent / --border, which previously broke the explicit theme toggle. */
 :root {
-  --text: #6b6375;
-  --text-h: #08060d;
-  --bg: #fff;
-  --border: #e5e4e7;
-  --code-bg: #f4f3ec;
-  --accent: #aa3bff;
-  --accent-bg: rgba(170, 59, 255, 0.1);
-  --accent-border: rgba(170, 59, 255, 0.5);
-  --social-bg: rgba(244, 243, 236, 0.5);
-  --shadow:
-    rgba(0, 0, 0, 0.1) 0 10px 15px -3px, rgba(0, 0, 0, 0.05) 0 4px 6px -2px;
+  --text: var(--text-secondary);
+  --text-h: var(--text-primary);
+  --bg: var(--bg-base);
+  --code-bg: var(--bg-code-elevated);
+  --accent-bg: var(--accent-muted);
+  --social-bg: var(--bg-elevated);
+  --shadow: var(--shadow-md);
+  --sans: var(--font-body);
+  --heading: var(--font-body);
+  --mono: var(--font-mono);
 
-  --sans: system-ui, 'Segoe UI', Roboto, sans-serif;
-  --heading: system-ui, 'Segoe UI', Roboto, sans-serif;
-  --mono: ui-monospace, Consolas, monospace;
-
-  font: 18px/145% var(--sans);
-  letter-spacing: 0.18px;
-  color-scheme: light dark;
-  color: var(--text);
-  background: var(--bg);
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
-
-  @media (max-width: 1024px) {
-    font-size: 16px;
-  }
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --text: #9ca3af;
-    --text-h: #f3f4f6;
-    --bg: #16171d;
-    --border: #2e303a;
-    --code-bg: #1f2028;
-    --accent: #c084fc;
-    --accent-bg: rgba(192, 132, 252, 0.15);
-    --accent-border: rgba(192, 132, 252, 0.5);
-    --social-bg: rgba(47, 48, 58, 0.5);
-    --shadow:
-      rgba(0, 0, 0, 0.4) 0 10px 15px -3px, rgba(0, 0, 0, 0.25) 0 4px 6px -2px;
-  }
-
-  #social .button-icon {
-    filter: invert(1) brightness(2);
-  }
 }
 
 body {
@@ -898,6 +878,31 @@ code {
   border-color: var(--border);
   color: var(--text-secondary);
 }
+
+/* Semantic badges and pills use darker foregrounds on pale surfaces. */
+[data-theme="light"] .badge-critical,
+[data-theme="light"] .pill-high { color: #b91c1c; }
+[data-theme="light"] .badge-high,
+[data-theme="light"] .badge-java,
+[data-theme="light"] .pill-java { color: #c2410c; }
+[data-theme="light"] .badge-medium,
+[data-theme="light"] .pill-medium { color: #a16207; }
+[data-theme="light"] .badge-low,
+[data-theme="light"] .badge-python,
+[data-theme="light"] .pill-low,
+[data-theme="light"] .pill-python { color: #1d4ed8; }
+[data-theme="light"] .badge-ok,
+[data-theme="light"] .badge-c,
+[data-theme="light"] .badge-success,
+[data-theme="light"] .pill-c,
+[data-theme="light"] .metric-c .metric-value { color: #15803d; }
+[data-theme="light"] .badge-purple { color: #7e22ce; }
+[data-theme="light"] .alert-success { color: #15803d; }
+[data-theme="light"] .alert-warning { color: #a16207; }
+[data-theme="light"] .json-key { color: #1d4ed8; }
+[data-theme="light"] .json-str { color: #0369a1; }
+[data-theme="light"] .json-num { color: #c2410c; }
+[data-theme="light"] .json-bool { color: #b91c1c; }
 
 /* Priority pills — keep readable in light */
 [data-theme="light"] .pill-critical { background: rgba(220,38,38,0.12);  color: #dc2626; border-color: rgba(220,38,38,0.3); }
