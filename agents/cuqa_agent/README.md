@@ -73,6 +73,88 @@ The API is then available at `http://localhost:8080`.
 
 ---
 
+## ML Code Smell Detection (Java)
+
+Besides the rules, CUQA has a trained model that detects code smells in Java
+without hand-set thresholds. It lives in `src/ml_detector/` and is trained on the
+MLCQ dataset (expert-reviewed Java classes and methods from open-source projects).
+
+| Smell (MLCQ name) | CUQA type | Level | Shipped | Test precision | Test recall | Test F1 |
+|---|---|---|---|---:|---:|---:|
+| Long Method | `LongMethod` | method | yes | 0.83 | 0.66 | 0.73 |
+| Data Class | `DataClass` | class | yes | 0.70 | 0.71 | 0.71 |
+| Blob | `LargeClass` | class | yes | 0.46 | 0.61 | 0.52 |
+| Feature Envy | `FeatureEnvy` | method | no (experimental) | 0.15 | 0.33 | 0.21 |
+
+The numbers are from 100 repositories that were not used for training. Method,
+confidence intervals, baselines and discussion are in
+[`training/MODEL_EVALUATION.md`](training/MODEL_EVALUATION.md).
+
+**How it works.** `java_features.py` measures every class and method (size,
+complexity, coupling, cohesion, accessor usage). A small gradient-boosted tree
+model per smell turns the measurements into a probability. The model is stored
+as JSON (`artifacts/smell_model.json`, about 175 KB) and scored in pure Python,
+so the service needs no extra dependency.
+
+**Scope.** Java only. Python and C files are analysed by the rules as before,
+because there is no labeled data for them.
+
+### Detection modes
+
+| Mode | `code_smells` contains | When to use |
+|---|---|---|
+| `rules` (default) | Rule-based smells only. ML findings are attached under `ml_analysis`. | Existing behaviour, nothing changes for RDP. |
+| `hybrid` | Rule-based smells plus ML smells. Agreement is one entry with `detected_by: "rule+ml"`. | Send ML findings to RDP as well. |
+| `ml` | ML smells for `LongMethod`, `LargeClass`, `DataClass`. Other types still from rules. | Replace the hand-set thresholds with the model. |
+| `off` | Rule-based smells only. The model is not run and no `ml_analysis` is added. | Exactly the output and speed from before the model was added. |
+
+Set the mode per request with `"detector"` or for the whole service with the
+`CUQA_SMELL_DETECTOR` environment variable. Set `CUQA_ML_INCLUDE_EXPERIMENTAL=1`
+to also report Feature Envy.
+
+```bash
+# Model description: version, thresholds, test metrics
+curl http://localhost:8080/api/ml-model
+
+# ML-only detection for the loaded repository (up to 200 Java files)
+curl -X POST http://localhost:8080/api/ml-smells \
+     -H "Content-Type: application/json" -d '{}'
+
+# Quality report with ML findings merged in
+curl -X POST http://localhost:8080/api/quality-report \
+     -H "Content-Type: application/json" -d '{"detector": "hybrid"}'
+```
+
+### ML smell entry
+
+```json
+{
+  "type": "LongMethod",
+  "message": "Method 'runExec' is predicted to be a Long Method (model confidence 99%)",
+  "line": 348,
+  "severity": "high",
+  "entity": "runExec",
+  "start_line": 348,
+  "end_line": 499,
+  "detected_by": "ml",
+  "confidence": 0.992,
+  "evidence": {"loc": 152, "n_tokens": 928, "sloc": 134, "n_branches": 23, "n_operators": 97},
+  "parameter_count": 1,
+  "cyclomatic_complexity": 39
+}
+```
+
+Every Java file report also gets `detection_mode` and an `ml_analysis` block
+(`status`, `model_version`, `entities_scored`, `smells`). If a file cannot be
+parsed or the model file is missing, `status` says so and the report falls back
+to the rules.
+
+### Retraining
+
+See [`training/README.md`](training/README.md).
+
+---
+
 ## Output Schema
 
 Every file report emitted to the RDP Agent follows this structure:
