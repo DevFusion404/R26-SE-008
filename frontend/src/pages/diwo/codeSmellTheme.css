@@ -1,0 +1,161 @@
+/*
+ * codeSmellTheme.css
+ * ==================
+ * R26-SE-008 | Bandara S M Y M | IT22277886
+ *
+ * Theme tokens for the Code Smell Review stage (and the dialogs it opens).
+ *
+ * diwoTheme's `C` palette mixes CSS variables (surfaces, text) with fixed hex
+ * accents that are tuned for the dark theme only — amber, mint and green text
+ * read fine on navy and nearly vanish on white. These tokens give every
+ * colour a dark AND a light value, flipped by the same `data-theme="light"`
+ * attribute ThemeContext sets on <html>, so nothing in a component has to
+ * know which theme is active.
+ *
+ * Surfaces and the primary text colour still come from theme.css — this file
+ * only adds what theme.css does not carry with enough contrast.
+ */
+
+:root {
+  --dw-page:          var(--bg-root);
+  --dw-surface:       var(--bg-card);
+  --dw-surface-2:     var(--bg-elevated);
+  --dw-sunken:        var(--bg-input);
+  --dw-code-bg:       var(--bg-code);
+  --dw-hover:         var(--bg-hover);
+  --dw-border:        var(--border);
+  --dw-border-strong: #2f4660;
+
+  --dw-text:          var(--text-primary);
+  --dw-text-2:        #a9b8cb;
+  --dw-text-3:        #7d90a8;
+
+  --dw-accent:        #00d4aa;
+  --dw-accent-text:   #2ee6c0;
+  --dw-on-accent:     #03140f;
+
+  --dw-high:          #f87171;
+  --dw-medium:        #fbbf24;
+  --dw-low:           #4ade80;
+  --dw-info:          #60a5fa;
+  --dw-violet:        #a78bfa;
+
+  --dw-shadow-sm:     0 1px 2px rgba(0, 0, 0, 0.35);
+  --dw-shadow-md:     0 10px 28px rgba(0, 0, 0, 0.38);
+  --dw-shadow-lg:     0 24px 64px rgba(0, 0, 0, 0.55);
+  --dw-overlay:       rgba(3, 6, 12, 0.74);
+
+  --dw-mono: var(--font-mono, "JetBrains Mono", "Fira Code", ui-monospace, Menlo, Consolas, monospace);
+}
+
+[data-theme="light"] {
+  --dw-border-strong: #94a3b8;
+
+  --dw-text-2:        #475569;
+  --dw-text-3:        #64748b;
+
+  --dw-accent:        #0b8a6f;
+  --dw-accent-text:   #04735c;
+  --dw-on-accent:     #ffffff;
+
+  --dw-high:          #dc2626;
+  --dw-medium:        #b45309;
+  --dw-low:           #15803d;
+  --dw-info:          #2563eb;
+  --dw-violet:        #7c3aed;
+
+  --dw-shadow-sm:     0 1px 2px rgba(15, 23, 42, 0.06), 0 1px 3px rgba(15, 23, 42, 0.08);
+  --dw-shadow-md:     0 8px 24px rgba(15, 23, 42, 0.10);
+  --dw-shadow-lg:     0 24px 64px rgba(15, 23, 42, 0.20);
+  --dw-overlay:       rgba(15, 23, 42, 0.42);
+}
+
+/* ── Interaction states inline styles cannot express ──────────────────────── */
+
+.dw-focus:focus-visible {
+  outline: 2px solid var(--dw-accent);
+  outline-offset: 2px;
+}
+
+.dw-hover:hover:not(:disabled) {
+  background: var(--dw-hover) !important;
+}
+
+.dw-input::placeholder { color: var(--dw-text-3); }
+.dw-input:focus { border-color: var(--dw-accent) !important; outline: none; }
+
+@keyframes dwSpin  { to { transform: rotate(360deg); } }
+@keyframes dwSlide { 0% { transform: translateX(-100%); } 100% { transform: translateX(250%); } }
+
+/* ── Workspace: summary & filters above the findings, selection panel beside ──
+ *
+ *     [ severity filter | category filter          ]   [ selection ]
+ *     [ toolbar                                    ]   [  panel    ]
+ *     [ findings                                   ]   [ (sticky)  ]
+ *
+ * A container query, not a media query: the stage sits inside the DIWO shell
+ * beside the app sidebar, so the viewport width says little about how much
+ * room the findings list actually gets.
+ */
+
+.dw-ws {
+  container-type: inline-size;
+  container-name: dwws;
+}
+
+.dw-grid {
+  display: grid;
+  gap: 16px;
+  align-items: start;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-areas: "rail" "main" "side";
+}
+
+.dw-area-rail { grid-area: rail; min-width: 0; }
+.dw-area-main { grid-area: main; min-width: 0; }
+.dw-area-side { grid-area: side; min-width: 0; }
+
+/* The summary and filter cards sit side by side in a row above the list. */
+.dw-rail {
+  display: grid;
+  gap: 12px;
+  align-items: stretch;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+}
+
+.dw-mobile-cta { position: sticky; bottom: 0; z-index: 20; margin-top: 16px; }
+
+@container dwws (min-width: 860px) {
+  .dw-grid {
+    grid-template-columns: minmax(0, 1fr) 280px;
+    grid-template-areas: "rail side" "main side";
+  }
+  .dw-area-side { position: sticky; top: 0; }
+  .dw-mobile-cta { display: none; }
+  .dw-rail { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+@container dwws (min-width: 1140px) {
+  .dw-grid { grid-template-columns: minmax(0, 1fr) 290px; }
+  .dw-rail { grid-template-columns: minmax(0, 1fr) minmax(0, 1.5fr); }
+}
+
+@container dwws (min-width: 1420px) {
+  .dw-grid { grid-template-columns: minmax(0, 1fr) 300px; }
+}
+
+/* ── Source viewer body: sidebar beside the code, stacked on narrow screens ── */
+
+.dw-sv-body {
+  display: grid;
+  grid-template-columns: 300px minmax(0, 1fr);
+  flex: 1;
+  min-height: 0;
+}
+
+@media (max-width: 760px) {
+  .dw-sv-body { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(120px, 34%) 1fr; }
+  .dw-sv-list { border-right: none !important; border-bottom: 1px solid var(--dw-border); }
+}
+
+.dw-sv-item:hover { background: var(--dw-hover); }

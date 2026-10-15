@@ -3,329 +3,302 @@
  * ====================
  * R26-SE-008 | Bandara S M Y M | IT22277886
  *
- * The Stage 1 header furniture: the four stat cards, the report-source card,
- * the selection-mode segmented control, and the search / severity strip.
+ * The compact toolbar above the findings list:
  *
- * One rule runs through all of it — the palette carries meaning, so it stays
- * small. Teal marks what is active or good, amber marks medium, red marks high
- * severity, and everything else is neutral. The previous version gave each
- * stat card its own colour and each file its own accent, which meant the two
- * signals that actually matter (severity and selection) had to compete with
- * eight that did not.
+ *     [File wise | Smell wise | Category wise]     [Search…………]  [Sort ▾]
+ *     [✓ Select shown (57)] [✕ Clear (12)]  [Smell type ▾] [Category ▾]
+ *     Showing 57 of 57 findings · 6 smell types       Expand all · Collapse
+ *     Filtered to: [Category Bloaters ✕] [Severity high ✕]
+ *
+ * Filters that need room to show their counts (severity, category, smell type)
+ * live in the left rail; this strip holds the controls a developer reaches for
+ * while reading the list. Select-shown and Clear are the only controls here
+ * that change what reaches the planning agent, so they are the only two that
+ * look like actions.
  */
 
-import { C } from "../diwoTheme.jsx";
+import { T, tint, eyebrow, ghostButton } from "../codeSmellTheme.js";
 
-// ─── Stats ───────────────────────────────────────────────────────────────────
+// ─── Mode ────────────────────────────────────────────────────────────────────
 
-function StatCard({ label, value, hint, tone = C.accent }) {
+const REVIEW_MODES = [
+  { key: "file", label: "File wise", hint: "Select whole files" },
+  { key: "smell", label: "Smell wise", hint: "Select individual findings, grouped by smell type" },
+  { key: "category", label: "Category wise", hint: "Select individual findings, grouped by CUQA category" },
+];
+
+/** Segmented control. The active segment is raised, not painted. */
+export function ModeSwitch({ mode, onChange, counts }) {
+  return (
+    <div
+      role="tablist"
+      aria-label="Review mode"
+      style={{
+        display: "inline-flex", gap: 3, padding: 3, flexShrink: 0,
+        background: T.sunken, border: `1px solid ${T.border}`, borderRadius: 10,
+      }}
+    >
+      {REVIEW_MODES.map((m) => {
+        const active = m.key === mode;
+        return (
+          <button
+            key={m.key}
+            type="button"
+            role="tab"
+            aria-selected={active}
+            title={m.hint}
+            className="dw-focus"
+            onClick={() => onChange(m.key)}
+            style={{
+              display: "flex", alignItems: "center", gap: 7,
+              padding: "6px 12px", borderRadius: 7, cursor: "pointer",
+              border: `1px solid ${active ? T.border : "transparent"}`,
+              background: active ? T.surface : "transparent",
+              boxShadow: active ? T.shadowSm : "none",
+              color: active ? T.text : T.text2,
+              fontSize: 12, fontWeight: 700, whiteSpace: "nowrap",
+              transition: "background 0.15s, color 0.15s",
+            }}
+          >
+            {m.label}
+            {counts?.[m.key] !== undefined && (
+              <span style={{
+                fontSize: 10, fontFamily: T.mono, fontWeight: 700,
+                padding: "0 6px", borderRadius: 999,
+                background: active ? tint(T.accent, 14) : T.surface2,
+                color: active ? T.accentText : T.text3,
+              }}>
+                {counts[m.key]}
+              </span>
+            )}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+// ─── Toolbar ─────────────────────────────────────────────────────────────────
+
+const PLACEHOLDER = {
+  file: "Search files, smell types, entities…",
+  smell: "Search smell types, files, entities, messages…",
+  category: "Search categories, smell types, files…",
+};
+
+const GROUP_NOUN = { file: "file", smell: "smell type", category: "category" };
+
+/**
+ * `sortOptions` entries are { key, label, disabled?, hint? }. An option whose
+ * figures do not exist (no impact records) is rendered disabled rather than
+ * sorting by a column of blanks.
+ */
+export function ReviewToolbar({
+  mode, onModeChange, modeCounts,
+  search, onSearch,
+  sort, sortOptions, onSort,
+  onSelectAll, onClearSelection, selectableCount, selectionCount,
+  onExpandAll, onCollapseAll, groupCount, anyOpen,
+  shownFindings, totalFindings,
+  quickSelect,
+  activeFilters = [], onClearFilters,
+}) {
+  const noun = GROUP_NOUN[mode] || "group";
+  const unit = mode === "file" ? "file" : "finding";
+
   return (
     <div style={{
-      background: C.panel, border: `1px solid ${C.border}`, borderRadius: 11,
-      padding: "15px 17px", minWidth: 0,
+      background: T.surface, border: `1px solid ${T.border}`, borderRadius: 12,
+      boxShadow: T.shadowSm, padding: 12, marginBottom: 12,
+      display: "flex", flexDirection: "column", gap: 10,
     }}>
-      <div style={{
-        fontSize: 10.5, color: C.textMuted, textTransform: "uppercase",
-        letterSpacing: 0.9, fontWeight: 700,
-      }}>
-        {label}
+      {/* Row 1 — how to look: mode, search, sort */}
+      <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+        <ModeSwitch mode={mode} onChange={onModeChange} counts={modeCounts} />
+
+        <div style={{ position: "relative", flex: "1 1 220px", minWidth: 0 }}>
+          <span aria-hidden="true" style={{
+            position: "absolute", left: 11, top: "50%", transform: "translateY(-50%)",
+            color: T.text3, fontSize: 13, pointerEvents: "none",
+          }}>
+            ⌕
+          </span>
+          <input
+            type="search"
+            value={search}
+            onChange={(e) => onSearch(e.target.value)}
+            placeholder={PLACEHOLDER[mode] || PLACEHOLDER.smell}
+            aria-label="Search findings"
+            className="dw-input"
+            style={{
+              width: "100%", padding: "8px 12px 8px 30px", borderRadius: 9,
+              background: T.sunken, border: `1px solid ${T.border}`,
+              color: T.text, fontSize: 12.5, boxSizing: "border-box",
+            }}
+          />
+        </div>
+
+        <label style={{ display: "flex", alignItems: "center", gap: 7, flexShrink: 0 }}>
+          <span style={{ ...eyebrow, letterSpacing: 0.6 }}>Sort</span>
+          <select
+            value={sort}
+            onChange={(e) => onSort(e.target.value)}
+            aria-label={`Sort ${noun}s`}
+            className="dw-input"
+            style={{
+              padding: "7px 10px", borderRadius: 8, fontSize: 12, fontWeight: 600,
+              background: T.sunken, color: T.text, border: `1px solid ${T.border}`,
+              cursor: "pointer",
+            }}
+          >
+            {sortOptions.map((o) => (
+              <option key={o.key} value={o.key} disabled={o.disabled}>
+                {o.label}{o.disabled ? " (needs impact data)" : ""}
+              </option>
+            ))}
+          </select>
+        </label>
       </div>
-      <div style={{
-        fontSize: 26, fontWeight: 800, color: tone, fontFamily: "monospace",
-        lineHeight: 1.2, marginTop: 5,
-      }}>
-        {value}
+
+      {/* Row 2 — what to send: the two bulk verdicts, then quick selection */}
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+        <button
+          type="button"
+          onClick={onSelectAll}
+          disabled={!selectableCount}
+          className="dw-focus"
+          title={`Select every ${unit} the current filters show (${selectableCount})`}
+          style={{
+            display: "inline-flex", alignItems: "center", gap: 7,
+            padding: "8px 14px", borderRadius: 8, fontSize: 12, fontWeight: 700,
+            cursor: selectableCount ? "pointer" : "not-allowed",
+            background: selectableCount ? tint(T.accent, 12) : T.sunken,
+            color: selectableCount ? T.accentText : T.text3,
+            border: `1px solid ${selectableCount ? tint(T.accent, 45) : T.border}`,
+          }}
+        >
+          <span aria-hidden="true">✓</span>
+          Select shown
+          <span style={{ fontFamily: T.mono, opacity: 0.8 }}>({selectableCount})</span>
+        </button>
+
+        <button
+          type="button"
+          onClick={onClearSelection}
+          disabled={!selectionCount}
+          className="dw-focus dw-hover"
+          title={selectionCount ? `Clear all ${selectionCount} selected ${unit}(s), including any hidden by filters` : "Nothing is selected"}
+          style={ghostButton(Boolean(selectionCount), {
+            padding: "8px 14px",
+            color: selectionCount ? T.high : T.text3,
+            borderColor: selectionCount ? tint(T.high, 40) : T.border,
+          })}
+        >
+          <span aria-hidden="true">✕</span>
+          Clear selection
+          {selectionCount > 0 && (
+            <span style={{ fontFamily: T.mono, opacity: 0.8 }}>({selectionCount})</span>
+          )}
+        </button>
+
+        {quickSelect && (
+          <div style={{
+            display: "flex", gap: 8, flexWrap: "wrap", flex: "1 1 360px", minWidth: 0,
+          }}>
+            {quickSelect}
+          </div>
+        )}
       </div>
-      {hint && (
-        <div style={{
-          fontSize: 10.5, color: C.textMuted, marginTop: 3,
-          overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
-        }}>
-          {hint}
+
+      {/* Row 3 — status line and accordion controls */}
+      <div style={{
+        display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center",
+        paddingTop: 8, borderTop: `1px solid ${T.border}`,
+      }}>
+        <span style={{ fontSize: 12, color: T.text2 }}>
+          Showing <b style={{ color: T.text, fontFamily: T.mono }}>{shownFindings}</b> of{" "}
+          <b style={{ color: T.text, fontFamily: T.mono }}>{totalFindings}</b> finding
+          {totalFindings === 1 ? "" : "s"} in{" "}
+          <b style={{ color: T.text, fontFamily: T.mono }}>{groupCount}</b> {noun}
+          {groupCount === 1 ? "" : "s"}
+        </span>
+
+        <span style={{ marginLeft: "auto", display: "flex", gap: 6 }}>
+          <button
+            type="button"
+            onClick={onExpandAll}
+            disabled={!groupCount}
+            className="dw-focus dw-hover"
+            title={groupCount ? `Open every ${noun} and everything nested inside it` : "Nothing to expand"}
+            style={ghostButton(Boolean(groupCount), { padding: "5px 10px", fontSize: 11.5 })}
+          >
+            Expand all
+          </button>
+          <button
+            type="button"
+            onClick={onCollapseAll}
+            disabled={!anyOpen}
+            className="dw-focus dw-hover"
+            title={anyOpen ? "Collapse everything back to the group headings" : "Nothing is expanded"}
+            style={ghostButton(anyOpen, { padding: "5px 10px", fontSize: 11.5 })}
+          >
+            Collapse all
+          </button>
+        </span>
+      </div>
+
+      {activeFilters.length > 0 && (
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
+          <span style={eyebrow}>Filtered to</span>
+          {activeFilters.map((f) => (
+            <FilterChip key={f.key} label={f.label} value={f.value} tone={f.tone} onClear={f.onClear} />
+          ))}
+          {onClearFilters && activeFilters.length > 1 && (
+            <button
+              type="button"
+              onClick={onClearFilters}
+              className="dw-focus"
+              style={{
+                background: "none", border: "none", padding: "2px 4px", cursor: "pointer",
+                color: T.accentText, fontSize: 11.5, fontWeight: 700,
+              }}
+            >
+              Clear all filters
+            </button>
+          )}
+          <span style={{ fontSize: 11, color: T.text3 }}>
+            Selected findings hidden by a filter stay selected.
+          </span>
         </div>
       )}
     </div>
   );
 }
 
-/**
- * Four equal cards. Only High Severity is allowed a warning colour, and only
- * when it is non-zero: a red "0" is a false alarm.
- */
-export function CodeSmellStats({ files, smells, high, quality, languages, categories }) {
-  const languageHint = languages?.length
-    ? `${languages.slice(0, 2).join(", ")}${languages.length > 2 ? ` +${languages.length - 2}` : ""} scanned`
-    : "files scanned";
-
+function FilterChip({ label, value, tone, onClear }) {
+  const color = tone || T.accentText;
   return (
-    <div style={{
-      display: "grid", gap: 12, marginBottom: 14,
-      gridTemplateColumns: "repeat(auto-fit, minmax(170px, 1fr))",
+    <span style={{
+      display: "inline-flex", alignItems: "center", gap: 6,
+      padding: "3px 6px 3px 10px", borderRadius: 999,
+      background: tint(tone || T.accent, 10), border: `1px solid ${tint(tone || T.accent, 35)}`,
+      fontSize: 11.5, fontWeight: 600, color,
     }}>
-      <StatCard label="Files analysed" value={files} hint={languageHint} />
-      <StatCard
-        label="Total smells"
-        value={smells}
-        hint={categories ? `across ${categories} categor${categories === 1 ? "y" : "ies"}` : undefined}
-      />
-      <StatCard
-        label="High severity"
-        value={high}
-        hint={high > 0 ? "requires attention" : "none found"}
-        tone={high > 0 ? C.danger : C.textSub}
-      />
-      <StatCard label="Avg quality" value={quality} hint="overall code quality" />
-    </div>
-  );
-}
-
-// ─── Mode ────────────────────────────────────────────────────────────────────
-
-const REVIEW_MODES = [
-  { key: "file", label: "File wise" },
-  { key: "smell", label: "Smell wise" },
-  { key: "category", label: "Category wise" },
-];
-
-/**
- * The orange the active review mode is painted in.
- *
- * Named here rather than pulled from the theme: the palette's amber (C.warn)
- * means medium severity everywhere else on this page, and the mode switch is
- * not a severity. Same family, different job, so it gets its own constant
- * instead of borrowing one whose meaning is already spoken for.
- */
-const MODE_ACTIVE = "#ccbbbc";
-
-/** Segmented control. Only the active segment is filled. */
-export function ModeSwitch({ mode, onChange, counts }) {
-  return (
-    <div>
-      <div style={{
-        fontSize: 10.5, color: C.textMuted, textTransform: "uppercase",
-        letterSpacing: 0.9, fontWeight: 700, marginBottom: 7,
-      }}>
-        Selection mode
-      </div>
-      <div
-        role="tablist"
+      <span style={{ color: T.text3, fontWeight: 500 }}>{label}</span>
+      {value}
+      <button
+        type="button"
+        onClick={onClear}
+        aria-label={`Clear the ${label} filter`}
+        className="dw-focus"
         style={{
-          display: "inline-flex", gap: 4, padding: 4,
-          background: C.panel, border: `1px solid ${C.border}`, borderRadius: 10,
+          width: 18, height: 18, borderRadius: "50%", border: "none", cursor: "pointer",
+          background: "transparent", color: "inherit", fontWeight: 800, fontSize: 11, lineHeight: 1,
         }}
       >
-        {REVIEW_MODES.map((m) => {
-          const active = m.key === mode;
-          return (
-            <button
-              key={m.key}
-              role="tab"
-              aria-selected={active}
-              onClick={() => onChange(m.key)}
-              style={{
-                display: "flex", alignItems: "center", gap: 7,
-                padding: "7px 15px", borderRadius: 7, border: "none", cursor: "pointer",
-                background: active ? MODE_ACTIVE : "transparent",
-                color: active ? "#0d0f14" : C.textMuted,
-                fontSize: 12, fontWeight: 700, transition: "all 0.15s",
-              }}
-            >
-              {m.label}
-              {counts?.[m.key] !== undefined && (
-                <span style={{ fontSize: 10, opacity: 0.8, fontFamily: "monospace" }}>
-                  {counts[m.key]}
-                </span>
-              )}
-            </button>
-          );
-        })}
-      </div>
-    </div>
+        ✕
+      </button>
+    </span>
   );
 }
 
-// ─── Search + severity ───────────────────────────────────────────────────────
-
-const SEVERITY_TONE = { all: C.accent, high: C.danger, medium: C.warn, low: C.textSub };
-
-const PLACEHOLDER = {
-  file: "Search files or smell types…",
-  smell: "Search smell types, files or entities…",
-  category: "Search categories, smell types or files…",
-};
-
-export function SearchAndSeverity({
-  mode, search, onSearch, severity, onSeverity, onSelectAll, onRejectAll,
-  onExpandAll, onCollapseAll, visibleCount, selectedCount, groupCount = 0,
-  anyOpen = false,
-}) {
-  const noun = GROUP_NOUN[mode] || "group";
-
-  return (
-    <>
-      {/* ── The two bulk verdicts, on their own line ───────────────────────
-          Lifted out of the filter strip because they are not filters. Select
-          all and Reject all are the only controls on this page that change
-          what gets sent to the planning agent, and they were sitting fourth
-          in a row of look-at-it controls, styled like them. They are solid
-          buttons now, above the line rather than in it. */}
-      <div style={{
-        display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap",
-        marginBottom: 12, padding: "10px 14px", borderRadius: 10,
-        background: C.panel, border: `1px solid ${C.border}`,
-      }}>
-        <button
-          onClick={onSelectAll}
-          disabled={!visibleCount}
-          title={`Send every ${noun === "file" ? "file" : "finding"} the current filters show to planning — ${visibleCount} item(s)`}
-          style={{
-            display: "inline-flex", alignItems: "center", gap: 7,
-            padding: "9px 18px", borderRadius: 9, border: "none",
-            fontSize: 12.5, fontWeight: 700,
-            cursor: visibleCount ? "pointer" : "not-allowed",
-            background: visibleCount ? C.accent : C.border,
-            color: visibleCount ? "#000" : C.textMuted,
-          }}
-        >
-          <span aria-hidden="true" style={{ fontWeight: 900 }}>✓</span>
-          Select all
-          {visibleCount > 0 && (
-            <span style={{ fontFamily: "monospace", opacity: 0.7 }}>({visibleCount})</span>
-          )}
-        </button>
-
-        <button
-          onClick={onRejectAll}
-          disabled={!selectedCount}
-          title={
-            selectedCount
-              ? `Clear all ${selectedCount} selected item(s) — nothing is sent to planning`
-              : "Nothing is selected"
-          }
-          style={{
-            display: "inline-flex", alignItems: "center", gap: 7,
-            padding: "9px 18px", borderRadius: 9,
-            fontSize: 12.5, fontWeight: 700,
-            cursor: selectedCount ? "pointer" : "not-allowed",
-            background: selectedCount ? `${C.danger}1a` : C.bg,
-            color: selectedCount ? C.danger : C.textMuted,
-            border: `1px solid ${selectedCount ? C.danger : C.border}`,
-          }}
-        >
-          <span aria-hidden="true" style={{ fontWeight: 900 }}>✕</span>
-          Reject all
-          {selectedCount > 0 && (
-            <span style={{ fontFamily: "monospace", opacity: 0.75 }}>({selectedCount})</span>
-          )}
-        </button>
-
-        <span style={{ fontSize: 11, color: C.textMuted, marginLeft: "auto" }}>
-          {selectedCount > 0
-            ? `${selectedCount} selected of ${visibleCount} shown`
-            : `${visibleCount} ${noun}${visibleCount === 1 ? "" : "s"} shown · nothing selected yet`}
-        </span>
-      </div>
-
-      {/* ── Ways of looking: search, severity, and the accordion ─────────── */}
-      <div style={{
-        display: "flex", gap: 12, alignItems: "flex-end", flexWrap: "wrap",
-        marginBottom: 14,
-      }}>
-        <div style={{ flex: "1 1 260px", minWidth: 0 }}>
-          <div style={{
-            fontSize: 10.5, color: C.textMuted, textTransform: "uppercase",
-            letterSpacing: 0.9, fontWeight: 700, marginBottom: 7,
-          }}>
-            Search
-          </div>
-          <input
-            value={search}
-            onChange={(e) => onSearch(e.target.value)}
-            placeholder={PLACEHOLDER[mode] || PLACEHOLDER.smell}
-            aria-label="Search findings"
-            style={{
-              width: "100%", padding: "9px 13px", borderRadius: 9,
-              background: C.panel, border: `1px solid ${C.border}`,
-              color: C.text, fontSize: 12.5, outline: "none", boxSizing: "border-box",
-            }}
-          />
-        </div>
-
-        <div>
-          <div style={{
-            fontSize: 10.5, color: C.textMuted, textTransform: "uppercase",
-            letterSpacing: 0.9, fontWeight: 700, marginBottom: 7,
-          }}>
-            Severity
-          </div>
-          <div style={{ display: "flex", gap: 6 }}>
-            {["all", "high", "medium", "low"].map((level) => {
-              const active = severity === level;
-              const tone = SEVERITY_TONE[level];
-              return (
-                <button
-                  key={level}
-                  onClick={() => onSeverity(level)}
-                  aria-pressed={active}
-                  style={{
-                    padding: "8px 14px", borderRadius: 8, cursor: "pointer",
-                    fontSize: 11.5, fontWeight: 700, textTransform: "capitalize",
-                    background: active ? tone : C.panel,
-                    color: active ? (level === "medium" || level === "all" ? "#000" : "#fff") : C.textMuted,
-                    border: `1px solid ${active ? tone : C.border}`,
-                  }}
-                >
-                  {level}
-                </button>
-              );
-            })}
-          </div>
-        </div>
-
-        {(onExpandAll || onCollapseAll) && (
-          <div>
-            <div style={{
-              fontSize: 10.5, color: C.textMuted, textTransform: "uppercase",
-              letterSpacing: 0.9, fontWeight: 700, marginBottom: 7,
-            }}>
-              Accordion
-            </div>
-            <div style={{ display: "flex", gap: 6 }}>
-              <button
-                onClick={onExpandAll}
-                disabled={!groupCount}
-                title={
-                  groupCount
-                    ? `Open every ${noun} and everything nested inside it`
-                    : "Nothing to expand"
-                }
-                style={neutralButton(Boolean(groupCount))}
-              >
-                Expand all
-              </button>
-              <button
-                onClick={onCollapseAll}
-                disabled={!anyOpen}
-                title={anyOpen ? "Collapse everything back to the group headings" : "Nothing is expanded"}
-                style={neutralButton(anyOpen)}
-              >
-                Hide all
-              </button>
-            </div>
-          </div>
-        )}
-      </div>
-    </>
-  );
-}
-
-const GROUP_NOUN = { file: "file", smell: "smell type", category: "category" };
-
-const neutralButton = (enabled) => ({
-  padding: "8px 14px", borderRadius: 8,
-  cursor: enabled ? "pointer" : "not-allowed",
-  background: C.panel,
-  color: enabled ? C.textSub : C.textMuted,
-  border: `1px solid ${C.border}`,
-  fontSize: 11.5, fontWeight: 700,
-});
