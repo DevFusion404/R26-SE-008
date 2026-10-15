@@ -1,0 +1,69 @@
+/*
+ * planApproval.css
+ * ================
+ * R26-SE-008 | Bandara S M Y M | IT22277886
+ *
+ * Layout for the Refactoring Plan Approval stage:
+ *
+ *     [ plan header: identity · counters · filters · send to SCTVA   ]
+ *     [ step navigator ]  [ step workspace                           ]
+ *     [  (own scroll)  ]  [   main sections      |  decision support ]
+ *     [                ]  [ sticky decision bar                      ]
+ *
+ * Container queries, because the stage sits inside the DIWO shell and the
+ * viewport width says little about the room it actually has. Colours come
+ * from codeSmellTheme.css tokens.
+ */
+
+.pa-ws {
+  container-type: inline-size;
+  container-name: paws;
+}
+
+.pa-grid {
+  display: grid;
+  gap: 16px;
+  align-items: start;
+  grid-template-columns: minmax(0, 1fr);
+}
+
+/* Single column: the navigator keeps a fixed height and scrolls on its own. */
+.pa-nav {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  max-height: 420px;
+}
+
+.pa-nav-list { overflow-y: auto; flex: 1; min-height: 0; }
+
+.pa-detail { min-width: 0; container-type: inline-size; container-name: padetail; }
+
+.pa-detail-grid {
+  display: grid;
+  gap: 14px;
+  align-items: start;
+  grid-template-columns: minmax(0, 1fr);
+}
+
+@container paws (min-width: 900px) {
+  .pa-grid { grid-template-columns: 340px minmax(0, 1fr); }
+  .pa-nav { position: sticky; top: 0; max-height: calc(100vh - 110px); }
+}
+
+@container paws (min-width: 1240px) {
+  .pa-grid { grid-template-columns: 380px minmax(0, 1fr); }
+}
+
+@container padetail (min-width: 780px) {
+  .pa-detail-grid { grid-template-columns: minmax(0, 1fr) 300px; }
+}
+
+/* Responsive label/value grid used by the detail sections. */
+.pa-fields {
+  display: grid;
+  gap: 10px 16px;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+}
+
+.pa-row:hover { background: var(--dw-hover); }
