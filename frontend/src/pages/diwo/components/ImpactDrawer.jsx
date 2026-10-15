@@ -19,11 +19,13 @@
  */
 
 import { useEffect } from "react";
-import { C, Badge, severityColor } from "../diwoTheme.jsx";
+import { T, tint } from "../codeSmellTheme.js";
+import { SeverityTag, Chip } from "../codeSmellUi.jsx";
 import { smellIcon } from "../utils/smellIcons";
 
-const RISK_COLOR = { low: C.low, medium: C.warn, high: C.danger };
-const PRESSURE_COLOR = { low: C.textMuted, medium: C.warn, high: C.danger };
+const sevTone = (s) => ({ high: T.high, medium: T.medium, low: T.low }[s] || T.text3);
+const RISK_COLOR = { low: T.low, medium: T.medium, high: T.high };
+const PRESSURE_COLOR = { low: T.text3, medium: T.medium, high: T.high };
 
 export default function ImpactDrawer({ record, smell, onClose, onToggleSmell, isSelected }) {
   useEffect(() => {
@@ -48,7 +50,7 @@ export default function ImpactDrawer({ record, smell, onClose, onToggleSmell, is
       onClick={onClose}
       style={{
         position: "fixed", inset: 0, zIndex: 1100,
-        background: "rgba(4,6,10,0.72)", backdropFilter: "blur(2px)",
+        background: T.overlay, backdropFilter: "blur(2px)",
         display: "flex", alignItems: "center", justifyContent: "center", padding: 24,
       }}
     >
@@ -56,14 +58,14 @@ export default function ImpactDrawer({ record, smell, onClose, onToggleSmell, is
         onClick={(e) => e.stopPropagation()}
         style={{
           width: "min(940px, 100%)", maxHeight: "88vh", overflowY: "auto",
-          background: C.bg, border: `1px solid ${C.borderAcc}`, borderRadius: 14,
-          boxShadow: "0 24px 60px rgba(0,0,0,0.55)",
+          background: T.surface, border: `1px solid ${T.border}`, borderRadius: 14,
+          boxShadow: T.shadowLg,
         }}
       >
         {/* ── Header ─────────────────────────────────────────────────────── */}
         <div style={{
           display: "flex", alignItems: "flex-start", gap: 12, padding: "16px 20px",
-          borderBottom: `1px solid ${C.border}`, background: C.panel,
+          borderBottom: `1px solid ${T.border}`, background: T.surface2,
         }}>
           <div style={{ flex: 1, minWidth: 0 }}>
             <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 5 }}>
@@ -76,22 +78,21 @@ export default function ImpactDrawer({ record, smell, onClose, onToggleSmell, is
                   width: 24, height: 24, borderRadius: 7, flexShrink: 0, lineHeight: 1,
                   display: "inline-flex", alignItems: "center", justifyContent: "center",
                   fontSize: 14,
-                  background: `${severityColor(record.severity)}1e`,
-                  border: `1px solid ${severityColor(record.severity)}55`,
+                  background: tint(sevTone(record.severity), 12),
+                  border: `1px solid ${tint(sevTone(record.severity), 35)}`,
                 }}
               >
                 {smellIcon(record.smell_type, smell?.category)}
               </span>
-              <span style={{ fontSize: 15, fontWeight: 800, color: C.text }}>
+              <span style={{ fontSize: 15, fontWeight: 800, color: T.text }}>
                 {record.smell_type}
               </span>
-              <Badge label={record.severity || "unknown"} color={severityColor(record.severity)} />
-              <Badge
-                label={isExecutable ? "AUTO-FIXABLE" : "ADVISORY"}
-                color={isExecutable ? C.accent : C.warn}
-              />
+              <SeverityTag severity={record.severity} />
+              <Chip tone={isExecutable ? T.accentText : T.medium}>
+                {isExecutable ? "Auto-fixable" : "Advisory"}
+              </Chip>
             </div>
-            <div style={{ fontSize: 11, color: C.textMuted, fontFamily: "monospace" }}>
+            <div style={{ fontSize: 11, color: T.text3, fontFamily: T.mono }}>
               {record.file}{record.line ? `:${record.line}` : ""}
               {smell?.entity ? ` · ${smell.entity}` : ""}
             </div>
@@ -101,8 +102,8 @@ export default function ImpactDrawer({ record, smell, onClose, onToggleSmell, is
         </div>
 
         {/* ── The two branches ───────────────────────────────────────────── */}
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr" }}>
-          <Column title="IF YOU SELECT" accent={C.accent}>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(300px, 1fr))" }}>
+          <Column title="IF YOU SELECT" accent={T.accentText}>
             <Row
               label="Quality"
               value={
@@ -110,7 +111,7 @@ export default function ImpactDrawer({ record, smell, onClose, onToggleSmell, is
                   ? `+${gain.automated_points} pts`
                   : `no automated gain`
               }
-              tone={isExecutable ? C.accent : C.textMuted}
+              tone={isExecutable ? T.accentText : T.text3}
               hint={
                 isExecutable
                   ? `range ${gain.automated_low}–${gain.automated_high} pts`
@@ -121,13 +122,13 @@ export default function ImpactDrawer({ record, smell, onClose, onToggleSmell, is
             <Row
               label="SCTVA action"
               value={capability.action_type || "none — no-op"}
-              tone={isExecutable ? C.accent : C.warn}
+              tone={isExecutable ? T.accentText : T.medium}
               mono
             />
             <Row
               label="Risk"
               value={`${(risk.band || "—").toUpperCase()} (${risk.score})`}
-              tone={RISK_COLOR[risk.band] || C.textSub}
+              tone={RISK_COLOR[risk.band] || T.text2}
             />
             <Bullets items={risk.drivers} />
             <Row label="Effort" value={`~${selectedSide.effort_minutes} min review`} />
@@ -138,16 +139,16 @@ export default function ImpactDrawer({ record, smell, onClose, onToggleSmell, is
             />
           </Column>
 
-          <Column title="IF YOU SKIP" accent={C.warn} bordered>
+          <Column title="IF YOU SKIP" accent={T.medium} bordered>
             <Row
               label="Carries forward"
               value={`${deferred.carried_points} pts`}
-              tone={C.warn}
+              tone={T.medium}
             />
             <Row
               label="Interest"
               value={`${deferred.interest_per_quarter} pts / quarter`}
-              tone={C.warn}
+              tone={T.medium}
               hint="debt weighted by how often this file is edited"
             />
             <Row
@@ -159,13 +160,13 @@ export default function ImpactDrawer({ record, smell, onClose, onToggleSmell, is
               }
               tone={
                 deferred.churn_known
-                  ? PRESSURE_COLOR[deferred.change_pressure] || C.textSub
-                  : C.textMuted
+                  ? PRESSURE_COLOR[deferred.change_pressure] || T.text2
+                  : T.text3
               }
             />
-            <Row label="Risk now" value="none — the file is untouched" tone={C.low} />
+            <Row label="Risk now" value="none — the file is untouched" tone={T.low} />
             <Row label="Next CUQA run" value="re-detected, unchanged" />
-            <div style={{ fontSize: 11, color: C.textMuted, lineHeight: 1.6, marginTop: 10 }}>
+            <div style={{ fontSize: 11, color: T.text3, lineHeight: 1.6, marginTop: 10 }}>
               {deferred.explanation}
             </div>
           </Column>
@@ -173,19 +174,19 @@ export default function ImpactDrawer({ record, smell, onClose, onToggleSmell, is
 
         {/* ── Why ────────────────────────────────────────────────────────── */}
         <div style={{
-          padding: "14px 20px", borderTop: `1px solid ${C.border}`, background: C.panel,
+          padding: "14px 20px", borderTop: `1px solid ${T.border}`, background: T.surface2,
         }}>
           <div style={{
-            fontSize: 10, fontWeight: 800, letterSpacing: 1, color: C.textMuted,
+            fontSize: 10, fontWeight: 800, letterSpacing: 1, color: T.text3,
             textTransform: "uppercase", marginBottom: 6,
           }}>
             Why this number
           </div>
-          <div style={{ fontSize: 12, color: C.textSub, lineHeight: 1.65 }}>
+          <div style={{ fontSize: 12, color: T.text2, lineHeight: 1.65 }}>
             {gain.explanation}
           </div>
           {!isExecutable && (
-            <div style={{ fontSize: 12, color: C.warn, lineHeight: 1.65, marginTop: 8 }}>
+            <div style={{ fontSize: 12, color: T.medium, lineHeight: 1.65, marginTop: 8 }}>
               {capability.reason}
             </div>
           )}
@@ -196,21 +197,22 @@ export default function ImpactDrawer({ record, smell, onClose, onToggleSmell, is
             ))}
           </div>
 
-          <div style={{ fontSize: 10, color: C.textMuted, marginTop: 12 }}>
+          <div style={{ fontSize: 10, color: T.text3, marginTop: 12 }}>
             {record.tier === "static" ? "Static model" : record.tier} ·{" "}
             ±{Math.round((record.error_band || 0) * 100)}% · {record.model_version}
           </div>
         </div>
 
         {onToggleSmell && (
-          <div style={{ padding: "12px 20px", borderTop: `1px solid ${C.border}` }}>
+          <div style={{ padding: "12px 20px", borderTop: `1px solid ${T.border}` }}>
             <button
               onClick={() => onToggleSmell(record.smell_id)}
               style={{
                 padding: "9px 18px", borderRadius: 8, fontSize: 12, fontWeight: 700,
                 cursor: "pointer", border: "none",
-                background: isSelected ? C.border : C.accent,
-                color: isSelected ? C.textSub : "#000",
+                background: isSelected ? T.sunken : T.accent,
+                color: isSelected ? T.text2 : T.onAccent,
+                boxShadow: isSelected ? `inset 0 0 0 1px ${T.border}` : "none",
               }}
             >
               {isSelected ? "Remove from selection" : "Add to selection"}
@@ -226,7 +228,7 @@ export default function ImpactDrawer({ record, smell, onClose, onToggleSmell, is
 
 const ghostButton = {
   padding: "6px 13px", borderRadius: 8, fontSize: 12, fontWeight: 700,
-  background: C.panel, color: C.textSub, border: `1px solid ${C.border}`,
+  background: T.surface2, color: T.text2, border: `1px solid ${T.border}`,
   cursor: "pointer", flexShrink: 0,
 };
 
@@ -234,7 +236,7 @@ function Column({ title, accent, bordered = false, children }) {
   return (
     <div style={{
       padding: "16px 20px",
-      borderLeft: bordered ? `1px solid ${C.border}` : "none",
+      borderLeft: bordered ? `1px solid ${T.border}` : "none",
       minWidth: 0,
     }}>
       <div style={{
@@ -248,11 +250,11 @@ function Column({ title, accent, bordered = false, children }) {
   );
 }
 
-function Row({ label, value, tone = C.text, hint, mono = false }) {
+function Row({ label, value, tone = T.text, hint, mono = false }) {
   return (
     <div style={{ display: "flex", gap: 10, marginBottom: 9, alignItems: "baseline" }}>
       <span style={{
-        fontSize: 11, color: C.textMuted, width: 108, flexShrink: 0,
+        fontSize: 11, color: T.text3, width: 108, flexShrink: 0,
       }}>
         {label}
       </span>
@@ -264,7 +266,7 @@ function Row({ label, value, tone = C.text, hint, mono = false }) {
           {value}
         </span>
         {hint && (
-          <span style={{ fontSize: 10, color: C.textMuted, marginLeft: 8 }}>{hint}</span>
+          <span style={{ fontSize: 10, color: T.text3, marginLeft: 8 }}>{hint}</span>
         )}
       </span>
     </div>
@@ -276,7 +278,7 @@ function Bullets({ items }) {
   return (
     <ul style={{ margin: "0 0 10px 118px", padding: 0, listStyle: "none" }}>
       {items.map((item) => (
-        <li key={item} style={{ fontSize: 11, color: C.textMuted, lineHeight: 1.6 }}>
+        <li key={item} style={{ fontSize: 11, color: T.text3, lineHeight: 1.6 }}>
           • {item}
         </li>
       ))}
@@ -294,18 +296,18 @@ const FACTOR_LABEL = {
 function Factor({ name, value }) {
   return (
     <div style={{ minWidth: 96 }}>
-      <div style={{ fontSize: 10, color: C.textMuted, marginBottom: 3 }}>
+      <div style={{ fontSize: 10, color: T.text3, marginBottom: 3 }}>
         {FACTOR_LABEL[name] || name}
       </div>
       <div style={{
-        height: 4, borderRadius: 2, background: C.border, overflow: "hidden", marginBottom: 3,
+        height: 4, borderRadius: 2, background: T.border, overflow: "hidden", marginBottom: 3,
       }}>
         <div style={{
           height: "100%", width: `${Math.min(100, Math.max(0, value * 100))}%`,
-          background: C.gradient,
+          background: T.accent,
         }} />
       </div>
-      <div style={{ fontSize: 10, color: C.textSub, fontFamily: "monospace" }}>{value}</div>
+      <div style={{ fontSize: 10, color: T.text2, fontFamily: T.mono }}>{value}</div>
     </div>
   );
 }

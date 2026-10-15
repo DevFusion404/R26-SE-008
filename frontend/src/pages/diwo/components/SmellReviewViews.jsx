@@ -4,7 +4,7 @@
  * R26-SE-008 | Bandara S M Y M | IT22277886
  *
  * The three arrangements of one set of findings. Every one of them ends at the
- * same leaf — an individual finding, in a named file, at a line, with its
+ * same leaf — an individual finding card, in a named file, at a line, with its
  * impact and a way into the source:
  *
  *     FileWiseView       file -> smell type -> the findings inside     (file select)
@@ -12,9 +12,8 @@
  *     CategoryWiseView   category -> smell type -> file -> the findings
  *
  * The FILE level inside Smell wise and Category wise is what makes a
- * repository-wide smell type readable. "53 Magic Numbers" expanded into 53 flat
- * rows is a list whose neighbours differ only by a repeated path; expanded into
- * five files that each say how many they carry, it is a list you can navigate.
+ * repository-wide smell type readable: "53 Magic Numbers" expanded into five
+ * files that each say how many they carry is a list you can navigate.
  *
  * Selection
  * ---------
@@ -24,36 +23,31 @@
  * disagree and switching views keeps every tick.
  *
  * File wise selects whole FILES into `selected`. Its findings are shown in full
- * and can be opened in the source, but cannot be ticked individually: doing so
- * would promise a partial-file selection the mode cannot express or send.
+ * and can be opened in the source, but carry no checkbox: offering one would
+ * promise a partial-file selection the mode cannot express or send.
  *
- * CHECKBOXES LIVE ON GROUPS ONLY. A finding line is selected by clicking it,
- * and says so with a tinted background and an accent stripe down its left
- * edge. The line already carries a severity, an entity, a path, a message, a
- * capability and two figures; a checkbox and an icon in front of all that made
- * the one thing a developer scans for — which line is this — the hardest thing
- * on the row to find.
+ * The finding card shows severity, type, entity, path:line range, category,
+ * CUQA's message and the backend impact line (capability, points, risk,
+ * effort) without a click. The full counterfactual stays in ImpactDrawer.
  *
- * Impact
- * ------
- * Every finding states its impact on the line itself — capability, quality
- * points, risk, effort — with no click required, and an Impact button opens the
- * full counterfactual in a dialog: what selecting it buys, what skipping it
- * costs, and why the number is what it is.
+ * Accordion keys are composed exactly as utils/smellGrouping::expandAllKeys
+ * composes them — change one and Expand all silently stops opening a level.
  */
 
-import { C, severityColor } from "../diwoTheme.jsx";
+import { T, tint, sevTone, riskTone } from "../codeSmellTheme.js";
+import { SeverityTag, Chip } from "../codeSmellUi.jsx";
 import { TriCheckbox } from "./QuickSelectDropdown.jsx";
 import { formatEffort, groupRowsByFile } from "../utils/smellGrouping";
+import { smellLines } from "../utils/smellLines";
 import { categoryIcon, FILE_ICON, smellIcon } from "../utils/smellIcons";
 
 const stateOf = (selection) =>
   selection?.all ? "all" : selection?.partial ? "partial" : "none";
 
 const CAPABILITY_TONE = {
-  "Auto-fixable": C.accent,
-  Advisory: C.warn,
-  Mixed: C.textSub,
+  "Auto-fixable": T.accentText,
+  Advisory: T.medium,
+  Mixed: T.text2,
 };
 
 /** "2 high · 4 medium · 47 low" — only the levels actually present. */
@@ -63,7 +57,8 @@ function SeveritySpread({ spread }) {
   return (
     <span style={{ display: "inline-flex", gap: 8, flexWrap: "wrap" }}>
       {parts.map((level) => (
-        <span key={level} style={{ fontSize: 10.5, fontWeight: 700, color: severityColor(level) }}>
+        <span key={level} style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 11, fontWeight: 600, color: T.text2 }}>
+          <span aria-hidden="true" style={{ width: 6, height: 6, borderRadius: "50%", background: sevTone(level) }} />
           {spread[level]} {level}
         </span>
       ))}
@@ -74,25 +69,18 @@ function SeveritySpread({ spread }) {
 /** Capability, in words, from the probe — never inferred from severity. */
 function CapabilityTag({ capability }) {
   if (!capability) return null;
-  const tone = CAPABILITY_TONE[capability.label] || C.textSub;
+  const tone = CAPABILITY_TONE[capability.label] || T.text2;
   return (
-    <span
-      title={`${capability.executable} auto-fixable · ${capability.advisory} advisory`}
-      style={{
-        fontSize: 10, fontWeight: 700, color: tone,
-        border: `1px solid ${tone}40`, background: `${tone}12`,
-        padding: "1px 7px", borderRadius: 20, whiteSpace: "nowrap",
-      }}
-    >
+    <Chip tone={tone} title={`${capability.executable} auto-fixable · ${capability.advisory} advisory (SCTVA capability model)`}>
       {capability.label}
-    </span>
+    </Chip>
   );
 }
 
-function Metric({ value, label, tone = C.textSub }) {
+function Metric({ value, label }) {
   return (
-    <span style={{ fontSize: 11, color: C.textMuted, whiteSpace: "nowrap" }}>
-      <b style={{ color: tone, fontFamily: "monospace", fontWeight: 800 }}>{value}</b> {label}
+    <span style={{ fontSize: 11, color: T.text3, whiteSpace: "nowrap" }}>
+      <b style={{ color: T.text2, fontFamily: T.mono, fontWeight: 700 }}>{value}</b> {label}
     </span>
   );
 }
@@ -100,11 +88,10 @@ function Metric({ value, label, tone = C.textSub }) {
 // ─── Impact ──────────────────────────────────────────────────────────────────
 
 /**
- * The one-line impact every finding carries, with no interaction needed.
+ * The impact chips every finding carries, with no interaction needed.
  *
- * Capability is the lead fact because it decides whether any of the rest is
- * actionable: an advisory finding's points are real but nobody is going to
- * collect them automatically.
+ * Capability leads because it decides whether any of the rest is actionable:
+ * an advisory finding's points are real but nobody collects them automatically.
  */
 function ImpactLine({ record }) {
   if (!record) return null;
@@ -114,50 +101,33 @@ function ImpactLine({ record }) {
   const risk = record.if_selected?.risk || {};
   const minutes = record.if_selected?.effort_minutes;
   const executable = status === "executable";
-  const tone = executable ? C.accent : status === "advisory" ? C.warn : C.textMuted;
-
-  const facts = executable
-    ? [
-        typeof gain.automated_points === "number" ? `+${gain.automated_points} pts` : null,
-        risk.band ? `${risk.band} risk` : null,
-        minutes ? formatEffort(minutes) : null,
-      ]
-    : [
-        typeof gain.potential_points === "number" ? `${gain.potential_points} pts by hand` : null,
-        "no auto-fix",
-      ];
 
   return (
-    <span style={{ display: "inline-flex", alignItems: "center", gap: 7, flexWrap: "wrap" }}>
-      <span style={{
-        fontSize: 10, fontWeight: 800, color: tone,
-        background: `${tone}12`, border: `1px solid ${tone}40`,
-        padding: "1px 7px", borderRadius: 20, whiteSpace: "nowrap",
-      }}>
-        {executable ? "Auto-fixable" : status === "advisory" ? "Advisory" : "Unknown"}
-      </span>
-      {facts.filter(Boolean).map((fact) => (
-        <span key={fact} style={{ fontSize: 10.5, color: C.textMuted }}>{fact}</span>
-      ))}
-    </span>
+    <>
+      <Chip
+        tone={executable ? T.accentText : status === "advisory" ? T.medium : T.text3}
+        title={record.capability?.refactoring ? `SCTVA refactoring: ${record.capability.refactoring}` : undefined}
+      >
+        {executable ? "Auto-fixable" : status === "advisory" ? "Advisory · no auto-fix" : "Capability unknown"}
+      </Chip>
+      {executable && typeof gain.automated_points === "number" && (
+        <Chip title="Expected quality gain if SCTVA applies the fix">+{gain.automated_points} pts</Chip>
+      )}
+      {!executable && typeof gain.potential_points === "number" && (
+        <Chip title="Quality points available only if fixed by hand">{gain.potential_points} pts by hand</Chip>
+      )}
+      {executable && risk.band && (
+        <Chip tone={riskTone(risk.band)} title="Transformation risk">{risk.band} risk</Chip>
+      )}
+      {executable && typeof minutes === "number" && minutes > 0 && (
+        <Chip title="Estimated developer review effort">{formatEffort(minutes)}</Chip>
+      )}
+    </>
   );
 }
 
-/**
- * The glyph that identifies a smell type, a category or a file.
- *
- * Bare — no tile, no border. The icon was drawn inside a tinted, outlined box,
- * which put a second bordered rectangle inside every already-bordered row and
- * made the header read as two nested boxes rather than one line. The icon says
- * WHICH smell this is on its own.
- *
- * GroupHeader still computes a per-row `accent` and hands it down, and Glyph
- * now ignores it — severity is already carried by the severity badge and the
- * row's own left stripe, so tinting the glyph too spent colour on a signal
- * that was on screen twice. The prop is left at the call site because that is
- * the one line to change if the tile is ever wanted back.
- */
-function Glyph({ icon, label, size = 22 }) {
+/** The identifying glyph for a smell type, category or file. */
+function Glyph({ icon, label, size = 20 }) {
   if (!icon) return null;
   return (
     <span
@@ -179,54 +149,59 @@ function Glyph({ icon, label, size = 22 }) {
 
 /**
  * One accordion header. `onToggleSelect` is optional — a level that must not be
- * selectable simply omits it and gets no checkbox rather than a disabled one.
- * The TITLE toggles the accordion, so clicking a file path opens it.
+ * selectable omits it and gets no checkbox rather than a disabled one. The
+ * title row is itself the expander, so clicking a path opens it.
  */
 function GroupHeader({
   title, icon, iconLabel, mono = false, metrics, selection, onToggleSelect,
-  open, onToggleOpen, accent, right, level = 0,
+  open, onToggleOpen, right, level = 0, selectLabel,
 }) {
   const state = stateOf(selection);
-  const indent = [0, 22, 40][level] || 0;
+  const indent = [0, 18, 34][level] || 0;
+  const on = state !== "none";
 
   return (
     <div style={{
-      display: "flex", alignItems: "center", gap: 9,
-      padding: `${level ? 8 : 11}px 14px ${level ? 8 : 11}px ${14 + indent}px`,
-      background: state === "none" ? "transparent" : `${C.accent}0a`,
-      borderLeft: `3px solid ${state === "none" ? "transparent" : C.accent}`,
+      display: "flex", alignItems: "center", gap: 10,
+      padding: `${level ? 8 : 12}px 14px ${level ? 8 : 12}px ${14 + indent}px`,
+      background: on ? tint(T.accent, level ? 5 : 7) : level ? "transparent" : T.surface,
     }}>
       {onToggleSelect && (
         <button
           type="button"
           onClick={onToggleSelect}
           aria-pressed={state === "all"}
-          aria-label={`Select ${title}`}
-          style={{ background: "none", border: "none", padding: 0, cursor: "pointer", display: "flex", flexShrink: 0 }}
+          aria-label={selectLabel || `Select ${title}`}
+          title={state === "all" ? `Deselect all of ${title}` : `Select all of ${title}`}
+          className="dw-focus"
+          style={{ background: "none", border: "none", padding: 2, cursor: "pointer", display: "flex", flexShrink: 0, borderRadius: 4 }}
         >
-          <TriCheckbox state={state} size={level ? 14 : 16} />
+          <TriCheckbox state={state} size={level ? 15 : 17} />
         </button>
       )}
 
-      {/* The whole title row is the expander, so the file path is clickable. */}
       <button
         type="button"
         onClick={onToggleOpen}
         aria-expanded={open}
         title={mono ? title : undefined}
+        className="dw-focus"
         style={{
           flex: 1, minWidth: 0, background: "none", border: "none", padding: 0,
-          textAlign: "left", cursor: "pointer", color: "inherit",
+          textAlign: "left", cursor: "pointer", color: "inherit", borderRadius: 4,
           display: "flex", alignItems: "center", gap: 9, flexWrap: "wrap",
         }}
       >
-        <span aria-hidden="true" style={{ color: C.textMuted, fontSize: 10, flexShrink: 0 }}>
-          {open ? "▾" : "▸"}
+        <span aria-hidden="true" style={{
+          color: T.text3, fontSize: 10, flexShrink: 0, width: 10,
+          display: "inline-block", transform: open ? "rotate(90deg)" : "none", transition: "transform 0.15s",
+        }}>
+          ▶
         </span>
-        <Glyph icon={icon} tone={accent} label={iconLabel || title} size={level ? 19 : 22} />
+        <Glyph icon={icon} label={iconLabel || title} size={level ? 17 : 20} />
         <span style={{
-          fontSize: level ? 12 : 13.5, fontWeight: 700, color: C.text,
-          fontFamily: mono ? "ui-monospace, Menlo, Consolas, monospace" : "inherit",
+          fontSize: level ? 12.5 : 14, fontWeight: level === 2 ? 600 : 700, color: T.text,
+          fontFamily: mono ? T.mono : "inherit",
           overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
           minWidth: 0, maxWidth: "100%",
         }}>
@@ -237,164 +212,158 @@ function GroupHeader({
         </span>
       </button>
 
-      <span style={{ display: "flex", alignItems: "center", gap: 9, flexShrink: 0 }}>
+      <span style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
         {right}
         {selection && (
-          <span style={{
-            fontSize: 11, fontFamily: "monospace",
-            color: selection.selected ? C.accent : C.textMuted,
-          }}>
+          <span
+            title={`${selection.selected} of ${selection.total} selected`}
+            style={{
+              fontSize: 11, fontFamily: T.mono, fontWeight: 700,
+              padding: "1px 7px", borderRadius: 999,
+              background: on ? tint(T.accent, 14) : T.sunken,
+              color: on ? T.accentText : T.text3,
+            }}
+          >
             {selection.selected}/{selection.total}
           </span>
         )}
-        {/* An explicit expander beside the row, for anyone who does not think
-            of a heading as a button. */}
-        <button
-          type="button"
-          onClick={onToggleOpen}
-          aria-expanded={open}
-          aria-label={open ? `Collapse ${title}` : `Expand ${title}`}
-          style={{
-            padding: "3px 9px", borderRadius: 7, cursor: "pointer",
-            background: C.bg, color: C.textSub, border: `1px solid ${C.border}`,
-            fontSize: 10, fontWeight: 700, whiteSpace: "nowrap",
-          }}
-        >
-          {open ? "Hide" : "Expand"}
-        </button>
       </span>
     </div>
   );
 }
 
 /**
- * One finding. The leaf of all three views.
+ * One finding — the leaf of all three views.
  *
- * Carries the full path and line, so the developer can see WHERE it is without
- * opening anything, and a View action that opens the file at that exact line.
- * `selectable` is false in File wise, where the row is evidence rather than a
- * control.
- *
- * Marked with a plain dot rather than the smell's glyph. The glyph belongs on
- * the GROUP heading, where it names a type once for the whole list; repeating
- * it on every occurrence of that same type said nothing new forty lines
- * running, and competed with the severity word next to it.
+ * Carries the full path and line range, so WHERE is answered without opening
+ * anything. `selectable` is false in File wise, where the card is evidence
+ * rather than a control. The checkbox, Impact and View code buttons stop
+ * propagation, so none of them also toggles the card.
  */
-function FindingRow({
-  row, selected, selectable, onToggle, onView, onShowImpact, record, indent = 54,
+function FindingCard({
+  row, selected, selectable, onToggle, onView, onShowImpact, record, indent = 20,
 }) {
   const { smell } = row;
+  const { start, end } = smellLines(smell);
+  const range = start ? (end > start ? `:${start}–${end}` : `:${start}`) : "";
+  const category = row.category || smell.category;
 
   return (
     <div
       onClick={selectable ? () => onToggle(row.id) : undefined}
       style={{
-        padding: `8px 14px 8px ${indent}px`,
-        borderTop: `1px solid ${C.border}`,
-        background: selected ? `${C.accent}12` : "transparent",
-        // With no checkbox on the row, this stripe is what says "selected", so
-        // it is louder than the tint it used to sit beside.
-        boxShadow: selected ? `inset 3px 0 0 ${C.accent}` : "none",
+        margin: `6px 10px 6px ${indent}px`,
+        padding: "10px 12px",
+        borderRadius: 10,
+        background: selected ? tint(T.accent, 8) : T.surface,
+        border: `1px solid ${selected ? tint(T.accent, 55) : T.border}`,
+        boxShadow: selected ? `inset 3px 0 0 ${T.accent}` : T.shadowSm,
         cursor: selectable ? "pointer" : "default",
+        transition: "background 0.12s, border-color 0.12s",
       }}
     >
-      <div style={{ display: "flex", alignItems: "flex-start", gap: 9 }}>
-        {/* A bullet, not a grade. The severity sits in words immediately after
-            it, in its own colour, so this marks the line without competing to
-            describe it. */}
-        <span
-          aria-hidden="true"
-          style={{
-            width: 6, height: 6, borderRadius: "50%", flexShrink: 0,
-            background: C.danger, marginTop: 6,
-          }}
-        />
+      <div style={{ display: "flex", alignItems: "flex-start", gap: 10 }}>
+        {selectable && (
+          <button
+            type="button"
+            onClick={(e) => { e.stopPropagation(); onToggle(row.id); }}
+            aria-pressed={selected}
+            aria-label={`${selected ? "Deselect" : "Select"} ${smell.type || "finding"} at ${row.file}${smell.line ? ` line ${smell.line}` : ""}`}
+            className="dw-focus"
+            style={{ background: "none", border: "none", padding: 2, cursor: "pointer", display: "flex", flexShrink: 0, marginTop: 1, borderRadius: 4 }}
+          >
+            <TriCheckbox state={selected ? "all" : "none"} size={16} />
+          </button>
+        )}
 
         <div style={{ flex: 1, minWidth: 0 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-            <span style={{ fontSize: 10, fontWeight: 700, color: severityColor(smell.severity) }}>
-              {smell.severity || "unknown"}
+            <SeverityTag severity={smell.severity} compact />
+            <span style={{ fontSize: 12.5, fontWeight: 700, color: T.text }}>
+              {smell.type || "Finding"}
             </span>
             {smell.entity && (
               <span style={{
-                fontSize: 11, color: C.textSub,
-                fontFamily: "ui-monospace, Menlo, Consolas, monospace",
+                fontSize: 12, color: T.text2, fontFamily: T.mono, fontWeight: 600,
+                overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: "100%",
               }}>
                 {smell.entity}
               </span>
             )}
-            {/* Path + line together: the address of the finding, always shown
-                so "where is this" never needs a click to answer. */}
-            <span
-              title={row.file}
-              style={{
-                fontSize: 10.5, color: C.textMuted,
-                fontFamily: "ui-monospace, Menlo, Consolas, monospace",
-                overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
-                maxWidth: 320,
-              }}
-            >
-              {row.file}{smell.line ? `:${smell.line}` : ""}
-            </span>
+            {row.suggested && selected && (
+              <Chip tone={T.violet} title="This finding was proposed by DIWO's selection optimiser (not by CUQA)">
+                DIWO optimised
+              </Chip>
+            )}
+          </div>
+
+          <div
+            title={`${row.file}${range}`}
+            style={{
+              marginTop: 4, fontSize: 11.5, color: T.text3, fontFamily: T.mono,
+              overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+            }}
+          >
+            {row.file}<span style={{ color: T.text2, fontWeight: 700 }}>{range}</span>
           </div>
 
           {smell.message && (
-            <div style={{ fontSize: 11, color: C.textMuted, marginTop: 3, lineHeight: 1.5 }}>
+            <div style={{ fontSize: 12, color: T.text2, marginTop: 6, lineHeight: 1.55 }}>
               {smell.message}
             </div>
           )}
 
-          <div style={{ marginTop: 5, display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-            <ImpactLine record={record} />
-            {record && (
-              <button
-                type="button"
-                /* Opens the dialog. Deliberately NOT tied to the checkbox:
-                   ticking a finding is a decision, and unfolding a panel of
-                   figures underneath every one of them turned a list of
-                   choices into a wall of text nobody asked for. */
-                onClick={(e) => { e.stopPropagation(); onShowImpact?.(row); }}
-                title={`Open the full impact of this ${smell.type || "finding"}`}
-                style={{
-                  padding: "1px 8px", borderRadius: 20, cursor: "pointer",
-                  // Amber, tinted the same way every other chip on the row is,
-                  // so it reads as one of them rather than as a stray colour.
-                  background: `${C.warn}14`, color: C.warn,
-                  border: `1px solid ${C.warn}55`, fontSize: 9.5, fontWeight: 700,
-                }}
-              >
-                Impact ↗
-              </button>
+          <div style={{ marginTop: 8, display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+            {category && (
+              <Chip title="CUQA category">
+                <span aria-hidden="true">{categoryIcon(category)}</span>
+                {category}
+              </Chip>
             )}
+            <ImpactLine record={record} />
           </div>
         </div>
 
-        <button
-          type="button"
-          onClick={(e) => { e.stopPropagation(); onView?.(row.file, row.id); }}
-          title={`Open ${row.file}${smell.line ? ` at line ${smell.line}` : ""} and show the code`}
-          style={{
-            flexShrink: 0, padding: "4px 11px", borderRadius: 7, cursor: "pointer",
-            background: C.bg, color: C.textSub, border: `1px solid ${C.border}`,
-            fontSize: 10.5, fontWeight: 700,
-          }}
-        >
-          View code
-        </button>
+        <div style={{ display: "flex", flexDirection: "column", gap: 6, flexShrink: 0 }}>
+          <button
+            type="button"
+            onClick={(e) => { e.stopPropagation(); onView?.(row.file, row.id); }}
+            title={`Open ${row.file}${smell.line ? ` at line ${smell.line}` : ""}`}
+            className="dw-focus dw-hover"
+            style={actionButton}
+          >
+            View code
+          </button>
+          {record && (
+            <button
+              type="button"
+              onClick={(e) => { e.stopPropagation(); onShowImpact?.(row); }}
+              title="What selecting this buys, and what skipping it costs"
+              className="dw-focus dw-hover"
+              style={actionButton}
+            >
+              Impact details
+            </button>
+          )}
+        </div>
       </div>
     </div>
   );
 }
 
+const actionButton = {
+  padding: "5px 10px", borderRadius: 7, cursor: "pointer",
+  background: T.surface, color: T.text2, border: `1px solid ${T.border}`,
+  fontSize: 11, fontWeight: 700, whiteSpace: "nowrap",
+};
+
 /**
- * A smell type's findings, split by the file they live in.
- *
- * Used inside Smell wise and inside Category wise, so both reach the same
- * file → finding structure and a developer only learns it once.
+ * A smell type's findings, split by the file they live in. Used inside Smell
+ * wise and Category wise, so both reach the same file -> finding structure.
  */
 function FileBuckets({
   rows, impacts, selectedIds, openKeys, keyPrefix, onToggleOpen, onToggleRows,
-  onToggleSmell, onView, onShowImpact, selectable = true,
+  onToggleSmell, onView, onShowImpact, selectable = true, level = 2,
 }) {
   const buckets = groupRowsByFile(rows, { impacts, selectedIds });
 
@@ -402,14 +371,13 @@ function FileBuckets({
     const key = `${keyPrefix}:${bucket.file}`;
     const open = openKeys.has(key);
     return (
-      <div key={key} style={{ borderTop: `1px solid ${C.border}` }}>
+      <div key={key} style={{ borderTop: `1px solid ${T.border}` }}>
         <GroupHeader
-          level={2}
+          level={level}
           mono
           title={bucket.file}
           icon={FILE_ICON}
           iconLabel={`File ${bucket.file}`}
-          accent={severityColor(bucket.worstSeverity)}
           selection={selectable ? bucket.selection : undefined}
           onToggleSelect={selectable ? () => onToggleRows(bucket.rows) : undefined}
           open={open}
@@ -419,25 +387,29 @@ function FileBuckets({
               <Metric value={bucket.findingCount} label={bucket.findingCount === 1 ? "finding" : "findings"} />
               <SeveritySpread spread={bucket.severity} />
               {bucket.effort !== null && (
-                <span style={{ fontSize: 10.5, color: C.textMuted }}>{formatEffort(bucket.effort)}</span>
+                <span style={{ fontSize: 11, color: T.text3 }}>{formatEffort(bucket.effort)}</span>
               )}
             </>
           }
         />
 
-        {open && bucket.rows.map((row) => (
-          <FindingRow
-            key={row.id}
-            row={row}
-            record={impacts?.get(row.id)}
-            selectable={selectable}
-            selected={selectedIds.has(row.id)}
-            onToggle={onToggleSmell}
-            onView={onView}
-            onShowImpact={onShowImpact}
-            indent={62}
-          />
-        ))}
+        {open && (
+          <div style={{ paddingBottom: 6 }}>
+            {bucket.rows.map((row) => (
+              <FindingCard
+                key={row.id}
+                row={row}
+                record={impacts?.get(row.id)}
+                selectable={selectable}
+                selected={selectedIds.has(row.id)}
+                onToggle={onToggleSmell}
+                onView={onView}
+                onShowImpact={onShowImpact}
+                indent={level === 2 ? 30 : 20}
+              />
+            ))}
+          </div>
+        )}
       </div>
     );
   });
@@ -447,9 +419,10 @@ function FileBuckets({
 function GroupCard({ active, children }) {
   return (
     <div style={{
-      background: C.panel,
-      border: `1px solid ${active ? C.accent : C.border}`,
-      borderRadius: 11, overflow: "hidden", flexShrink: 0,
+      background: T.sunken,
+      border: `1px solid ${active ? tint(T.accent, 60) : T.border}`,
+      borderRadius: 12, overflow: "hidden", flexShrink: 0,
+      boxShadow: T.shadowSm,
     }}>
       {children}
     </div>
@@ -459,7 +432,7 @@ function GroupCard({ active, children }) {
 /** A smell-type level: header, then its files. */
 function SmellTypeGroup({
   group, level, keyPrefix, selectedIds, openKeys, onToggleOpen, onToggleRows,
-  onToggleSmell, onView, onShowImpact, impacts, selectable = true,
+  onToggleSmell, onView, onShowImpact, impacts,
 }) {
   const key = `${keyPrefix}${group.type}`;
   const open = openKeys.has(key);
@@ -471,9 +444,9 @@ function SmellTypeGroup({
         title={group.type}
         icon={smellIcon(group.type, group.rows[0]?.smell?.category)}
         iconLabel={group.type}
-        accent={severityColor(group.worstSeverity)}
-        selection={selectable ? group.selection : undefined}
-        onToggleSelect={selectable ? () => onToggleRows(group.rows) : undefined}
+        selection={group.selection}
+        onToggleSelect={() => onToggleRows(group.rows)}
+        selectLabel={`Select all ${group.findingCount} ${group.type} findings`}
         open={open}
         onToggleOpen={() => onToggleOpen(key)}
         metrics={
@@ -482,7 +455,7 @@ function SmellTypeGroup({
             <Metric value={group.fileCount} label={group.fileCount === 1 ? "file" : "files"} />
             <SeveritySpread spread={group.severity} />
             {group.effort !== null && (
-              <span style={{ fontSize: 10.5, color: C.textMuted }}>{formatEffort(group.effort)}</span>
+              <span style={{ fontSize: 11, color: T.text3 }}>{formatEffort(group.effort)}</span>
             )}
           </>
         }
@@ -501,7 +474,7 @@ function SmellTypeGroup({
           onToggleSmell={onToggleSmell}
           onView={onView}
           onShowImpact={onShowImpact}
-          selectable={selectable}
+          level={level === 0 ? 1 : 2}
         />
       )}
     </>
@@ -539,7 +512,7 @@ export function SmellWiseView({
 
 // ─── Category wise ───────────────────────────────────────────────────────────
 
-const PRIORITY_TONE = { critical: C.danger, medium: C.warn, low: C.textMuted };
+const PRIORITY_TONE = { critical: T.high, high: T.high, medium: T.medium, low: T.text3 };
 
 export function CategoryWiseView({
   groups, priorities, selectedIds, openKeys, onToggleOpen, onToggleRows,
@@ -556,9 +529,9 @@ export function CategoryWiseView({
               title={group.category}
               icon={categoryIcon(group.category)}
               iconLabel={`${group.category} category`}
-              accent={PRIORITY_TONE[priority] || undefined}
               selection={group.selection}
               onToggleSelect={() => onToggleRows(group.rows)}
+              selectLabel={`Select all ${group.findingCount} findings in ${group.category}`}
               open={open}
               onToggleOpen={() => onToggleOpen(group.key)}
               metrics={
@@ -567,7 +540,10 @@ export function CategoryWiseView({
                   <Metric value={group.fileCount} label={group.fileCount === 1 ? "file" : "files"} />
                   <Metric value={group.typeCount} label={group.typeCount === 1 ? "smell type" : "smell types"} />
                   {priority && (
-                    <span style={{ fontSize: 10, fontWeight: 700, color: PRIORITY_TONE[priority] || C.textMuted }}>
+                    <span style={{
+                      fontSize: 10.5, fontWeight: 700, letterSpacing: 0.4, textTransform: "uppercase",
+                      color: PRIORITY_TONE[priority] || T.text3,
+                    }}>
                       {priority} priority
                     </span>
                   )}
@@ -577,7 +553,7 @@ export function CategoryWiseView({
             />
 
             {open && group.types.map((type) => (
-              <div key={type.key} style={{ borderTop: `1px solid ${C.border}` }}>
+              <div key={type.key} style={{ borderTop: `1px solid ${T.border}` }}>
                 <SmellTypeGroup
                   group={type}
                   level={1}
@@ -603,12 +579,10 @@ export function CategoryWiseView({
 // ─── File wise ───────────────────────────────────────────────────────────────
 
 /**
- * Whole-file selection.
- *
- * The checkbox belongs to the FILE. Expanding shows the smell types inside it
- * and, under each, the findings themselves with their impact and a way into the
- * source — everything needed to judge the file, without offering a per-finding
- * tick that this mode could not send.
+ * Whole-file selection. The checkbox belongs to the FILE; expanding shows the
+ * smell types inside and, under each, the findings with their impact and a
+ * way into the source — everything needed to judge the file, without a
+ * per-finding tick this mode could not send.
  */
 export function FileWiseView({
   groups, openKeys, onToggleOpen, onToggleFile, onViewFile, onView,
@@ -626,7 +600,6 @@ export function FileWiseView({
               title={group.file}
               icon={FILE_ICON}
               iconLabel={`File ${group.file}`}
-              accent={severityColor(group.worstSeverity)}
               selection={{
                 total: group.findingCount,
                 selected: group.fileSelected ? group.findingCount : 0,
@@ -635,6 +608,7 @@ export function FileWiseView({
                 none: !group.fileSelected,
               }}
               onToggleSelect={() => onToggleFile(group.file)}
+              selectLabel={`Select the whole file ${group.file} (${group.findingCount} findings)`}
               open={open}
               onToggleOpen={() => onToggleOpen(group.key)}
               metrics={
@@ -642,11 +616,9 @@ export function FileWiseView({
                   <Metric value={group.findingCount} label={group.findingCount === 1 ? "finding" : "findings"} />
                   <Metric value={group.typeCount} label={group.typeCount === 1 ? "smell type" : "smell types"} />
                   <SeveritySpread spread={group.severity} />
-                  {group.language && (
-                    <span style={{ fontSize: 10.5, color: C.textMuted }}>{group.language}</span>
-                  )}
+                  {group.language && <Chip>{group.language}</Chip>}
                   {typeof quality === "number" && (
-                    <span style={{ fontSize: 10.5, color: quality >= 95 ? C.accent : C.warn }}>
+                    <span style={{ fontSize: 11, color: quality >= 95 ? T.accentText : T.medium, fontWeight: 600 }}>
                       Quality {quality.toFixed(1)}%
                     </span>
                   )}
@@ -659,11 +631,8 @@ export function FileWiseView({
                     type="button"
                     onClick={(e) => { e.stopPropagation(); onViewFile?.(group.file); }}
                     title="Open the original file with every finding marked"
-                    style={{
-                      padding: "3px 9px", borderRadius: 7, cursor: "pointer",
-                      background: C.bg, color: C.textSub, border: `1px solid ${C.border}`,
-                      fontSize: 10, fontWeight: 700, whiteSpace: "nowrap",
-                    }}
+                    className="dw-focus dw-hover"
+                    style={actionButton}
                   >
                     View file
                   </button>
@@ -675,13 +644,12 @@ export function FileWiseView({
               const typeKey = `${group.key}:${type.type}`;
               const typeOpen = openKeys.has(typeKey);
               return (
-                <div key={type.key} style={{ borderTop: `1px solid ${C.border}` }}>
+                <div key={type.key} style={{ borderTop: `1px solid ${T.border}` }}>
                   <GroupHeader
                     level={1}
                     title={type.type}
                     icon={smellIcon(type.type, type.rows[0]?.smell?.category)}
                     iconLabel={type.type}
-                    accent={severityColor(type.worstSeverity)}
                     open={typeOpen}
                     onToggleOpen={() => onToggleOpen(typeKey)}
                     metrics={
@@ -689,30 +657,31 @@ export function FileWiseView({
                         <Metric value={type.findingCount} label={type.findingCount === 1 ? "finding" : "findings"} />
                         <SeveritySpread spread={type.severity} />
                         {type.effort !== null && (
-                          <span style={{ fontSize: 10.5, color: C.textMuted }}>{formatEffort(type.effort)}</span>
+                          <span style={{ fontSize: 11, color: T.text3 }}>{formatEffort(type.effort)}</span>
                         )}
                       </>
                     }
                     right={<CapabilityTag capability={type.capability} />}
                   />
 
-                  {/* No per-finding checkbox: this mode selects whole files. */}
-                  {typeOpen && type.rows.map((row) => (
-                    <FindingRow
-                      key={row.id}
-                      row={row}
-                      record={impacts?.get(row.id)}
-                      selectable={false}
-                      // Never highlighted here: this mode's unit of selection
-                      // is the file, and a row lit up from a previous
-                      // smell-wise session would claim a state File wise
-                      // neither owns nor can change.
-                      selected={false}
-                      onView={onView}
-                      onShowImpact={onShowImpact}
-                      indent={44}
-                    />
-                  ))}
+                  {/* No per-finding checkbox, and never highlighted: this
+                      mode's unit of selection is the file. */}
+                  {typeOpen && (
+                    <div style={{ paddingBottom: 6 }}>
+                      {type.rows.map((row) => (
+                        <FindingCard
+                          key={row.id}
+                          row={row}
+                          record={impacts?.get(row.id)}
+                          selectable={false}
+                          selected={false}
+                          onView={onView}
+                          onShowImpact={onShowImpact}
+                          indent={20}
+                        />
+                      ))}
+                    </div>
+                  )}
                 </div>
               );
             })}

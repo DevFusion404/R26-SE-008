@@ -3,30 +3,29 @@
  * =================
  * R26-SE-008 | Bandara S M Y M | IT22277886
  *
- * Replaces the count-only footer of the Code Smell Review stage.
- *
- * The old footer said "7 smells selected · 3 files affected · 1 high severity",
- * which counts things without answering anything. This says how much of the
- * available improvement the current selection actually captures, what the
- * rejections cost, and which selections will come back as no-ops.
+ * What the current selection buys and what the rejections cost, plus the
+ * selection optimiser.
  *
  * The capture bar is the reframing: "you are capturing 41% of what this run
  * could achieve" is a different question from "you have ticked 7 boxes".
  *
- * Degrades to the original counters when no impact records are available, so a
- * missing backend never blocks the stage.
+ * Lives inside the right-hand selection panel, so it is laid out for a narrow
+ * column: everything stacks, and the two Selected / Skipped sides wrap onto
+ * separate rows when there is no room for both. `embedded` drops the outer
+ * card chrome when the parent already supplies it.
+ *
+ * Every figure comes from summariseSelection() over the backend's impact
+ * records; nothing is rendered when they are absent.
  */
 
-import { C } from "../diwoTheme.jsx";
+import { T, tint, eyebrow, riskTone } from "../codeSmellTheme.js";
 import { PRESETS } from "../utils/impactPresets";
 
 const LEVEL = {
-  error: { color: C.danger, icon: "⛔" },
-  warning: { color: C.warn, icon: "⚠" },
-  info: { color: C.info, icon: "ℹ" },
+  error: { color: T.high, icon: "⛔" },
+  warning: { color: T.medium, icon: "⚠" },
+  info: { color: T.info, icon: "ℹ" },
 };
-
-const RISK_COLOR = { low: C.low, medium: C.warn, high: C.danger };
 
 export default function TradeOffPanel({
   summary,
@@ -35,6 +34,7 @@ export default function TradeOffPanel({
   onOptimise,
   budgetMinutes,
   onBudgetChange,
+  embedded = false,
 }) {
   if (!summary) return null;
 
@@ -43,63 +43,61 @@ export default function TradeOffPanel({
   const notes = [...(summary.warnings || []), ...interactionNotes];
 
   return (
-    <div style={{
-      marginTop: 16, padding: "16px 20px", borderRadius: 10,
-      background: C.panel, border: `1px solid ${C.border}`,
+    <div style={embedded ? {} : {
+      marginTop: 16, padding: "16px 18px", borderRadius: 12,
+      background: T.surface, border: `1px solid ${T.border}`, boxShadow: T.shadowSm,
     }}>
       {/* ── Capture bar ───────────────────────────────────────────────────── */}
-      <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 6 }}>
+      <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 8, marginBottom: 6 }}>
+        <span style={eyebrow}>Quality capture</span>
         <span style={{
-          fontSize: 10, fontWeight: 800, letterSpacing: 1.2, color: C.textMuted,
-          textTransform: "uppercase", flexShrink: 0,
-        }}>
-          Quality capture
-        </span>
-        <div style={{
-          flex: 1, height: 8, borderRadius: 4, background: C.border,
-          overflow: "hidden", minWidth: 120,
-        }}>
-          <div style={{
-            height: "100%", width: `${capturePct}%`,
-            background: C.gradient, transition: "width 0.25s ease",
-          }} />
-        </div>
-        <span style={{
-          fontSize: 14, fontWeight: 800, color: capturePct > 0 ? C.accent : C.textMuted,
-          fontFamily: "monospace", flexShrink: 0, minWidth: 44, textAlign: "right",
+          fontSize: 15, fontWeight: 800, fontFamily: T.mono,
+          color: capturePct > 0 ? T.accentText : T.text3,
         }}>
           {capturePct}%
         </span>
       </div>
-
-      <div style={{ fontSize: 11, color: C.textMuted, marginBottom: 14 }}>
-        Now <Mono>{summary.quality_before}</Mono> → projected{" "}
-        <Mono tone={C.accent}>{summary.quality_projected}</Mono>
-        {"  ·  ceiling "}
-        <Mono tone={C.warn}>{summary.quality_ceiling}</Mono> if every fixable smell were taken
-        {headroom > 0.05 && <> · <Mono tone={C.warn}>{headroom.toFixed(1)}</Mono> pts unclaimed</>}
-        {" · ±"}{Math.round((summary.error_band ?? 0.35) * 100)}% static estimate
+      <div
+        role="progressbar"
+        aria-label="Share of available automated quality gain captured by this selection"
+        aria-valuenow={capturePct}
+        aria-valuemin={0}
+        aria-valuemax={100}
+        style={{ height: 6, borderRadius: 4, background: T.sunken, border: `1px solid ${T.border}`, overflow: "hidden" }}
+      >
+        <div style={{ height: "100%", width: `${capturePct}%`, background: T.accent, transition: "width 0.25s ease" }} />
       </div>
 
-      {/* ── Two rows: what is in, what is out ─────────────────────────────── */}
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+      <div style={{ fontSize: 11.5, color: T.text2, marginTop: 8, lineHeight: 1.6 }}>
+        Quality <Mono>{summary.quality_before}</Mono> → <Mono tone={T.accentText}>{summary.quality_projected}</Mono>
+        {" "}projected · ceiling <Mono tone={T.medium}>{summary.quality_ceiling}</Mono>
+        {headroom > 0.05 && <> · <Mono tone={T.medium}>{headroom.toFixed(1)}</Mono> pts unclaimed</>}
+        <div style={{ color: T.text3, fontSize: 10.5 }}>
+          ±{Math.round((summary.error_band ?? 0.35) * 100)}% static estimate
+        </div>
+      </div>
+
+      {/* ── What is in, what is out ───────────────────────────────────────── */}
+      <div style={{
+        display: "grid", gap: 8, marginTop: 12,
+        gridTemplateColumns: "repeat(auto-fit, minmax(128px, 1fr))",
+      }}>
         <Side
           title="Selected"
-          accent={C.accent}
+          accent={T.accent}
+          titleTone={T.accentText}
           facts={[
             `${summary.selected_count} smell${summary.selected_count === 1 ? "" : "s"}`,
             `${summary.executable_count} auto-fixable`,
             summary.advisory_count ? `${summary.advisory_count} advisory` : null,
             `~${summary.effort_minutes} min`,
-            summary.executable_count
-              ? `max risk ${riskBand(summary.max_risk)}`
-              : null,
+            summary.executable_count ? { text: `max risk ${riskBand(summary.max_risk)}`, tone: riskTone(riskBand(summary.max_risk)) } : null,
           ]}
-          riskBandName={summary.executable_count ? riskBand(summary.max_risk) : null}
         />
         <Side
           title="Skipped"
-          accent={C.warn}
+          accent={T.medium}
+          titleTone={T.medium}
           facts={[
             `${summary.skipped_count} smell${summary.skipped_count === 1 ? "" : "s"}`,
             `${summary.forgone_points} pts forgone`,
@@ -110,20 +108,21 @@ export default function TradeOffPanel({
 
       {/* ── Warnings and interaction notes ────────────────────────────────── */}
       {notes.length > 0 && (
-        <div style={{ marginTop: 14, display: "flex", flexDirection: "column", gap: 6 }}>
+        <div style={{ marginTop: 12, display: "flex", flexDirection: "column", gap: 6 }}>
           {notes.map((note, index) => {
             const tone = LEVEL[note.level] || LEVEL.info;
             return (
               <div
                 key={`${note.level}-${index}`}
+                role={note.level === "error" ? "alert" : undefined}
                 style={{
                   display: "flex", gap: 8, alignItems: "flex-start",
-                  padding: "7px 11px", borderRadius: 7,
-                  background: `${tone.color}0d`, border: `1px solid ${tone.color}33`,
+                  padding: "8px 10px", borderRadius: 8,
+                  background: tint(tone.color, 9), border: `1px solid ${tint(tone.color, 30)}`,
                 }}
               >
-                <span style={{ color: tone.color, flexShrink: 0 }}>{tone.icon}</span>
-                <span style={{ fontSize: 11, color: C.textSub, lineHeight: 1.55 }}>
+                <span aria-hidden="true" style={{ color: tone.color, flexShrink: 0 }}>{tone.icon}</span>
+                <span style={{ fontSize: 11.5, color: T.text, lineHeight: 1.5 }}>
                   {note.message}
                 </span>
               </div>
@@ -134,53 +133,52 @@ export default function TradeOffPanel({
 
       {/* ── Optimiser ─────────────────────────────────────────────────────── */}
       {onOptimise && (
-        <div style={{
-          marginTop: 14, paddingTop: 12, borderTop: `1px solid ${C.border}`,
-          display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap",
-        }}>
-          <span style={{
-            fontSize: 10, fontWeight: 800, letterSpacing: 1, color: C.textMuted,
-            textTransform: "uppercase",
-          }}>
-            Optimise for me
-          </span>
+        <div style={{ marginTop: 14, paddingTop: 12, borderTop: `1px solid ${T.border}` }}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, marginBottom: 8 }}>
+            <span style={eyebrow}>Optimise selection</span>
+            <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11.5, color: T.text2 }}>
+              Budget
+              <input
+                type="number"
+                min={5}
+                step={5}
+                value={budgetMinutes}
+                onChange={(e) => onBudgetChange?.(Number(e.target.value))}
+                aria-label="Review budget in minutes"
+                className="dw-input"
+                style={{
+                  width: 60, background: T.sunken, border: `1px solid ${T.border}`,
+                  borderRadius: 6, padding: "4px 7px", color: T.text, fontSize: 11.5,
+                  fontFamily: T.mono,
+                }}
+              />
+              min
+            </label>
+          </div>
 
-          {PRESETS.map((preset) => (
-            <button
-              key={preset.key}
-              disabled={optimising}
-              title={preset.description}
-              onClick={() => onOptimise(preset.key)}
-              style={{
-                padding: "6px 13px", borderRadius: 7, fontSize: 11, fontWeight: 700,
-                background: C.bg, color: optimising ? C.textMuted : C.textSub,
-                border: `1px solid ${C.border}`,
-                cursor: optimising ? "wait" : "pointer",
-              }}
-            >
-              {preset.label}
-            </button>
-          ))}
-
-          <label style={{
-            display: "flex", alignItems: "center", gap: 6, marginLeft: "auto",
-            fontSize: 11, color: C.textMuted,
-          }}>
-            Budget
-            <input
-              type="number"
-              min={5}
-              step={5}
-              value={budgetMinutes}
-              onChange={(e) => onBudgetChange?.(Number(e.target.value))}
-              style={{
-                width: 62, background: C.bg, border: `1px solid ${C.border}`,
-                borderRadius: 6, padding: "4px 8px", color: C.text, fontSize: 11,
-                outline: "none",
-              }}
-            />
-            min
-          </label>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+            {PRESETS.map((preset) => (
+              <button
+                key={preset.key}
+                type="button"
+                disabled={optimising}
+                title={preset.description}
+                onClick={() => onOptimise(preset.key)}
+                className="dw-focus dw-hover"
+                style={{
+                  padding: "6px 11px", borderRadius: 7, fontSize: 11.5, fontWeight: 700,
+                  background: T.surface, color: optimising ? T.text3 : T.text2,
+                  border: `1px solid ${T.border}`,
+                  cursor: optimising ? "wait" : "pointer",
+                }}
+              >
+                {preset.label}
+              </button>
+            ))}
+          </div>
+          <div style={{ fontSize: 10.5, color: T.text3, marginTop: 6, lineHeight: 1.5 }}>
+            Replaces the current selection with DIWO's suggestion and switches to Smell wise so you can edit it.
+          </div>
         </div>
       )}
     </div>
@@ -192,38 +190,28 @@ function riskBand(score) {
   return score < 0.65 ? "medium" : "high";
 }
 
-function Mono({ children, tone = C.textSub }) {
+function Mono({ children, tone = T.text }) {
   return (
-    <span style={{ fontFamily: "monospace", fontWeight: 700, color: tone }}>{children}</span>
+    <span style={{ fontFamily: T.mono, fontWeight: 700, color: tone }}>{children}</span>
   );
 }
 
-function Side({ title, accent, facts, riskBandName }) {
+function Side({ title, accent, titleTone, facts }) {
   return (
     <div style={{
-      padding: "10px 13px", borderRadius: 8,
-      background: `${accent}08`, border: `1px solid ${accent}26`,
+      padding: "9px 11px", borderRadius: 8,
+      background: tint(accent, 6), border: `1px solid ${tint(accent, 24)}`,
     }}>
-      <div style={{
-        fontSize: 10, fontWeight: 800, letterSpacing: 1, color: accent,
-        textTransform: "uppercase", marginBottom: 6,
-      }}>
-        {title}
-      </div>
-      <div style={{ display: "flex", flexWrap: "wrap", gap: "4px 10px" }}>
-        {facts.filter(Boolean).map((fact) => (
-          <span
-            key={fact}
-            style={{
-              fontSize: 11,
-              color: riskBandName && fact.startsWith("max risk")
-                ? RISK_COLOR[riskBandName]
-                : C.textSub,
-            }}
-          >
-            {fact}
-          </span>
-        ))}
+      <div style={{ ...eyebrow, color: titleTone, marginBottom: 5 }}>{title}</div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+        {facts.filter(Boolean).map((fact) => {
+          const text = typeof fact === "string" ? fact : fact.text;
+          return (
+            <span key={text} style={{ fontSize: 11.5, color: typeof fact === "string" ? T.text2 : fact.tone }}>
+              {text}
+            </span>
+          );
+        })}
       </div>
     </div>
   );

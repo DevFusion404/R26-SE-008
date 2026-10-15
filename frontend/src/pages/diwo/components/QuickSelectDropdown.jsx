@@ -36,7 +36,7 @@
  */
 
 import { useEffect, useRef, useState } from "react";
-import { C } from "../diwoTheme.jsx";
+import { T, tint } from "../codeSmellTheme.js";
 
 /** ☐ / ◐ / ☑ — the state is in the glyph, not only in the colour. */
 export function TriCheckbox({ state, size = 15 }) {
@@ -47,14 +47,14 @@ export function TriCheckbox({ state, size = 15 }) {
       aria-hidden="true"
       style={{
         width: size, height: size, borderRadius: 4, flexShrink: 0,
-        border: `1.5px solid ${on || half ? C.accent : C.borderAcc}`,
-        background: on ? C.accent : "transparent",
+        border: `1.5px solid ${on || half ? T.accent : T.borderStrong}`,
+        background: on ? T.accent : T.surface,
         display: "inline-flex", alignItems: "center", justifyContent: "center",
         transition: "all 0.15s",
       }}
     >
-      {on && <span style={{ color: "#000", fontSize: size * 0.62, fontWeight: 900, lineHeight: 1 }}>✓</span>}
-      {half && <span style={{ width: size * 0.5, height: 2, background: C.accent, borderRadius: 1 }} />}
+      {on && <span style={{ color: T.onAccent, fontSize: size * 0.62, fontWeight: 900, lineHeight: 1 }}>✓</span>}
+      {half && <span style={{ width: size * 0.5, height: 2, background: T.accent, borderRadius: 1 }} />}
     </span>
   );
 }
@@ -62,7 +62,7 @@ export function TriCheckbox({ state, size = 15 }) {
 const stateOf = (selection) =>
   selection?.all ? "all" : selection?.partial ? "partial" : "none";
 
-const SEVERITY_COLOR = { high: C.danger, medium: C.warn, low: C.textMuted };
+const SEVERITY_COLOR = { high: T.high, medium: T.medium, low: T.low };
 
 export default function QuickSelectDropdown({
   label,
@@ -128,18 +128,18 @@ export default function QuickSelectDropdown({
         style={{
           width: "100%", display: "flex", alignItems: "center", gap: 8,
           padding: "9px 12px", borderRadius: 9, cursor: "pointer",
-          background: open ? `${C.accent}12` : C.panel,
-          border: `1px solid ${open || activeCount ? C.accent : C.border}`,
-          color: C.text, fontSize: 12.5, fontWeight: 600, textAlign: "left",
+          background: open ? tint(T.accent, 8) : T.surface,
+          border: `1px solid ${open || activeCount ? T.accent : T.border}`,
+          color: T.text, fontSize: 12.5, fontWeight: 600, textAlign: "left",
         }}
       >
-        <span style={{ color: C.textMuted, fontSize: 11 }}>{label}</span>
-        <span style={{ flex: 1, minWidth: 0, color: activeCount ? C.accent : C.textSub }}>
+        <span style={{ color: T.text3, fontSize: 11 }}>{label}</span>
+        <span style={{ flex: 1, minWidth: 0, color: activeCount ? T.accentText : T.text2 }}>
           {activeCount
             ? `${activeCount} selected · ${totalSelected} finding${totalSelected === 1 ? "" : "s"}`
             : `All ${label.toLowerCase()}s`}
         </span>
-        <span aria-hidden="true" style={{ color: C.textMuted, fontSize: 10 }}>
+        <span aria-hidden="true" style={{ color: T.text3, fontSize: 10 }}>
           {open ? "▲" : "▼"}
         </span>
       </button>
@@ -149,22 +149,23 @@ export default function QuickSelectDropdown({
           role="listbox"
           style={{
             position: "absolute", top: "calc(100% + 6px)", left: 0, right: 0, zIndex: 40,
-            background: C.bg, border: `1px solid ${C.borderAcc}`, borderRadius: 10,
-            boxShadow: "0 18px 40px rgba(0,0,0,0.45)", overflow: "hidden",
+            background: T.surface, border: `1px solid ${T.border}`, borderRadius: 10,
+            boxShadow: T.shadowMd, overflow: "hidden",
             minWidth: 300,
           }}
         >
           {searchable && (
-            <div style={{ padding: 8, borderBottom: `1px solid ${C.border}` }}>
+            <div style={{ padding: 8, borderBottom: `1px solid ${T.border}` }}>
               <input
                 autoFocus
+                className="dw-input"
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
                 placeholder={searchPlaceholder}
                 style={{
                   width: "100%", padding: "7px 10px", borderRadius: 7,
-                  background: C.panel, border: `1px solid ${C.border}`,
-                  color: C.text, fontSize: 12, outline: "none", boxSizing: "border-box",
+                  background: T.sunken, border: `1px solid ${T.border}`,
+                  color: T.text, fontSize: 12, outline: "none", boxSizing: "border-box",
                 }}
               />
             </div>
@@ -172,7 +173,7 @@ export default function QuickSelectDropdown({
 
           <div style={{ maxHeight: 320, overflowY: "auto" }}>
             {visible.length === 0 && (
-              <div style={{ padding: "18px 14px", fontSize: 12, color: C.textMuted, textAlign: "center" }}>
+              <div style={{ padding: "18px 14px", fontSize: 12, color: T.text3, textAlign: "center" }}>
                 {emptyLabel}
               </div>
             )}
@@ -208,8 +209,8 @@ export default function QuickSelectDropdown({
               disabled={totalSelected === 0}
               style={{
                 width: "100%", padding: "9px 12px", border: "none",
-                borderTop: `1px solid ${C.border}`, background: C.panel,
-                color: totalSelected ? C.textSub : C.textMuted,
+                borderTop: `1px solid ${T.border}`, background: T.sunken,
+                color: totalSelected ? T.text2 : T.text3,
                 fontSize: 11.5, fontWeight: 600,
                 cursor: totalSelected ? "pointer" : "not-allowed", textAlign: "left",
               }}
@@ -243,8 +244,8 @@ function Option({ option, onToggle, onNavigate, nested = false, expandable = fal
     <div style={{
       display: "flex", alignItems: "flex-start", gap: 9,
       padding: nested ? "7px 12px 7px 34px" : "8px 12px",
-      borderTop: nested ? "none" : `1px solid ${C.border}`,
-      background: state === "none" ? "transparent" : `${C.accent}0a`,
+      borderTop: nested ? "none" : `1px solid ${T.border}`,
+      background: state === "none" ? "transparent" : tint(T.accent, 7),
     }}>
       <button
         type="button"
@@ -273,17 +274,17 @@ function Option({ option, onToggle, onNavigate, nested = false, expandable = fal
           {option.worstSeverity && option.worstSeverity !== "unknown" && (
             <span aria-hidden="true" style={{
               width: 6, height: 6, borderRadius: "50%", flexShrink: 0,
-              background: SEVERITY_COLOR[option.worstSeverity] || C.textMuted,
+              background: SEVERITY_COLOR[option.worstSeverity] || T.text3,
             }} />
           )}
           <span style={{
-            fontSize: 12.5, fontWeight: 600, color: C.text,
+            fontSize: 12.5, fontWeight: 600, color: T.text,
             overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
           }}>
             {option.label}
           </span>
         </div>
-        <div style={{ fontSize: 10.5, color: C.textMuted, marginTop: 2 }}>{meta}</div>
+        <div style={{ fontSize: 10.5, color: T.text3, marginTop: 2 }}>{meta}</div>
       </button>
 
       {expandable && (
@@ -294,7 +295,7 @@ function Option({ option, onToggle, onNavigate, nested = false, expandable = fal
           aria-label={`${expanded ? "Collapse" : "Expand"} ${option.label}`}
           style={{
             background: "none", border: "none", cursor: "pointer", flexShrink: 0,
-            color: C.textMuted, fontSize: 10, padding: "2px 4px",
+            color: T.text3, fontSize: 10, padding: "2px 4px",
           }}
         >
           {expanded ? "▾" : "▸"}
