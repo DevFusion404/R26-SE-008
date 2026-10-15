@@ -71,6 +71,18 @@ except ImportError:
         except ImportError:
             _C_HELPERS_AVAILABLE = False
 
+# ML smell detector for Java (optional — reports stay rule-based when it is missing)
+try:
+    from ml_detector import detector as _ml_detector
+except ImportError:
+    try:
+        from .ml_detector import detector as _ml_detector
+    except ImportError:
+        try:
+            from agents.cuqa_agent.src.ml_detector import detector as _ml_detector
+        except ImportError:
+            _ml_detector = None
+
 
 
 # ---------------------------------------------------------------------------
@@ -1605,6 +1617,7 @@ def generate_file_report(
     source: str,
     filename: str,
     repo_ref_index: set[str] | None = None,
+    detector: str | None = None,
 ) -> dict:
     """
     SPECIAL FUNCTION: Generate a comprehensive Quality & Code Smell Report for a single file.
@@ -1620,6 +1633,9 @@ def generate_file_report(
     5. Dead-Code Accuracy: When `repo_ref_index` is supplied (by `generate_repo_report`), Python dead-code
        detection checks across the entire repository — functions/classes imported by other files are never
        flagged.  Without the index (single-file mode), detection is scoped to the file itself.
+    6. ML Smell Detection (Java only): the trained model in `ml_detector` scores every class and method.
+       Its findings are always attached under `ml_analysis`.  They are merged into `code_smells` only
+       when the detection mode is "hybrid" or "ml", so the default rule-based output is unchanged.
     -------------------------------------------------------------------------
 
     Args:
@@ -1627,6 +1643,9 @@ def generate_file_report(
         filename (str): Target filename for language detection and entity tagging.
         repo_ref_index (set[str] | None): Optional cross-file name index built by
             `build_repo_name_index`.  Pass ``None`` (default) for standalone single-file analysis.
+        detector (str | None): "rules", "hybrid", "ml" or "off".  ``None`` (default) reads the
+            CUQA_SMELL_DETECTOR environment variable and falls back to "rules".  "off" skips the
+            model completely.
 
     Returns:
         dict: Complete CUQA Quality Report dict for the file.
@@ -1669,6 +1688,19 @@ def generate_file_report(
                 "entity": filename,
             })
 
+    # ML smell detection (Java only) — additive unless the mode is "hybrid" or "ml"
+    ml_analysis = None
+    detection_mode = "rules"
+    requested_mode = _ml_detector.resolve_mode(detector) if _ml_detector is not None else "off"
+    if language == "java" and requested_mode != "off":
+        ml_analysis = _ml_detector.detect_smells(source)
+        if requested_mode != "rules" and ml_analysis["status"] == "ok":
+            smells = _ml_detector.merge_with_rule_smells(
+                smells, ml_analysis["smells"], requested_mode
+            )
+            detection_mode = requested_mode
+        _enrich_smells_with_category(ml_analysis["smells"])
+
     # Enrich each smell with category + category_priority fields
     _enrich_smells_with_category(smells)
 
@@ -1680,7 +1712,7 @@ def generate_file_report(
         s = smell.get("severity", "medium")
         severity_counts[s] = severity_counts.get(s, 0) + 1
 
-    return {
+    report = {
         "file": filename,
         "language": language,
         "metrics": metrics,
@@ -1689,6 +1721,10 @@ def generate_file_report(
         "smell_summary": severity_counts,
         "quality_score": _compute_score(smells, metrics),
     }
+    if ml_analysis is not None:
+        report["detection_mode"] = detection_mode
+        report["ml_analysis"] = ml_analysis
+    return report
 
 
 def generate_repo_report(
@@ -1796,19 +1832,39 @@ def generate_repo_report(
     _enrich_smells_with_category(all_smells)
     repo_smell_overview = _build_smell_overview(all_smells)
 
-    return {
-        "summary": {
-            "files_analyzed": files_analyzed,
-            "total_lines_of_code": total_loc,
-            "total_code_smells": total_smells,
-            "smell_severity": {
-                "high": high_smells,
-                "medium": medium_smells,
-                "low": low_smells,
-            },
-            "average_quality_score": round(avg_score, 1),
-            "code_smell_overview": repo_smell_overview,
+    summary = {
+        "files_analyzed": files_analyzed,
+        "total_lines_of_code": total_loc,
+        "total_code_smells": total_smells,
+        "smell_severity": {
+            "high": high_smells,
+            "medium": medium_smells,
+            "low": low_smells,
         },
+        "average_quality_score": round(avg_score, 1),
+        "code_smell_overview": repo_smell_overview,
+    }
+
+    # Repository-level view of the ML detector's findings (Java files only)
+    ml_blocks = [
+        r["ml_analysis"] for r in file_reports if isinstance(r.get("ml_analysis"), dict)
+    ]
+    if ml_blocks:
+        ml_by_type: dict[str, int] = defaultdict(int)
+        for block in ml_blocks:
+            for smell in block.get("smells", []):
+                ml_by_type[smell.get("type", "")] += 1
+        summary["ml_code_smells"] = {
+            "model_version": next(
+                (b.get("model_version") for b in ml_blocks if b.get("model_version")), None
+            ),
+            "files_scored": sum(1 for b in ml_blocks if b.get("status") == "ok"),
+            "total": sum(ml_by_type.values()),
+            "by_type": dict(ml_by_type),
+        }
+
+    return {
+        "summary": summary,
         "files": file_reports,
     }
 
