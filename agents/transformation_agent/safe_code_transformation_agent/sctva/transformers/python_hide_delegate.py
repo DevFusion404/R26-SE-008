@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import copy
 import re
+from collections import Counter
 from typing import Any
 
 
@@ -58,6 +59,231 @@ def _customer_names(tree: ast.Module, source_class: str) -> set[str]:
     return names
 
 
+def _message_chain_depth(node: ast.AST) -> int:
+    if isinstance(node, ast.Attribute):
+        return 1 + _message_chain_depth(node.value)
+    if isinstance(node, ast.Subscript):
+        return 1 + _message_chain_depth(node.value)
+    if isinstance(node, ast.Call):
+        return _message_chain_depth(node.func)
+    return 0
+
+
+def _module_message_chain_evidence(
+    function: ast.FunctionDef | ast.AsyncFunctionDef,
+) -> list[dict[str, Any]]:
+    """Describe outermost module-function message chains."""
+
+    return [
+        {
+            "line": int(getattr(node, "lineno", 0) or 0),
+            "end_line": int(getattr(node, "end_lineno", 0) or 0),
+            "chain_depth": _message_chain_depth(node),
+            "expression": ast.unparse(node),
+        }
+        for node in _module_message_chain_nodes(function)
+    ]
+
+
+def _module_message_chain_nodes(
+    function: ast.FunctionDef | ast.AsyncFunctionDef,
+) -> list[ast.AST]:
+    """Return outermost chain expressions without double-counting children."""
+
+    parents = _parents(function)
+    candidates: list[ast.AST] = []
+    for node in ast.walk(function):
+        if not isinstance(node, (ast.Attribute, ast.Subscript, ast.Call)):
+            continue
+        depth = _message_chain_depth(node)
+        if depth < 2:
+            continue
+        parent = parents.get(node)
+        if (
+            isinstance(parent, ast.Attribute) and parent.value is node
+        ) or (
+            isinstance(parent, ast.Subscript) and parent.value is node
+        ) or (
+            isinstance(parent, ast.Call) and parent.func is node
+        ):
+            continue
+        candidates.append(node)
+    return candidates
+
+
+def _message_chain_root_name(node: ast.AST) -> str:
+    current = node
+    while isinstance(current, (ast.Attribute, ast.Subscript, ast.Call)):
+        if isinstance(current, ast.Attribute):
+            current = current.value
+        elif isinstance(current, ast.Subscript):
+            current = current.value
+        elif isinstance(current.func, ast.Name):
+            return current.func.id
+        else:
+            current = current.func
+    return current.id if isinstance(current, ast.Name) else ""
+
+
+def _message_chain_terminal_member(node: ast.AST) -> str:
+    if isinstance(node, ast.Call):
+        return node.func.attr if isinstance(node.func, ast.Attribute) else "call"
+    if isinstance(node, ast.Attribute):
+        return node.attr
+    return "item"
+
+
+def _message_chain_shape_fingerprint(node: ast.AST) -> str:
+    """Fingerprint chain topology while tolerating numeric constants introduced elsewhere."""
+
+    if isinstance(node, ast.Call):
+        args = ",".join(_message_chain_shape_fingerprint(arg) for arg in node.args)
+        keywords = ",".join(
+            f"{keyword.arg or '*'}={_message_chain_shape_fingerprint(keyword.value)}"
+            for keyword in node.keywords
+        )
+        return (
+            "Call("
+            f"{_message_chain_shape_fingerprint(node.func)}"
+            f";args={len(node.args)}[{args}]"
+            f";kw={len(node.keywords)}[{keywords}]"
+            ")"
+        )
+    if isinstance(node, ast.Attribute):
+        return f"Attr({_message_chain_shape_fingerprint(node.value)}.{node.attr})"
+    if isinstance(node, ast.Subscript):
+        return (
+            "Subscript("
+            f"{_message_chain_shape_fingerprint(node.value)}"
+            f"[{_message_chain_shape_fingerprint(node.slice)}]"
+            ")"
+        )
+    if isinstance(node, ast.BinOp):
+        return (
+            f"BinOp({type(node.op).__name__},"
+            f"{_message_chain_shape_fingerprint(node.left)},"
+            f"{_message_chain_shape_fingerprint(node.right)})"
+        )
+    if isinstance(node, ast.UnaryOp):
+        return f"UnaryOp({type(node.op).__name__},{_message_chain_shape_fingerprint(node.operand)})"
+    if isinstance(node, ast.Compare):
+        operators = ",".join(type(operator).__name__ for operator in node.ops)
+        comparators = ",".join(_message_chain_shape_fingerprint(item) for item in node.comparators)
+        return f"Compare({operators},{_message_chain_shape_fingerprint(node.left)};{comparators})"
+    if isinstance(node, ast.Tuple):
+        return "Tuple(" + ",".join(_message_chain_shape_fingerprint(item) for item in node.elts) + ")"
+    if isinstance(node, ast.List):
+        return "List(" + ",".join(_message_chain_shape_fingerprint(item) for item in node.elts) + ")"
+    if isinstance(node, ast.Slice):
+        lower = _message_chain_shape_fingerprint(node.lower) if node.lower else ""
+        upper = _message_chain_shape_fingerprint(node.upper) if node.upper else ""
+        step = _message_chain_shape_fingerprint(node.step) if node.step else ""
+        return f"Slice({lower}:{upper}:{step})"
+    if isinstance(node, ast.Name):
+        if re.fullmatch(
+            r"(?:THRESHOLD_LIMIT|MAGIC_NUMBER|INTRODUCED_CONSTANT|SCTVA_CONSTANT)_[A-Z0-9_]+",
+            node.id,
+        ):
+            return "NumericConstant"
+        return f"Name({node.id})"
+    if isinstance(node, ast.Constant):
+        if isinstance(node.value, (int, float, complex)):
+            return "NumericConstant"
+        return f"Constant({node.value!r})"
+    return ast.dump(node, include_attributes=False)
+
+
+def _module_facade_resolution(
+    *,
+    module_functions: dict[str, ast.FunctionDef | ast.AsyncFunctionDef],
+    selected_function: ast.FunctionDef | ast.AsyncFunctionDef | None,
+    requested_source_class: str,
+    requested_method: str,
+    new_method_name: str,
+    resolution_strategy: str,
+) -> dict[str, Any] | None:
+    functions = [selected_function] if selected_function is not None else list(module_functions.values())
+    candidates = [
+        (function, node)
+        for function in functions
+        if isinstance(function, ast.FunctionDef)
+        for node in _module_message_chain_nodes(function)
+        if _message_chain_depth(node) >= 3 and _message_chain_root_name(node)
+    ]
+    if not candidates:
+        return None
+
+    maximum_depth = max(_message_chain_depth(node) for _, node in candidates)
+    strongest = [
+        (function, node)
+        for function, node in candidates
+        if _message_chain_depth(node) == maximum_depth
+    ]
+    if len(strongest) != 1:
+        return {
+            "status": "review_required",
+            "reason": "AMBIGUOUS_MODULE_HIDE_DELEGATE_TARGET",
+            "strategy": "unique_deepest_module_chain",
+            "candidate_count": len(strongest),
+            "maximum_chain_depth": maximum_depth,
+        }
+
+    function, node = strongest[0]
+    if any(
+        isinstance(item, (ast.Await, ast.Yield, ast.YieldFrom, ast.NamedExpr, ast.Lambda))
+        for item in ast.walk(node)
+    ):
+        return {
+            "status": "review_required",
+            "reason": "MODULE_HIDE_DELEGATE_CONTROL_FLOW_UNSAFE",
+            "strategy": "unique_deepest_module_chain",
+        }
+
+    delegate = _message_chain_root_name(node)
+    delegated = _message_chain_terminal_member(node)
+    forwarder = str(new_method_name or f"get_{delegate}_result").strip()
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", forwarder):
+        return {
+            "status": "review_required",
+            "reason": "INVALID_NEW_METHOD_NAME",
+            "strategy": "unique_deepest_module_chain",
+        }
+    if forwarder in module_functions:
+        return {
+            "status": "review_required",
+            "reason": "MODULE_FORWARDER_NAME_COLLISION",
+            "strategy": "unique_deepest_module_chain",
+        }
+
+    target = {
+        "source_class": "__module__",
+        "delegate_member": delegate,
+        "delegated_member": delegated,
+        "new_method_name": forwarder,
+        "hide_delegate_mode": "module_facade",
+        "source_method": function.name,
+        "target_line": int(getattr(node, "lineno", 0) or 0),
+        "target_end_line": int(getattr(node, "end_lineno", 0) or 0),
+        "message_chain_depth": maximum_depth,
+        "message_chain_expression": ast.unparse(node),
+        "message_chain_fingerprint": ast.dump(node, include_attributes=False),
+    }
+    return {
+        "status": "success",
+        "reason": "MODULE_FACADE_HIDE_DELEGATE_SAFE",
+        "strategy": (
+            resolution_strategy
+            if selected_function is not None
+            else "unique_deepest_module_chain"
+        ),
+        "target_kind": "MODULE_MESSAGE_CHAIN",
+        "requested_source_class": requested_source_class,
+        "requested_method": requested_method,
+        **target,
+        "targets": [target],
+    }
+
+
 def resolve_hide_delegate_target(
     source_code: str,
     *,
@@ -104,21 +330,99 @@ def resolve_hide_delegate_target(
     }
 
     if not classes:
-        # This is the exact Jarvis-style failure mode: RDP may call the module
-        # name a "source_class", but there is no class owner in the source.
-        # Hide Delegate is therefore structurally not applicable; fabricating a
-        # class would be a different refactoring (Extract Class/Move Function).
-        if requested_method and requested_method in module_functions:
+        selected_function = module_functions.get(requested_method)
+        resolution_strategy = "requested_module_function"
+        if selected_function is None and source_line is not None:
+            selected_function = next(
+                (
+                    function
+                    for function in module_functions.values()
+                    if int(getattr(function, "lineno", 0) or 0)
+                    <= source_line
+                    <= int(getattr(function, "end_lineno", 0) or 0)
+                ),
+                None,
+            )
+            resolution_strategy = "source_line_enclosing_module_function"
+
+        module_facade = _module_facade_resolution(
+            module_functions=module_functions,
+            selected_function=selected_function,
+            requested_source_class=requested_source_class,
+            requested_method=requested_method,
+            new_method_name=new_method_name,
+            resolution_strategy=resolution_strategy,
+        )
+        if module_facade is not None:
+            return module_facade
+
+        selected_evidence = (
+            _module_message_chain_evidence(selected_function)
+            if selected_function is not None
+            else []
+        )
+        if selected_evidence:
+            # Hide Delegate requires a local owning class on which SCTVA can
+            # create the forwarding method. A module function navigating a
+            # library/global result (for example a Tensor call chain) needs a
+            # different refactoring; manufacturing a class here is unsafe.
+            return {
+                "status": "not_applicable",
+                "reason": "HIDE_DELEGATE_NO_LOCAL_CLASS_OWNER_FOR_MESSAGE_CHAIN",
+                "strategy": resolution_strategy,
+                "target_kind": "MODULE_FUNCTION",
+                "method": selected_function.name,
+                "requested_source_class": requested_source_class,
+                "requested_method": requested_method,
+                "suggested_refactoring": "EXTRACT_METHOD_OR_INTRODUCE_FACADE",
+                "message_chain_count": len(selected_evidence),
+                "message_chains": selected_evidence,
+            }
+
+        if selected_function is None:
+            module_evidence = [
+                {"method": function.name, **item}
+                for function in module_functions.values()
+                for item in _module_message_chain_evidence(function)
+            ]
+            if module_evidence:
+                return {
+                    "status": "not_applicable",
+                    "reason": "HIDE_DELEGATE_NO_LOCAL_CLASS_OWNER_FOR_MESSAGE_CHAIN",
+                    "strategy": "current_ast_module_message_chain_scan",
+                    "target_kind": "MODULE",
+                    "requested_source_class": requested_source_class,
+                    "requested_method": requested_method,
+                    "suggested_refactoring": "EXTRACT_METHOD_OR_INTRODUCE_FACADE",
+                    "message_chain_count": len(module_evidence),
+                    "message_chain_methods": sorted({
+                        str(item["method"])
+                        for item in module_evidence
+                    }),
+                    "message_chains": module_evidence,
+                }
+
+        # RDP may call the module name a "source_class", but there is no class
+        # owner in the current AST. Hide Delegate is structurally inapplicable;
+        # fabricating one would be Extract Class or Move Function instead.
+        if selected_function is not None:
             return {
                 "status": "not_applicable",
                 "reason": "MODULE_LEVEL_FUNCTION_HAS_NO_HIDE_DELEGATE_OWNER",
-                "method": requested_method,
+                "strategy": resolution_strategy,
+                "target_kind": "MODULE_FUNCTION",
+                "method": selected_function.name,
                 "requested_source_class": requested_source_class,
+                "requested_method": requested_method,
+                "suggested_refactoring": "EXTRACT_CLASS_OR_MOVE_FUNCTION",
             }
         return {
             "status": "not_applicable",
             "reason": "HIDE_DELEGATE_REQUIRES_CLASS_OWNER",
+            "strategy": "current_ast_has_no_class_owner",
+            "target_kind": "MODULE",
             "requested_source_class": requested_source_class,
+            "requested_method": requested_method,
         }
 
     # If the planner names a class that does not exist, do not use that stale
@@ -285,6 +589,31 @@ def resolve_hide_delegate_target(
             candidates.add((class_name, delegate.attr, node.attr, is_call))
 
     if not candidates:
+        if not requested_source_class or source_class_is_stale:
+            selected_module_function = module_functions.get(requested_method)
+            module_resolution_strategy = "requested_module_function"
+            if selected_module_function is None and source_line is not None:
+                selected_module_function = next(
+                    (
+                        function
+                        for function in module_functions.values()
+                        if int(getattr(function, "lineno", 0) or 0)
+                        <= source_line
+                        <= int(getattr(function, "end_lineno", 0) or 0)
+                    ),
+                    None,
+                )
+                module_resolution_strategy = "source_line_enclosing_module_function"
+            module_facade = _module_facade_resolution(
+                module_functions=module_functions,
+                selected_function=selected_module_function,
+                requested_source_class=requested_source_class,
+                requested_method=requested_method,
+                new_method_name=new_method_name,
+                resolution_strategy=module_resolution_strategy,
+            )
+            if module_facade is not None:
+                return module_facade
         if requested_method and requested_method in module_functions:
             return {
                 "status": "not_applicable",
@@ -362,6 +691,190 @@ def _method_is_equivalent(
     if delegated_is_call:
         expected = ast.Call(func=expected, args=[], keywords=[])
     return ast.dump(body[0].value, include_attributes=False) == ast.dump(expected, include_attributes=False)
+
+
+def _function_local_names(function: ast.FunctionDef) -> set[str]:
+    names = {
+        argument.arg
+        for argument in (
+            *function.args.posonlyargs,
+            *function.args.args,
+            *function.args.kwonlyargs,
+        )
+    }
+    if function.args.vararg:
+        names.add(function.args.vararg.arg)
+    if function.args.kwarg:
+        names.add(function.args.kwarg.arg)
+
+    class _LocalCollector(ast.NodeVisitor):
+        def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+            if node is function:
+                for statement in node.body:
+                    self.visit(statement)
+
+        def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+            return
+
+        def visit_ClassDef(self, node: ast.ClassDef) -> None:
+            return
+
+        def visit_Lambda(self, node: ast.Lambda) -> None:
+            return
+
+        def visit_Name(self, node: ast.Name) -> None:
+            if isinstance(node.ctx, (ast.Store, ast.Del)):
+                names.add(node.id)
+
+        def visit_Import(self, node: ast.Import) -> None:
+            for alias in node.names:
+                names.add(alias.asname or alias.name.split(".", 1)[0])
+
+        def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+            for alias in node.names:
+                names.add(alias.asname or alias.name)
+
+    _LocalCollector().visit(function)
+    for declaration in ast.walk(function):
+        if isinstance(declaration, (ast.Global, ast.Nonlocal)):
+            names.difference_update(declaration.names)
+    return names
+
+
+def apply_module_hide_delegate(
+    source_code: str,
+    *,
+    source_method: str,
+    delegate_member: str,
+    delegated_member: str,
+    new_method_name: str,
+    message_chain_fingerprint: str = "",
+) -> tuple[str, int, dict[str, Any]]:
+    """Hide one module-level chain behind a behavior-preserving facade."""
+
+    if not all(
+        re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", value or "")
+        for value in (source_method, delegate_member, delegated_member, new_method_name)
+    ):
+        return _review(source_code, "INVALID_MODULE_HIDE_DELEGATE_TARGET")
+    try:
+        tree = ast.parse(source_code)
+    except SyntaxError:
+        return _review(source_code, "SOURCE_PARSE_FAILED")
+    functions = {
+        node.name: node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+    }
+    function = functions.get(source_method)
+    if function is None:
+        return _review(source_code, "MODULE_HIDE_DELEGATE_FUNCTION_NOT_FOUND")
+    if new_method_name in functions:
+        return _review(source_code, "MODULE_FORWARDER_NAME_COLLISION")
+
+    candidates = [
+        node
+        for node in _module_message_chain_nodes(function)
+        if _message_chain_depth(node) >= 3
+        and _message_chain_root_name(node) == delegate_member
+    ]
+    exact = [
+        node
+        for node in candidates
+        if ast.dump(node, include_attributes=False) == message_chain_fingerprint
+    ] if message_chain_fingerprint else []
+    if len(exact) == 1:
+        target = exact[0]
+        resolution = "normalized_ast_fingerprint"
+    else:
+        maximum_depth = max((_message_chain_depth(node) for node in candidates), default=0)
+        strongest = [
+            node for node in candidates
+            if _message_chain_depth(node) == maximum_depth
+        ]
+        if len(strongest) != 1:
+            return _review(
+                source_code,
+                "AMBIGUOUS_MODULE_HIDE_DELEGATE_TARGET",
+                candidate_count=len(strongest),
+            )
+        target = strongest[0]
+        resolution = "current_ast_unique_deepest_chain"
+
+    if _message_chain_terminal_member(target) != delegated_member:
+        return _review(source_code, "MODULE_HIDE_DELEGATE_MEMBER_CHANGED")
+    if any(
+        isinstance(node, (ast.Await, ast.Yield, ast.YieldFrom, ast.NamedExpr, ast.Lambda))
+        for node in ast.walk(target)
+    ):
+        return _review(source_code, "MODULE_HIDE_DELEGATE_CONTROL_FLOW_UNSAFE")
+
+    local_names = _function_local_names(function)
+    helper_parameters: list[str] = []
+    for node in ast.walk(target):
+        if (
+            isinstance(node, ast.Name)
+            and isinstance(node.ctx, ast.Load)
+            and node.id in local_names
+            and node.id not in helper_parameters
+        ):
+            helper_parameters.append(node.id)
+
+    chain_expression = ast.unparse(target)
+    arguments = ", ".join(helper_parameters)
+    helper_text = (
+        f"def {new_method_name}({arguments}):\n"
+        f"    return {chain_expression}\n\n\n"
+    )
+    replacement = f"{new_method_name}({arguments})"
+    offsets = _line_offsets(source_code)
+    start = _offset(offsets, target.lineno, target.col_offset)
+    end = _offset(offsets, target.end_lineno, target.end_col_offset)
+    decorator_lines = [
+        int(getattr(decorator, "lineno", function.lineno) or function.lineno)
+        for decorator in function.decorator_list
+    ]
+    insertion_line = min([function.lineno, *decorator_lines])
+    insertion = _offset(offsets, insertion_line, 0)
+    if insertion > start:
+        return _review(source_code, "MODULE_FORWARDER_INSERTION_UNSAFE")
+
+    transformed = source_code
+    for edit_start, edit_end, edit_text in sorted(
+        ((start, end, replacement), (insertion, insertion, helper_text)),
+        key=lambda item: item[0],
+        reverse=True,
+    ):
+        transformed = f"{transformed[:edit_start]}{edit_text}{transformed[edit_end:]}"
+    try:
+        ast.parse(transformed)
+        compile(transformed, "<sctva-module-hide-delegate>", "exec")
+    except (SyntaxError, TypeError, ValueError):
+        return _review(source_code, "TRANSFORMED_SOURCE_PARSE_FAILED")
+
+    fingerprint = ast.dump(target, include_attributes=False)
+    effective = {
+        "hide_delegate_mode": "module_facade",
+        "source_class": "__module__",
+        "source_method": source_method,
+        "delegate_member": delegate_member,
+        "delegated_member": delegated_member,
+        "new_method_name": new_method_name,
+        "message_chain_fingerprint": fingerprint,
+        "message_chain_expression": chain_expression,
+        "message_chain_depth": _message_chain_depth(target),
+        "helper_parameters": helper_parameters,
+    }
+    return transformed, 2, {
+        "status": "success",
+        "reason": "MODULE_FACADE_HIDE_DELEGATE_SAFE",
+        "language": "python",
+        "created_forwarder": True,
+        "updated_call_sites": 1,
+        "target_resolution": resolution,
+        **effective,
+        "effective_action_parameters": effective,
+    }
 
 
 def apply_hide_delegate(
@@ -560,3 +1073,153 @@ def validate_hide_delegate(
         "python_syntax_valid": True,
     }
     return {"passed": all(checks.values()), "language": "python", "checks": checks}
+
+
+def validate_module_hide_delegate(
+    original_code: str,
+    transformed_code: str,
+    *,
+    source_method: str,
+    delegate_member: str,
+    delegated_member: str,
+    new_method_name: str,
+    message_chain_fingerprint: str,
+    helper_parameters: list[str] | None = None,
+) -> dict[str, Any]:
+    """Prove a selected module chain moved once behind its facade function."""
+
+    try:
+        before = ast.parse(original_code)
+        after = ast.parse(transformed_code)
+    except SyntaxError:
+        return {"passed": False, "reason": "parse_failed"}
+    before_function = next(
+        (
+            node for node in before.body
+            if isinstance(node, ast.FunctionDef) and node.name == source_method
+        ),
+        None,
+    )
+    after_function = next(
+        (
+            node for node in after.body
+            if isinstance(node, ast.FunctionDef) and node.name == source_method
+        ),
+        None,
+    )
+    helpers = [
+        node for node in after.body
+        if isinstance(node, ast.FunctionDef) and node.name == new_method_name
+    ]
+    if before_function is None or after_function is None:
+        return {"passed": False, "reason": "source_method_missing"}
+
+    before_targets = [
+        node
+        for node in _module_message_chain_nodes(before_function)
+        if ast.dump(node, include_attributes=False) == message_chain_fingerprint
+    ]
+    selected_chain_fingerprints = {message_chain_fingerprint}
+    helper = helpers[0] if len(helpers) == 1 else None
+    helper_body = list(helper.body) if helper is not None else []
+    helper_return = (
+        helper_body[0].value
+        if len(helper_body) == 1 and isinstance(helper_body[0], ast.Return)
+        else None
+    )
+    expected_parameters = list(helper_parameters or [])
+    actual_parameters = (
+        [argument.arg for argument in helper.args.args]
+        if helper is not None
+        else []
+    )
+    facade_calls = [
+        node
+        for node in ast.walk(after_function)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == new_method_name
+    ]
+    call_inputs_preserved = bool(facade_calls) and all(
+        [
+            argument.id
+            for argument in call.args
+            if isinstance(argument, ast.Name)
+        ] == expected_parameters
+        and len(call.args) == len(expected_parameters)
+        and not call.keywords
+        for call in facade_calls
+    )
+
+    def chain_records(function: ast.FunctionDef) -> Counter[str]:
+        return Counter(
+            _message_chain_shape_fingerprint(node)
+            for node in _module_message_chain_nodes(function)
+            if ast.dump(node, include_attributes=False) not in selected_chain_fingerprints
+        )
+
+    def chain_expressions_by_fingerprint(function: ast.FunctionDef) -> dict[str, str]:
+        expressions: dict[str, str] = {}
+        for node in _module_message_chain_nodes(function):
+            fingerprint = ast.dump(node, include_attributes=False)
+            if fingerprint in selected_chain_fingerprints:
+                continue
+            expressions.setdefault(_message_chain_shape_fingerprint(node), ast.unparse(node))
+        return expressions
+
+    before_other = chain_records(before_function)
+    after_other = chain_records(after_function)
+    before_other_expressions = chain_expressions_by_fingerprint(before_function)
+    after_other_expressions = chain_expressions_by_fingerprint(after_function)
+    missing_unrelated = list((before_other - after_other).elements())
+    extra_unrelated = list((after_other - before_other).elements())
+    unrelated_diagnostics = [
+        {
+            "status": "missing_after_transformation",
+            "expression": before_other_expressions.get(fingerprint, ""),
+            "normalized_fingerprint": fingerprint,
+        }
+        for fingerprint in missing_unrelated
+    ] + [
+        {
+            "status": "unexpected_after_transformation",
+            "expression": after_other_expressions.get(fingerprint, ""),
+            "normalized_fingerprint": fingerprint,
+        }
+        for fingerprint in extra_unrelated
+    ]
+    checks = {
+        "original_message_chain_existed": len(before_targets) == 1,
+        "module_forwarder_added": len(helpers) == 1,
+        "forwarder_targets_correct_delegate": (
+            helper_return is not None
+            and ast.dump(helper_return, include_attributes=False)
+            == message_chain_fingerprint
+            and _message_chain_root_name(helper_return) == delegate_member
+            and _message_chain_terminal_member(helper_return) == delegated_member
+        ),
+        "client_message_chain_shortened": not any(
+            ast.dump(node, include_attributes=False) == message_chain_fingerprint
+            for node in _module_message_chain_nodes(after_function)
+        ),
+        "matching_call_site_updated": len(facade_calls) == 1,
+        "evaluation_inputs_preserved": (
+            actual_parameters == expected_parameters and call_inputs_preserved
+        ),
+        "unrelated_message_chains_preserved": not unrelated_diagnostics,
+        "no_duplicate_forwarder": len(helpers) == 1,
+        "python_syntax_valid": True,
+    }
+    result = {
+        "passed": all(checks.values()),
+        "language": "python",
+        "hide_delegate_mode": "module_facade",
+        "source_method": source_method,
+        "delegate_member": delegate_member,
+        "delegated_member": delegated_member,
+        "new_method_name": new_method_name,
+        "checks": checks,
+    }
+    if unrelated_diagnostics:
+        result["unrelated_message_chain_diagnostics"] = unrelated_diagnostics
+    return result

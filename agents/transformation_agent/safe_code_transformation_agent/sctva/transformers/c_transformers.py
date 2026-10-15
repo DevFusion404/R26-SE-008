@@ -9,6 +9,30 @@ from typing import Any, Optional, Sequence, Tuple
 
 _INCLUDE_RE = re.compile(r"^\s*#\s*include\b.*$", re.MULTILINE)
 _DEFINE_RE = re.compile(r"^\s*#\s*define\s+([A-Za-z_][A-Za-z0-9_]*)\b.*$", re.MULTILINE)
+_PLANNED_DECIMAL_INTEGER_RE = re.compile(r"^[+-]?(?:0|[1-9][0-9]*)$")
+_PLANNED_DECIMAL_FLOAT_RE = re.compile(
+    r"^[+-]?(?:(?:[0-9]+\.[0-9]*|\.[0-9]+)(?:[eE][+-]?[0-9]+)?|[0-9]+[eE][+-]?[0-9]+)$"
+)
+
+
+def normalize_planned_numeric_literal(value: Any) -> Any:
+    """Convert unquoted decimal values from planner JSON into numeric values.
+
+    RDP plans often serialize a magic number as ``"10"`` rather than JSON
+    number ``10``.  C target analysis must still distinguish that metadata
+    representation from an actual C string literal, which is done by the
+    source tokenizer after this normalization.  Hex, suffix-bearing, and
+    quoted C literals are deliberately left untouched to avoid changing their
+    C semantics.
+    """
+    if not isinstance(value, str):
+        return value
+    text = value.strip()
+    if _PLANNED_DECIMAL_INTEGER_RE.fullmatch(text):
+        return int(text)
+    if _PLANNED_DECIMAL_FLOAT_RE.fullmatch(text):
+        return float(text)
+    return value
 
 
 def _sanitize_identifier(value: str) -> str:
@@ -199,13 +223,206 @@ def _is_c_type_or_signature_context(masked_source: str, index: int) -> bool:
     return _looks_like_c_type_declaration(masked_source, index)
 
 
+def _c_preprocessor_directive_for_index(source_code: str, index: int) -> str:
+    """Return the logical preprocessor directive containing ``index``.
+
+    The function understands backslash-continued directives so values on a
+    continuation line of ``#define`` are not mistaken for ordinary C runtime
+    literals.
+    """
+
+    lines = source_code.splitlines(keepends=True)
+    if not lines:
+        return ""
+    offset = 0
+    line_index = 0
+    for i, raw in enumerate(lines):
+        next_offset = offset + len(raw)
+        if offset <= index < next_offset:
+            line_index = i
+            break
+        offset = next_offset
+
+    start = line_index
+    while start > 0 and lines[start - 1].rstrip("\r\n").rstrip().endswith("\\"):
+        start -= 1
+    directive = lines[start].lstrip()
+    if not directive.startswith("#"):
+        return ""
+    logical = "".join(lines[start : line_index + 1])
+    return logical
+
+
+def _inside_c_enum_body(masked_source: str, index: int) -> bool:
+    """Return True when ``index`` lies in the nearest open ``enum { ... }``."""
+
+    depth = 0
+    opening = None
+    for position in range(index - 1, -1, -1):
+        char = masked_source[position]
+        if char == "}":
+            depth += 1
+        elif char == "{":
+            if depth:
+                depth -= 1
+            else:
+                opening = position
+                break
+    if opening is None:
+        return False
+    boundary = max(
+        masked_source.rfind(";", 0, opening),
+        masked_source.rfind("}", 0, opening),
+        masked_source.rfind("{", 0, opening),
+    )
+    prefix = masked_source[boundary + 1 : opening]
+    return bool(re.search(r"\benum\b(?:\s+[A-Za-z_][A-Za-z0-9_]*)?\s*$", prefix))
+
+
+def _inside_c_struct_or_union_body(masked_source: str, index: int) -> bool:
+    """Return True when ``index`` is inside the nearest struct/union body."""
+
+    depth = 0
+    opening = None
+    for position in range(index - 1, -1, -1):
+        char = masked_source[position]
+        if char == "}":
+            depth += 1
+        elif char == "{":
+            if depth:
+                depth -= 1
+            else:
+                opening = position
+                break
+    if opening is None:
+        return False
+    boundary = max(
+        masked_source.rfind(";", 0, opening),
+        masked_source.rfind("}", 0, opening),
+        masked_source.rfind("{", 0, opening),
+    )
+    prefix = masked_source[boundary + 1 : opening]
+    return bool(re.search(r"\b(?:struct|union)\b(?:\s+[A-Za-z_][A-Za-z0-9_]*)?\s*$", prefix))
+
+
+def _enclosing_c_struct_or_union_body(
+    masked_source: str,
+    index: int,
+) -> tuple[int, int] | None:
+    """Return the containing struct/union body span for ``index``.
+
+    This identity lets stale-line recovery distinguish a cohesive group of
+    repeated field capacities from unrelated equal literals elsewhere in a
+    translation unit.
+    """
+    depth = 0
+    opening = None
+    for position in range(index - 1, -1, -1):
+        char = masked_source[position]
+        if char == "}":
+            depth += 1
+        elif char == "{":
+            if depth:
+                depth -= 1
+            else:
+                opening = position
+                break
+    if opening is None:
+        return None
+
+    boundary = max(
+        masked_source.rfind(";", 0, opening),
+        masked_source.rfind("}", 0, opening),
+        masked_source.rfind("{", 0, opening),
+    )
+    prefix = masked_source[boundary + 1 : opening]
+    if not re.search(r"\b(?:struct|union)\b(?:\s+[A-Za-z_][A-Za-z0-9_]*)?\s*$", prefix):
+        return None
+
+    depth = 0
+    for position in range(opening, len(masked_source)):
+        char = masked_source[position]
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return opening, position
+    return None
+
+
+def _cohesive_array_extent_group(
+    source_code: str,
+    spans: Sequence[tuple[int, int]],
+) -> tuple[bool, dict[str, Any]]:
+    """Prove that repeated array extents are one safe header-level group."""
+    if len(spans) < 2:
+        return False, {}
+    masked = _mask_c_non_code(source_code)
+    containers: set[tuple[int, int]] = set()
+    lines: list[int] = []
+    for start, end in spans:
+        if _c_numeric_context(source_code, masked, start, end) != "C_ARRAY_EXTENT":
+            return False, {}
+        container = _enclosing_c_struct_or_union_body(masked, start)
+        if container is None:
+            return False, {}
+        containers.add(container)
+        lines.append(_line_for_c_index(source_code, start))
+    if len(containers) != 1:
+        return False, {}
+    return True, {
+        "candidate_count": len(spans),
+        "container_kind": "struct_or_union",
+        "source_lines": lines,
+    }
+
+
+def _symbolic_numeric_context_for_literal(
+    source_code: str,
+    literal_value: Any,
+    source_line: Optional[int],
+) -> str:
+    """Detect enum/macro numeric values that are already named symbols."""
+
+    if isinstance(literal_value, bool) or not isinstance(literal_value, (int, float)):
+        return ""
+    literal_text = _to_c_literal(literal_value)
+    magnitude = literal_text[1:] if literal_text[:1] in {"+", "-"} else literal_text
+    sign = literal_text[:1] if literal_text[:1] in {"+", "-"} else ""
+    masked = _mask_c_non_code(source_code)
+    contexts: list[str] = []
+    for match in _C_NUMERIC_TOKEN_RE.finditer(masked):
+        start, end = match.span()
+        if source_code[start:end] != magnitude:
+            continue
+        if sign:
+            sign_index = start - 1
+            while sign_index >= 0 and masked[sign_index].isspace():
+                sign_index -= 1
+            if sign_index < 0 or masked[sign_index] != sign:
+                continue
+            start = sign_index
+        if source_line is not None and _line_for_c_index(source_code, start) != source_line:
+            continue
+        directive = _c_preprocessor_directive_for_index(source_code, start)
+        if directive and re.match(r"\s*#\s*define\b", directive):
+            contexts.append("ALREADY_SYMBOLIC_MACRO_VALUE")
+            continue
+        if _inside_c_enum_body(masked, start):
+            contexts.append("ALREADY_SYMBOLIC_ENUM_VALUE")
+    if not contexts:
+        return ""
+    return contexts[0] if len(set(contexts)) == 1 else "ALREADY_SYMBOLIC_C_CONSTANT"
+
+
 def _c_numeric_context(
     source_code: str,
     masked_source: str,
     start: int,
     end: int,
 ) -> str:
-    """Classify a numeric token before it is eligible for substitution."""
+    """Classify one C numeric token for safe Introduce Constant handling."""
 
     line_start = masked_source.rfind("\n", 0, start) + 1
     line_end = masked_source.find("\n", end)
@@ -214,31 +431,31 @@ def _c_numeric_context(
     line_prefix = masked_source[line_start:start]
     line_suffix = masked_source[end:line_end]
 
-    # Preprocessor directives are a separate language and are intentionally
-    # excluded from this transformation.  This prevents replacements in macro
-    # definitions and continued macro lines.
-    if masked_source[line_start:line_end].lstrip().startswith("#"):
+    directive = _c_preprocessor_directive_for_index(source_code, start)
+    if directive:
+        if re.match(r"\s*#\s*define\b", directive):
+            return "ALREADY_SYMBOLIC_MACRO_VALUE"
         return "TARGET_CONTEXT_UNSUPPORTED"
 
-    # Case labels and enum values affect integral-language constructs rather
-    # than ordinary runtime expressions.  Leave them for a dedicated,
-    # compiler-validated refactoring if one is added later.
-    if re.search(r"(?:^|[;{}])\s*case\b", line_prefix) and re.search(
-        r":", line_suffix
-    ):
-        return "TARGET_CONTEXT_UNSUPPORTED"
-    last_open = masked_source.rfind("{", 0, start)
-    last_close = masked_source.rfind("}", 0, start)
-    enum_start = masked_source.rfind("enum", 0, start)
-    if enum_start > last_close and enum_start < last_open:
+    # Enum members already have semantic names.  Introducing another macro for
+    # the numeric initializer adds indirection without reducing a magic-number
+    # smell, so report the plan target as already satisfied.
+    if _inside_c_enum_body(masked_source, start):
         return "TARGET_CONTEXT_UNSUPPORTED"
 
-    # Function parameter bounds, local/struct arrays, typedefs, and other
-    # declaration-only type forms are deliberately out of scope.  Replacing
-    # them changes the textual signature and can confuse downstream tools even
-    # when a macro has an equivalent value.
+    # Case labels are part of C control-flow syntax and need a dedicated
+    # refactoring if a project wants named case constants.
+    if re.search(r"(?:^|[;{}])\s*case\b", line_prefix) and re.search(r":", line_suffix):
+        return "TARGET_CONTEXT_UNSUPPORTED"
+
+    # A fixed-size array declaration is a constant-expression context and can
+    # safely use a macro with the exact same numeric value.  This is especially
+    # useful in headers such as ``char version_number[32]``.  Runtime indexing
+    # expressions remain out of scope.
     if _inside_square_brackets(masked_source, start):
         if _is_c_type_or_signature_context(masked_source, start):
+            if _inside_c_struct_or_union_body(masked_source, start):
+                return "C_ARRAY_EXTENT"
             return "TARGET_IN_C_TYPE_OR_SIGNATURE_CONTEXT"
         return "TARGET_CONTEXT_UNSUPPORTED"
 
@@ -248,6 +465,9 @@ def _c_numeric_context(
     following = end
     while following < line_end and masked_source[following].isspace():
         following += 1
+
+    # Bit-field widths and similar declaration-only contexts are not rewritten
+    # without a full type-layout validator.
     if previous >= line_start and masked_source[previous] == ":":
         if _is_c_type_or_signature_context(masked_source, start):
             return "TARGET_IN_C_TYPE_OR_SIGNATURE_CONTEXT"
@@ -257,9 +477,7 @@ def _c_numeric_context(
             return "TARGET_IN_C_TYPE_OR_SIGNATURE_CONTEXT"
         return "TARGET_CONTEXT_UNSUPPORTED"
 
-    # A standalone token in executable C code is the only accepted context.
-    return ""
-
+    return "C_NUMERIC_EXPRESSION"
 
 def _ignored_c_context_for_literal(
     source_code: str,
@@ -368,7 +586,7 @@ def _find_c_numeric_literals(
     literal_value: Any,
     source_line: Optional[int] = None,
 ) -> tuple[list[tuple[int, int]], str]:
-    """Return safe numeric token spans and a conservative rejection reason."""
+    """Return safe numeric-token spans and a precise rejection reason."""
 
     if isinstance(literal_value, bool) or not isinstance(literal_value, (int, float)):
         return [], "TARGET_NOT_C_NUMERIC_LITERAL"
@@ -402,7 +620,7 @@ def _find_c_numeric_literals(
         if source_line is not None and line != source_line:
             continue
         context = _c_numeric_context(source_code, masked, start, end)
-        if context:
+        if context not in {"C_NUMERIC_EXPRESSION", "C_ARRAY_EXTENT"}:
             rejection_reason = rejection_reason or context
             continue
         spans.append((start, end))
@@ -420,12 +638,34 @@ def analyze_extract_constant_target(
 ) -> dict[str, Any]:
     """Expose safe C literal classification for engine/report diagnostics."""
 
-    spans, reason = _find_c_numeric_literals(source_code, literal_value, source_line)
+    normalized = normalize_planned_numeric_literal(literal_value)
+    spans, reason = _find_c_numeric_literals(source_code, normalized, source_line)
+    contexts: list[str] = []
+    if spans:
+        masked = _mask_c_non_code(source_code)
+        contexts = [
+            _c_numeric_context(source_code, masked, start, end)
+            for start, end in spans
+        ]
     return {
         "eligible": bool(spans),
         "candidate_count": len(spans),
-        "reason": reason if not spans else "C_NUMERIC_EXPRESSION",
+        "reason": reason if not spans else (contexts[0] if len(set(contexts)) == 1 else "C_NUMERIC_EXPRESSION"),
+        "contexts": contexts,
+        "source_line": source_line,
+        "literal_value": normalized,
     }
+
+
+def _replace_numeric_spans(
+    source_code: str,
+    spans: Sequence[tuple[int, int]],
+    constant_name: str,
+) -> tuple[str, int]:
+    transformed = source_code
+    for start, end in sorted(spans, reverse=True):
+        transformed = transformed[:start] + constant_name + transformed[end:]
+    return transformed, len(spans)
 
 
 def _replace_literal(
@@ -438,10 +678,7 @@ def _replace_literal(
         spans, _ = _find_c_numeric_literals(source_code, literal_value, source_line)
         if not spans:
             return source_code, 0
-        # Apply from right to left so token offsets remain stable.
-        for start, end in reversed(spans):
-            source_code = source_code[:start] + constant_name + source_code[end:]
-        return source_code, len(spans)
+        return _replace_numeric_spans(source_code, spans, constant_name)
 
     pattern = _literal_pattern(literal_value)
     lines = source_code.splitlines(keepends=True)
@@ -460,22 +697,402 @@ def _replace_literal(
     return "".join(lines), replacements
 
 
+def _header_guard_insert_position(source_code: str) -> int | None:
+    """Return a safe insertion point immediately inside a classic header guard."""
+
+    lines = source_code.splitlines(keepends=True)
+    offset = 0
+    significant: list[tuple[int, int, str]] = []
+    in_block_comment = False
+    for i, raw in enumerate(lines):
+        stripped = raw.strip()
+        if in_block_comment:
+            if "*/" in stripped:
+                in_block_comment = False
+            offset += len(raw)
+            continue
+        if stripped.startswith("/*"):
+            if "*/" not in stripped:
+                in_block_comment = True
+            offset += len(raw)
+            continue
+        if not stripped or stripped.startswith("//"):
+            offset += len(raw)
+            continue
+        significant.append((i, offset, stripped))
+        offset += len(raw)
+        if len(significant) >= 3:
+            break
+
+    if len(significant) < 2:
+        return None
+    first_i, first_offset, first = significant[0]
+    second_i, second_offset, second = significant[1]
+    m_ifndef = re.fullmatch(r"#\s*ifndef\s+([A-Za-z_][A-Za-z0-9_]*)", first)
+    if not m_ifndef:
+        return None
+    guard = m_ifndef.group(1)
+    if not re.fullmatch(rf"#\s*define\s+{re.escape(guard)}(?:\s+.*)?", second):
+        return None
+    return second_offset + len(lines[second_i])
+
+
+def _leading_comment_insert_position(source_code: str) -> int:
+    """Return a position after leading license/comments and blank lines."""
+
+    lines = source_code.splitlines(keepends=True)
+    offset = 0
+    in_block_comment = False
+    for raw in lines:
+        stripped = raw.strip()
+        if in_block_comment:
+            offset += len(raw)
+            if "*/" in stripped:
+                in_block_comment = False
+            continue
+        if not stripped:
+            offset += len(raw)
+            continue
+        if stripped.startswith("//"):
+            offset += len(raw)
+            continue
+        if stripped.startswith("/*"):
+            offset += len(raw)
+            if "*/" not in stripped:
+                in_block_comment = True
+            continue
+        break
+    return offset
+
+
 def _insert_define(source_code: str, constant_name: str, literal_value: Any) -> str:
     if constant_name in _existing_define_names(source_code):
         return source_code
 
     define_line = f"#define {constant_name} {_to_c_literal(literal_value)}\n"
-    match = _INCLUDE_RE.search(source_code)
-    if match:
-        insert_at = match.end()
-        tail = source_code[insert_at:]
-        next_line = tail.find("\n")
-        if next_line >= 0:
-            insert_at += next_line + 1
-        return source_code[:insert_at] + define_line + source_code[insert_at:]
 
-    return define_line + "\n" + source_code.lstrip()
+    # In a guarded header, keep the constant inside the guard.  This avoids
+    # leaking implementation macros into translation units that intentionally
+    # bypass the header body on repeated inclusion.
+    guard_position = _header_guard_insert_position(source_code)
+    if guard_position is not None:
+        return source_code[:guard_position] + "\n" + define_line + source_code[guard_position:]
 
+    # For ordinary C files, inserting after the final #include is unsafe when
+    # the final include belongs to a platform-only conditional block.  Put the
+    # define after leading license/comments but before includes/conditionals;
+    # a macro declaration has no dependency on included headers and is visible
+    # to every later preprocessor branch.
+    insert_at = _leading_comment_insert_position(source_code)
+    return source_code[:insert_at] + define_line + "\n" + source_code[insert_at:]
+
+def _c_line_bounds_for_index(source_code: str, index: int) -> tuple[int, int]:
+    start = source_code.rfind("\n", 0, max(0, index)) + 1
+    end = source_code.find("\n", max(0, index))
+    if end < 0:
+        end = len(source_code)
+    return start, end
+
+
+def _c_target_line_fingerprint(
+    source_code: str,
+    span: tuple[int, int],
+) -> str:
+    """Build a stable one-line fingerprint for a numeric target.
+
+    Only the selected numeric token is replaced with ``<TARGET>``.  Identifiers
+    such as struct-field names are retained, so two equal array extents in
+    ``pre_release[48]`` and ``build_metadata[48]`` remain distinguishable after
+    earlier actions shift line numbers.
+    """
+
+    start, end = span
+    line_start, line_end = _c_line_bounds_for_index(source_code, start)
+    relative_start = start - line_start
+    relative_end = end - line_start
+    line = source_code[line_start:line_end]
+    fingerprint = line[:relative_start] + "<TARGET>" + line[relative_end:]
+    fingerprint = re.sub(r"\s+", " ", fingerprint).strip()
+    return fingerprint
+
+
+def _resolve_c_literal_from_reference(
+    current_source: str,
+    reference_source: str,
+    literal_value: Any,
+    source_line: Optional[int],
+) -> tuple[list[tuple[int, int]], str, dict[str, Any]]:
+    """Resolve a planned literal against the original source then current AST text."""
+
+    evidence: dict[str, Any] = {}
+    if source_line is None or reference_source == current_source:
+        return [], "", evidence
+
+    reference_spans, reference_reason = _find_c_numeric_literals(
+        reference_source, literal_value, source_line
+    )
+    evidence["reference_reason"] = reference_reason
+    evidence["reference_candidate_count"] = len(reference_spans)
+    if len(reference_spans) != 1:
+        return [], "", evidence
+
+    reference_fingerprint = _c_target_line_fingerprint(
+        reference_source, reference_spans[0]
+    )
+    evidence["reference_line_fingerprint"] = reference_fingerprint
+    current_spans, _ = _find_c_numeric_literals(current_source, literal_value, None)
+    fingerprint_matches = [
+        span
+        for span in current_spans
+        if _c_target_line_fingerprint(current_source, span) == reference_fingerprint
+    ]
+    evidence["current_candidate_count"] = len(current_spans)
+    evidence["fingerprint_match_count"] = len(fingerprint_matches)
+    if len(fingerprint_matches) == 1:
+        return fingerprint_matches, "reference_line_fingerprint", evidence
+    if len(fingerprint_matches) > 1:
+        return [], "reference_line_fingerprint_ambiguous", evidence
+    return [], "", evidence
+
+
+def apply_introduce_constant(
+    source_code: str,
+    literal_value: Any,
+    constant_name: Optional[str] = None,
+    source_line: Optional[int] = None,
+    *,
+    reference_source_code: Optional[str] = None,
+) -> tuple[str, int, dict[str, Any]]:
+    """Safely introduce a C macro for one planned numeric literal.
+
+    The resolver is line-aware, string/comment aware, header-guard aware and
+    supports fixed array extents in declarations.  Enum values and existing
+    macro values are classified as already symbolic instead of being rewritten.
+    If an RDP line is stale, SCTVA recovers only when exactly one safe matching
+    literal exists in the current source; otherwise it asks for review rather
+    than changing the wrong token.
+    """
+
+    planned_literal = literal_value
+    literal_value = normalize_planned_numeric_literal(literal_value)
+    normalized_name = _normalize_constant_name(constant_name, literal_value)
+    preferred_name = _unique_constant_name(source_code, normalized_name)
+    reference = reference_source_code if reference_source_code is not None else source_code
+
+    metadata: dict[str, Any] = {
+        "language": "c",
+        "refactoring": "Introduce Constant",
+        "target_literal": literal_value,
+        "requested_source_line": source_line,
+        "constant_name": preferred_name,
+    }
+    if literal_value != planned_literal:
+        metadata["literal_value_normalization"] = {
+            "original": planned_literal,
+            "normalized": literal_value,
+            "strategy": "planner_decimal_string",
+        }
+
+    if isinstance(literal_value, bool) or not isinstance(literal_value, (int, float)):
+        metadata.update({
+            "status": "not_applicable",
+            "reason": "TARGET_NOT_C_NUMERIC_LITERAL",
+            "final_status": "NOT_APPLICABLE",
+            "final_decision": "NOT_APPLICABLE",
+            "target_context": "NON_NUMERIC_PLANNER_VALUE",
+        })
+        return source_code, 0, metadata
+
+    selected_spans: list[tuple[int, int]] = []
+    resolution = "current_source_line" if source_line is not None else "current_numeric_literal_scan"
+    reference_resolution: dict[str, Any] = {}
+
+    if reference_source_code is not None:
+        selected_spans, reference_strategy, reference_resolution = (
+            _resolve_c_literal_from_reference(
+                source_code,
+                reference,
+                literal_value,
+                source_line,
+            )
+        )
+        if reference_strategy == "reference_line_fingerprint_ambiguous":
+            metadata.update({
+                "status": "review_required",
+                "reason": "C_LITERAL_TARGET_AMBIGUOUS",
+                "final_status": "REVIEW_REQUIRED",
+                "final_decision": "REVIEW_REQUIRED",
+                "target_resolution": reference_strategy,
+                "reference_resolution": reference_resolution,
+            })
+            return source_code, 0, metadata
+        if selected_spans:
+            resolution = reference_strategy
+
+    exact_spans: list[tuple[int, int]] = []
+    exact_reason = ""
+    if not selected_spans:
+        exact_spans, exact_reason = _find_c_numeric_literals(
+            source_code, literal_value, source_line
+        )
+        selected_spans = exact_spans
+
+    # Only classify an enum/macro target as already handled when there is no
+    # eligible runtime/struct-array literal at the requested scope.  Prefer the
+    # original source for this classification when line numbers have drifted.
+    if not selected_spans:
+        symbolic_source = reference if reference_source_code is not None else source_code
+        symbolic_reason = _symbolic_numeric_context_for_literal(
+            symbolic_source, literal_value, source_line
+        )
+        if symbolic_reason:
+            metadata.update({
+                "status": "already_handled",
+                "reason": symbolic_reason,
+                "final_status": "ALREADY_HANDLED",
+                "final_decision": "ALREADY_HANDLED",
+                "target_context": symbolic_reason,
+                "target_resolution": "reference_source_line" if reference_source_code is not None else ("requested_source_line" if source_line is not None else "current_numeric_literal_scan"),
+                "reference_resolution": reference_resolution,
+            })
+            return source_code, 0, metadata
+
+    if not selected_spans and source_line is not None:
+        # If the line targets an already named enum/macro or a literal embedded
+        # in non-code text, do not jump to a different occurrence elsewhere.
+        if exact_reason in {
+            "ALREADY_SYMBOLIC_ENUM_VALUE",
+            "ALREADY_SYMBOLIC_MACRO_VALUE",
+        }:
+            metadata.update({
+                "status": "already_handled",
+                "reason": exact_reason,
+                "final_status": "ALREADY_HANDLED",
+                "final_decision": "ALREADY_HANDLED",
+                "target_context": exact_reason,
+                "target_resolution": "requested_source_line",
+            })
+            return source_code, 0, metadata
+        if exact_reason in {
+            "TARGET_IN_STRING_LITERAL",
+            "TARGET_IN_CHAR_LITERAL",
+            "TARGET_IN_COMMENT",
+            "TARGET_IN_C_TYPE_OR_SIGNATURE_CONTEXT",
+            "TARGET_CONTEXT_UNSUPPORTED",
+        }:
+            metadata.update({
+                "status": "not_applicable",
+                "reason": exact_reason,
+                "final_status": "NOT_APPLICABLE",
+                "final_decision": "NOT_APPLICABLE",
+                "target_context": exact_reason,
+                "target_resolution": "requested_source_line",
+            })
+            return source_code, 0, metadata
+
+        # Stale RDP line recovery is safe only for one unique eligible token.
+        all_spans, all_reason = _find_c_numeric_literals(source_code, literal_value, None)
+        if len(all_spans) == 1:
+            selected_spans = all_spans
+            resolution = "stale_line_unique_candidate"
+        elif len(all_spans) > 1:
+            cohesive_group, group_evidence = _cohesive_array_extent_group(
+                source_code, all_spans
+            )
+            if cohesive_group:
+                selected_spans = all_spans
+                resolution = "stale_line_cohesive_array_extent_group"
+                reference_resolution["cohesive_group"] = group_evidence
+            else:
+                metadata.update({
+                    "status": "review_required",
+                    "reason": "C_LITERAL_TARGET_AMBIGUOUS",
+                    "final_status": "REVIEW_REQUIRED",
+                    "final_decision": "REVIEW_REQUIRED",
+                    "candidate_count": len(all_spans),
+                    "target_resolution": "stale_line_ambiguous",
+                })
+                return source_code, 0, metadata
+        else:
+            # The planner line can be stale after a long license/header
+            # preamble.  If no executable candidate exists anywhere and the
+            # only matching numeric value is already named by an enum/macro,
+            # preserve that semantic classification instead of reporting the
+            # unrelated stale-line context as not applicable.
+            symbolic_anywhere = _symbolic_numeric_context_for_literal(
+                symbolic_source, literal_value, None
+            )
+            final_reason = (
+                symbolic_anywhere
+                or all_reason
+                or exact_reason
+                or "TARGET_NOT_C_NUMERIC_LITERAL"
+            )
+            status = "already_handled" if final_reason in {
+                "ALREADY_SYMBOLIC_ENUM_VALUE",
+                "ALREADY_SYMBOLIC_MACRO_VALUE",
+            } else "not_applicable"
+            final = "ALREADY_HANDLED" if status == "already_handled" else "NOT_APPLICABLE"
+            metadata.update({
+                "status": status,
+                "reason": final_reason,
+                "final_status": final,
+                "final_decision": final,
+                "target_context": final_reason,
+                "target_resolution": "stale_line_no_safe_candidate",
+            })
+            return source_code, 0, metadata
+
+    if not selected_spans:
+        reason = exact_reason or "TARGET_NOT_C_NUMERIC_LITERAL"
+        status = "already_handled" if reason in {
+            "ALREADY_SYMBOLIC_ENUM_VALUE",
+            "ALREADY_SYMBOLIC_MACRO_VALUE",
+        } else "not_applicable"
+        final = "ALREADY_HANDLED" if status == "already_handled" else "NOT_APPLICABLE"
+        metadata.update({
+            "status": status,
+            "reason": reason,
+            "final_status": final,
+            "final_decision": final,
+            "target_context": reason,
+            "target_resolution": resolution,
+        })
+        return source_code, 0, metadata
+
+    # Re-classify the selected spans before editing so the report records
+    # whether this was an executable expression or a header array extent.
+    masked = _mask_c_non_code(source_code)
+    contexts = [
+        _c_numeric_context(source_code, masked, start, end)
+        for start, end in selected_spans
+    ]
+    transformed, replacements = _replace_numeric_spans(
+        source_code, selected_spans, preferred_name
+    )
+    transformed = _insert_define(transformed, preferred_name, literal_value)
+
+    # Ensure the plan's original source really referenced the same literal when
+    # it is available.  This catches accidental handoff corruption while still
+    # allowing line drift caused by earlier accepted actions in this file.
+    reference_analysis = analyze_extract_constant_target(
+        reference, literal_value, source_line
+    )
+    metadata.update({
+        "status": "success",
+        "reason": "introduce_constant_applied",
+        "final_status": "PASS",
+        "final_decision": "ACCEPT",
+        "target_context": contexts[0] if len(set(contexts)) == 1 else "MIXED_SAFE_C_NUMERIC_CONTEXT",
+        "target_contexts": contexts,
+        "target_resolution": resolution,
+        "eligible_occurrences_before": len(selected_spans),
+        "eligible_occurrences_after": 0,
+        "reference_target": reference_analysis,
+        "reference_resolution": reference_resolution,
+        "reused_existing_constant": False,
+    })
+    return transformed, replacements, metadata
 
 def _insert_static_string_constant(
     source_code: str,
@@ -581,6 +1198,19 @@ def apply_extract_constant(
     constant_name: Optional[str] = None,
     source_line: Optional[int] = None,
 ) -> Tuple[str, int]:
+    """Backward-compatible Extract/Introduce Constant wrapper for C."""
+
+    if isinstance(normalize_planned_numeric_literal(literal_value), (int, float)) and not isinstance(
+        normalize_planned_numeric_literal(literal_value), bool
+    ):
+        transformed, replacements, _ = apply_introduce_constant(
+            source_code,
+            literal_value,
+            constant_name,
+            source_line,
+        )
+        return transformed, replacements
+
     normalized_name = _normalize_constant_name(constant_name, literal_value)
     preferred_name = _unique_constant_name(source_code, normalized_name)
     transformed, replacements = _replace_literal(
@@ -589,27 +1219,9 @@ def apply_extract_constant(
         preferred_name,
         source_line,
     )
-    if replacements == 0 and source_line is not None:
-        # Do not fall back to another occurrence when the requested line
-        # contains an unsafe character/string/comment/context target.  The
-        # legacy fallback is retained only when the line simply missed the
-        # literal entirely.
-        context = analyze_extract_constant_target(
-            source_code,
-            literal_value,
-            source_line,
-        )
-        if context["reason"] == "TARGET_NOT_C_NUMERIC_LITERAL":
-            transformed, replacements = _replace_literal(
-                source_code,
-                literal_value,
-                preferred_name,
-                None,
-            )
     if replacements > 0:
         transformed = _insert_define(transformed, preferred_name, literal_value)
     return transformed, replacements
-
 
 def apply_replace_literal(
     source_code: str,
@@ -2217,10 +2829,15 @@ def _mask_c_comments_and_strings(source_code: str) -> str:
 
 
 def _c_global_declaration_match(source_code: str, variable_name: str) -> tuple[re.Match[str] | None, str]:
-    """Find one deliberately small scalar C global declaration."""
+    """Find one deliberately small scalar C global declaration.
+
+    Matching is performed on a same-length string/comment-masked source so
+    embedded JavaScript/HTML identifiers can never be mistaken for C globals.
+    """
 
     if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", variable_name or ""):
         return None, "INVALID_VARIABLE_NAME"
+    masked_source = _mask_c_comments_and_strings(source_code)
     type_part = (
         r"(?:(?:const|volatile|unsigned|signed|short|long)\s+)*"
         r"(?:char|int|float|double|_Bool|size_t)"
@@ -2231,11 +2848,11 @@ def _c_global_declaration_match(source_code: str, variable_name: str) -> tuple[r
         rf"(?P<type>{type_part})\s+{re.escape(variable_name)}"
         rf"(?P<array>\s*\[[^\]\n]*\])?\s*(?P<initializer>=\s*[^;\n{{}}]+)?\s*;"
     )
-    matches = list(declaration.finditer(source_code))
+    matches = list(declaration.finditer(masked_source))
     if len(matches) != 1:
         array_declaration = re.search(
             rf"(?m)^\s*(?:static\s+|extern\s+)?[^;\n]*\b{re.escape(variable_name)}\s*\[",
-            source_code,
+            masked_source,
         )
         if array_declaration:
             return None, "GLOBAL_ARRAY_UNSUPPORTED"
@@ -2249,6 +2866,90 @@ def _c_global_declaration_match(source_code: str, variable_name: str) -> tuple[r
         return None, "GLOBAL_ARRAY_UNSUPPORTED"
     return match, ""
 
+
+def _split_c_global_initializer_and_siblings(initializer: str) -> tuple[str, str]:
+    """Separate the target initializer from later declarators on its line.
+
+    ``int primary = 1, secondary = 2;`` is one C declaration, but only
+    ``primary`` becomes private during Encapsulate Variable.  Leaving the
+    entire declaration attached to ``static`` would also change
+    ``secondary``'s linkage, while comparing the whole initializer later
+    would mistake an approved Introduce Constant for a changed value.
+
+    The enclosing declaration matcher intentionally only accepts simple
+    single-line scalar declarations.  Within that boundary, a small
+    delimiter-aware split is sufficient: commas inside calls, casts, or array
+    expressions remain part of the target initializer; only a top-level comma
+    starts the untouched sibling declarators.
+    """
+
+    text = str(initializer or "").strip()
+    if not text.startswith("="):
+        return text, ""
+
+    expression = text[1:].strip()
+    paren_depth = 0
+    bracket_depth = 0
+    for index, char in enumerate(expression):
+        if char == "(":
+            paren_depth += 1
+        elif char == ")" and paren_depth:
+            paren_depth -= 1
+        elif char == "[":
+            bracket_depth += 1
+        elif char == "]" and bracket_depth:
+            bracket_depth -= 1
+        elif char == "," and paren_depth == 0 and bracket_depth == 0:
+            target_initializer = expression[:index].strip()
+            sibling_declarators = expression[index + 1:].strip()
+            if target_initializer and sibling_declarators:
+                return f"= {target_initializer}", sibling_declarators
+            break
+    return text, ""
+
+
+def analyze_c_global_variable_target(source_code: str, variable_name: str) -> dict[str, Any]:
+    """Classify an RDP/CUQA C Global Variable target before transformation."""
+
+    variable_name = str(variable_name or "").strip()
+    declaration, reason = _c_global_declaration_match(source_code, variable_name)
+    if declaration is not None:
+        return {
+            "eligible": True,
+            "status": "eligible",
+            "reason": "C_GLOBAL_VARIABLE_RESOLVED",
+            "variable_name": variable_name,
+            "source_line": _line_for_c_index(source_code, declaration.start()),
+        }
+
+    masked = _mask_c_comments_and_strings(source_code)
+    code_occurrences = list(re.finditer(rf"\b{re.escape(variable_name)}\b", masked)) if variable_name else []
+    raw_occurrences = list(re.finditer(rf"\b{re.escape(variable_name)}\b", source_code)) if variable_name else []
+
+    if reason == "GLOBAL_DECLARATION_NOT_FOUND_OR_AMBIGUOUS":
+        if raw_occurrences and not code_occurrences:
+            return {
+                "eligible": False,
+                "status": "not_applicable",
+                "reason": "TARGET_ONLY_IN_C_STRING_OR_COMMENT",
+                "variable_name": variable_name,
+            }
+        if not raw_occurrences:
+            return {
+                "eligible": False,
+                "status": "not_applicable",
+                "reason": "TARGET_NOT_FOUND_IN_C_SOURCE",
+                "variable_name": variable_name,
+            }
+
+    return {
+        "eligible": False,
+        "status": "review_required",
+        "reason": reason or "GLOBAL_DECLARATION_NOT_FOUND_OR_AMBIGUOUS",
+        "variable_name": variable_name,
+        "code_occurrence_count": len(code_occurrences),
+        "raw_occurrence_count": len(raw_occurrences),
+    }
 
 def _c_function_body_ranges(masked_code: str) -> list[tuple[int, int]]:
     """Return balanced brace ranges; global references must be inside one."""
@@ -2433,6 +3134,14 @@ def apply_encapsulate_c_variable(
             "variable_name": variable_name,
         }
 
+    target_analysis = analyze_c_global_variable_target(source_code, variable_name)
+    if target_analysis.get("status") == "not_applicable":
+        return source_code, 0, {
+            "status": "not_applicable",
+            "reason": target_analysis.get("reason"),
+            "variable_name": variable_name,
+            "target_analysis": target_analysis,
+        }
     declaration, declaration_error = _c_global_declaration_match(source_code, variable_name)
     if declaration is None:
         return review(declaration_error)
@@ -2466,7 +3175,9 @@ def apply_encapsulate_c_variable(
     if not edits:
         return review("NO_GLOBAL_ACCESS_FOUND")
 
-    initializer = str(declaration.group("initializer") or "").strip()
+    initializer, sibling_declarators = _split_c_global_initializer_and_siblings(
+        str(declaration.group("initializer") or "")
+    )
     static_declaration = (
         f"{declaration.group('indent') or ''}static {type_name} {variable_name}"
         f" {initializer}".rstrip()
@@ -2484,6 +3195,13 @@ def apply_encapsulate_c_variable(
             f"\nvoid {setter_name}({type_name} value) {{\n"
             f"    {variable_name} = value;\n"
             f"}}\n"
+        )
+    if sibling_declarators:
+        # Preserve later declarators with their original linkage.  Only the
+        # requested global becomes ``static`` as part of encapsulation.
+        accessor += (
+            f"\n{declaration.group('indent') or ''}{type_name} "
+            f"{sibling_declarators};\n"
         )
     edits.extend([
         (declaration.start(), declaration.end(), static_declaration + accessor),
@@ -2669,6 +3387,12 @@ def validate_c_encapsulated_variable(
         direct_accesses.append(match.start())
     getter_exists = _c_accessor_span(transformed_masked, getter_name) is not None
     setter_exists = _c_accessor_span(transformed_masked, setter_name) is not None
+    original_initializer, _ = _split_c_global_initializer_and_siblings(
+        str(before.group("initializer") or "")
+    )
+    transformed_initializer, _ = _split_c_global_initializer_and_siblings(
+        str(after.group("initializer") or "")
+    )
     checks = {
         "target_global_existed_before": True,
         "global_is_static_after": bool(str(after.group("storage") or "").strip() == "static"),
@@ -2681,8 +3405,8 @@ def validate_c_encapsulated_variable(
         "no_duplicate_global_declaration": True,
         "original_type_preserved": original_type == transformed_type,
         "original_initializer_preserved": _c_initializer_semantically_equal(
-            str(before.group("initializer") or ""),
-            str(after.group("initializer") or ""),
+            original_initializer,
+            transformed_initializer,
             transformed_code,
         ),
     }

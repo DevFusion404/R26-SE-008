@@ -23,7 +23,13 @@ _STATIC_FINAL_RE = re.compile(
 
 def _to_java_literal(value: Any) -> str:
     if isinstance(value, str):
-        escaped = value.replace('"', '\\"')
+        escaped = (
+            value.replace("\\", "\\\\")
+            .replace('"', '\\"')
+            .replace("\r", "\\r")
+            .replace("\n", "\\n")
+            .replace("\t", "\\t")
+        )
         return f'"{escaped}"'
     if isinstance(value, bool):
         return "true" if value else "false"
@@ -470,6 +476,77 @@ def _numeric_string_occurrences(
     return matches
 
 
+def _extract_complete_java_string_literal(
+    source_code: str,
+    reference_source_code: str,
+    literal_value: Any,
+    constant_name: Optional[str],
+    source_line: Optional[int],
+) -> Tuple[str, int, dict[str, Any]]:
+    """Extract one RDP-targeted Java string token without changing its output.
+
+    Upstream Magic Number detectors sometimes report values contained in static
+    HTML/CSS fragments.  Replacing only those digits with an integer constant
+    produces brittle presentation code.  When the plan points to exactly one
+    complete Java string token, extracting that entire token as a ``String``
+    constant is behaviorally equivalent and keeps the refactoring local.
+    """
+
+    metadata: dict[str, Any] = {
+        "target_context": "STRING_LITERAL",
+        "string_literal_strategy": "extract_complete_java_string_literal",
+    }
+    if source_line is None or not isinstance(literal_value, (int, float)) or isinstance(literal_value, bool):
+        return source_code, 0, metadata
+
+    literal_text = str(literal_value)
+    number_pattern = re.compile(
+        rf"(?<![A-Za-z0-9_.]){re.escape(literal_text)}(?![A-Za-z0-9_.])"
+    )
+    reference_candidates = [
+        value
+        for value, line_no, _start, _end in _iter_java_string_literals(reference_source_code)
+        if line_no == source_line and number_pattern.search(value)
+    ]
+    if len(reference_candidates) != 1:
+        metadata["string_target_resolution"] = (
+            "ambiguous" if reference_candidates else "not_found"
+        )
+        return source_code, 0, metadata
+
+    target_value = reference_candidates[0]
+    current_candidates = []
+    for value, _line_no, start, end in _iter_java_string_literals(source_code):
+        line_start = source_code.rfind("\n", 0, start) + 1
+        line_end = source_code.find("\n", start)
+        raw_line = source_code[line_start:line_end if line_end >= 0 else len(source_code)]
+        if value == target_value and "static final" not in raw_line:
+            current_candidates.append((start, end))
+    if not current_candidates:
+        metadata.update({
+            "string_target_resolution": "already_replaced",
+            "reason": "TARGET_ALREADY_REFACTORED_BY_PREVIOUS_ACTION",
+        })
+        return source_code, 0, metadata
+
+    requested_name = _normalize_constant_name(constant_name, target_value)
+    if re.fullmatch(r"(?:THRESHOLD_LIMIT|MAGIC_NUMBER|CONSTANT_NUMBER)_[A-Z0-9_]+", requested_name):
+        requested_name = _constant_name_from_value(target_value)
+    preferred_name = _unique_constant_name(source_code, requested_name)
+
+    transformed = source_code
+    for start, end in reversed(current_candidates):
+        transformed = transformed[:start] + preferred_name + transformed[end:]
+    transformed = _insert_class_constant(transformed, preferred_name, target_value)
+
+    metadata.update({
+        "constant_name": preferred_name,
+        "string_target_resolution": "reference_string_token",
+        "extracted_string_occurrences": len(current_candidates),
+    })
+    return transformed, len(current_candidates), metadata
+
+
 def _numeric_constants_for_literal(
     source_code: str,
     literal_value: Any,
@@ -497,6 +574,7 @@ def apply_introduce_constant(
     source_line: Optional[int] = None,
     *,
     reference_source_code: Optional[str] = None,
+    allow_string_literal_extraction: bool = False,
 ) -> Tuple[str, int, dict[str, Any]]:
     """Safely apply Java Introduce Constant with target diagnostics.
 
@@ -563,10 +641,36 @@ def apply_introduce_constant(
         }
     )
 
-    # A line-scoped upstream Magic Number target that points into a string is a
-    # false positive. Never fall back to a different numeric expression in the
-    # file, because that could refactor the wrong program behavior.
+    # A line-scoped upstream Magic Number target can point into a static Java
+    # string such as generated HTML.  With explicit engine opt-in, extract the
+    # entire unambiguous string token; otherwise preserve the previous strict
+    # behavior and never fall back to a different numeric expression.
     if source_line is not None and reference_line_strings and not reference_line_code:
+        if allow_string_literal_extraction:
+            transformed, replacements, string_metadata = _extract_complete_java_string_literal(
+                source_code,
+                reference,
+                literal_value,
+                constant_name,
+                source_line,
+            )
+            metadata.update(string_metadata)
+            if replacements > 0:
+                metadata.update({
+                    "status": "success",
+                    "reason": "introduce_string_constant_applied",
+                    "final_status": "PASS",
+                    "final_decision": "ACCEPT",
+                })
+                return transformed, replacements, metadata
+            if string_metadata.get("reason") == "TARGET_ALREADY_REFACTORED_BY_PREVIOUS_ACTION":
+                metadata.update({
+                    "status": "not_applicable",
+                    "reason": "TARGET_ALREADY_REFACTORED_BY_PREVIOUS_ACTION",
+                    "final_status": "NOT_APPLICABLE",
+                    "final_decision": "NOT_APPLICABLE",
+                })
+                return source_code, 0, metadata
         metadata.update(
             {
                 "status": "not_applicable",

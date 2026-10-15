@@ -27,6 +27,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Badge, C, Card, Pill } from "../diwoTheme.jsx";
 import { CodeBlock, CodeSurface, DiffBlock, DiffLegend } from "../components/DiffView.jsx";
+import StickyActionBar from "../components/StickyActionBar.jsx";
 import { runTransformation } from "../services/diwoApi";
 import { buildDiffRows } from "../utils/diffMapper";
 import { hydrateTransformationResult } from "../utils/transformationMapper";
@@ -116,13 +117,20 @@ function BulkDecisionBar({ total, accepted, rejected, pending, onAcceptAll, onRe
 
   const railColor = allAccepted ? C.accent : allRejected ? C.danger : pending > 0 ? C.warn : C.info;
 
+  const one = total === 1;
   const message = allAccepted
-    ? `All ${total} refactored file(s) accepted — every change is carried forward.`
+    ? one
+      ? "Accepted — the change is carried forward."
+      : `All ${total} refactored files accepted — every change is carried forward.`
     : allRejected
-      ? `All ${total} refactored file(s) rejected — every file falls back to its original source.`
+      ? one
+        ? "Rejected — the file falls back to its original source."
+        : `All ${total} refactored files rejected — every file falls back to its original source.`
       : pending === 0
         ? `Mixed decision — ${accepted} file(s) kept refactored, ${rejected} reverted to original.`
-        : `${pending} of ${total} refactored file(s) still need a decision.`;
+        : one
+          ? "This refactored file still needs a decision."
+          : `${pending} of ${total} refactored files still need a decision.`;
 
   const bulkButton = (label, color, active, onClick) => (
     <button
@@ -154,13 +162,17 @@ function BulkDecisionBar({ total, accepted, rejected, pending, onAcceptAll, onRe
         padding: "12px 16px",
         borderRadius: 10,
         background: C.panel,
-        border: `1px solid ${C.border}`,
+        // Three explicit sides, not the `border` shorthand: mixing it with
+        borderTop: `1px solid ${C.border}`,
+        borderRight: `1px solid ${C.border}`,
+        borderBottom: `1px solid ${C.border}`,
+        // borderLeft below makes React reset the rail on a re-render.
         borderLeft: `3px solid ${railColor}`,
       }}
     >
       <div>
         <div style={{ fontSize: 12, fontWeight: 700, color: C.text, marginBottom: 3 }}>
-          Decide on all files at once
+          {total === 1 ? "Decide on this file" : "Decide on all files at once"}
         </div>
         <div style={{ fontSize: 12, color: railColor }}>{message}</div>
       </div>
@@ -188,6 +200,9 @@ function BulkDecisionBar({ total, accepted, rejected, pending, onAcceptAll, onRe
     </div>
   );
 }
+
+/** Windows paths come back with backslashes; plan paths do not. */
+const normPath = (value = "") => String(value).replace(/\\/g, "/");
 
 /**
  * Rollback to Stage 2. The approved plan is what SCTVA executes, so changing
@@ -370,6 +385,74 @@ export default function TransformationApprovalPage({
   const safetyReport = activeFile?.safety_report || result?.safetyReport || null;
 
   const confidence = activeFile?.confidence_score ?? result?.confidenceScore ?? null;
+
+  /**
+   * file path -> { smells, methods }, folded once out of the approved plan.
+   *
+   * Counted rather than listed, because a file with six Magic Numbers should
+   * read "Magic Number ×6" and not print the same chip six times.
+   */
+  const planContext = useMemo(() => {
+    const byFile = new Map();
+
+    ((plan?.steps) || []).forEach((step) => {
+      const file = normPath(step?.target?.file || "");
+      if (!file) return;
+
+      const entry = byFile.get(file) || { smells: new Map(), methods: new Map() };
+
+      if (step.smell_type) {
+        const prev = entry.smells.get(step.smell_type);
+        entry.smells.set(step.smell_type, {
+          name: step.smell_type,
+          // The worst severity seen for this type wins the chip's colour.
+          severity: prev?.severity === "high" ? prev.severity : (step.severity || prev?.severity),
+          count: (prev?.count || 0) + 1,
+        });
+      }
+      if (step.refactoring) {
+        const prev = entry.methods.get(step.refactoring);
+        entry.methods.set(step.refactoring, {
+          name: step.refactoring,
+          count: (prev?.count || 0) + 1,
+        });
+      }
+
+      byFile.set(file, entry);
+    });
+
+    return byFile;
+  }, [plan]);
+
+  /**
+   * The plan context for one transformed file.
+   *
+   * Falls back to matching on the file NAME: SCTVA echoes the path it was given
+   * and the plan carries the path CUQA reported, which agree today but have no
+   * contract saying they must — and a chip strip that silently disappears on a
+   * path-shape mismatch is worse than one matched a little more loosely.
+   */
+  const contextFor = useCallback((path) => {
+    const key = normPath(path || "");
+    const hit = planContext.get(key);
+    if (hit) return hit;
+
+    const base = key.split("/").pop();
+    for (const [file, entry] of planContext) {
+      if (file.split("/").pop() === base) return entry;
+    }
+    return null;
+  }, [planContext]);
+
+  /** "Long Method, Magic Number ×2" — counted names, in one line. */
+  const noteFrom = (items) =>
+    items.map((i) => (i.count > 1 ? `${i.name} ×${i.count}` : i.name)).join(", ");
+
+  // What the diff's two group headers say this change is for. Computed here
+  // rather than inside DiffBlock because the plan is this stage's to read.
+  const activeContext = activeFile ? contextFor(activeFile.path) : null;
+  const beforeNote = activeContext ? noteFrom(Array.from(activeContext.smells.values())) : "";
+  const afterNote = activeContext ? noteFrom(Array.from(activeContext.methods.values())) : "";
 
   // ── Per-file accept / reject ──────────────────────────────────────────────
   const changedFiles = useMemo(() => files.filter((f) => f.changed), [files]);
@@ -667,8 +750,12 @@ export default function TransformationApprovalPage({
         </div>
       )}
 
-      {/* ── Accept / reject every file at once ──────────────────────────── */}
-      {changedFiles.length > 1 && (
+      {/* ── Accept / reject every changed file ──────────────────────────
+          Shown from ONE file upward. It was gated at >1, so a run that
+          refactored a single file offered no Accept/Reject at this level at
+          all — the developer had to find the per-file pair further down, and
+          the bar that states the overall verdict simply was not there. */}
+      {changedFiles.length > 0 && (
         <BulkDecisionBar
           total={changedFiles.length}
           accepted={acceptedPaths.length}
@@ -683,7 +770,13 @@ export default function TransformationApprovalPage({
       {/* ── Refactored code ─────────────────────────────────────────────── */}
       <div style={{ display: "flex", gap: 12, alignItems: "flex-start" }}>
         {files.length > 1 && (
-          <div style={{ width: 240, flexShrink: 0, maxHeight: 460, overflow: "auto", background: C.panel, border: `1px solid ${C.border}`, borderRadius: 8, padding: 8 }}>
+          // Taller than the CodeSurface it sits beside (460), because the right
+          // column also carries the path header and the accept/reject bar above
+          // that surface — matching the surface alone left this list ending a
+          // good 80px short of the code it belongs to. Viewport-relative so it
+          // grows on a tall screen without running off a short one, the same
+          // idiom Stage 1 uses for its findings list.
+          <div style={{ width: 240, flexShrink: 0, maxHeight: "min(90vh, 620px)", overflow: "auto", background: C.panel, border: `1px solid ${C.border}`, borderRadius: 8, padding: 8 }}>
             <div style={{ fontSize: 11, color: C.textMuted, textTransform: "uppercase", letterSpacing: 1, marginBottom: 8, padding: "0 4px" }}>
               Files ({files.length})
             </div>
@@ -702,7 +795,9 @@ export default function TransformationApprovalPage({
                     marginBottom: 6,
                     background: selectedIndex === idx ? `${C.accent}12` : "transparent",
                     color: C.text,
-                    border: `1px solid ${selectedIndex === idx ? C.accent : C.border}`,
+                    borderTop: `1px solid ${selectedIndex === idx ? C.accent : C.border}`,
+                    borderRight: `1px solid ${selectedIndex === idx ? C.accent : C.border}`,
+                    borderBottom: `1px solid ${selectedIndex === idx ? C.accent : C.border}`,
                     borderLeft: `3px solid ${railColor}`,
                   }}
                 >
@@ -811,7 +906,11 @@ export default function TransformationApprovalPage({
 
           <CodeSurface>
             {view === "diff" ? (
-              <DiffBlock rows={activeFile?.diff_rows} />
+              <DiffBlock
+                rows={activeFile?.diff_rows}
+                beforeNote={beforeNote}
+                afterNote={afterNote}
+              />
             ) : (
               <CodeBlock
                 code={view === "before" ? activeFile?.before : activeFile?.after}
@@ -872,10 +971,18 @@ export default function TransformationApprovalPage({
         </div>
       )}
 
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 24, gap: 12, flexWrap: "wrap" }}>
-        <div>
-          {changedFiles.length > 0 && (
-            <div style={{ fontSize: 12, color: C.textSub, marginBottom: 4 }}>
+      {/* The provenance line stays with the page; the decision stays pinned. */}
+      <div style={{ marginTop: 24, fontSize: 11, color: C.textMuted }}>
+        {result
+          ? `Request ${result.requestId} · executed by SCTVA at ${run?.sctvaUrl || "the orchestration agent"}`
+          : "Simulated by the DIWO backend"}
+      </div>
+
+      <StickyActionBar
+        active={pendingCount === 0}
+        status={
+          changedFiles.length > 0 ? (
+            <>
               <span style={{ color: C.accent, fontWeight: 700 }}>{acceptedPaths.length} accepted</span>
               {" · "}
               <span style={{ color: C.danger, fontWeight: 700 }}>{rejectedPaths.length} rejected</span>
@@ -883,43 +990,41 @@ export default function TransformationApprovalPage({
               <span style={{ color: pendingCount > 0 ? C.warn : C.textMuted, fontWeight: 700 }}>
                 {pendingCount} pending
               </span>
-              <span style={{ color: C.textMuted }}> of {changedFiles.length} changed file(s)</span>
-            </div>
-          )}
-          <div style={{ fontSize: 11, color: C.textMuted }}>
-            {result
-              ? `Request ${result.requestId} · executed by SCTVA at ${run?.sctvaUrl || "the orchestration agent"}`
-              : "Simulated by the DIWO backend"}
-          </div>
-        </div>
-        <div style={{ textAlign: "right", display: "flex", gap: 12, alignItems: "flex-start", flexWrap: "wrap", justifyContent: "flex-end" }}>
-          <BackToPlanButton onBackToPlan={onBackToPlan} />
-          <div>
-          <button
-            onClick={handleContinue}
-            disabled={pendingCount > 0}
-            style={{
-              padding: "10px 24px",
-              borderRadius: 8,
-              fontWeight: 700,
-              fontSize: 13,
-              cursor: pendingCount > 0 ? "not-allowed" : "pointer",
-              background: pendingCount > 0 ? C.border : C.accent,
-              color: pendingCount > 0 ? C.textMuted : "#000",
-              border: "none",
-              boxShadow: pendingCount > 0 ? "none" : `0 0 20px ${C.accentGlow}`,
-            }}
-          >
-            Continue to Results Review →
-          </button>
-          {pendingCount > 0 && (
-            <div style={{ fontSize: 11, color: C.warn, marginTop: 6 }}>
-              Accept or reject {pendingCount} more file(s) to continue.
-            </div>
-          )}
-          </div>
-        </div>
-      </div>
+              <span style={{ color: C.textMuted }}>
+                {" "}of {changedFiles.length} changed file{changedFiles.length === 1 ? "" : "s"}
+                {pendingCount > 0 && " — decide the rest to continue"}
+              </span>
+            </>
+          ) : (
+            "No file was changed by this transformation."
+          )
+        }
+      >
+        <BackToPlanButton onBackToPlan={onBackToPlan} />
+        <button
+          onClick={handleContinue}
+          disabled={pendingCount > 0}
+          title={
+            pendingCount > 0
+              ? `Accept or reject ${pendingCount} more file(s) to continue.`
+              : undefined
+          }
+          style={{
+            padding: "10px 24px",
+            borderRadius: 9,
+            fontWeight: 700,
+            fontSize: 13,
+            cursor: pendingCount > 0 ? "not-allowed" : "pointer",
+            background: pendingCount > 0 ? C.border : C.accent,
+            color: pendingCount > 0 ? C.textMuted : "#000",
+            border: "none",
+            boxShadow: pendingCount > 0 ? "none" : `0 0 20px ${C.accentGlow}`,
+            transition: "all 0.2s",
+          }}
+        >
+          Continue to Results Review →
+        </button>
+      </StickyActionBar>
     </div>
   );
 }

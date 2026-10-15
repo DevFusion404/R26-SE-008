@@ -339,6 +339,7 @@ def create_sctva_blueprint() -> Blueprint:
                     "cuqa_temp_workspace_source_import",
                     "sctva_internal_refactoring_detector",
                     "multiline_statement_normalization",
+                    "python_inline_class_external_framework_contract",
                 ],
             }
         ), 200

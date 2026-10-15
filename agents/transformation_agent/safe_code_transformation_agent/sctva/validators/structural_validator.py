@@ -500,6 +500,25 @@ class StructuralValidator:
         delegate_member = str(params.get("delegate_member") or "").strip()
         delegated_member = str(params.get("delegated_member") or "").strip()
         new_method_name = str(params.get("new_method_name") or "").strip()
+        hide_delegate_mode = str(params.get("hide_delegate_mode") or "owner_class").strip()
+        if language == "python" and hide_delegate_mode == "module_facade":
+            source_method = str(params.get("source_method") or "").strip()
+            fingerprint = str(params.get("message_chain_fingerprint") or "").strip()
+            if not all((source_method, delegate_member, delegated_member, new_method_name, fingerprint)):
+                return {"passed": False, "reason": "missing_module_hide_delegate_parameters"}
+            helper_parameters = params.get("helper_parameters")
+            if not isinstance(helper_parameters, list):
+                helper_parameters = []
+            return python_hide_delegate.validate_module_hide_delegate(
+                original_code,
+                transformed_code,
+                source_method=source_method,
+                delegate_member=delegate_member,
+                delegated_member=delegated_member,
+                new_method_name=new_method_name,
+                message_chain_fingerprint=fingerprint,
+                helper_parameters=[str(value) for value in helper_parameters],
+            )
         if not all((source_class, delegate_member, delegated_member, new_method_name)):
             return {"passed": False, "reason": "missing_hide_delegate_parameters"}
         if language == "python":
@@ -2372,7 +2391,11 @@ class StructuralValidator:
             else None
         )
 
-        if inline_mode == "owner_class" and destination_class is None:
+        if inline_mode in {
+            "owner_class",
+            "framework_owner_class",
+            "framework_repeated_owner_class",
+        } and destination_class is None:
             return {
                 "passed": False,
                 "language": "python",
@@ -2393,6 +2416,344 @@ class StructuralValidator:
                     "no_unresolved_references_to_removed_class": False,
                     "python_syntax_valid": True,
                 },
+            }
+
+        if inline_mode == "framework_repeated_owner_class":
+            owner_attributes = {
+                str(value)
+                for value in params.get("owner_attributes") or []
+                if str(value)
+            }
+            nested_mapping = {
+                str(owner): {
+                    str(field): str(path)
+                    for field, path in dict(fields or {}).items()
+                    if str(field) and str(path)
+                }
+                for owner, fields in dict(
+                    params.get("moved_nested_field_mapping") or {}
+                ).items()
+                if str(owner)
+            }
+            method_mapping = {
+                str(source): str(destination)
+                for source, destination in dict(
+                    params.get("moved_method_mapping") or {}
+                ).items()
+                if str(source) and str(destination)
+            }
+
+            def self_attribute_path(node: ast.AST) -> str:
+                parts: list[str] = []
+                current = node
+                while isinstance(current, ast.Attribute):
+                    parts.append(current.attr)
+                    current = current.value
+                if not (isinstance(current, ast.Name) and current.id == "self"):
+                    return ""
+                return ".".join(reversed(parts))
+
+            stored_paths = {
+                self_attribute_path(node)
+                for node in ast.walk(destination_class)
+                if isinstance(node, ast.Attribute) and isinstance(node.ctx, ast.Store)
+            }
+            expected_nested_paths = {
+                path
+                for fields in nested_mapping.values()
+                for path in fields.values()
+            }
+            nested_fields_preserved = bool(expected_nested_paths) and (
+                original_fields
+                <= {
+                    field
+                    for fields in nested_mapping.values()
+                    for field in fields
+                }
+                and expected_nested_paths <= stored_paths
+                and owner_attributes <= stored_paths
+            )
+            destination_methods = {
+                node.name: node
+                for node in destination_class.body
+                if isinstance(node, ast.FunctionDef)
+            }
+            helper_name = method_mapping.get("forward", "")
+            helper = destination_methods.get(helper_name)
+
+            class _RepeatedFrameworkNormalizer(ast.NodeTransformer):
+                def visit_Name(self, node: ast.Name) -> ast.AST:
+                    if node.id != "self":
+                        return node
+                    return ast.copy_location(
+                        ast.Name(id="module", ctx=node.ctx),
+                        node,
+                    )
+
+            logic_preserved = False
+            original_forward = next(
+                (method for method in original_methods if method.name == "forward"),
+                None,
+            )
+            if original_forward is not None and helper is not None:
+                expected = copy.deepcopy(original_forward)
+                expected.name = helper_name
+                expected.args.args = [
+                    expected.args.args[0],
+                    ast.arg(arg="module"),
+                    *expected.args.args[1:],
+                ]
+                expected = _RepeatedFrameworkNormalizer().visit(expected)
+                ast.fix_missing_locations(expected)
+                actual = copy.deepcopy(helper)
+                ast.fix_missing_locations(actual)
+                logic_preserved = ast.dump(
+                    expected,
+                    include_attributes=False,
+                ) == ast.dump(actual, include_attributes=False)
+
+            destination_constructor = self._python_class_method(destination_class, "__init__")
+            constructor_super_preserved = bool(
+                destination_constructor
+                and any(
+                    isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "__init__"
+                    and isinstance(node.func.value, ast.Call)
+                    and isinstance(node.func.value.func, ast.Name)
+                    and node.func.value.func.id == "super"
+                    for node in ast.walk(destination_constructor)
+                )
+            )
+            before_destination = self._python_top_level_class(
+                before_tree,
+                destination_class_name,
+            )
+            before_owner_calls = sum(
+                isinstance(node, ast.Call)
+                and (
+                    (
+                        isinstance(node.func, ast.Attribute)
+                        and self_attribute_path(node.func) in owner_attributes
+                    )
+                    or (
+                        isinstance(node.func, ast.Attribute)
+                        and node.func.attr == "forward"
+                        and self_attribute_path(node.func.value) in owner_attributes
+                    )
+                )
+                for node in ast.walk(before_destination or before_tree)
+            )
+            after_helper_calls = sum(
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and self_attribute_path(node.func) == helper_name
+                for node in ast.walk(destination_class)
+            )
+            remaining_source_references = any(
+                isinstance(node, ast.Name) and node.id == class_name
+                for node in ast.walk(after_tree)
+            )
+            state_mapping = dict(params.get("state_dict_key_mapping") or {})
+            state_mapping_preserved = bool(state_mapping) and all(
+                str(source) == str(destination)
+                for source, destination in state_mapping.items()
+            )
+            checks = {
+                "target_class_existed_before": True,
+                "target_class_removed_after": class_removed,
+                "destination_class_exists_after": destination_class is not None,
+                "moved_fields_preserved": nested_fields_preserved,
+                "moved_methods_preserved": helper is not None,
+                "constructor_behavior_preserved": constructor_super_preserved,
+                "framework_contract_preserved": (
+                    str(params.get("framework_contract") or "") == "torch.nn.Module"
+                    and bool(params.get("registered_submodules_preserved"))
+                ),
+                "forward_behavior_preserved": logic_preserved,
+                "state_dict_paths_preserved": state_mapping_preserved,
+                "remaining_source_references": not remaining_source_references,
+                "affected_call_sites_updated": (
+                    before_owner_calls > 0
+                    and after_helper_calls >= before_owner_calls
+                ),
+                "python_syntax_valid": True,
+            }
+            return {
+                "passed": all(checks.values()),
+                "language": "python",
+                "inline_mode": inline_mode,
+                "class_to_inline": class_name,
+                "destination_class": destination_class_name,
+                "owner_attributes": sorted(owner_attributes),
+                "framework_contract": params.get("framework_contract"),
+                "state_dict_key_mapping": state_mapping,
+                "checks": checks,
+            }
+
+        if inline_mode == "framework_owner_class":
+            field_mapping = {
+                str(source): str(destination)
+                for source, destination in dict(
+                    params.get("moved_field_mapping") or {}
+                ).items()
+                if str(source) and str(destination)
+            }
+            method_mapping = {
+                str(source): str(destination)
+                for source, destination in dict(
+                    params.get("moved_method_mapping") or {}
+                ).items()
+                if str(source) and str(destination)
+            }
+
+            destination_fields = {
+                node.attr
+                for node in ast.walk(destination_class)
+                if (
+                    isinstance(node, ast.Attribute)
+                    and isinstance(node.value, ast.Name)
+                    and node.value.id == "self"
+                    and isinstance(node.ctx, ast.Store)
+                )
+            }
+            destination_methods = {
+                node.name: node
+                for node in destination_class.body
+                if isinstance(node, ast.FunctionDef)
+            }
+            mapped_fields_preserved = (
+                original_fields <= set(field_mapping)
+                and set(field_mapping.values()) <= destination_fields
+            )
+            mapped_methods_preserved = (
+                method_names <= set(method_mapping)
+                and all(
+                    name in destination_methods
+                    for name in method_mapping.values()
+                )
+            )
+
+            class _FrameworkMemberNormalizer(ast.NodeTransformer):
+                def visit_Attribute(self, node: ast.Attribute) -> ast.AST:
+                    node = self.generic_visit(node)
+                    if (
+                        isinstance(node, ast.Attribute)
+                        and isinstance(node.value, ast.Name)
+                        and node.value.id == "self"
+                    ):
+                        replacement = field_mapping.get(node.attr) or method_mapping.get(node.attr)
+                        if replacement:
+                            return ast.copy_location(
+                                ast.Attribute(
+                                    value=ast.Name(id="self", ctx=ast.Load()),
+                                    attr=replacement,
+                                    ctx=node.ctx,
+                                ),
+                                node,
+                            )
+                    return node
+
+            logic_preserved = mapped_methods_preserved
+            for original_method in original_methods:
+                moved_name = method_mapping.get(original_method.name)
+                moved_method = destination_methods.get(moved_name or "")
+                if moved_method is None:
+                    logic_preserved = False
+                    break
+                expected = _FrameworkMemberNormalizer().visit(copy.deepcopy(original_method))
+                expected.name = moved_name
+                ast.fix_missing_locations(expected)
+                actual = copy.deepcopy(moved_method)
+                ast.fix_missing_locations(actual)
+                if ast.dump(expected, include_attributes=False) != ast.dump(
+                    actual,
+                    include_attributes=False,
+                ):
+                    logic_preserved = False
+                    break
+
+            destination_constructor = self._python_class_method(destination_class, "__init__")
+            constructor_super_preserved = bool(
+                destination_constructor
+                and any(
+                    isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "__init__"
+                    and isinstance(node.func.value, ast.Call)
+                    and isinstance(node.func.value.func, ast.Name)
+                    and node.func.value.func.id == "super"
+                    for node in ast.walk(destination_constructor)
+                )
+            )
+            framework_contract_preserved = (
+                str(params.get("framework_contract") or "") == "torch.nn.Module"
+                and bool(params.get("registered_submodules_preserved"))
+                and constructor_super_preserved
+                and mapped_fields_preserved
+            )
+            remaining_source_references = any(
+                isinstance(node, ast.Name) and node.id == class_name
+                for node in ast.walk(after_tree)
+            ) or any(
+                isinstance(node, ast.Attribute)
+                and isinstance(node.value, ast.Name)
+                and node.value.id == "self"
+                and node.attr == owner_attribute
+                for node in ast.walk(after_tree)
+            )
+            before_owner_calls = sum(
+                isinstance(node, ast.Call)
+                and (
+                    (
+                        isinstance(node.func, ast.Attribute)
+                        and isinstance(node.func.value, ast.Name)
+                        and node.func.value.id == "self"
+                        and node.func.attr == owner_attribute
+                    )
+                    or (
+                        isinstance(node.func, ast.Attribute)
+                        and isinstance(node.func.value, ast.Attribute)
+                        and isinstance(node.func.value.value, ast.Name)
+                        and node.func.value.value.id == "self"
+                        and node.func.value.attr == owner_attribute
+                    )
+                )
+                for node in ast.walk(before_tree)
+            )
+            after_helper_calls = sum(
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "self"
+                and node.func.attr in set(method_mapping.values())
+                for node in ast.walk(after_tree)
+            )
+            checks = {
+                "target_class_existed_before": True,
+                "target_class_removed_after": class_removed,
+                "destination_class_exists_after": destination_class is not None,
+                "moved_fields_preserved": mapped_fields_preserved,
+                "moved_methods_preserved": mapped_methods_preserved,
+                "constructor_behavior_preserved": constructor_super_preserved,
+                "framework_contract_preserved": framework_contract_preserved,
+                "forward_behavior_preserved": logic_preserved,
+                "registered_submodules_preserved": bool(params.get("registered_submodules_preserved")),
+                "state_dict_mapping_recorded": bool(params.get("state_dict_key_mapping")),
+                "remaining_source_references": not remaining_source_references,
+                "affected_call_sites_updated": after_helper_calls >= before_owner_calls,
+                "python_syntax_valid": True,
+            }
+            return {
+                "passed": all(checks.values()),
+                "language": "python",
+                "inline_mode": "framework_owner_class",
+                "class_to_inline": class_name,
+                "destination_class": destination_class_name,
+                "owner_attribute": owner_attribute,
+                "framework_contract": params.get("framework_contract"),
+                "state_dict_key_mapping": params.get("state_dict_key_mapping") or {},
+                "checks": checks,
             }
 
         if inline_mode == "owner_class" or destination_class is not None:

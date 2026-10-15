@@ -880,11 +880,59 @@ class Customer:
     assert log["metadata"]["status"] == "not_applicable"
     assert log["metadata"]["final_decision"] == "NOT_APPLICABLE"
     assert log["metadata"]["dead_code_target_status"] == "live"
+    assert log["metadata"]["resolved_dead_code_method"] == "formatted_phone"
+    assert log["metadata"]["resolved_dead_code_class"] == "CustomerContact"
+    assert log["metadata"]["deadness_proof"]["status"] == "NOT_DEAD"
+    assert any(
+        item.startswith("attribute_reference:example.py:")
+        for item in log["metadata"]["deadness_proof"]["deadness_evidence"]
+    )
     assert not any(
         "Dead-code removal skipped" in message
         for message in result["safety_report"]["human_messages"]
     )
     assert result["refactored_code"] == source
+
+
+def test_python_framework_route_dead_code_target_requires_review():
+    source = '''class Router:
+    def route(self, _path):
+        return lambda function: function
+
+app = Router()
+
+@app.route("/")
+def index():
+    return "home"
+'''
+
+    result = SafeCodeTransformationValidationAgent().execute({
+        "request_id": "framework_dead_code_target",
+        "language": "python",
+        "source_files": [{
+            "file_name": "app.py",
+            "source_code": source,
+            "language": "python",
+            "source_mode": "raw",
+        }],
+        "refactoring_plan": {
+            "plan_id": "framework_dead_code_target",
+            "actions": [{
+                "action_type": "remove_dead_code",
+                "parameters": {"source_file": "app.py", "source_line": 8},
+            }],
+            "behavior_tests": [],
+            "metadata": {},
+        },
+        "execution_options": _options(),
+    })
+
+    log = result["safety_report"]["transformation_log"][0]
+    assert log["metadata"]["status"] == "review_required"
+    assert log["metadata"]["final_decision"] == "REVIEW_REQUIRED"
+    assert log["metadata"]["dead_code_status"] == "REVIEW_REQUIRED"
+    assert log["metadata"]["reason"] == "DECORATOR_OR_FRAMEWORK_HOOK"
+    assert "def index" in result["refactored_code"]
 
 
 def test_python_inline_class_plan_live_method_dead_code_steps_do_not_emit_skip_warnings():
@@ -969,4 +1017,13 @@ def main():
         if item["action_type"] == "remove_dead_code"
     ]
     assert dead_logs
-    assert all(item["metadata"]["status"] == "not_applicable" for item in dead_logs)
+    handled = next(
+        item for item in dead_logs
+        if item["metadata"]["status"] == "already_handled"
+    )
+    assert handled["metadata"]["reason"] == "TARGET_ALREADY_HANDLED_BY_PRIOR_INLINE_CLASS"
+    assert handled["metadata"]["handled_by_action"]["action_type"] == "inline_python_class"
+    assert all(
+        item["metadata"]["status"] in {"not_applicable", "already_handled"}
+        for item in dead_logs
+    )

@@ -2,6 +2,8 @@ import ast
 import contextlib
 import io
 
+import pytest
+
 from sctva.contracts import RefactoringAction, SourceFileContract
 from sctva.agent import SafeCodeTransformationValidationAgent
 from sctva.analysis import LocalRefactorDetector
@@ -451,7 +453,7 @@ def test_missing_explicit_inline_class_reports_not_applicable_in_pipeline():
         },
     })
 
-    assert result["success"] is False
+    assert result["success"] is True
     assert result["plan_compliance"]["inline_class"] == "NOT_APPLICABLE"
     metadata = result["safety_report"]["transformation_log"][0]["metadata"]
     assert metadata["status"] == "not_applicable"
@@ -737,7 +739,9 @@ def test_owned_inline_class_keeps_cross_file_wrapper_for_atomic_repository_edit(
     assert transformed == FIELD_ONLY_WRAPPER_SOURCE
     assert replacements == 0
     assert metadata["status"] == "review_required"
-    assert metadata["reason"] == "EXTERNAL_REFERENCES"
+    assert metadata["reason"] == (
+        "EXTERNAL_CLASS_REFERENCES_REQUIRE_REPOSITORY_INLINE"
+    )
     assert metadata["reference_files"] == ["consumer.py"]
 
 
@@ -931,7 +935,7 @@ class Child(Base):
 
     assert python_inline_class.select_python_inline_class_strategy(
         inheritance, class_to_inline="Base"
-    )["reason"] == "SUBCLASS_HIERARCHY_REQUIRES_REVIEW"
+    )["reason"] == "BASE_CLASS_INLINE_REQUIRES_EXPLICIT_DESTINATION"
     assert python_inline_class.select_python_inline_class_strategy(
         multiple, class_to_inline="Combined"
     )["reason"] == "MULTIPLE_INHERITANCE_REQUIRES_REVIEW"
@@ -1409,8 +1413,10 @@ def test_empty_class_cleanup_is_blocked_by_repository_reference():
 
     assert transformed == source
     assert logs[0].metadata["status"] == "review_required"
-    assert logs[0].metadata["reason"] == "EXTERNAL_REPOSITORY_REFERENCE"
-    assert logs[0].metadata["reference_file"] == "consumer.py"
+    assert logs[0].metadata["reason"] == (
+        "EXTERNAL_CLASS_REFERENCES_REQUIRE_REPOSITORY_INLINE"
+    )
+    assert logs[0].metadata["reference_files"] == ["consumer.py"]
 
 
 def test_inline_class_collapses_exact_forwarding_subclass():
@@ -1462,7 +1468,7 @@ class Configured(Base):
     assert strategy["reason"] == "INHERITANCE_CLASS_HAS_CONFIGURATION_OR_STATE"
 
 
-def test_inline_class_marks_external_base_behavior_as_not_applicable():
+def test_inline_class_marks_unknown_external_base_behavior_for_review():
     source = '''from framework.backends import BaseBackend
 
 
@@ -1475,8 +1481,387 @@ class CustomBackend(BaseBackend):
         class_to_inline="CustomBackend",
     )
 
+    assert strategy["status"] == "review_required"
+    assert strategy["reason"] == "INLINE_CLASS_EXTERNAL_BASE_CONTRACT_UNSAFE"
+
+
+PYTORCH_OWNED_MODULE_SOURCE = '''import torch.nn as nn
+
+
+class Block(nn.Module):
+    def __init__(self, width=4):
+        super().__init__()
+        self.projection = nn.Identity()
+        self.width = width
+
+    def forward(self, value):
+        return self.projection(value)
+
+
+class Model(nn.Module):
+    def __init__(self, width=4):
+        super().__init__()
+        self.block = Block(width)
+
+    def forward(self, value):
+        return self.block(value)
+'''
+
+
+def _framework_effective_action(log, index=1):
+    parameters = dict(log.metadata["effective_action_parameters"])
+    parameters["_sctva_action_index"] = index
+    parameters["applied_transformation_metadata"] = dict(log.metadata)
+    return RefactoringAction(action_type="inline_python_class", parameters=parameters)
+
+
+def test_inline_class_flattens_uniquely_owned_pytorch_module_preserving_contract():
+    action = RefactoringAction(
+        action_type="inline_python_class",
+        parameters={"class_to_inline": "Block"},
+    )
+    transformed, logs, _ = TransformationEngine().apply_actions(
+        language="python",
+        source_code=PYTORCH_OWNED_MODULE_SOURCE,
+        actions=[action],
+        strict_mode=True,
+        current_file_name="model.py",
+    )
+
+    metadata = logs[0].metadata
+    assert metadata["status"] == "success", metadata
+    assert metadata["reason"] == "INLINE_CLASS_EXTERNAL_BASE_SAFE"
+    assert metadata["inline_mode"] == "framework_owner_class"
+    assert metadata["framework_contract"] == "torch.nn.Module"
+    assert metadata["registered_submodules_preserved"] is True
+    assert metadata["constructor_behavior_preserved"] is True
+    assert "class Block" not in transformed
+    assert "super().__init__()" in transformed
+    assert "self.block_projection = nn.Identity()" in transformed
+    assert "self.block_width = width" in transformed
+    assert "return self._sctva_inline_block_forward(value)" in transformed
+    assert "return self.block_projection(value)" in transformed
+
+    validation = StructuralValidator().validate(
+        language="python",
+        original_code=PYTORCH_OWNED_MODULE_SOURCE,
+        transformed_code=transformed,
+        actions=[_framework_effective_action(logs[0])],
+    )
+    assert validation.passed is True, validation.details
+    checks = validation.details["inline_class_validation"][0]["checks"]
+    assert checks["framework_contract_preserved"] is True
+    assert checks["registered_submodules_preserved"] is True
+    assert checks["forward_behavior_preserved"] is True
+
+
+def test_direct_inline_class_api_uses_the_pytorch_owner_strategy():
+    transformed, replacements, metadata = python_transformers.apply_inline_class(
+        PYTORCH_OWNED_MODULE_SOURCE,
+        class_to_inline="Block",
+    )
+
+    assert replacements > 0
+    assert metadata["status"] == "success"
+    assert metadata["inline_mode"] == "framework_owner_class"
+    assert "class Block" not in transformed
+
+
+def test_pytorch_inline_class_preserves_forward_result_and_registered_submodule():
+    torch = pytest.importorskip("torch")
+    transformed, _, metadata = python_transformers.apply_inline_class(
+        PYTORCH_OWNED_MODULE_SOURCE,
+        class_to_inline="Block",
+    )
+    assert metadata["status"] == "success"
+
+    original_namespace = {}
+    transformed_namespace = {}
+    exec(compile(PYTORCH_OWNED_MODULE_SOURCE, "<original-module>", "exec"), original_namespace)
+    exec(compile(transformed, "<inlined-module>", "exec"), transformed_namespace)
+    value = torch.tensor([1.0, 2.0])
+    assert torch.equal(
+        original_namespace["Model"]()(value),
+        transformed_namespace["Model"]()(value),
+    )
+    assert "block_projection" in dict(
+        transformed_namespace["Model"]().named_modules()
+    )
+    assert "block" not in dict(transformed_namespace["Model"]().named_modules())
+
+
+def test_pytorch_inline_class_runs_through_full_sctva_validation_pipeline():
+    result = SafeCodeTransformationValidationAgent().execute({
+        "request_id": "framework_inline_python_class",
+        "language": "python",
+        "source_files": [{
+            "file_name": "model.py",
+            "source_code": PYTORCH_OWNED_MODULE_SOURCE,
+            "language": "python",
+            "source_mode": "raw",
+        }],
+        "refactoring_plan": {
+            "plan_id": "framework_inline_python_class",
+            "actions": [{
+                "action_type": "inline_python_class",
+                "parameters": {
+                    "class_to_inline": "Block",
+                    "source_file": "model.py",
+                },
+            }],
+            "behavior_tests": [],
+            "metadata": {},
+        },
+        "execution_options": {
+            "strict_mode": True,
+            "enable_behavior_tests": True,
+            "enable_sctva_auto_refactoring": False,
+            "require_compilation": False,
+            "timeout_seconds": 10,
+        },
+    })
+
+    assert result["success"] is True, result
+    assert result["rollback_occurred"] is False
+    assert result["plan_compliance"]["inline_class"] == "PASS"
+    metadata = result["safety_report"]["transformation_log"][0]["metadata"]
+    assert metadata["source_class_resolved"] is True
+    assert metadata["destination_class_resolved"] is True
+    assert metadata["relationship_verified"] is True
+    checks = result["validation"]["structural"]["details"][
+        "inline_class_validation"
+    ][0]["checks"]
+    assert checks["framework_contract_preserved"] is True
+
+
+def test_inline_class_supports_repeated_pytorch_module_instances_in_one_owner():
+    source = PYTORCH_OWNED_MODULE_SOURCE.replace(
+        "self.block = Block(width)",
+        "self.left = Block(width)\n        self.right = Block(width)",
+    ).replace("return self.block(value)", "return self.left(value) + self.right(value)")
+
+    strategy = python_inline_class.select_python_inline_class_strategy(
+        source,
+        class_to_inline="Block",
+    )
+    action = RefactoringAction(
+        action_type="inline_python_class",
+        parameters={"class_to_inline": "Block"},
+    )
+    transformed, logs, _ = TransformationEngine().apply_actions(
+        language="python",
+        source_code=source,
+        actions=[action],
+        strict_mode=True,
+        current_file_name="model.py",
+    )
+
+    assert strategy["status"] == "success", strategy
+    assert strategy["strategy"] == "pytorch_repeated_module_owner_inline"
+    assert strategy["owner_attributes"] == ["left", "right"]
+    metadata = logs[0].metadata
+    assert metadata["status"] == "success", metadata
+    assert metadata["inline_mode"] == "framework_repeated_owner_class"
+    assert "class Block" not in transformed
+    assert "self.left = nn.Module()" in transformed
+    assert "self.right = nn.Module()" in transformed
+    assert "self.left.projection = nn.Identity()" in transformed
+    assert "self.right.projection = nn.Identity()" in transformed
+    assert "self._sctva_inline_block_forward(self.left, value)" in transformed
+    assert "self._sctva_inline_block_forward(self.right, value)" in transformed
+    assert metadata["state_dict_key_mapping"] == {
+        "left.projection": "left.projection",
+        "right.projection": "right.projection",
+    }
+
+    validation = StructuralValidator().validate(
+        language="python",
+        original_code=source,
+        transformed_code=transformed,
+        actions=[_framework_effective_action(logs[0])],
+    )
+    assert validation.passed is True, validation.details
+
+
+def test_inline_class_supports_repeated_framework_block_with_registered_state():
+    source = '''import torch.nn as nn
+
+
+class Stage(nn.Module):
+    def __init__(self):
+        super(Stage, self).__init__()
+        self.layer1 = nn.Identity()
+        self.layer2 = nn.Identity()
+        self.layer3 = nn.Identity()
+        self.layer4 = nn.Identity()
+        self.layer5 = nn.Identity()
+
+    def forward(self, value):
+        value = self.layer1(value)
+        value = self.layer2(value)
+        value = self.layer3(value)
+        value = self.layer4(value)
+        return self.layer5(value)
+
+
+class Network(nn.Module):
+    def __init__(self):
+        super(Network, self).__init__()
+        self.first = Stage()
+        self.second = Stage()
+
+    def forward(self, value):
+        return self.second(self.first(value))
+'''
+    action = RefactoringAction(
+        action_type="inline_python_class",
+        parameters={"class_to_inline": "Stage"},
+    )
+    transformed, logs, _ = TransformationEngine().apply_actions(
+        language="python",
+        source_code=source,
+        actions=[action],
+        strict_mode=True,
+        current_file_name="network.py",
+    )
+
+    metadata = logs[0].metadata
+    assert metadata["status"] == "success", metadata
+    assert metadata["inline_mode"] == "framework_repeated_owner_class"
+    assert metadata["owner_attributes"] == ["first", "second"]
+    assert len(metadata["state_dict_key_mapping"]) == 10
+    assert all(
+        original == transformed_path
+        for original, transformed_path in metadata["state_dict_key_mapping"].items()
+    )
+    assert "class Stage" not in transformed
+
+    validation = StructuralValidator().validate(
+        language="python",
+        original_code=source,
+        transformed_code=transformed,
+        actions=[_framework_effective_action(logs[0])],
+    )
+    assert validation.passed is True, validation.details
+
+
+def test_inline_class_rejects_pytorch_module_with_distinct_owners():
+    source = '''import torch.nn as nn
+
+
+class Block(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.projection = nn.Identity()
+
+    def forward(self, value):
+        return self.projection(value)
+
+
+class FirstModel(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.block = Block()
+
+
+class SecondModel(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.block = Block()
+'''
+
+    strategy = python_inline_class.select_python_inline_class_strategy(
+        source,
+        class_to_inline="Block",
+    )
+
+    assert strategy["status"] == "review_required"
+    assert strategy["reason"] == "INLINE_CLASS_MULTIPLE_OWNERS"
+
+
+def test_inline_class_marks_meaningful_pytorch_component_not_applicable():
+    source = '''import torch.nn as nn
+
+
+class DenseComponent(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.layer1 = nn.Identity()
+        self.layer2 = nn.Identity()
+        self.layer3 = nn.Identity()
+        self.layer4 = nn.Identity()
+        self.layer5 = nn.Identity()
+
+    def forward(self, value):
+        value = self.layer1(value)
+        value = self.layer2(value)
+        value = self.layer3(value)
+        value = self.layer4(value)
+        return self.layer5(value)
+
+
+class Model(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.component = DenseComponent()
+'''
+    strategy = python_inline_class.select_python_inline_class_strategy(
+        source,
+        class_to_inline="DenseComponent",
+    )
+    transformed, replacements, metadata = python_inline_class.apply_owned_inline_class(
+        source,
+        class_to_inline="DenseComponent",
+    )
+
     assert strategy["status"] == "not_applicable"
-    assert strategy["reason"] == "EXTERNAL_BASE_CLASS_CONTRACT_REQUIRED"
+    assert strategy["reason"] == (
+        "INLINE_CLASS_SOURCE_HAS_MEANINGFUL_FRAMEWORK_RESPONSIBILITY"
+    )
+    assert transformed == source
+    assert replacements == 0
+    assert metadata["status"] == "not_applicable"
+    assert metadata["responsibility_profile"]["instance_field_count"] == 5
+
+
+def test_inline_class_rejects_mismatched_planned_pytorch_destination():
+    transformed, replacements, metadata = python_inline_class.apply_owned_inline_class(
+        PYTORCH_OWNED_MODULE_SOURCE,
+        class_to_inline="Block",
+        preferred_destination_class="UnrelatedOwner",
+    )
+
+    assert transformed == PYTORCH_OWNED_MODULE_SOURCE
+    assert replacements == 0
+    assert metadata["status"] == "review_required"
+    assert metadata["reason"] == "INLINE_CLASS_DESTINATION_RELATIONSHIP_UNVERIFIED"
+
+
+def test_inline_class_marks_unowned_pytorch_module_not_applicable():
+    source = PYTORCH_OWNED_MODULE_SOURCE.split("\n\nclass Model", 1)[0]
+    strategy = python_inline_class.select_python_inline_class_strategy(
+        source,
+        class_to_inline="Block",
+    )
+
+    assert strategy["status"] == "not_applicable"
+    assert strategy["reason"] == "INLINE_CLASS_DESTINATION_NOT_FOUND"
+
+
+def test_inline_class_rejects_pytorch_module_with_repository_public_api_reference():
+    strategy = python_inline_class.select_python_inline_class_strategy(
+        PYTORCH_OWNED_MODULE_SOURCE,
+        class_to_inline="Block",
+        current_file_name="model.py",
+        project_source_files=[{
+            "file_name": "consumer.py",
+            "language": "python",
+            "source_code": "from model import Block\n\ndef build():\n    return Block()\n",
+        }],
+    )
+
+    assert strategy["status"] == "review_required"
+    assert strategy["reason"] == "INLINE_CLASS_PUBLIC_API_DEPENDENCY"
 
 
 def test_inline_class_shared_base_requires_hierarchy_refactoring_not_inline():

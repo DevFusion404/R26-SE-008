@@ -12,6 +12,7 @@ from sctva.constants import ACTION_ENCAPSULATE_VARIABLE
 from sctva.integration.planner_adapter import PlannerAdapter
 from sctva.transformers import c_transformers
 from sctva.transformers.engine import TransformationEngine
+from sctva.validators.c_support import compare_c_static_summaries
 from sctva.validators.structural_validator import StructuralValidator
 
 
@@ -333,6 +334,56 @@ int read_stock(void) { return total_stock; }
         setter_name="set_total_stock",
     )
     assert validation["checks"]["original_initializer_preserved"] is True
+
+
+def test_composed_c_encapsulation_and_constant_preserves_sibling_globals():
+    source = """\
+#include <stdio.h>
+int a = 10, b = 5, c = 15;
+int main(void) { return a + b + c; }
+"""
+    actions = [
+        RefactoringAction(
+            action_type="encapsulate_c_variable",
+            parameters={"variable_name": "a", "getter_name": "get_a"},
+        ),
+        RefactoringAction(
+            action_type="introduce_constant",
+            parameters={
+                "literal_value": 10,
+                "constant_name": "THRESHOLD_LIMIT_10",
+                "source_line": 2,
+            },
+        ),
+    ]
+    engine = TransformationEngine()
+    transformed, logs, _ = engine.apply_actions(
+        language="c",
+        source_code=source,
+        actions=actions,
+        strict_mode=True,
+    )
+    effective_actions = SafeCodeTransformationValidationAgent._actions_with_effective_replacements(
+        actions,
+        logs,
+    )
+
+    assert "static int a = THRESHOLD_LIMIT_10;" in transformed
+    assert "int b = 5, c = 15;" in transformed
+    assert "int get_a(void)" in transformed
+    assert "return get_a() + b + c;" in transformed
+
+    structural = StructuralValidator().validate(
+        language="c",
+        original_code=source,
+        transformed_code=transformed,
+        actions=effective_actions,
+    )
+    assert structural.passed is True, structural.details
+    assert structural.details["c_global_variable_validation"][0]["checks"]["original_initializer_preserved"] is True
+
+    comparison = compare_c_static_summaries(source, transformed, effective_actions)
+    assert comparison["matched"] is True, comparison
 
 
 def test_engine_recovers_three_generic_c_global_variable_targets_in_declaration_order():

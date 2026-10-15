@@ -231,7 +231,13 @@ export default function SmellCategoryOverview({
                   boxShadow: `inset -1px -1px 0 ${C.border}`,
                   padding: "10px 12px 9px",
                   background: isActive ? `${C.accent}0d` : "transparent",
-                  border: "none",
+                  // Sides spelled out rather than `border: "none"` plus a
+                  // left override: borderLeft changes with `isActive`, and
+                  // React warns when it updates a longhand while the matching
+                  // shorthand is also set.
+                  borderTop: "none",
+                  borderRight: "none",
+                  borderBottom: "none",
                   borderLeft: `2px solid ${isActive ? C.accent : "transparent"}`,
                   textAlign: "left",
                   cursor: empty ? "default" : "pointer",

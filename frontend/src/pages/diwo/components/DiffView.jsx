@@ -16,12 +16,12 @@ import { useMemo } from "react";
 import { C } from "../diwoTheme.jsx";
 import { buildDiffSegments } from "../utils/diffMapper";
 
-/** Scrollable dark panel every code and diff view sits in. */
+/** Scrollable theme-aware panel every code and diff view sits in. */
 export function CodeSurface({ children, maxHeight = 460, style = {} }) {
   return (
     <div
       style={{
-        background: "#0b1020",
+        background: "var(--bg-code)",
         border: `1px solid ${C.border}`,
         borderRadius: 10,
         overflow: "auto",
@@ -39,8 +39,8 @@ export function CodeSurface({ children, maxHeight = 460, style = {} }) {
 }
 
 const DIFF_TONES = {
-  before: { rail: "#ef4444", fill: "rgba(239,68,68,0.12)", text: "#fecaca", label: "Original" },
-  after: { rail: "#3b82f6", fill: "rgba(59,130,246,0.12)", text: "#bfdbfe", label: "Refactored" },
+  before: { rail: "#ef4444", fill: "rgba(239,68,68,0.12)", text: "var(--text-danger)", label: "Original" },
+  after: { rail: "#3b82f6", fill: "rgba(59,130,246,0.12)", text: "var(--text-info)", label: "Refactored" },
 };
 
 /** "lines 12–15", or "line 12" for a single line. */
@@ -80,10 +80,10 @@ export function CodeBlock({ code, emptyMessage = "No code to display." }) {
           key={`line-${idx}`}
           style={{ display: "grid", gridTemplateColumns: "56px 1fr", padding: "1px 0" }}
         >
-          <span style={{ color: "#64748b", textAlign: "right", paddingRight: 10, userSelect: "none" }}>
+          <span style={{ color: "var(--text-muted)", textAlign: "right", paddingRight: 10, userSelect: "none" }}>
             {idx + 1}
           </span>
-          <span style={{ whiteSpace: "pre", color: "#cbd5e1", padding: "0 12px 0 6px" }}>
+          <span style={{ whiteSpace: "pre", color: "var(--text-primary)", padding: "0 12px 0 6px" }}>
             {line || " "}
           </span>
         </div>
@@ -95,7 +95,7 @@ export function CodeBlock({ code, emptyMessage = "No code to display." }) {
 function DiffLine({ row, tone }) {
   return (
     <div style={{ display: "grid", gridTemplateColumns: "56px 24px 1fr", padding: "1px 0" }}>
-      <span style={{ color: "#64748b", textAlign: "right", paddingRight: 8, userSelect: "none" }}>
+      <span style={{ color: "var(--text-muted)", textAlign: "right", paddingRight: 8, userSelect: "none" }}>
         {row.lineNo}
       </span>
       <span style={{ color: tone.rail, textAlign: "center", userSelect: "none", fontWeight: 700 }}>
@@ -108,8 +108,17 @@ function DiffLine({ row, tone }) {
   );
 }
 
-/** One side of a change: every removed line together, or every added line together. */
-function DiffGroup({ rows, kind }) {
+/**
+ * One side of a change: every removed line together, or every added line
+ * together.
+ *
+ * `note` is the WHY for this side — the smells the original was flagged for,
+ * the refactorings planned for the replacement. It rides on this header rather
+ * than in a strip above the code because this is the line a reader is already
+ * looking at when they ask "why is this block red?", and an answer one line
+ * away is an answer they have to go and find.
+ */
+function DiffGroup({ rows, kind, note }) {
   if (rows.length === 0) return null;
   const tone = DIFF_TONES[kind];
 
@@ -117,15 +126,29 @@ function DiffGroup({ rows, kind }) {
     <div style={{ background: tone.fill, borderLeft: `3px solid ${tone.rail}` }}>
       <div
         style={{
+          display: "flex",
+          alignItems: "baseline",
+          gap: 8,
+          flexWrap: "wrap",
           fontSize: 9,
           fontWeight: 700,
           letterSpacing: 1,
           textTransform: "uppercase",
           color: tone.rail,
-          padding: "3px 0 3px 62px",
+          padding: "3px 12px 3px 62px",
         }}
       >
-        {tone.label} · {rows.length} line{rows.length === 1 ? "" : "s"}
+        <span>{tone.label} · {rows.length} line{rows.length === 1 ? "" : "s"}</span>
+        {note && (
+          // Not uppercased and not tinted: a smell type is a proper noun, and
+          // shouting it would make it compete with the label it qualifies.
+          <span style={{
+            textTransform: "none", letterSpacing: 0.2, fontWeight: 600,
+            color: C.textSub, minWidth: 0,
+          }}>
+            {note}
+          </span>
+        )}
       </div>
       {rows.map((row) => (
         <DiffLine key={row.key} row={row} tone={tone} />
@@ -139,7 +162,15 @@ function DiffGroup({ rows, kind }) {
  * removed lines as one red block and the lines that replaced them as one blue
  * block beneath it.
  */
-export function DiffBlock({ rows, emptyMessage = "No differences to display for this file." }) {
+export function DiffBlock({
+  rows,
+  emptyMessage = "No differences to display for this file.",
+  // Optional. Both stages render this component; only the Transformation stage
+  // holds the plan that can say what the change is for, so a caller without
+  // that context simply omits them and the headers read as they always did.
+  beforeNote = "",
+  afterNote = "",
+}) {
   const segments = useMemo(() => buildDiffSegments(rows), [rows]);
   const changeCount = segments.filter((s) => s.type === "change").length;
 
@@ -201,8 +232,8 @@ export function DiffBlock({ rows, emptyMessage = "No differences to display for 
               <span style={{ color: C.accent }}>Change {segment.ordinal}/{changeCount}</span>
               <span style={{ color: C.textMuted, fontWeight: 500 }}>{changeTitle(segment)}</span>
             </div>
-            <DiffGroup rows={segment.before} kind="before" />
-            <DiffGroup rows={segment.after} kind="after" />
+            <DiffGroup rows={segment.before} kind="before" note={beforeNote} />
+            <DiffGroup rows={segment.after} kind="after" note={afterNote} />
           </div>
         );
       })}

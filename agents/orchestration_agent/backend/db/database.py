@@ -3,10 +3,16 @@ Database connection and schema
 ==============================
 R26-SE-008 | Bandara S M Y M | IT22277886
 
-SQLite for the prototype; replace the connection with a PostgreSQL DSN for
-production. This module owns the connection, the schema and its migrations —
-persistence of workflows, audit events and feedback lives next door in
-workflow_repository.py.
+SQLite for the prototype. This module owns the SQLite connection, its schema
+and its migrations — persistence of workflows, audit events and feedback lives
+next door, behind db/workflow_repository.py.
+
+SUPABASE DEPLOYMENTS SKIP ALL OF IT. When SUPABASE_URL and a key are set,
+db/workflow_repository.py dispatches to db/supabase_repository.py and nothing
+here is ever called; init_db() then creates no file, because a SQLite database
+sitting unused beside a live Supabase project is the thing someone eventually
+mistakes for the real data. The Supabase schema is db/schema_supabase.sql, run
+by hand in the SQL editor — PostgREST cannot issue DDL.
 
 The database file now sits under runtime/database/, resolved by config so
 generated data is never mixed with source. An older backend/diwo_audit.db is
@@ -17,11 +23,14 @@ import sqlite3
 from datetime import datetime, timezone
 from flask import g
 
+import config
 from config import database_path
 
 #: Resolved once at import so every helper agrees on the file, and the
-#: legacy-path migration runs exactly once per process.
-DB_PATH = database_path()
+#: legacy-path migration runs exactly once per process. Left unresolved on a
+#: Supabase deployment: database_path() creates runtime/database/ as a side
+#: effect, and a directory that exists implies a database that does not.
+DB_PATH = None if config.uses_supabase() else database_path()
 
 
 def get_db():
@@ -38,6 +47,21 @@ def close_db(e=None):
 
 
 def init_db(app):
+    """Create the SQLite schema, unless this deployment persists to Supabase."""
+    if config.uses_supabase():
+        # One cheap read at boot. Without it a bad URL or a publishable key
+        # surfaces as a 500 on every request, or as reads that quietly return
+        # nothing — which reaches the developer as "the button does nothing",
+        # several screens from the cause.
+        from db.supabase_client import startup_check
+        print(f"[DIWO] Persistence: Supabase — SQLite schema not created.")
+        print(f"[DIWO] {startup_check()}")
+        return
+
+    reason = config.supabase_misconfigured()
+    if reason:
+        print(f"[DIWO] {reason}")
+
     app.teardown_appcontext(close_db)
     with sqlite3.connect(str(DB_PATH)) as conn:
         conn.executescript("""
@@ -137,7 +161,7 @@ def init_db(app):
                ON feedback_entries (workflow_id, action, step_key)"""
         )
 
-    print("[DIWO] Database initialized.")
+    print(f"[DIWO] Database initialized (SQLite: {DB_PATH}).")
 
 
 def now_iso():

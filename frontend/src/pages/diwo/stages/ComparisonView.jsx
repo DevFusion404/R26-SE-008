@@ -48,7 +48,7 @@ function TrailEntry({ entry, open, onToggle }) {
   const clickable = entry.expandable;
 
   return (
-    <div style={{ borderBottom: "1px solid #1f2937" }}>
+    <div style={{ borderBottom: "1px solid var(--border-light)" }}>
       <button
         type="button"
         onClick={clickable ? () => onToggle(entry.id) : undefined}
@@ -65,26 +65,26 @@ function TrailEntry({ entry, open, onToggle }) {
           width: 6, height: 6, borderRadius: "50%", background: tone, flexShrink: 0,
         }} />
         <span style={{
-          flex: 1, minWidth: 0, fontSize: 13, color: "#e2e8f0",
+          flex: 1, minWidth: 0, fontSize: 13, color: "var(--text-primary)",
           fontWeight: 600, lineHeight: 1.4,
         }}>
           {entry.title}
         </span>
         <span style={{
           display: "flex", alignItems: "center", gap: 6, fontSize: 11.5,
-          color: "#94a3b8", background: "#1e293b", padding: "4px 9px",
-          borderRadius: 6, border: "1px solid #334155", flexShrink: 0,
+          color: "var(--text-secondary)", background: "var(--bg-elevated)", padding: "4px 9px",
+          borderRadius: 6, border: "1px solid var(--border)", flexShrink: 0,
         }}>
           <span>{entry.actor === "system" ? "⚙️" : entry.actor === "developer" ? "👤" : "📌"}</span>
           <span>{entry.actor}</span>
         </span>
         <span style={{
-          fontSize: 11, color: "#64748b", fontFamily: "monospace",
+          fontSize: 11, color: "var(--text-muted)", fontFamily: "monospace",
           flexShrink: 0, minWidth: 140, textAlign: "right",
         }}>
           {fmtStamp(entry.timestamp) || "—"}
         </span>
-        <span style={{ color: clickable ? "#64748b" : "transparent", fontWeight: 800, flexShrink: 0 }}>
+        <span style={{ color: clickable ? "var(--text-muted)" : "transparent", fontWeight: 800, flexShrink: 0 }}>
           {open ? "▾" : "▸"}
         </span>
       </button>
@@ -94,9 +94,9 @@ function TrailEntry({ entry, open, onToggle }) {
           {entry.facts.length > 0 && (
             <div style={{ display: "flex", flexWrap: "wrap", gap: "4px 16px" }}>
               {entry.facts.map((fact) => (
-                <span key={fact.label} style={{ fontSize: 11.5, color: "#94a3b8" }}>
+                <span key={fact.label} style={{ fontSize: 11.5, color: "var(--text-secondary)" }}>
                   {fact.label}{" "}
-                  <b style={{ color: "#cbd5e1", fontFamily: "monospace" }}>{fact.value}</b>
+                  <b style={{ color: "var(--text-primary)", fontFamily: "monospace" }}>{fact.value}</b>
                 </span>
               ))}
             </div>
@@ -106,7 +106,7 @@ function TrailEntry({ entry, open, onToggle }) {
             <div key={group.label}>
               <div style={{
                 fontSize: 10.5, textTransform: "uppercase", letterSpacing: 0.5,
-                color: "#64748b", fontWeight: 700, marginBottom: 5,
+                color: "var(--text-muted)", fontWeight: 700, marginBottom: 5,
               }}>
                 {group.label}
                 <span style={{ fontFamily: "monospace", marginLeft: 6 }}>{group.items.length}</span>
@@ -115,20 +115,20 @@ function TrailEntry({ entry, open, onToggle }) {
                 {group.items.map((item) => (
                   <div key={item.key} style={{
                     display: "flex", alignItems: "baseline", gap: 8, fontSize: 12,
-                    background: "#0b1020", border: "1px solid #1f2937",
+                    background: "var(--bg-subtle)", border: "1px solid var(--border-light)",
                     borderRadius: 6, padding: "5px 9px",
                   }}>
-                    <span style={{ color: "#cbd5e1", fontWeight: 600, flex: 1, minWidth: 0 }}>
+                    <span style={{ color: "var(--text-primary)", fontWeight: 600, flex: 1, minWidth: 0 }}>
                       {item.primary}
                       {item.secondary && (
-                        <span style={{ color: "#64748b", fontWeight: 400 }}> · {item.secondary}</span>
+                        <span style={{ color: "var(--text-muted)", fontWeight: 400 }}> · {item.secondary}</span>
                       )}
                     </span>
                     {item.file && (
                       <code
                         title={item.file}
                         style={{
-                          fontSize: 10.5, color: "#94a3b8", flexShrink: 0,
+                          fontSize: 10.5, color: "var(--text-secondary)", flexShrink: 0,
                           maxWidth: 260, overflow: "hidden", textOverflow: "ellipsis",
                           whiteSpace: "nowrap",
                         }}
@@ -140,7 +140,7 @@ function TrailEntry({ entry, open, onToggle }) {
                       <span style={{
                         fontSize: 9.5, fontWeight: 700, textTransform: "uppercase",
                         padding: "1px 6px", borderRadius: 8, flexShrink: 0,
-                        background: "#1e293b", color: "#94a3b8",
+                        background: "var(--bg-elevated)", color: "var(--text-secondary)",
                       }}>
                         {item.tag}
                       </span>
@@ -152,7 +152,7 @@ function TrailEntry({ entry, open, onToggle }) {
           ))}
 
           {entry.note && (
-            <div style={{ fontSize: 11, color: "#64748b", fontStyle: "italic" }}>{entry.note}</div>
+            <div style={{ fontSize: 11, color: "var(--text-muted)", fontStyle: "italic" }}>{entry.note}</div>
           )}
         </div>
       )}
@@ -166,24 +166,24 @@ function MetricBar({ label, before, after, unit = "", higherIsBetter = true, car
   
   return (
     <div style={cardStyle}>
-      <div style={{ fontSize: 13, color: "#cbd5e1", fontWeight: 600, marginBottom: 12, letterSpacing: 0.3 }}>
+      <div style={{ fontSize: 13, color: "var(--text-primary)", fontWeight: 600, marginBottom: 12, letterSpacing: 0.3 }}>
         {label}
       </div>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
         <div>
-          <div style={{ fontSize: 11, color: "#94a3b8", marginBottom: 2 }}>Before</div>
+          <div style={{ fontSize: 11, color: "var(--text-secondary)", marginBottom: 2 }}>Before</div>
           <div style={{ fontSize: 18, fontWeight: 700, color: "#f97316" }}>{before}{unit}</div>
         </div>
-        <div style={{ fontSize: 18, color: "#64748b", fontWeight: 300 }}>→</div>
+        <div style={{ fontSize: 18, color: "var(--text-muted)", fontWeight: 300 }}>→</div>
         <div>
-          <div style={{ fontSize: 11, color: "#94a3b8", marginBottom: 2 }}>After</div>
+          <div style={{ fontSize: 11, color: "var(--text-secondary)", marginBottom: 2 }}>After</div>
           <div style={{ fontSize: 18, fontWeight: 700, color: "#22c55e" }}>{after}{unit}</div>
         </div>
       </div>
       <div style={{
         fontSize: 11,
         fontWeight: 600,
-        color: improved ? "#86efac" : "#fca5a5",
+        color: improved ? "var(--text-success)" : "var(--text-danger)",
         letterSpacing: 0.2,
       }}>
         {improved ? "✓" : "•"} {pct}% {improved ? "improvement" : "increase"}
@@ -235,21 +235,21 @@ export function ComparisonView({ workflow, workflowId: propWorkflowId, language:
 
   const KPI_CARD_BASE = {
     borderRadius: 12,
-    border: "1px solid #1f2937",
-    background: "#0f172a",
+    border: "1px solid var(--border)",
+    background: "var(--bg-card)",
     padding: "14px 16px",
     minHeight: 86,
     display: "flex",
     flexDirection: "column",
     justifyContent: "center",
-    boxShadow: "0 6px 20px rgba(2,6,23,0.45)",
+    boxShadow: "var(--shadow-card)",
   };
 
   const kpiVariantStyle = (variant) => {
-    if (variant === "green") return { borderColor: "rgba(34,197,94,0.35)", background: "linear-gradient(180deg, rgba(34,197,94,0.14), rgba(15,23,42,0.95))", numColor: "#86efac" };
-    if (variant === "blue") return { borderColor: "rgba(59,130,246,0.35)", background: "linear-gradient(180deg, rgba(59,130,246,0.14), rgba(15,23,42,0.95))", numColor: "#93c5fd" };
-    if (variant === "purple") return { borderColor: "rgba(168,85,247,0.35)", background: "linear-gradient(180deg, rgba(168,85,247,0.14), rgba(15,23,42,0.95))", numColor: "#d8b4fe" };
-    return { borderColor: "rgba(249,115,22,0.35)", background: "linear-gradient(180deg, rgba(249,115,22,0.14), rgba(15,23,42,0.95))", numColor: "#fdba74" };
+    if (variant === "green") return { borderColor: "rgba(34,197,94,0.35)", background: "linear-gradient(180deg, rgba(34,197,94,0.12), var(--bg-card))", numColor: "var(--metric-green)" };
+    if (variant === "blue") return { borderColor: "rgba(59,130,246,0.35)", background: "linear-gradient(180deg, rgba(59,130,246,0.12), var(--bg-card))", numColor: "var(--metric-blue)" };
+    if (variant === "purple") return { borderColor: "rgba(168,85,247,0.35)", background: "linear-gradient(180deg, rgba(168,85,247,0.12), var(--bg-card))", numColor: "var(--metric-purple)" };
+    return { borderColor: "rgba(249,115,22,0.35)", background: "linear-gradient(180deg, rgba(249,115,22,0.12), var(--bg-card))", numColor: "var(--metric-orange)" };
   };
 
   const diffRows = workflow?.diff_rows || [];
@@ -427,9 +427,9 @@ export function ComparisonView({ workflow, workflowId: propWorkflowId, language:
             marginBottom: 14,
             padding: "8px 16px",
             borderRadius: 8,
-            border: "1px solid #334155",
-            background: "#1e293b",
-            color: "#cbd5e1",
+            border: "1px solid var(--border)",
+            background: "var(--bg-elevated)",
+            color: "var(--text-primary)",
             fontSize: 12.5,
             fontWeight: 700,
             cursor: "pointer",
@@ -449,19 +449,19 @@ export function ComparisonView({ workflow, workflowId: propWorkflowId, language:
       <div className="kpi-row" style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 12, marginBottom: 18 }}>
         <div className="kpi-card green" style={{ ...KPI_CARD_BASE, borderColor: kpiVariantStyle("green").borderColor, background: kpiVariantStyle("green").background }}>
           <div className="kpi-num" style={{ fontSize: 26, fontWeight: 800, color: kpiVariantStyle("green").numColor, lineHeight: 1.1 }}>↓ {improvements.complexity_reduced_by || 0}</div>
-          <div className="kpi-label" style={{ fontSize: 12, color: "#cbd5e1", marginTop: 6, letterSpacing: 0.2 }}>Complexity Reduced</div>
+          <div className="kpi-label" style={{ fontSize: 12, color: "var(--text-secondary)", marginTop: 6, letterSpacing: 0.2 }}>Complexity Reduced</div>
         </div>
         <div className="kpi-card blue" style={{ ...KPI_CARD_BASE, borderColor: kpiVariantStyle("blue").borderColor, background: kpiVariantStyle("blue").background }}>
           <div className="kpi-num" style={{ fontSize: 26, fontWeight: 800, color: kpiVariantStyle("blue").numColor, lineHeight: 1.1 }}>↓ {improvements.duplication_reduced_by || 0}%</div>
-          <div className="kpi-label" style={{ fontSize: 12, color: "#cbd5e1", marginTop: 6, letterSpacing: 0.2 }}>Duplication Reduced</div>
+          <div className="kpi-label" style={{ fontSize: 12, color: "var(--text-secondary)", marginTop: 6, letterSpacing: 0.2 }}>Duplication Reduced</div>
         </div>
         <div className="kpi-card purple" style={{ ...KPI_CARD_BASE, borderColor: kpiVariantStyle("purple").borderColor, background: kpiVariantStyle("purple").background }}>
           <div className="kpi-num" style={{ fontSize: 26, fontWeight: 800, color: kpiVariantStyle("purple").numColor, lineHeight: 1.1 }}>↑ {improvements.maintainability_gained || 0}</div>
-          <div className="kpi-label" style={{ fontSize: 12, color: "#cbd5e1", marginTop: 6, letterSpacing: 0.2 }}>Maintainability Gained</div>
+          <div className="kpi-label" style={{ fontSize: 12, color: "var(--text-secondary)", marginTop: 6, letterSpacing: 0.2 }}>Maintainability Gained</div>
         </div>
         <div className="kpi-card orange" style={{ ...KPI_CARD_BASE, borderColor: kpiVariantStyle("orange").borderColor, background: kpiVariantStyle("orange").background }}>
           <div className="kpi-num" style={{ fontSize: 26, fontWeight: 800, color: kpiVariantStyle("orange").numColor, lineHeight: 1.1 }}>{mb.total_smells || 0} → {ma.total_smells || 0}</div>
-          <div className="kpi-label" style={{ fontSize: 12, color: "#cbd5e1", marginTop: 6, letterSpacing: 0.2 }}>Smells Remaining</div>
+          <div className="kpi-label" style={{ fontSize: 12, color: "var(--text-secondary)", marginTop: 6, letterSpacing: 0.2 }}>Smells Remaining</div>
         </div>
       </div>
 
@@ -505,8 +505,8 @@ export function ComparisonView({ workflow, workflowId: propWorkflowId, language:
           <h3>Quality Radar</h3>
           <ResponsiveContainer width="100%" height={260}>
             <RadarChart data={radarData}>
-              <PolarGrid stroke="#334155" />
-              <PolarAngleAxis dataKey="metric" tick={{ fill: "#94a3b8", fontSize: 12 }} />
+              <PolarGrid stroke="var(--border)" />
+              <PolarAngleAxis dataKey="metric" tick={{ fill: "var(--text-secondary)", fontSize: 12 }} />
               <Radar name="Before" dataKey="before" stroke="#f97316" fill="#f97316" fillOpacity={0.25} />
               <Radar name="After"  dataKey="after"  stroke="#22c55e" fill="#22c55e" fillOpacity={0.25} />
               <Legend />
@@ -518,9 +518,9 @@ export function ComparisonView({ workflow, workflowId: propWorkflowId, language:
           <h3>Smell Breakdown</h3>
           <ResponsiveContainer width="100%" height={260}>
             <BarChart data={smellBreakdownData}>
-              <XAxis dataKey="severity" tick={{ fill: "#94a3b8", fontSize: 12 }} />
-              <YAxis tick={{ fill: "#94a3b8" }} />
-              <Tooltip contentStyle={{ background: "#1e293b", border: "1px solid #334155", borderRadius: 8 }} />
+              <XAxis dataKey="severity" tick={{ fill: "var(--text-secondary)", fontSize: 12 }} />
+              <YAxis tick={{ fill: "var(--text-secondary)" }} />
+              <Tooltip contentStyle={{ background: "var(--bg-card)", border: "1px solid var(--border)", borderRadius: 8, color: "var(--text-primary)" }} />
               <Legend />
               <Bar dataKey="before" name="Before" fill="#f97316" radius={[4,4,0,0]} />
               <Bar dataKey="after"  name="After"  fill="#22c55e" radius={[4,4,0,0]} />
@@ -534,8 +534,8 @@ export function ComparisonView({ workflow, workflowId: propWorkflowId, language:
           <div style={{ marginTop: 8 }}>
             {files.length > 0 && (
               <div style={{ display: "flex", gap: 8, marginBottom: 8, alignItems: "center" }}>
-                <div style={{ fontSize: 12, color: "#94a3b8" }}>File:</div>
-                <select value={selectedFileIndex} onChange={(e) => setSelectedFileIndex(Number(e.target.value))} style={{ padding: 6, borderRadius: 6, background: "#071025", color: "#cbd5e1", border: "1px solid #1f2937" }}>
+                <div style={{ fontSize: 12, color: "var(--text-secondary)" }}>File:</div>
+                <select value={selectedFileIndex} onChange={(e) => setSelectedFileIndex(Number(e.target.value))} style={{ padding: 6, borderRadius: 6, background: "var(--bg-input)", color: "var(--text-primary)", border: "1px solid var(--border)" }}>
                   {files.map((f, i) => (
                     <option key={f.path || i} value={i}>{f.path || `file-${i+1}`}</option>
                   ))}
@@ -575,16 +575,16 @@ export function ComparisonView({ workflow, workflowId: propWorkflowId, language:
                     borderBottom: "1px solid rgba(148,163,184,0.08)",
                   }}
                 >
-                  <span style={{ color: "#64748b", textAlign: "right", paddingRight: 8, userSelect: "none" }}>{row.lineNo}</span>
+                  <span style={{ color: "var(--text-muted)", textAlign: "right", paddingRight: 8, userSelect: "none" }}>{row.lineNo}</span>
                   <span style={{
-                    color: isBefore ? "#ef4444" : isAfter ? "#3b82f6" : "#94a3b8",
+                    color: isBefore ? "#ef4444" : isAfter ? "#2563eb" : "var(--text-secondary)",
                     textAlign: "center",
                     userSelect: "none",
                     fontWeight: 700,
                   }}>{row.marker}</span>
                   <span style={{
                     whiteSpace: "pre",
-                    color: isBefore ? "#fecaca" : isAfter ? "#bfdbfe" : "#cbd5e1",
+                    color: isBefore ? "var(--text-danger)" : isAfter ? "var(--text-info)" : "var(--text-primary)",
                     padding: "0 10px 0 6px",
                   }}>{row.text || " "}</span>
                 </div>
@@ -598,7 +598,7 @@ export function ComparisonView({ workflow, workflowId: propWorkflowId, language:
         <h2 style={{ marginBottom: 6, display: "flex", alignItems: "center", gap: 8 }}>
           <span style={{ fontSize: 24 }}>📋</span> Audit Trail
         </h2>
-        <p style={{ margin: "0 0 16px", fontSize: 12.5, color: "#94a3b8" }}>
+        <p style={{ margin: "0 0 16px", fontSize: 12.5, color: "var(--text-secondary)" }}>
           Every recorded step of this session — which files had smells, which were
           selected, what each was refactored into, and what the developer decided.
           {narratedTrail.length > 0 && (
@@ -607,15 +607,15 @@ export function ComparisonView({ workflow, workflowId: propWorkflowId, language:
         </p>
 
         <div className="audit-log" style={{
-          background: "#0f172a",
-          border: "1px solid #1f2937",
+          background: "var(--bg-card)",
+          border: "1px solid var(--border)",
           borderRadius: 12,
           overflow: "hidden",
-          boxShadow: "0 6px 20px rgba(2,6,23,0.45)",
+          boxShadow: "var(--shadow-card)",
         }}>
           {narratedTrail.length === 0 && (
             <p className="empty-state" style={{
-              padding: 32, textAlign: "center", color: "#64748b", margin: 0,
+              padding: 32, textAlign: "center", color: "var(--text-muted)", margin: 0,
             }}>
               No audit log entries yet.
             </p>
@@ -624,8 +624,8 @@ export function ComparisonView({ workflow, workflowId: propWorkflowId, language:
           {groupByStage(narratedTrail).map((stage) => (
             <div key={stage.stage}>
               <div style={{
-                padding: "10px 20px", background: "#111c31",
-                borderBottom: "1px solid #1f2937",
+                padding: "10px 20px", background: "var(--bg-surface)",
+                borderBottom: "1px solid var(--border)",
                 display: "flex", alignItems: "center", gap: 10,
               }}>
                 <span style={{
@@ -640,7 +640,7 @@ export function ComparisonView({ workflow, workflowId: propWorkflowId, language:
                 }}>
                   {stage.label}
                 </span>
-                <span style={{ fontSize: 11, color: "#64748b", fontFamily: "monospace" }}>
+                <span style={{ fontSize: 11, color: "var(--text-muted)", fontFamily: "monospace" }}>
                   {stage.entries.length}
                 </span>
               </div>
@@ -662,7 +662,7 @@ export function ComparisonView({ workflow, workflowId: propWorkflowId, language:
         <label style={{ display: "block", marginBottom: 8, fontWeight: 700 }}>Final Notes (optional)</label>
         <textarea rows={6} placeholder="Overall notes for this refactoring session..."
                   value={notes} onChange={(e) => setNotes(e.target.value)}
-                  style={{ width: "100%", minHeight: 140, padding: 12, borderRadius: 10, background: "#071025", color: "#e2e8f0", border: "1px solid #1f2937", resize: "vertical", fontFamily: "inherit" }} />
+                  style={{ width: "100%", minHeight: 140, padding: 12, borderRadius: 10, background: "var(--bg-input)", color: "var(--text-primary)", border: "1px solid var(--border)", resize: "vertical", fontFamily: "inherit" }} />
       </div>
       {/* <button className="primary-btn complete-btn" onClick={() => onComplete && onComplete(notes)} disabled={loading}>
         {loading ? "Completing..." : "✓ Complete Workflow"}
@@ -675,9 +675,9 @@ export function ComparisonView({ workflow, workflowId: propWorkflowId, language:
     style={{
       padding: "10px 18px",
       borderRadius: 10,
-      border: "1px solid #334155",
-      background: "#1e293b",
-      color: "#e2e8f0",
+      border: "1px solid var(--border)",
+      background: "var(--bg-elevated)",
+      color: "var(--text-primary)",
       fontWeight: 700,
       cursor: "pointer"
     }}
@@ -697,9 +697,9 @@ export function ComparisonView({ workflow, workflowId: propWorkflowId, language:
     style={{
       padding: "10px 18px",
       borderRadius: 10,
-      border: `1px solid ${downloadableFiles.length === 0 ? "#334155" : "rgba(34,197,94,0.45)"}`,
-      background: downloadableFiles.length === 0 ? "#1e293b" : "linear-gradient(180deg, rgba(34,197,94,0.16), rgba(15,23,42,0.95))",
-      color: downloadableFiles.length === 0 ? "#64748b" : "#86efac",
+      border: `1px solid ${downloadableFiles.length === 0 ? "var(--border)" : "rgba(34,197,94,0.45)"}`,
+      background: downloadableFiles.length === 0 ? "var(--bg-elevated)" : "linear-gradient(180deg, rgba(34,197,94,0.13), var(--bg-card))",
+      color: downloadableFiles.length === 0 ? "var(--text-muted)" : "var(--metric-green)",
       fontWeight: 700,
       cursor: loading || zipping || downloadableFiles.length === 0 ? "not-allowed" : "pointer",
     }}
@@ -717,8 +717,8 @@ export function ComparisonView({ workflow, workflowId: propWorkflowId, language:
       padding: "11px 26px",
       borderRadius: 10,
       border: "none",
-      background: loading ? "#334155" : "#22c55e",
-      color: loading ? "#94a3b8" : "#04210f",
+      background: loading ? "var(--bg-elevated)" : "#22c55e",
+      color: loading ? "var(--text-muted)" : "#04210f",
       fontSize: 13.5,
       fontWeight: 800,
       letterSpacing: 0.2,
@@ -731,7 +731,7 @@ export function ComparisonView({ workflow, workflowId: propWorkflowId, language:
 </div>
 
       {downloadableFiles.length > 0 && !archiveSummary && (
-        <div style={{ marginTop: 10, fontSize: 12, color: "#94a3b8" }}>
+        <div style={{ marginTop: 10, fontSize: 12, color: "var(--text-secondary)" }}>
           The archive packs the whole project in its original folder structure: {downloadableFiles.length}{" "}
           changed file(s) applied
           {revertedCount > 0 && (
@@ -756,17 +756,17 @@ export function ComparisonView({ workflow, workflowId: propWorkflowId, language:
             padding: "10px 14px",
             borderRadius: 10,
             border: `1px solid ${archiveSummary.scope === "full_project" ? "rgba(34,197,94,0.35)" : "rgba(249,115,22,0.35)"}`,
-            background: "#0f172a",
+            background: "var(--bg-elevated)",
             fontSize: 12,
-            color: "#cbd5e1",
+            color: "var(--text-primary)",
           }}
         >
           {archiveSummary.scope === "full_project" ? (
             <>
-              <strong style={{ color: "#86efac" }}>Project archive downloaded</strong>
+              <strong style={{ color: "var(--text-success)" }}>Project archive downloaded</strong>
               {archiveSummary.repoName ? ` — ${archiveSummary.repoName}` : ""} ·{" "}
               {archiveSummary.included} file(s), {Math.round((archiveSummary.bytes || 0) / 1024)} KB
-              <div style={{ marginTop: 4, color: "#94a3b8" }}>
+              <div style={{ marginTop: 4, color: "var(--text-secondary)" }}>
                 {archiveSummary.replacedInPlace} file(s) replaced in place ·{" "}
                 {archiveSummary.refactored} refactored · {archiveSummary.reverted} reverted to original ·{" "}
                 {archiveSummary.unchanged} unchanged
