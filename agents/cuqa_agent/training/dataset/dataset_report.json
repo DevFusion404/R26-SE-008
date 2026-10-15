@@ -1,0 +1,39 @@
+{
+  "mlcq_samples_total": 4770,
+  "source_files_parsed": 4156,
+  "sample_status": {
+    "source_unavailable": 478,
+    "matched": 4277,
+    "parse_failed": 15
+  },
+  "class_rows": 2107,
+  "method_rows": 2170,
+  "repositories": 499,
+  "line_tolerance": 2,
+  "labels": {
+    "blob": {
+      "samples": 2103,
+      "positive": 220,
+      "negative": 1883,
+      "positive_rate": 0.1046
+    },
+    "data_class": {
+      "samples": 2106,
+      "positive": 277,
+      "negative": 1829,
+      "positive_rate": 0.1315
+    },
+    "long_method": {
+      "samples": 2170,
+      "positive": 233,
+      "negative": 1937,
+      "positive_rate": 0.1074
+    },
+    "feature_envy": {
+      "samples": 2159,
+      "positive": 59,
+      "negative": 2100,
+      "positive_rate": 0.0273
+    }
+  }
+}
