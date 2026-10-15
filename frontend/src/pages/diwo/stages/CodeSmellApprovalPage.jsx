@@ -58,32 +58,47 @@
  * into a wall of figures, and made the list impossible to scan for the one
  * finding still being weighed.
  *
- * All of it degrades. No impact records means no chips, no capability tags and
- * no effort figures — not zeroes. No taxonomy means no category overview and no
- * category dropdown. Selection keeps working in every case.
+ * All of it degrades. No impact records means no chips, no capability tags,
+ * no effort figures and no effort / gain sorting — not zeroes. No taxonomy
+ * means categories fall back to what CUQA stamped on each smell. Selection
+ * keeps working in every case.
+ *
+ * Layout
+ * ------
+ *     context strip      repository, report source, key metrics, re-analyze
+ *     filter rail        summary + severity / category / smell-type filters
+ *     findings           toolbar, then the active view's groups and cards
+ *     selection panel    what goes to RDP, impact & optimiser, the one CTA
+ *
+ * Three columns on a wide workspace, two (rail above the list) on a medium
+ * one, one on a narrow one with a sticky footer carrying the CTA — see
+ * codeSmellTheme.css. Colours come from codeSmellTheme.js tokens, which flip
+ * with the app's light / dark theme.
+ *
+ * Send to RDP opens CodeSmellApprovalDialog first; confirming calls
+ * handleApproveSelection, the same single submit path as before.
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { CUQA_DATA } from "../data/diwoData";
-import { C, Card, Badge } from "../diwoTheme.jsx";
+import { T, tint, eyebrow, panelStyle, ghostButton, primaryButton } from "../codeSmellTheme.js";
+import { Spinner } from "../codeSmellUi.jsx";
 import SourceViewer from "../components/SourceViewer.jsx";
 import ImpactDrawer from "../components/ImpactDrawer.jsx";
-import TradeOffPanel from "../components/TradeOffPanel.jsx";
-import SmellCategoryOverview from "../components/SmellCategoryOverview.jsx";
 import QuickSelectDropdown from "../components/QuickSelectDropdown.jsx";
-import SelectionSummaryPanel from "../components/SelectionSummaryPanel.jsx";
-import StickyActionBar from "../components/StickyActionBar.jsx";
+import CodeSmellContextBar from "../components/CodeSmellContextBar.jsx";
+import CodeSmellFilterRail from "../components/CodeSmellFilterRail.jsx";
+import CodeSmellSelectionPanel, { MobileActionBar } from "../components/CodeSmellSelectionPanel.jsx";
+import CodeSmellApprovalDialog from "../components/CodeSmellApprovalDialog.jsx";
 import {
   CategoryWiseView, FileWiseView, SmellWiseView,
 } from "../components/SmellReviewViews.jsx";
-import {
-  CodeSmellStats, ModeSwitch, SearchAndSeverity,
-} from "../components/CodeSmellToolbar.jsx";
-import { DEFAULT_BUDGET_MINUTES } from "../utils/impactPresets";
+import { ReviewToolbar } from "../components/CodeSmellToolbar.jsx";
+import { DEFAULT_BUDGET_MINUTES, PRESETS } from "../utils/impactPresets";
 import { qualityBaseline, summariseSelection } from "../utils/impactSummary";
 import {
-  categoryOptions, expandAllKeys, groupByCategory, groupByFile, groupBySmellType,
-  selectionSummary, smellTypeOptions,
+  categoryOptions, expandAllKeys, groupByCategory, groupByFile,
+  groupBySmellType, selectionSummary, severitySpread, smellTypeOptions,
 } from "../utils/smellGrouping";
 import {
   analyseSelectionImpact, fetchProjectStructure, fetchQualityReport,
@@ -107,6 +122,32 @@ const round = (value, dp = 0) => {
  */
 const smellId = (relativePath, smell, index) =>
   `${relativePath}:${smell?.line || 0}:${index}`;
+
+/**
+ * Re-order the top-level groups of the active view.
+ *
+ * "default" keeps the grouping's own order (worst severity first for files and
+ * smell types, taxonomy priority for categories). Effort and quality gain sort
+ * only by figures the backend supplied — the caller disables them without
+ * impact records, and a group with no figure sorts last rather than as zero.
+ */
+const SEVERITY_ORDER = { high: 0, medium: 1, low: 2, unknown: 3 };
+const groupName = (g) => g.type || g.category || g.file || "";
+
+function sortGroups(groups, sort, gainOf) {
+  if (sort === "default") return groups;
+  const compare = {
+    severity: (a, b) =>
+      (SEVERITY_ORDER[a.worstSeverity] ?? 9) - (SEVERITY_ORDER[b.worstSeverity] ?? 9)
+      || (b.severity?.high || 0) - (a.severity?.high || 0)
+      || b.findingCount - a.findingCount,
+    findings: (a, b) => b.findingCount - a.findingCount,
+    effort: (a, b) => (b.effort ?? -1) - (a.effort ?? -1),
+    gain: (a, b) => gainOf(b.rows) - gainOf(a.rows),
+    name: () => 0,
+  }[sort];
+  return [...groups].sort((a, b) => (compare ? compare(a, b) : 0) || groupName(a).localeCompare(groupName(b)));
+}
 
 export default function CodeSmellApprovalPage({
   onProceed,
@@ -151,6 +192,15 @@ export default function CodeSmellApprovalPage({
   // The finding whose impact dialog is open. The ROW, not the id: the dialog
   // shows the entity name, which lives on the smell and not on the record.
   const [impactRow, setImpactRow] = useState(null);
+  // The confirmation shown before the hand-off. It only summarises; confirming
+  // calls handleApproveSelection, the one submit path this stage has.
+  const [confirming, setConfirming] = useState(false);
+  // How the active view's top-level groups are ordered. View-only.
+  const [sort, setSort] = useState("default");
+  // Provenance of the last optimiser run — { ids, label, count } — so a
+  // finding it proposed can say so. Display only: `selectedIds` stays the one
+  // record of what is selected.
+  const [optimised, setOptimised] = useState(null);
 
   // ── Selection impact ───────────────────────────────────────────────────────
   const [impacts, setImpacts] = useState(null);
@@ -183,6 +233,8 @@ export default function CodeSmellApprovalPage({
     setLoading(false);
     setViewing(null);
     setImpactRow(null);
+    setConfirming(false);
+    setOptimised(null);
     setInteractionNotes([]);
     onReportLoadedRef.current?.(result);
   }, []);
@@ -235,6 +287,8 @@ export default function CodeSmellApprovalPage({
       setViewing(null);
       setImpactRow(null);
       setImpacts(null);
+      setConfirming(false);
+      setOptimised(null);
       setInteractionNotes([]);
     }
   }
@@ -354,12 +408,20 @@ export default function CodeSmellApprovalPage({
     [taxonomy]
   );
 
+  // The rows the views render: each tagged with its resolved category and
+  // whether the optimiser proposed it. Same ids, same order as smellRows.
+  const reviewRows = useMemo(() => smellRows.map((row) => ({
+    ...row,
+    category: categoryOf(row),
+    suggested: Boolean(optimised?.ids.has(row.id)),
+  })), [smellRows, categoryOf, optimised]);
+
   // ── Filtering pipeline ─────────────────────────────────────────────────────
   // search -> severity -> category -> smell type. Filters change what is
   // VISIBLE and never what is selected: a finding hidden by a filter keeps its
   // tick, because a filter is a way of looking, not a way of deciding.
   const term = search.trim().toLowerCase();
-  const visibleRows = useMemo(() => smellRows.filter((row) => {
+  const visibleRows = useMemo(() => reviewRows.filter((row) => {
     const { smell, file } = row;
     const matchesSearch = term === ""
       || file.toLowerCase().includes(term)
@@ -371,7 +433,7 @@ export default function CodeSmellApprovalPage({
     const matchesCategory = categoryFilter === "all" || categoryOf(row) === categoryFilter;
     const matchesType = smellTypeFilter === "all" || smell.type === smellTypeFilter;
     return matchesSearch && matchesSeverity && matchesCategory && matchesType;
-  }), [smellRows, term, severity, categoryFilter, smellTypeFilter, categoryOf]);
+  }), [reviewRows, term, severity, categoryFilter, smellTypeFilter, categoryOf]);
 
   // ── Grouping, one per view ─────────────────────────────────────────────────
   const smellGroups = useMemo(
@@ -399,7 +461,18 @@ export default function CodeSmellApprovalPage({
   );
 
   const isFileMode = mode === "file";
-  const activeGroups = isFileMode ? fileGroups : mode === "category" ? catGroups : smellGroups;
+  const groupedView = isFileMode ? fileGroups : mode === "category" ? catGroups : smellGroups;
+
+  // Quality gain per group, summed from the backend records. Only reachable
+  // when impacts exist — the sort option is disabled otherwise.
+  const gainOf = useCallback((rows) => rows.reduce(
+    (total, r) => total + (impacts?.get(r.id)?.if_selected?.quality_gain?.automated_points || 0), 0
+  ), [impacts]);
+  const effectiveSort = !impacts && (sort === "effort" || sort === "gain") ? "default" : sort;
+  const activeGroups = useMemo(
+    () => sortGroups(groupedView, effectiveSort, gainOf),
+    [groupedView, effectiveSort, gainOf]
+  );
 
   // Keep the first group open until the developer touches an accordion.
   const effectiveOpen = useMemo(() => {
@@ -583,7 +656,13 @@ export default function CodeSmellApprovalPage({
         preset,
         budget_minutes: budgetMinutes,
       });
-      setSelectedIds(new Set(result.selected_ids || []));
+      const ids = result.selected_ids || [];
+      setSelectedIds(new Set(ids));
+      setOptimised({
+        ids: new Set(ids),
+        label: PRESETS.find((p) => p.key === preset)?.label || preset,
+        count: ids.length,
+      });
       // The optimiser only ever proposes individual smells, so a smell-level
       // view is what makes its answer visible and editable.
       if (isFileMode) setMode("smell");
@@ -669,6 +748,56 @@ export default function CodeSmellApprovalPage({
     }
   };
 
+  // ── Left rail figures ──────────────────────────────────────────────────────
+  // Counted over EVERY finding, not the filtered ones: the rail is where a
+  // developer sees what a filter would reveal before applying it.
+  const severityCounts = { ...severitySpread(smellRows), total: smellRows.length };
+  const railCategories = (() => {
+    const counts = new Map();
+    reviewRows.forEach((row) => counts.set(row.category, (counts.get(row.category) || 0) + 1));
+    const rank = new Map(categoryOrder.map((name, i) => [name, i]));
+    return Array.from(counts, ([category, count]) => ({
+      category, count, priority: categoryPriority.get(category) || null,
+    })).sort((a, b) =>
+      (rank.get(a.category) ?? Number.MAX_SAFE_INTEGER) - (rank.get(b.category) ?? Number.MAX_SAFE_INTEGER)
+      || b.count - a.count || a.category.localeCompare(b.category));
+  })();
+
+  const filtersActive = term !== "" || severity !== "all"
+    || categoryFilter !== "all" || smellTypeFilter !== "all";
+  const clearFilters = () => {
+    setSearch("");
+    setSeverity("all");
+    setCategoryFilter("all");
+    setSmellTypeFilter("all");
+  };
+
+  const activeFilters = [
+    term && { key: "search", label: "Search", value: `"${search.trim()}"`, onClear: () => setSearch("") },
+    severity !== "all" && {
+      key: "severity", label: "Severity", value: severity,
+      tone: { high: T.high, medium: T.medium, low: T.low }[severity],
+      onClear: () => setSeverity("all"),
+    },
+    categoryFilter !== "all" && { key: "category", label: "Category", value: categoryFilter, onClear: () => setCategoryFilter("all") },
+    smellTypeFilter !== "all" && { key: "type", label: "Smell type", value: smellTypeFilter, onClear: () => setSmellTypeFilter("all") },
+  ].filter(Boolean);
+
+  const sortOptions = [
+    { key: "default", label: mode === "category" ? "Category priority" : "Severity" },
+    ...(mode === "category" ? [{ key: "severity", label: "Severity" }] : []),
+    { key: "findings", label: "Most findings" },
+    { key: "effort", label: "Review effort", disabled: !impacts },
+    { key: "gain", label: "Quality gain", disabled: !impacts },
+    { key: "name", label: "Name (A–Z)" },
+  ];
+
+  /** Open the confirmation — never submits on its own. */
+  const openReview = () => {
+    if (selectionCount === 0 || isSubmitting) return;
+    setConfirming(true);
+  };
+
   // ── Loading / error states ─────────────────────────────────────────────────
   if (loading && !sourceReport) return <LoadingState />;
 
@@ -687,7 +816,9 @@ export default function CodeSmellApprovalPage({
 
   const emptyMessage = filesWithSmells.length === 0
     ? "The CUQA agent reported no code smells in this workspace — nothing to refactor."
-    : "No findings match the current search, severity or category filters.";
+    : "No findings match the current search, severity, category or smell type filters.";
+
+  const openViewer = (file, id) => setViewing({ file, focusId: id });
 
   return (
     <div>
@@ -695,26 +826,7 @@ export default function CodeSmellApprovalPage({
         <StaleWorkspaceBanner info={staleWorkspace} loading={loading} onReload={reloadReport} />
       )}
 
-      <header style={{ marginBottom: 16 }}>
-        <h1 style={{ fontSize: 27, fontWeight: 800, color: C.text, margin: 0 }}>
-          Code Smell Review
-        </h1>
-        <p style={{ fontSize: 13, color: C.textMuted, margin: "6px 0 0", maxWidth: 720, lineHeight: 1.6 }}>
-          Review detected code smells and choose which findings should be sent to the
-          Refactoring Planning Agent.
-        </p>
-      </header>
-
-      <CodeSmellStats
-        files={num(summary.files_analyzed)}
-        smells={num(summary.total_code_smells) || smellRows.length}
-        high={num(summary.smell_severity?.high)}
-        quality={`${round(summary.average_quality_score, 1)}%`}
-        languages={languages}
-        categories={taxonomy?.category_count}
-      />
-
-      <ReportSourceCard
+      <CodeSmellContextBar
         origin={origin}
         report={sourceReport}
         meta={fetched}
@@ -722,201 +834,233 @@ export default function CodeSmellApprovalPage({
         error={loadError}
         onRefresh={reloadReport}
         reseeds={Boolean(onReloadWorkspace)}
-      />
-
-      <SmellCategoryOverview
-        taxonomy={taxonomy}
-        active={categoryFilter}
-        onSelect={(category) => {
-          setCategoryFilter(category);
-          if (category !== "all" && isFileMode) setMode("category");
+        stats={{
+          files: num(summary.files_analyzed),
+          smells: num(summary.total_code_smells) || smellRows.length,
+          high: num(summary.smell_severity?.high),
+          quality: typeof summary.average_quality_score === "number"
+            ? `${round(summary.average_quality_score, 1)}%`
+            : null,
+          categories: taxonomy?.category_count,
+          languages,
         }}
       />
 
-      <div style={{
-        display: "flex", gap: 16, alignItems: "flex-end",
-        flexWrap: "wrap", marginBottom: 14,
-      }}>
-        <ModeSwitch
+      <div className="dw-ws">
+        <div className="dw-grid">
+          <div className="dw-area-rail">
+            <CodeSmellFilterRail
+              severityCounts={severityCounts}
+              severity={severity}
+              onSeverity={setSeverity}
+              categories={railCategories}
+              categoryFilter={categoryFilter}
+              onCategory={(category) => {
+                setCategoryFilter(category);
+                if (category !== "all" && isFileMode) setMode("category");
+              }}
+              filtersActive={filtersActive}
+              onClearFilters={clearFilters}
+            />
+          </div>
+
+          <section className="dw-area-main" aria-label="Findings">
+            <ReviewToolbar
+              mode={mode}
+              onModeChange={setMode}
+              modeCounts={{
+                file: fileGroups.length,
+                smell: smellGroups.length,
+                category: catGroups.length,
+              }}
+              search={search}
+              onSearch={setSearch}
+              sort={effectiveSort}
+              sortOptions={sortOptions}
+              onSort={setSort}
+              onSelectAll={selectAll}
+              onClearSelection={rejectAll}
+              selectableCount={isFileMode ? fileGroups.length : visibleRows.length}
+              selectionCount={selectionCount}
+              onExpandAll={expandAll}
+              onCollapseAll={collapseAll}
+              groupCount={activeGroups.length}
+              anyOpen={effectiveOpen.size > 0}
+              shownFindings={visibleRows.length}
+              totalFindings={smellRows.length}
+              activeFilters={activeFilters}
+              onClearFilters={clearFilters}
+              quickSelect={(
+                <>
+                  <QuickSelectDropdown
+                    label="Smell type"
+                    options={typeOptions}
+                    searchPlaceholder="Search smell types…"
+                    emptyLabel="No smell types match"
+                    onToggleOption={(option) => toggleRows(option.rows)}
+                    onNavigateOption={(option) => {
+                      // The label navigates; the checkbox selects. Clicking a
+                      // name to go and look at 53 findings is not a request to
+                      // select all 53.
+                      setMode("smell");
+                      setSmellTypeFilter(option.key);
+                      setCategoryFilter("all");
+                      setAutoOpen(false);
+                      setOpenKeys(new Set([option.key]));
+                    }}
+                    onClear={() => {
+                      const ids = new Set(smellRows.map((r) => r.id));
+                      setSelectedIds((prev) => new Set([...prev].filter((id) => !ids.has(id))));
+                    }}
+                  />
+                  <QuickSelectDropdown
+                    label="Category"
+                    options={catOptions}
+                    expandable
+                    searchPlaceholder="Search categories…"
+                    emptyLabel="No categories available"
+                    onToggleOption={(option) => toggleRows(option.rows)}
+                    onNavigateOption={(option) => {
+                      setMode("category");
+                      setCategoryFilter(option.rows[0] ? categoryOf(option.rows[0]) : "all");
+                      setSmellTypeFilter("all");
+                      setAutoOpen(false);
+                      setOpenKeys(new Set([option.key]));
+                    }}
+                    onClear={() => setSelectedIds(new Set())}
+                  />
+                </>
+              )}
+            />
+
+            {isFileMode && (
+              <div style={{
+                fontSize: 11.5, color: T.text2, marginBottom: 10, padding: "7px 12px",
+                borderRadius: 8, background: tint(T.info, 7), border: `1px solid ${tint(T.info, 25)}`,
+              }}>
+                <b style={{ color: T.info }}>File wise:</b> ticking a file sends every finding inside it.
+                Switch to Smell wise or Category wise to pick individual findings.
+              </div>
+            )}
+
+            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+              {activeGroups.length === 0 && (
+                <div style={{
+                  padding: "36px 20px", textAlign: "center", background: T.surface,
+                  border: `1px dashed ${T.borderStrong}`, borderRadius: 12,
+                  color: T.text2, fontSize: 13,
+                }}>
+                  {emptyMessage}
+                  {filtersActive && (
+                    <div style={{ marginTop: 10 }}>
+                      <button type="button" onClick={clearFilters} className="dw-focus dw-hover" style={ghostButton(true)}>
+                        Reset filters
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {mode === "smell" && (
+                <SmellWiseView
+                  groups={activeGroups}
+                  selectedIds={selectedIds}
+                  openKeys={effectiveOpen}
+                  onToggleOpen={toggleOpen}
+                  onToggleRows={toggleRows}
+                  onToggleSmell={toggleSmell}
+                  onView={openViewer}
+                  onShowImpact={setImpactRow}
+                  impacts={impacts}
+                />
+              )}
+
+              {mode === "category" && (
+                <CategoryWiseView
+                  groups={activeGroups}
+                  priorities={categoryPriority}
+                  selectedIds={selectedIds}
+                  openKeys={effectiveOpen}
+                  onToggleOpen={toggleOpen}
+                  onToggleRows={toggleRows}
+                  onToggleSmell={toggleSmell}
+                  onView={openViewer}
+                  onShowImpact={setImpactRow}
+                  impacts={impacts}
+                />
+              )}
+
+              {isFileMode && (
+                <FileWiseView
+                  groups={activeGroups}
+                  openKeys={effectiveOpen}
+                  onToggleOpen={toggleOpen}
+                  onToggleFile={toggleFile}
+                  onViewFile={(file) => setViewing({ file, focusId: null })}
+                  onView={openViewer}
+                  onShowImpact={setImpactRow}
+                  qualityOf={qualityOf}
+                  impacts={impacts}
+                />
+              )}
+            </div>
+
+            {hiddenCount > 0 && (
+              <div style={{ marginTop: 10, fontSize: 11.5, color: T.text3 }}>
+                {hiddenCount} analysed file{hiddenCount > 1 ? "s" : ""} with no detected smells{" "}
+                {hiddenCount > 1 ? "are" : "is"} not listed.
+              </div>
+            )}
+          </section>
+
+          <div className="dw-area-side">
+            <CodeSmellSelectionPanel
+              mode={mode}
+              selectionCount={selectionCount}
+              findingCount={selectedRows.length}
+              totalFindings={smellRows.length}
+              totalFiles={filesWithSmells.length}
+              summary={panelSummary}
+              impactSummary={impactSummary}
+              interactionNotes={interactionNotes}
+              optimising={optimising}
+              onOptimise={workflowId ? handleOptimise : undefined}
+              budgetMinutes={budgetMinutes}
+              onBudgetChange={setBudgetMinutes}
+              optimised={optimised}
+              isSubmitting={isSubmitting}
+              submitPhase={submitPhase}
+              onReview={openReview}
+              onClear={rejectAll}
+            />
+          </div>
+        </div>
+
+        <MobileActionBar
+          selectionCount={selectionCount}
+          findingCount={selectedRows.length}
+          isFile={isFileMode}
+          isSubmitting={isSubmitting}
+          submitPhase={submitPhase}
+          onReview={openReview}
+        />
+      </div>
+
+      {confirming && (
+        <CodeSmellApprovalDialog
           mode={mode}
-          onChange={setMode}
-          counts={{
-            file: fileGroups.length,
-            smell: smellGroups.length,
-            category: catGroups.length,
+          selectedRows={selectedRows}
+          selectedFiles={selectedFiles}
+          totalFindings={smellRows.length}
+          summary={panelSummary}
+          impactSummary={impactSummary}
+          onCancel={() => setConfirming(false)}
+          onConfirm={() => {
+            setConfirming(false);
+            handleApproveSelection();
           }}
         />
-
-        <div style={{ flex: "1 1 420px", minWidth: 0 }}>
-          <div style={{
-            fontSize: 10.5, color: C.textMuted, textTransform: "uppercase",
-            letterSpacing: 0.9, fontWeight: 700, marginBottom: 7,
-          }}>
-            Quick selection
-          </div>
-          <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-            <QuickSelectDropdown
-              label="Smell type"
-              options={typeOptions}
-              searchPlaceholder="Search smell types…"
-              emptyLabel="No smell types match"
-              onToggleOption={(option) => toggleRows(option.rows)}
-              onNavigateOption={(option) => {
-                // The label navigates; the checkbox selects. Two intents, two
-                // targets — clicking a name to go and look at 53 findings is
-                // not a request to select all 53.
-                setMode("smell");
-                setSmellTypeFilter(option.key);
-                setCategoryFilter("all");
-                setAutoOpen(false);
-                setOpenKeys(new Set([option.key]));
-              }}
-              onClear={() => {
-                const ids = new Set(smellRows.map((r) => r.id));
-                setSelectedIds((prev) => new Set([...prev].filter((id) => !ids.has(id))));
-              }}
-            />
-
-            <QuickSelectDropdown
-              label="Category"
-              options={catOptions}
-              expandable
-              searchPlaceholder="Search categories…"
-              emptyLabel="No categories available"
-              onToggleOption={(option) => toggleRows(option.rows)}
-              onNavigateOption={(option) => {
-                setMode("category");
-                setCategoryFilter(option.rows[0] ? categoryOf(option.rows[0]) : "all");
-                setSmellTypeFilter("all");
-                setAutoOpen(false);
-                setOpenKeys(new Set([option.key]));
-              }}
-              onClear={() => setSelectedIds(new Set())}
-            />
-          </div>
-        </div>
-      </div>
-
-      {(smellTypeFilter !== "all" || categoryFilter !== "all") && (
-        <ActiveFilters
-          smellType={smellTypeFilter}
-          category={categoryFilter}
-          onClearType={() => setSmellTypeFilter("all")}
-          onClearCategory={() => setCategoryFilter("all")}
-        />
       )}
-
-      <SearchAndSeverity
-        mode={mode}
-        search={search}
-        onSearch={setSearch}
-        severity={severity}
-        onSeverity={setSeverity}
-        onSelectAll={selectAll}
-        onRejectAll={rejectAll}
-        onExpandAll={expandAll}
-        onCollapseAll={collapseAll}
-        visibleCount={isFileMode ? fileGroups.length : visibleRows.length}
-        selectedCount={selectionCount}
-        groupCount={activeGroups.length}
-        anyOpen={effectiveOpen.size > 0}
-      />
-
-      <div style={{
-        display: "flex", flexDirection: "column", gap: 10,
-        maxHeight: "min(72vh, 780px)", overflowY: "auto", paddingRight: 4,
-      }}>
-        {activeGroups.length === 0 && (
-          <div style={{
-            padding: "28px 20px", textAlign: "center", background: C.panel,
-            border: `1px dashed ${C.border}`, borderRadius: 11,
-            color: C.textMuted, fontSize: 13, flexShrink: 0,
-          }}>
-            {emptyMessage}
-          </div>
-        )}
-
-        {mode === "smell" && (
-          <SmellWiseView
-            groups={smellGroups}
-            selectedIds={selectedIds}
-            openKeys={effectiveOpen}
-            onToggleOpen={toggleOpen}
-            onToggleRows={toggleRows}
-            onToggleSmell={toggleSmell}
-            onView={(file, id) => setViewing({ file, focusId: id })}
-            onShowImpact={setImpactRow}
-            impacts={impacts}
-          />
-        )}
-
-        {mode === "category" && (
-          <CategoryWiseView
-            groups={catGroups}
-            priorities={categoryPriority}
-            selectedIds={selectedIds}
-            openKeys={effectiveOpen}
-            onToggleOpen={toggleOpen}
-            onToggleRows={toggleRows}
-            onToggleSmell={toggleSmell}
-            onView={(file, id) => setViewing({ file, focusId: id })}
-            onShowImpact={setImpactRow}
-            impacts={impacts}
-          />
-        )}
-
-        {isFileMode && (
-          <FileWiseView
-            groups={fileGroups}
-            openKeys={effectiveOpen}
-            onToggleOpen={toggleOpen}
-            onToggleFile={toggleFile}
-            onViewFile={(file) => setViewing({ file, focusId: null })}
-            onView={(file, id) => setViewing({ file, focusId: id })}
-            onShowImpact={setImpactRow}
-            qualityOf={qualityOf}
-            impacts={impacts}
-          />
-        )}
-      </div>
-
-      <div style={{ marginTop: 10, fontSize: 11, color: C.textMuted, display: "flex", gap: 16, flexWrap: "wrap" }}>
-        <span>
-          Showing {visibleRows.length} of {smellRows.length} finding
-          {smellRows.length === 1 ? "" : "s"} in {activeGroups.length}{" "}
-          {isFileMode ? "file" : mode === "category" ? "category" : "smell type"}
-          {activeGroups.length === 1 ? "" : "s"}.
-        </span>
-        {hiddenCount > 0 && (
-          <span>
-            {hiddenCount} analysed file{hiddenCount > 1 ? "s" : ""} with no detected smells{" "}
-            {hiddenCount > 1 ? "are" : "is"} hidden.
-          </span>
-        )}
-      </div>
-
-      <SelectionSummaryPanel summary={panelSummary} onClear={rejectAll} />
-
-      {impactSummary && (
-        <div style={{ marginTop: 16 }}>
-          <TradeOffPanel
-            summary={impactSummary}
-            interactionNotes={interactionNotes}
-            optimising={optimising}
-            onOptimise={workflowId ? handleOptimise : undefined}
-            budgetMinutes={budgetMinutes}
-            onBudgetChange={setBudgetMinutes}
-          />
-        </div>
-      )}
-
-      <ActionBar
-        selectionCount={selectionCount}
-        findingCount={selectedRows.length}
-        isSubmitting={isSubmitting}
-        submitPhase={submitPhase}
-        onContinue={handleApproveSelection}
-      />
 
       {impactRow && impacts?.get(impactRow.id) && (
         <ImpactDrawer
@@ -924,8 +1068,8 @@ export default function CodeSmellApprovalPage({
           smell={impactRow.smell}
           isSelected={selectedIds.has(impactRow.id)}
           // No select action in File wise: the unit of selection there is the
-          // file, so a button offering to add ONE finding would promise
-          // something the mode cannot send. The figures still read the same.
+          // file, so offering to add ONE finding would promise something the
+          // mode cannot send.
           onToggleSmell={isFileMode ? undefined : toggleSmell}
           onClose={() => setImpactRow(null)}
         />
@@ -939,8 +1083,8 @@ export default function CodeSmellApprovalPage({
           language={viewerLanguage}
           smells={viewerSmells}
           focusId={viewing?.focusId || null}
-          // File mode selects whole files — offering a per-smell tick there
-          // would suggest a partial selection the mode cannot express.
+          // File mode selects whole files — a per-smell tick there would
+          // suggest a partial selection the mode cannot express.
           selectedIds={isFileMode ? null : selectedIds}
           onToggleSmell={isFileMode ? undefined : toggleSmell}
           onClose={() => setViewing(null)}
@@ -952,244 +1096,65 @@ export default function CodeSmellApprovalPage({
 
 // ─── Page furniture ──────────────────────────────────────────────────────────
 
-/** The chips showing which quick-select filters are narrowing the list. */
-function ActiveFilters({ smellType, category, onClearType, onClearCategory }) {
-  const chip = (label, value, onClear) => (
-    <span style={{
-      display: "inline-flex", alignItems: "center", gap: 7,
-      padding: "5px 11px", borderRadius: 20,
-      background: `${C.accent}15`, border: `1px solid ${C.accent}55`,
-      fontSize: 11.5, color: C.accent, fontWeight: 600,
-    }}>
-      <span style={{ color: C.textMuted, fontWeight: 500 }}>{label}</span>
-      {value}
-      <button
-        onClick={onClear}
-        aria-label={`Clear the ${label} filter`}
-        style={{
-          background: "none", border: "none", color: "inherit", cursor: "pointer",
-          padding: 0, fontWeight: 800, fontSize: 12, lineHeight: 1,
-        }}
-      >
-        ✕
-      </button>
-    </span>
-  );
-
-  return (
-    <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 12, alignItems: "center" }}>
-      <span style={{
-        fontSize: 10.5, color: C.textMuted, textTransform: "uppercase",
-        letterSpacing: 0.9, fontWeight: 700,
-      }}>
-        Filtered to
-      </span>
-      {smellType !== "all" && chip("Smell type", smellType, onClearType)}
-      {category !== "all" && chip("Category", category, onClearCategory)}
-    </div>
-  );
-}
-
-const VIA_LABEL = {
-  "diwo-proxy": "via DIWO orchestration backend",
-};
-
-/** Where the report on screen came from, and how to reload the repository. */
-function ReportSourceCard({ origin, report, meta, loading, error, onRefresh, reseeds }) {
-  const isSample = origin === "sample";
-  const tone = isSample ? C.warn : origin === "workflow" ? C.info : C.accent;
-
-  const label = isSample
-    ? "Sample report (bundled data — CUQA agent unavailable)"
-    : origin === "workflow"
-      ? "Report from the current DIWO workflow"
-      : "Live CUQA quality report";
-
-  const details = [];
-  if (report?.repo_name) details.push(report.repo_name);
-  if (report?.report_type) details.push(report.report_type);
-  if (meta?.via && VIA_LABEL[meta.via]) details.push(VIA_LABEL[meta.via]);
-
-  return (
-    <div style={{
-      display: "flex", alignItems: "center", justifyContent: "space-between", gap: 14,
-      marginBottom: 14, padding: "12px 16px", borderRadius: 11,
-      background: C.panel, border: `1px solid ${isSample ? `${C.warn}55` : C.border}`,
-      flexWrap: "wrap",
-    }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 11, minWidth: 0 }}>
-        <span aria-hidden="true" style={{
-          width: 8, height: 8, borderRadius: "50%", background: tone, flexShrink: 0,
-        }} />
-        <div style={{ minWidth: 0 }}>
-          <div style={{ fontSize: 12.5, fontWeight: 700, color: C.text }}>{label}</div>
-          {details.length > 0 && (
-            <div style={{
-              fontSize: 11, color: C.textMuted,
-              fontFamily: "ui-monospace, Menlo, Consolas, monospace",
-              overflow: "hidden", textOverflow: "ellipsis", marginTop: 2,
-            }}>
-              {details.join(" · ")}
-            </div>
-          )}
-          {error && (
-            <div style={{ fontSize: 11, color: C.danger, marginTop: 2 }}>
-              Refresh failed: {error.message}
-            </div>
-          )}
-        </div>
-      </div>
-
-      <button
-        onClick={onRefresh}
-        disabled={loading}
-        title={
-          reseeds
-            ? "Re-read the repository currently loaded in CUQA and start a fresh workflow for it"
-            : "Re-read the quality report from the CUQA agent"
-        }
-        style={{
-          padding: "8px 15px", borderRadius: 8, fontSize: 12, fontWeight: 600,
-          background: C.bg, color: loading ? C.textMuted : C.textSub,
-          border: `1px solid ${C.border}`, cursor: loading ? "wait" : "pointer", flexShrink: 0,
-        }}
-      >
-        {loading ? "Analyzing…" : isSample ? "Retry CUQA" : "Re-analyze repository"}
-      </button>
-    </div>
-  );
-}
-
-/**
- * The sticky footer. `onContinue` is the ONLY submit path — the same
- * handleApproveSelection the page has always used, not a second one.
- *
- * The chrome comes from components/StickyActionBar, which Stages 2 and 3 also
- * use. This shell was defined here first and copied nowhere; the two later
- * stages ended on plain rows that scrolled away, and sharing it is what stops
- * the three footers drifting into three shapes again.
- */
-function ActionBar({ selectionCount, findingCount, isSubmitting, submitPhase, onContinue }) {
-  const ready = selectionCount > 0 && !isSubmitting;
-
-  return (
-    <StickyActionBar
-      active={selectionCount > 0}
-      status={
-        selectionCount > 0 ? (
-          <>
-            <b style={{ color: C.accent, fontFamily: "monospace" }}>{findingCount}</b>{" "}
-            finding{findingCount === 1 ? "" : "s"} selected for planning
-          </>
-        ) : (
-          "Select findings to continue to the Refactoring Planning Agent"
-        )
-      }
-    >
-      <button
-        onClick={onContinue}
-        disabled={!ready}
-        title={
-          isSubmitting
-            ? "Working — the Refactoring Planning Agent is generating the plan"
-            : undefined
-        }
-        style={{
-          display: "flex", alignItems: "center", gap: 9,
-          padding: "10px 22px", borderRadius: 9, border: "none",
-          fontSize: 13, fontWeight: 700,
-          cursor: isSubmitting ? "wait" : ready ? "pointer" : "not-allowed",
-          background: ready || isSubmitting ? C.accent : C.border,
-          color: ready || isSubmitting ? "#000" : C.textMuted,
-          opacity: isSubmitting ? 0.75 : 1,
-          transition: "all 0.2s",
-        }}
-      >
-        {isSubmitting && <Spinner color="#000" />}
-        {isSubmitting
-          ? submitPhase === "planning" ? "Planning refactorings…" : "Filtering selection…"
-          : "Continue to Refactoring Plan →"}
-      </button>
-    </StickyActionBar>
-  );
-}
-
 /**
  * CUQA is holding a different repository than the one on screen.
  *
  * Loud on purpose: everything below belongs to the repository named in `shown`,
- * which the developer has since replaced. Nothing on the page is wrong about
- * the OLD repository — it is simply about code that is no longer loaded, which
- * is the kind of stale that gets acted on because it looks healthy.
+ * which the developer has since replaced — the kind of stale that gets acted
+ * on because it looks healthy.
  */
 function StaleWorkspaceBanner({ info, loading, onReload }) {
   return (
-    <div style={{
-      marginBottom: 14, padding: "13px 16px", borderRadius: 11,
-      background: `${C.warn}12`, border: `1px solid ${C.warn}`,
+    <div role="alert" style={{
+      marginBottom: 14, padding: "13px 16px", borderRadius: 12,
+      background: tint(T.medium, 10), border: `1px solid ${tint(T.medium, 60)}`,
       display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap",
     }}>
-      <span aria-hidden="true" style={{ fontSize: 17 }}>⚠</span>
+      <span aria-hidden="true" style={{ fontSize: 17, color: T.medium }}>⚠</span>
       <div style={{ flex: 1, minWidth: 240 }}>
-        <div style={{ fontSize: 13, fontWeight: 700, color: C.warn }}>
+        <div style={{ fontSize: 13, fontWeight: 700, color: T.medium }}>
           A different repository is loaded in the CUQA agent
         </div>
-        <div style={{ fontSize: 12, color: C.textSub, lineHeight: 1.55, marginTop: 3 }}>
+        <div style={{ fontSize: 12, color: T.text2, lineHeight: 1.55, marginTop: 3 }}>
           This page is showing{" "}
-          <b style={{ color: C.text, fontFamily: "monospace" }}>{info.shown}</b>, but CUQA now
-          holds <b style={{ color: C.text, fontFamily: "monospace" }}>{info.live}</b>
+          <b style={{ color: T.text, fontFamily: T.mono }}>{info.shown}</b>, but CUQA now
+          holds <b style={{ color: T.text, fontFamily: T.mono }}>{info.live}</b>
           {typeof info.files === "number" ? ` (${info.files} source file${info.files === 1 ? "" : "s"})` : ""}.
           The findings below — and the workflow behind them — describe the old repository.
         </div>
       </div>
       <button
+        type="button"
         onClick={onReload}
         disabled={loading}
+        className="dw-focus"
         style={{
           padding: "9px 18px", borderRadius: 8, fontSize: 12.5, fontWeight: 700,
-          background: loading ? C.border : C.warn, color: loading ? C.textMuted : "#000",
+          background: loading ? T.sunken : T.medium, color: loading ? T.text3 : T.onAccent,
           border: "none", cursor: loading ? "wait" : "pointer", flexShrink: 0,
           display: "flex", alignItems: "center", gap: 8,
         }}
       >
-        {loading && <Spinner color="#000" />}
+        {loading && <Spinner />}
         {loading ? "Loading…" : `Analyse ${info.live}`}
       </button>
     </div>
   );
 }
 
-/** A small indeterminate spinner, for a wait whose length cannot be predicted. */
-function Spinner({ size = 13, color = "currentColor" }) {
-  return (
-    <>
-      <span
-        aria-hidden="true"
-        style={{
-          width: size, height: size, borderRadius: "50%", flexShrink: 0,
-          border: `2px solid ${color}`, borderTopColor: "transparent",
-          display: "inline-block", animation: "diwoSpin 0.7s linear infinite",
-        }}
-      />
-      <style>{"@keyframes diwoSpin { to { transform: rotate(360deg); } }"}</style>
-    </>
-  );
-}
-
 function LoadingState() {
   return (
-    <Card style={{ textAlign: "center", padding: "48px 24px" }}>
-      <div style={{ fontSize: 13.5, fontWeight: 700, color: C.text, marginBottom: 8 }}>
+    <div role="status" style={{ ...panelStyle, textAlign: "center", padding: "48px 24px" }}>
+      <div style={{ fontSize: 14, fontWeight: 700, color: T.text, marginBottom: 8 }}>
         Analyzing repository…
       </div>
-      <div style={{ fontSize: 12, color: C.textMuted, marginBottom: 20 }}>
+      <div style={{ fontSize: 12.5, color: T.text2, marginBottom: 20 }}>
         Requesting the quality report from CUQA through the DIWO orchestration backend
       </div>
-      <div style={{ height: 4, borderRadius: 4, background: C.border, overflow: "hidden", maxWidth: 320, margin: "0 auto" }}>
-        <div style={{ height: "100%", width: "40%", background: C.gradient, animation: "diwoSlide 1.1s ease-in-out infinite" }} />
+      <div style={{ height: 4, borderRadius: 4, background: T.sunken, overflow: "hidden", maxWidth: 320, margin: "0 auto" }}>
+        <div style={{ height: "100%", width: "40%", background: T.accent, animation: "dwSlide 1.1s ease-in-out infinite" }} />
       </div>
-      <style>{"@keyframes diwoSlide { 0% { transform: translateX(-100%); } 100% { transform: translateX(250%); } }"}</style>
-    </Card>
+    </div>
   );
 }
 
@@ -1202,41 +1167,39 @@ function ErrorState({ error, onRetry, onUseSample }) {
     : "Start the CUQA agent before running the DIWO workflow:  cd agents/cuqa_agent/src && uvicorn main:app --port 8080";
 
   return (
-    <Card style={{ padding: "32px 28px", borderColor: `${C.danger}50` }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
-        <Badge label={noRepo ? "NO REPOSITORY" : "CUQA UNAVAILABLE"} color={C.danger} />
-        <span style={{ fontSize: 14, fontWeight: 700, color: C.text }}>
+    <div role="alert" style={{ ...panelStyle, padding: "28px 28px", border: `1px solid ${tint(T.high, 45)}` }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10, flexWrap: "wrap" }}>
+        <span style={{
+          ...eyebrow, color: T.high, padding: "2px 8px", borderRadius: 4,
+          background: tint(T.high, 10), border: `1px solid ${tint(T.high, 30)}`,
+        }}>
+          {noRepo ? "No repository" : "CUQA unavailable"}
+        </span>
+        <span style={{ fontSize: 14.5, fontWeight: 700, color: T.text }}>
           Could not load the code smell report
         </span>
       </div>
 
-      <div style={{ fontSize: 12, color: C.textSub, lineHeight: 1.6, marginBottom: 12 }}>
+      <div style={{ fontSize: 12.5, color: T.text2, lineHeight: 1.6, marginBottom: 12 }}>
         {error?.message || "Unknown error while contacting the CUQA agent."}
       </div>
 
       <div style={{
-        fontSize: 11, color: C.textMuted,
-        fontFamily: "ui-monospace, Menlo, Consolas, monospace", lineHeight: 1.6,
-        background: C.bg, border: `1px solid ${C.border}`, borderRadius: 8,
-        padding: "10px 14px", marginBottom: 18,
+        fontSize: 11.5, color: T.text2, fontFamily: T.mono, lineHeight: 1.6,
+        background: T.code, border: `1px solid ${T.border}`, borderRadius: 8,
+        padding: "10px 14px", marginBottom: 18, wordBreak: "break-word",
       }}>
         {hint}
       </div>
 
       <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-        <button onClick={onRetry} style={{
-          padding: "9px 20px", borderRadius: 8, fontSize: 13, fontWeight: 700,
-          background: C.accent, color: "#000", border: "none", cursor: "pointer",
-        }}>
+        <button type="button" onClick={onRetry} className="dw-focus" style={primaryButton(true)}>
           Retry
         </button>
-        <button onClick={onUseSample} style={{
-          padding: "9px 20px", borderRadius: 8, fontSize: 13, fontWeight: 600,
-          background: C.panel, color: C.textSub, border: `1px solid ${C.border}`, cursor: "pointer",
-        }}>
+        <button type="button" onClick={onUseSample} className="dw-focus dw-hover" style={ghostButton(true, { padding: "10px 18px", fontSize: 13 })}>
           Continue with sample data
         </button>
       </div>
-    </Card>
+    </div>
   );
 }

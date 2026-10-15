@@ -31,7 +31,9 @@
  */
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { C, Badge, severityColor } from "../diwoTheme.jsx";
+import { T, tint, eyebrow, ghostButton, sevTone } from "../codeSmellTheme.js";
+import { SeverityTag, Chip, Spinner } from "../codeSmellUi.jsx";
+import { TriCheckbox } from "./QuickSelectDropdown.jsx";
 import { fetchFileSource } from "../services/diwoApi";
 import { buildCoverage, withLines } from "../utils/smellLines";
 
@@ -123,17 +125,20 @@ export default function SourceViewer({
       onClick={onClose}
       style={{
         position: "fixed", inset: 0, zIndex: 1000,
-        background: "rgba(4,6,10,0.78)", backdropFilter: "blur(2px)",
-        display: "flex", alignItems: "center", justifyContent: "center", padding: 24,
+        background: T.overlay, backdropFilter: "blur(2px)",
+        display: "flex", alignItems: "center", justifyContent: "center", padding: 16,
       }}
     >
       <div
+        role="dialog"
+        aria-modal="true"
+        aria-label={`Original source of ${file}`}
         onClick={(e) => e.stopPropagation()}
         style={{
-          width: "min(1240px, 100%)", height: "min(86vh, 900px)",
-          background: C.bg, border: `1px solid ${C.borderAcc}`, borderRadius: 14,
+          width: "min(1280px, 100%)", height: "min(88vh, 920px)",
+          background: T.surface, border: `1px solid ${T.border}`, borderRadius: 14,
           display: "flex", flexDirection: "column", overflow: "hidden",
-          boxShadow: "0 24px 60px rgba(0,0,0,0.55)",
+          boxShadow: T.shadowLg,
         }}
       >
         <Header
@@ -141,11 +146,11 @@ export default function SourceViewer({
           language={language}
           total={marked.length}
           counts={counts}
-          focusedSmell={focusedSmell}
+          lineCount={state.loading || state.error || state.missing ? null : lines.length}
           onClose={onClose}
         />
 
-        <div style={{ display: "grid", gridTemplateColumns: "296px 1fr", flex: 1, minHeight: 0 }}>
+        <div className="dw-sv-body">
           <SmellList
             smells={marked}
             focused={focused}
@@ -154,12 +159,12 @@ export default function SourceViewer({
             onToggleSmell={onToggleSmell}
           />
 
-          <div style={{ minWidth: 0, overflow: "auto", background: C.bg }}>
-            {state.loading && <Notice title="Reading the original file…" detail={file} />}
+          <div style={{ minWidth: 0, minHeight: 0, overflow: "auto", background: T.code }}>
+            {state.loading && <Notice title="Reading the original file…" detail={file} loading />}
 
             {!state.loading && state.error && (
               <Notice
-                tone={C.danger}
+                tone={T.high}
                 title="The original file could not be read"
                 detail={state.error.message}
                 hint={
@@ -172,7 +177,7 @@ export default function SourceViewer({
 
             {!state.loading && !state.error && state.missing && (
               <Notice
-                tone={C.warn}
+                tone={T.medium}
                 title="This file is no longer in the analysed workspace"
                 detail={file}
                 hint="The report describes an earlier analysis. Re-analyze in the Code Smell Review stage to refresh the workspace, then open the file again."
@@ -190,7 +195,7 @@ export default function SourceViewer({
           </div>
         </div>
 
-        <Legend counts={counts} lineCount={lines.length} />
+        <Footer counts={counts} lineCount={lines.length} focusedSmell={focusedSmell} />
       </div>
     </div>
   );
@@ -198,45 +203,44 @@ export default function SourceViewer({
 
 // ─── Header ──────────────────────────────────────────────────────────────────
 
-function Header({ file, language, total, counts, focusedSmell, onClose }) {
+function Header({ file, language, total, counts, lineCount, onClose }) {
+  const slash = file.lastIndexOf("/");
+  const dir = slash >= 0 ? file.slice(0, slash + 1) : "";
+  const name = slash >= 0 ? file.slice(slash + 1) : file;
+
   return (
     <div style={{
-      display: "flex", alignItems: "center", gap: 12, padding: "14px 18px",
-      borderBottom: `1px solid ${C.border}`, background: C.panel, flexShrink: 0,
+      display: "flex", alignItems: "center", gap: 12, padding: "12px 16px",
+      borderBottom: `1px solid ${T.border}`, background: T.surface, flexShrink: 0,
     }}>
       <div style={{ minWidth: 0, flex: 1 }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 3 }}>
-          <span style={{ fontSize: 10, fontWeight: 700, letterSpacing: 1, color: C.textMuted, textTransform: "uppercase" }}>
-            Original source
-          </span>
-          {language && <Badge label={language} color={C.info} />}
-          <Badge label={`${total} smell${total === 1 ? "" : "s"}`} color={counts.high ? C.danger : C.warn} />
+        <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", marginBottom: 4 }}>
+          <span style={eyebrow}>Original source</span>
+          {language && <Chip tone={T.info}>{language}</Chip>}
+          <Chip>{total} smell{total === 1 ? "" : "s"}</Chip>
+          {["high", "medium", "low"].filter((s) => counts[s]).map((s) => (
+            <Chip key={s} tone={sevTone(s)}>{counts[s]} {s}</Chip>
+          ))}
+          {typeof lineCount === "number" && (
+            <span style={{ fontSize: 11, color: T.text3 }}>{lineCount} lines</span>
+          )}
         </div>
         <div title={file} style={{
-          fontSize: 15, fontWeight: 700, color: C.text, fontFamily: "monospace",
-          overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+          fontSize: 14, fontFamily: T.mono, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
         }}>
-          {file}
+          <span style={{ color: T.text3 }}>{dir}</span>
+          <span style={{ color: T.text, fontWeight: 700 }}>{name}</span>
         </div>
-        {focusedSmell && (
-          <div style={{ fontSize: 11, color: C.textMuted, marginTop: 3 }}>
-            Focused: <span style={{ color: severityColor(focusedSmell.severity), fontWeight: 700 }}>{focusedSmell.type}</span>
-            {focusedSmell.start > 0 && (
-              <> · line {focusedSmell.start}{focusedSmell.end > focusedSmell.start ? `–${focusedSmell.end}` : ""}</>
-            )}
-          </div>
-        )}
       </div>
 
       <button
+        type="button"
         onClick={onClose}
-        style={{
-          padding: "7px 14px", borderRadius: 8, fontSize: 12, fontWeight: 700,
-          background: C.panel, color: C.textSub, border: `1px solid ${C.border}`,
-          cursor: "pointer", flexShrink: 0,
-        }}
+        aria-label="Close the source viewer"
+        className="dw-focus dw-hover"
+        style={ghostButton(true, { flexShrink: 0 })}
       >
-        Close ✕
+        Close <span aria-hidden="true">✕</span>
       </button>
     </div>
   );
@@ -244,85 +248,105 @@ function Header({ file, language, total, counts, focusedSmell, onClose }) {
 
 // ─── Smell list ──────────────────────────────────────────────────────────────
 
+/**
+ * Focus and selection are two separate controls: the row body focuses the
+ * smell in the code, the checkbox (Smell / Category wise only) changes what
+ * is sent to planning. Clicking to look never selects.
+ */
 function SmellList({ smells, focused, selectedIds, onFocus, onToggleSmell }) {
   return (
-    <div style={{
-      borderRight: `1px solid ${C.border}`, overflowY: "auto",
-      background: C.panel, minHeight: 0,
+    <div className="dw-sv-list" style={{
+      borderRight: `1px solid ${T.border}`, overflowY: "auto",
+      background: T.surface, minHeight: 0,
     }}>
       <div style={{
-        padding: "10px 14px", fontSize: 10, fontWeight: 700, letterSpacing: 1,
-        color: C.textMuted, textTransform: "uppercase",
-        borderBottom: `1px solid ${C.border}`, position: "sticky", top: 0, background: C.panel, zIndex: 1,
+        ...eyebrow, padding: "10px 14px",
+        borderBottom: `1px solid ${T.border}`, position: "sticky", top: 0, background: T.surface, zIndex: 1,
+        display: "flex", justifyContent: "space-between",
       }}>
-        Smells in this file
+        <span>Findings in this file</span>
+        {onToggleSmell && selectedIds && (
+          <span style={{ color: T.accentText }}>
+            {smells.filter((s) => selectedIds.has(s.id)).length} selected
+          </span>
+        )}
       </div>
 
       {smells.length === 0 && (
-        <div style={{ padding: "16px 14px", fontSize: 12, color: C.textMuted }}>
+        <div style={{ padding: "16px 14px", fontSize: 12, color: T.text2 }}>
           No smells were reported in this file.
         </div>
       )}
 
       {smells.map((smell, idx) => {
-        const color = severityColor(smell.severity);
+        const color = sevTone(smell.severity);
         const isFocused = smell.id === focused;
-        const isSelected = selectedIds?.has(smell.id);
+        const isSelected = Boolean(selectedIds?.has(smell.id));
 
         return (
           <div
             key={smell.id}
-            onClick={() => onFocus(smell.id)}
+            className={isFocused ? undefined : "dw-sv-item"}
             style={{
-              padding: "10px 14px", cursor: "pointer",
-              borderBottom: `1px solid ${C.border}`,
+              display: "flex", gap: 8, alignItems: "flex-start",
+              padding: "10px 12px 10px 11px",
+              borderBottom: `1px solid ${T.border}`,
               borderLeft: `3px solid ${isFocused ? color : "transparent"}`,
-              background: isFocused ? `${color}14` : "transparent",
+              background: isFocused ? tint(color, 10) : "transparent",
             }}
           >
-            <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
-              <span style={{ fontSize: 10, color: C.textMuted, fontFamily: "monospace", minWidth: 16 }}>
-                {idx + 1}.
-              </span>
-              <div style={{ width: 7, height: 7, borderRadius: "50%", background: color, flexShrink: 0 }} />
-              <span style={{ fontSize: 12, fontWeight: 700, color: isFocused ? C.text : C.textSub, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                {smell.type}
-              </span>
-              {smell.start > 0 && (
-                <span style={{ marginLeft: "auto", fontSize: 10, color: C.textMuted, fontFamily: "monospace", flexShrink: 0 }}>
-                  L{smell.start}{smell.end > smell.start ? `–${smell.end}` : ""}
-                </span>
-              )}
-            </div>
-
-            {smell.entity && (
-              <div style={{ fontSize: 10, color: C.textMuted, fontFamily: "monospace", marginTop: 3, marginLeft: 30 }}>
-                {smell.entity}
-              </div>
-            )}
-            {smell.message && (
-              <div style={{ fontSize: 11, color: C.textMuted, marginTop: 3, marginLeft: 30, lineHeight: 1.45 }}>
-                {smell.message}
-              </div>
-            )}
-
             {onToggleSmell && (
               <button
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onToggleSmell(smell.id);
-                }}
-                style={{
-                  marginTop: 7, marginLeft: 30, padding: "4px 10px", borderRadius: 6,
-                  fontSize: 10, fontWeight: 700, cursor: "pointer",
-                  background: isSelected ? C.accent : "transparent",
-                  color: isSelected ? "#000" : C.textMuted,
-                  border: `1px solid ${isSelected ? C.accent : C.border}`,
-                }}
+                type="button"
+                onClick={() => onToggleSmell(smell.id)}
+                aria-pressed={isSelected}
+                aria-label={`${isSelected ? "Deselect" : "Select"} ${smell.type}${smell.start ? ` at line ${smell.start}` : ""}`}
+                title={isSelected ? "Selected for planning — click to remove" : "Select for planning"}
+                className="dw-focus"
+                style={{ background: "none", border: "none", padding: 2, marginTop: 1, cursor: "pointer", display: "flex", flexShrink: 0, borderRadius: 4 }}
               >
-                {isSelected ? "✓ Selected" : "Select this smell"}
+                <TriCheckbox state={isSelected ? "all" : "none"} size={15} />
               </button>
             )}
+
+            <button
+              type="button"
+              onClick={() => onFocus(smell.id)}
+              aria-current={isFocused ? "true" : undefined}
+              className="dw-focus"
+              style={{
+                flex: 1, minWidth: 0, background: "none", border: "none", padding: 0,
+                textAlign: "left", cursor: "pointer", color: "inherit", borderRadius: 4,
+              }}
+            >
+              <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                <span style={{ fontSize: 10.5, color: T.text3, fontFamily: T.mono, minWidth: 18 }}>
+                  {idx + 1}.
+                </span>
+                <SeverityTag severity={smell.severity} compact />
+                {smell.start > 0 && (
+                  <span style={{ marginLeft: "auto", fontSize: 10.5, color: T.text2, fontFamily: T.mono, flexShrink: 0 }}>
+                    L{smell.start}{smell.end > smell.start ? `–${smell.end}` : ""}
+                  </span>
+                )}
+              </div>
+              <div style={{
+                fontSize: 12.5, fontWeight: 700, color: T.text, marginTop: 4,
+                overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+              }}>
+                {smell.type}
+              </div>
+              {smell.entity && (
+                <div style={{ fontSize: 11, color: T.text2, fontFamily: T.mono, marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  {smell.entity}
+                </div>
+              )}
+              {isFocused && smell.message && (
+                <div style={{ fontSize: 11.5, color: T.text2, marginTop: 4, lineHeight: 1.5 }}>
+                  {smell.message}
+                </div>
+              )}
+            </button>
           </div>
         );
       })}
@@ -334,9 +358,13 @@ function SmellList({ smells, focused, selectedIds, onFocus, onToggleSmell }) {
 
 function CodeLines({ lines, coverage, focusedSmell, focusLineRef }) {
   const focusAnchor = focusedSmell?.line || focusedSmell?.start || 0;
+  const focusTone = focusedSmell ? sevTone(focusedSmell.severity) : null;
 
   return (
-    <div style={{ fontFamily: "monospace", fontSize: 12.5, lineHeight: "20px", padding: "8px 0" }}>
+    <div style={{
+      fontFamily: T.mono, fontSize: 12.5, lineHeight: "21px", padding: "8px 0",
+      minWidth: "max-content",
+    }}>
       {lines.map((text, index) => {
         const lineNo = index + 1;
         const hit = coverage.get(lineNo);
@@ -344,86 +372,64 @@ function CodeLines({ lines, coverage, focusedSmell, focusLineRef }) {
           focusedSmell && focusedSmell.start > 0 &&
           lineNo >= focusedSmell.start && lineNo <= focusedSmell.end;
         const isAnchor = lineNo === focusAnchor;
-
-        const color = hit ? severityColor(hit.worst) : null;
+        const color = hit ? sevTone(hit.worst) : null;
+        const anchored = Boolean(hit && hit.anchors.length);
 
         return (
           <div
             key={lineNo}
             ref={isAnchor ? focusLineRef : null}
             style={{
-              // WRAPS, so the badge is the only thing that can move. A
-              // non-wrapping row put it past the end of the code, which on a
-              // line wider than the pane means off-screen — the label was
-              // missing on exactly the lines that most needed one. A long line
-              // now pushes it to a second visual line instead.
-              display: "flex", alignItems: "stretch", flexWrap: "wrap",
+              display: "flex", alignItems: "stretch",
               background: inFocus
-                ? `${severityColor(focusedSmell.severity)}22`
-                : hit ? `${color}0e` : "transparent",
-              outline: isAnchor && focusedSmell ? `1px solid ${severityColor(focusedSmell.severity)}66` : "none",
-              outlineOffset: -1,
+                ? tint(focusTone, 16)
+                : hit ? tint(color, 6) : "transparent",
+              boxShadow: isAnchor && focusedSmell ? `inset 0 0 0 1px ${tint(focusTone, 55)}` : "none",
             }}
           >
-            {/* Gutter and code in one non-shrinking block. Without it the wrap
-                would break between the line number and the code it numbers. */}
-            <div style={{
-              display: "flex", alignItems: "stretch",
-              flexGrow: 1, flexShrink: 0, minWidth: 0,
-            }}>
-            {/* The marker bar: the file's own margin, coloured by the worst
-                severity covering this line. */}
+            {/* Marker bar: every line a smell covers, coloured by the worst
+                severity on it; solid where a smell is anchored. */}
             <div style={{
               width: 4, flexShrink: 0,
               background: color || "transparent",
-              opacity: hit && hit.anchors.length ? 1 : 0.55,
+              opacity: anchored ? 1 : 0.45,
             }} />
 
             <span style={{
-              width: 52, flexShrink: 0, textAlign: "right", paddingRight: 12,
-              color: hit ? severityColor(hit.worst) : C.textMuted,
-              fontWeight: hit && hit.anchors.length ? 700 : 400,
+              width: 52, flexShrink: 0, textAlign: "right", paddingRight: 10,
+              color: hit ? color : T.text3,
+              fontWeight: anchored ? 700 : 400,
               userSelect: "none",
             }}>
               {lineNo}
             </span>
 
-            {/* Dot column: a filled dot only where a smell is actually
-                anchored, so the start of a long range is findable inside it. */}
-            <span style={{ width: 14, flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center" }}>
-              {hit && hit.anchors.length > 0 && (
+            <span style={{ width: 16, flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center" }}>
+              {anchored && (
                 <span
                   title={hit.anchors.map((s) => `${s.type}${s.entity ? ` · ${s.entity}` : ""}`).join("\n")}
-                  style={{ width: 7, height: 7, borderRadius: "50%", background: severityColor(hit.worst) }}
+                  style={{ width: 7, height: 7, borderRadius: "50%", background: color }}
                 />
               )}
             </span>
 
-            {/* flexShrink 0 so a long line keeps its full width and forces the
-                wrap, rather than being squeezed to fit beside the badge. */}
             <pre style={{
-              margin: 0, paddingRight: 20, whiteSpace: "pre", color: hit ? C.text : C.textSub,
-              flexGrow: 1, flexShrink: 0,
+              margin: 0, paddingRight: 16, whiteSpace: "pre", color: T.text,
+              fontFamily: "inherit", fontSize: "inherit", lineHeight: "inherit",
             }}>
               {text || " "}
             </pre>
-            </div>
 
-            {/* Right-hand side of the line — and of the wrapped line too, which
-                is what `marginLeft: auto` keeps true in both places. Nothing is
-                repeated when it wraps: it is a continuation of the row above,
-                not a row of its own, so the gutter stays empty beside it. */}
-            {hit && hit.anchors.length > 0 && (
+            {/* Kept on the line: the code pane scrolls horizontally, so the
+                label is reachable on long lines too. */}
+            {anchored && (
               <span style={{
-                flexShrink: 0, marginLeft: "auto", alignSelf: "center", marginRight: 12,
-                fontSize: 10, fontWeight: 700, color: severityColor(hit.worst),
-                background: `${severityColor(hit.worst)}1a`,
-                border: `1px solid ${severityColor(hit.worst)}40`,
-                borderRadius: 5, padding: "1px 7px", whiteSpace: "nowrap",
+                flexShrink: 0, alignSelf: "center", margin: "0 12px 0 8px",
+                fontFamily: "inherit", fontSize: 10.5, fontWeight: 700, color,
+                background: tint(color, 12), border: `1px solid ${tint(color, 35)}`,
+                borderRadius: 5, padding: "0 7px", whiteSpace: "nowrap", lineHeight: "17px",
               }}>
-                {hit.anchors.length === 1
-                  ? hit.anchors[0].type
-                  : `${hit.anchors.length} smells`}
+                {hit.anchors.length === 1 ? hit.anchors[0].type : `${hit.anchors.length} smells`}
               </span>
             )}
           </div>
@@ -431,7 +437,7 @@ function CodeLines({ lines, coverage, focusedSmell, focusLineRef }) {
       })}
 
       {lines.length === 0 && (
-        <div style={{ padding: "24px 20px", color: C.textMuted, fontSize: 12 }}>
+        <div style={{ padding: "24px 20px", color: T.text2, fontSize: 12, fontFamily: "inherit" }}>
           This file is empty.
         </div>
       )}
@@ -441,42 +447,55 @@ function CodeLines({ lines, coverage, focusedSmell, focusLineRef }) {
 
 // ─── Chrome ──────────────────────────────────────────────────────────────────
 
-function Legend({ counts, lineCount }) {
+function Footer({ counts, lineCount, focusedSmell }) {
   return (
     <div style={{
-      display: "flex", alignItems: "center", gap: 16, flexWrap: "wrap",
-      padding: "9px 18px", borderTop: `1px solid ${C.border}`,
-      background: C.panel, fontSize: 11, color: C.textMuted, flexShrink: 0,
+      display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap",
+      padding: "8px 16px", borderTop: `1px solid ${T.border}`,
+      background: T.surface2, fontSize: 11.5, color: T.text2, flexShrink: 0,
     }}>
-      <span>{lineCount} line{lineCount === 1 ? "" : "s"}</span>
+      {focusedSmell ? (
+        <span style={{ minWidth: 0 }}>
+          Focused:{" "}
+          <b style={{ color: sevTone(focusedSmell.severity) }}>{focusedSmell.type}</b>
+          {focusedSmell.start > 0 && (
+            <span style={{ fontFamily: T.mono }}>
+              {" "}· L{focusedSmell.start}{focusedSmell.end > focusedSmell.start ? `–${focusedSmell.end}` : ""}
+            </span>
+          )}
+        </span>
+      ) : (
+        <span>{lineCount} line{lineCount === 1 ? "" : "s"} · select a finding to focus it</span>
+      )}
       {["high", "medium", "low"].map((sev) => (
-        <span key={sev} style={{ display: "flex", alignItems: "center", gap: 6 }}>
-          <span style={{ width: 4, height: 12, background: severityColor(sev), borderRadius: 1 }} />
+        <span key={sev} style={{ display: "flex", alignItems: "center", gap: 5 }}>
+          <span aria-hidden="true" style={{ width: 4, height: 12, background: sevTone(sev), borderRadius: 1 }} />
           {sev} ({counts[sev] || 0})
         </span>
       ))}
-      <span style={{ marginLeft: "auto" }}>
-        A bar marks every line a smell covers; a dot marks the line it is reported on. Esc closes.
+      <span style={{ marginLeft: "auto", color: T.text3 }}>
+        Bar = lines a smell covers · dot = reported line · Esc closes
       </span>
     </div>
   );
 }
 
-function Notice({ title, detail, hint, tone = C.textMuted }) {
+function Notice({ title, detail, hint, tone, loading = false }) {
   return (
-    <div style={{ padding: "36px 28px", maxWidth: 720 }}>
-      <div style={{ fontSize: 13, fontWeight: 700, color: tone === C.textMuted ? C.text : tone, marginBottom: 6 }}>
+    <div role={loading ? "status" : "alert"} style={{ padding: "36px 28px", maxWidth: 720 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13.5, fontWeight: 700, color: tone || T.text, marginBottom: 6 }}>
+        {loading && <Spinner />}
         {title}
       </div>
       {detail && (
-        <div style={{ fontSize: 12, color: C.textSub, fontFamily: "monospace", lineHeight: 1.6, wordBreak: "break-word" }}>
+        <div style={{ fontSize: 12, color: T.text2, fontFamily: T.mono, lineHeight: 1.6, wordBreak: "break-word" }}>
           {detail}
         </div>
       )}
       {hint && (
         <div style={{
-          marginTop: 14, fontSize: 11, color: C.textMuted, fontFamily: "monospace", lineHeight: 1.6,
-          background: C.panel, border: `1px solid ${C.border}`, borderRadius: 8, padding: "10px 14px",
+          marginTop: 14, fontSize: 11.5, color: T.text2, fontFamily: T.mono, lineHeight: 1.6,
+          background: T.surface, border: `1px solid ${T.border}`, borderRadius: 8, padding: "10px 14px",
         }}>
           {hint}
         </div>
