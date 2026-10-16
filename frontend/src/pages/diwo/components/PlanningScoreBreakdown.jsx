@@ -92,16 +92,16 @@ function FactorRow({ name, factor }) {
   const estimated = /^estimated|^not enough/.test(note || "");
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
-      <div style={{ display: "flex", justifyContent: "space-between", gap: 10, fontSize: 11 }}>
-        <span style={{ color: T.text2, fontWeight: 600 }}>{FACTOR_LABEL[name] || name}</span>
-        <span style={{ color: T.text, fontFamily: T.mono, fontWeight: 700, flexShrink: 0 }}>
+    <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 10, fontSize: 14 }}>
+        <span style={{ color: T.text, fontWeight: 700, letterSpacing: "0.05em" }}>{FACTOR_LABEL[name] || name}</span>
+        <span style={{ color: T.text, fontFamily: T.mono, fontWeight: 800, fontSize: 15, flexShrink: 0 }}>
           {factor.points}
-          <span style={{ color: T.text3, fontWeight: 500 }}> / {max}</span>
+          <span style={{ color: T.text3, fontWeight: 500, fontSize: 13 }}> / {max}</span>
         </span>
       </div>
 
-      <div style={{ height: 5, borderRadius: 3, background: T.surface, overflow: "hidden" }}>
+      <div style={{ height: 7, borderRadius: 4, background: T.surface, overflow: "hidden" }}>
         <div style={{
           height: "100%", width: `${ratio * 100}%`,
           background: estimated
@@ -112,7 +112,7 @@ function FactorRow({ name, factor }) {
       </div>
 
       {note && (
-        <div style={{ fontSize: 10, color: estimated ? T.medium : T.text3 }}>
+        <div style={{ fontSize: 12, color: estimated ? T.medium : T.text2 }}>
           {estimated && <span aria-hidden="true">⌁ </span>}{note}
         </div>
       )}
@@ -137,7 +137,7 @@ export default function PlanningScoreBreakdown({ support }) {
           Decision Support Score — how it was calculated
         </div>
 
-        <div style={{ display: "flex", flexDirection: "column", gap: 9 }}>
+        <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
           {FACTOR_ORDER.filter((key) => factors[key]).map((key) => (
             <FactorRow key={key} name={key} factor={factors[key]} />
           ))}
@@ -145,14 +145,15 @@ export default function PlanningScoreBreakdown({ support }) {
 
         <div style={{
           display: "flex", justifyContent: "space-between", alignItems: "center",
-          marginTop: 11, paddingTop: 9, borderTop: `1px solid ${T.borderStrong}`,
+          gap: 10, flexWrap: "wrap",
+          marginTop: 12, paddingTop: 12, borderTop: `1px solid ${T.borderStrong}`,
         }}>
-          <span style={{ fontSize: 11, fontWeight: 700, color: T.text2 }}>
+          <span style={{ fontSize: 15, fontWeight: 800, color: T.text }}>
             Decision Support Score
           </span>
-          <span style={{ fontSize: 15, fontWeight: 800, fontFamily: T.mono, color: style.color }}>
+          <span style={{ fontSize: 36, fontWeight: 800, fontFamily: T.mono, color: style.color, lineHeight: 1 }}>
             {support.score}
-            <span style={{ color: T.text3, fontSize: 11, fontWeight: 500 }}> / 100</span>
+            <span style={{ color: T.text2, fontSize: 18, fontWeight: 700 }}> / 100</span>
           </span>
         </div>
 

@@ -67,7 +67,7 @@
  *    possible, deliberately, but only through the override dialog.
  */
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import "../planApproval.css";
 import { PLAN_DATA } from "../data/diwoData";
 import { T, tint, eyebrow, ghostButton, primaryButton } from "../codeSmellTheme.js";
@@ -125,6 +125,8 @@ export default function RefactoringPlanApprovalPage({
   const strategy = "balanced";
   // The step open in the workspace, by step_id.
   const [activeId, setActiveId] = useState(null);
+  // step_id -> Technical details unfolded, remembered while moving between steps.
+  const [detailsOpen, setDetailsOpen] = useState({});
   // Approvals waiting on the override confirmation, one dialog at a time. A
   // bulk approval queues every step DIWO advised against, so it gets exactly
   // the same check a single approval does.
@@ -157,9 +159,19 @@ export default function RefactoringPlanApprovalPage({
     setDecisions(carried.decisions);
     setOverrideReasons(carried.extras);
     setActiveId(null);
+    setDetailsOpen({});
     setConfirmQueue([]);
     setSubmitting(false);
   }
+
+  // A new step replaces the workspace content; bring its top back into view.
+  useEffect(() => {
+    if (activeId === null) return;
+    const column = document.querySelector(".pa-detail");
+    if (!column || column.getBoundingClientRect().top >= 0) return;
+    const reduce = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+    column.scrollIntoView({ behavior: reduce ? "auto" : "smooth", block: "start" });
+  }, [activeId]);
 
   const stepById = (id) => steps.find((step) => step.step_id === id) || null;
 
@@ -310,6 +322,11 @@ export default function RefactoringPlanApprovalPage({
     const target = ordered[activeIndex + offset];
     if (target) setActiveId(target.step_id);
   };
+  // The next undecided step after the open one, in list order, wrapping.
+  const nextPending = activeIndex >= 0
+    ? [...ordered.slice(activeIndex + 1), ...ordered.slice(0, activeIndex)]
+      .find((step) => !decisions[step.step_id]) || null
+    : null;
 
   const { approved, pending } = counts;
   const canProceed = approved > 0 && pending === 0;
@@ -425,6 +442,11 @@ export default function RefactoringPlanApprovalPage({
             })}
             onPrev={activeIndex > 0 ? () => goTo(-1) : undefined}
             onNext={activeIndex >= 0 && activeIndex < ordered.length - 1 ? () => goTo(1) : undefined}
+            onNextPending={nextPending ? () => setActiveId(nextPending.step_id) : undefined}
+            detailsOpen={Boolean(activeStep && detailsOpen[activeStep.step_id])}
+            onToggleDetails={() => activeStep && setDetailsOpen((prev) => ({
+              ...prev, [activeStep.step_id]: !prev[activeStep.step_id],
+            }))}
           />
         </div>
       </div>

@@ -103,7 +103,7 @@ export default function PlanFilters({
             className="dw-focus"
             style={{
               background: "none", border: "none", padding: "4px", cursor: "pointer",
-              color: T.accentText, fontSize: 12, fontWeight: 700, borderRadius: 4,
+              color: T.accentText, fontSize: 14, fontWeight: 700, borderRadius: 4,
             }}
           >
             Clear filters
@@ -117,8 +117,8 @@ export default function PlanFilters({
 function Group({ label, children }) {
   return (
     <div style={{ minWidth: 0 }}>
-      <div style={{ ...eyebrow, marginBottom: 6 }}>{label}</div>
-      <div style={{ display: "flex", gap: 5, flexWrap: "wrap", alignItems: "center" }}>{children}</div>
+      <div style={{ ...eyebrow, fontSize: 12.5, marginBottom: 8 }}>{label}</div>
+      <div style={{ display: "flex", gap: 7, flexWrap: "wrap", alignItems: "center" }}>{children}</div>
     </div>
   );
 }
@@ -133,8 +133,8 @@ function FilterChip({ active, disabled = false, onClick, label, count, tone }) {
       aria-pressed={active}
       className="dw-focus"
       style={{
-        display: "inline-flex", alignItems: "center", gap: 5,
-        padding: "4px 9px", borderRadius: 999, fontSize: 12, fontWeight: active ? 700 : 600,
+        display: "inline-flex", alignItems: "center", gap: 7,
+        padding: "7px 13px", borderRadius: 999, fontSize: 14, fontWeight: active ? 700 : 600,
         cursor: disabled ? "not-allowed" : "pointer", opacity: disabled ? 0.45 : 1,
         background: active ? tint(tone || T.accent, 14) : T.surface,
         color: active ? color : T.text2,
@@ -143,12 +143,12 @@ function FilterChip({ active, disabled = false, onClick, label, count, tone }) {
       }}
     >
       {label}
-      <span style={{ fontFamily: T.mono, fontSize: 11, color: active ? color : T.text3 }}>{count ?? 0}</span>
+      <span style={{ fontFamily: T.mono, fontSize: 13.5, fontWeight: 700, color: active ? color : T.text3 }}>{count ?? 0}</span>
     </button>
   );
 }
 
 const selectStyle = {
-  padding: "6px 9px", borderRadius: 7, fontSize: 12, minWidth: 128,
+  padding: "9px 12px", borderRadius: 8, fontSize: 14, minWidth: 150,
   background: T.surface, color: T.text, border: `1px solid ${T.border}`, cursor: "pointer",
 };

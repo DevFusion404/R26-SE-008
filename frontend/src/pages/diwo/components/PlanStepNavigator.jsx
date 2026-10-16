@@ -72,12 +72,9 @@ export default function PlanStepNavigator({
           type="button"
           onClick={() => onBulk(recommendedIds, APPROVE)}
           disabled={!recommendedIds.length}
-          className="dw-focus dw-hover"
+          className="dw-focus"
           title="Tick (approve) every step DIWO categorised as Recommended"
-          style={ghostButton(recommendedIds.length > 0, {
-            padding: "5px 10px", fontSize: 11.5,
-            color: T.info, border: `1px solid ${T.info}`, background: tint(T.info, 6),
-          })}
+          style={solidButton(recommendedIds.length > 0, FILLED.recommend)}
         >
           Select recommended ({recommendedIds.length})
         </button>
@@ -88,6 +85,7 @@ export default function PlanStepNavigator({
           disabled={!visibleIds.length}
           label={`Approve (tick) all ${visibleIds.length} step(s) shown`}
           onClick={() => onBulk(visibleIds, APPROVE)}
+          solid
         >
           ✓ Approve All
         </GroupActionButton>
@@ -98,6 +96,7 @@ export default function PlanStepNavigator({
           disabled={!visibleIds.length}
           label={`Reject (untick) all ${visibleIds.length} step(s) shown`}
           onClick={() => onBulk(visibleIds, REJECT)}
+          solid
         >
           ✕ Reject All
         </GroupActionButton>
@@ -380,11 +379,39 @@ function TickBox({ approved, rejected, label, onClick }) {
   );
 }
 
-/** Solid fill once applied: dark green for approve, red for reject. */
-const FILLED = { approve: "#15803d", reject: "#dc2626" };
+/** Solid fills: dark green for approve, red for reject, blue for recommended. */
+const FILLED = { approve: "#15803d", reject: "#dc2626", recommend: "#2563eb" };
 
-function GroupActionButton({ tone, text, filled = false, disabled = false, onClick, label, children }) {
+/**
+ * The plan-wide bulk buttons at the top of the list: always solid, so they
+ * read as the list's main actions. An applied verdict adds a white inner ring.
+ */
+const solidButton = (enabled, color, applied = false) => ({
+  display: "inline-flex", alignItems: "center", gap: 6,
+  padding: "8px 14px", borderRadius: 8, fontSize: 12.5, fontWeight: 800, whiteSpace: "nowrap",
+  cursor: enabled ? "pointer" : "not-allowed", opacity: enabled ? 1 : 0.5,
+  background: color, color: "#ffffff", border: `1px solid ${color}`,
+  boxShadow: applied ? "inset 0 0 0 2px rgba(255, 255, 255, 0.85)" : T.shadowSm,
+});
+
+function GroupActionButton({ tone, text, filled = false, disabled = false, onClick, label, solid: alwaysSolid = false, children }) {
   const solid = tone === T.high ? FILLED.reject : FILLED.approve;
+  if (alwaysSolid) {
+    return (
+      <button
+        type="button"
+        onClick={onClick}
+        disabled={disabled}
+        aria-pressed={filled}
+        aria-label={label}
+        title={label}
+        className="dw-focus"
+        style={solidButton(!disabled, solid, filled)}
+      >
+        {children}
+      </button>
+    );
+  }
   return (
     <button
       type="button"

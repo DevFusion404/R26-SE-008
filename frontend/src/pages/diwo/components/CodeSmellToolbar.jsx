@@ -168,14 +168,7 @@ export function ReviewToolbar({
           disabled={!selectableCount}
           className="dw-focus"
           title={`Select every ${unit} the current filters show (${selectableCount})`}
-          style={{
-            display: "inline-flex", alignItems: "center", gap: 7,
-            padding: "8px 14px", borderRadius: 8, fontSize: 12, fontWeight: 700,
-            cursor: selectableCount ? "pointer" : "not-allowed",
-            background: selectableCount ? tint(T.accent, 12) : T.sunken,
-            color: selectableCount ? T.accentText : T.text3,
-            border: `1px solid ${selectableCount ? tint(T.accent, 45) : T.border}`,
-          }}
+          style={bigButton(Boolean(selectableCount), "#15803d")}
         >
           <span aria-hidden="true">✓</span>
           Select shown
@@ -186,13 +179,9 @@ export function ReviewToolbar({
           type="button"
           onClick={onClearSelection}
           disabled={!selectionCount}
-          className="dw-focus dw-hover"
+          className="dw-focus"
           title={selectionCount ? `Clear all ${selectionCount} selected ${unit}(s), including any hidden by filters` : "Nothing is selected"}
-          style={ghostButton(Boolean(selectionCount), {
-            padding: "8px 14px",
-            color: selectionCount ? T.high : T.text3,
-            borderColor: selectionCount ? tint(T.high, 40) : T.border,
-          })}
+          style={bigButton(Boolean(selectionCount), "#dc2626")}
         >
           <span aria-hidden="true">✕</span>
           Clear selection
@@ -302,3 +291,20 @@ function FilterChip({ label, value, tone, onClear }) {
   );
 }
 
+
+/**
+ * The two bulk-selection buttons: solid colour and large, so they read as
+ * the main actions of the toolbar. Green selects, red clears; disabled falls
+ * back to a quiet grey.
+ */
+const bigButton = (enabled, solid) => ({
+  display: "inline-flex", alignItems: "center", gap: 8,
+  minHeight: 44, padding: "10px 20px", borderRadius: 10,
+  fontSize: 14.5, fontWeight: 800, whiteSpace: "nowrap",
+  cursor: enabled ? "pointer" : "not-allowed",
+  background: enabled ? solid : T.sunken,
+  color: enabled ? "#ffffff" : T.text3,
+  border: `1px solid ${enabled ? solid : T.border}`,
+  boxShadow: enabled ? T.shadowSm : "none",
+  transition: "background 0.15s, color 0.15s",
+});

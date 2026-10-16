@@ -65,7 +65,7 @@ export default function PlanApprovalHeader({
       </div>
 
       <dl style={{
-        margin: 0, display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(104px, 1fr))",
+        margin: 0, display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(130px, 1fr))",
         borderTop: `1px solid ${T.border}`, background: T.sunken,
       }}>
         <Counter label="Plan steps" value={totalSteps} />
@@ -132,15 +132,15 @@ export default function PlanApprovalHeader({
 function Counter({ label, value, tone, highlight = false, hint }) {
   return (
     <div style={{
-      padding: "9px 14px", minWidth: 0,
+      padding: "12px 16px", minWidth: 0,
       boxShadow: `inset -1px 0 0 ${T.border}`,
       background: highlight ? tint(T.accent, 6) : "transparent",
     }}>
-      <dt style={{ ...eyebrow, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{label}</dt>
-      <dd style={{ margin: "2px 0 0", fontSize: 19, fontWeight: 800, fontFamily: T.mono, color: tone || T.text, lineHeight: 1.2 }}>
+      <dt style={{ ...eyebrow, fontSize: 12.5, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{label}</dt>
+      <dd style={{ margin: "4px 0 0", fontSize: 28, fontWeight: 800, fontFamily: T.mono, color: tone || T.text, lineHeight: 1.15 }}>
         {value}
       </dd>
-      {hint && <div style={{ fontSize: 10.5, color: T.medium, marginTop: 1 }}>{hint}</div>}
+      {hint && <div style={{ fontSize: 12, color: T.medium, marginTop: 2 }}>{hint}</div>}
     </div>
   );
 }
