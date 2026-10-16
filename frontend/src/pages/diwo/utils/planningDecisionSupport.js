@@ -19,7 +19,7 @@
  * here so the components keep importing one module.
  */
 
-import { C } from "../diwoTheme.jsx";
+import { T } from "../codeSmellTheme.js";
 import {
   MANUAL_ONLY, NOT_RECOMMENDED, RECOMMENDED, REVIEW,
 } from "./planningSelection.js";
@@ -28,7 +28,9 @@ import {
 export * from "./planningSelection.js";
 
 /**
- * Colour, icon and wording per category.
+ * Colour, icon and wording per category. Colours are theme tokens (CSS
+ * variables), so they read correctly in light and dark mode — tint them with
+ * codeSmellTheme's tint(), never by appending a hex alpha.
  *
  * The icon and the text label are not decoration: the four categories must be
  * distinguishable without colour, so every surface that renders a category
@@ -36,7 +38,7 @@ export * from "./planningSelection.js";
  */
 export const CATEGORY_STYLE = {
   [RECOMMENDED]: {
-    color: C.accent,
+    color: T.accentText,
     icon: "🟢",
     label: "Recommended",
     short: "Recommended",
@@ -46,7 +48,7 @@ export const CATEGORY_STYLE = {
     blurb: "High expected improvement, low transformation risk, and SCTVA can execute it.",
   },
   [REVIEW]: {
-    color: C.warn,
+    color: T.medium,
     icon: "🟡",
     label: "Review Carefully",
     short: "Review",
@@ -56,7 +58,7 @@ export const CATEGORY_STYLE = {
     blurb: "Worth doing, but something about it needs your judgement before it runs.",
   },
   [NOT_RECOMMENDED]: {
-    color: C.danger,
+    color: T.high,
     icon: "🔴",
     label: "Not Recommended",
     short: "Not recommended",
@@ -66,7 +68,7 @@ export const CATEGORY_STYLE = {
     blurb: "The expected benefit does not cover the risk or the missing evidence.",
   },
   [MANUAL_ONLY]: {
-    color: C.info,
+    color: T.info,
     icon: "🔵",
     label: "Manual Refactoring Suggested",
     short: "Manual only",
@@ -78,7 +80,7 @@ export const CATEGORY_STYLE = {
 };
 
 const UNCLASSIFIED = {
-  color: C.textMuted,
+  color: T.text3,
   icon: "○",
   label: "Not assessed",
   short: "Not assessed",
@@ -105,7 +107,7 @@ export const strategyLabel = (value) =>
   STRATEGY_OPTIONS.find((option) => option.value === value)?.label || "Balanced";
 
 /** Risk band → colour, shared by the header metric and the card fact strip. */
-export const RISK_COLOR = { low: C.low, medium: C.warn, high: C.danger };
+export const RISK_COLOR = { low: T.low, medium: T.medium, high: T.high };
 
 /** Impact band → colour, for the "Benefit" fact. */
-export const BENEFIT_COLOR = { high: C.accent, medium: C.warn, low: C.textSub };
+export const BENEFIT_COLOR = { high: T.accentText, medium: T.medium, low: T.text2 };

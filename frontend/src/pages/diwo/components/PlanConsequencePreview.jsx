@@ -41,7 +41,7 @@ import {
   BENEFIT_COLOR, RISK_COLOR, MANUAL_ONLY,
   formatMinutes, formatPoints,
 } from "../utils/planningDecisionSupport";
-import { C } from "../diwoTheme.jsx";
+import { T, tint } from "../codeSmellTheme.js";
 
 // ─── Automation, in words ────────────────────────────────────────────────────
 
@@ -55,28 +55,28 @@ import { C } from "../diwoTheme.jsx";
  */
 function automationFact(support) {
   const capability = support?.capability;
-  if (!capability) return { label: "Unknown", color: C.textMuted, detail: null };
+  if (!capability) return { label: "Unknown", color: T.text3, detail: null };
 
   const status = String(capability.status || "unknown").toLowerCase();
 
   if (status === "advisory") {
     return {
       label: "Not available",
-      color: C.info,
+      color: T.info,
       detail: "SCTVA has no safe automatic form for this refactoring.",
     };
   }
   if (status === "unknown") {
     return {
       label: "Not supported",
-      color: C.danger,
+      color: T.high,
       detail: capability.reason || "No SCTVA action is mapped to this refactoring.",
     };
   }
   if (!capability.actual_step_mappable) {
     return {
       label: "Incomplete",
-      color: C.warn,
+      color: T.medium,
       detail: (capability.missing_requirements || []).length
         ? `Missing: ${capability.missing_requirements.join("; ")}`
         : capability.reason || "This concrete step cannot be mapped to an action.",
@@ -84,7 +84,7 @@ function automationFact(support) {
   }
   return {
     label: "SCTVA ready ✓",
-    color: C.accent,
+    color: T.accent,
     detail: capability.action_type ? `Action: ${capability.action_type}` : null,
   };
 }
@@ -95,12 +95,12 @@ function Fact({ label, value, color, detail }) {
   return (
     <div title={detail || undefined} style={{ minWidth: 96 }}>
       <div style={{
-        fontSize: 9, color: C.textMuted, textTransform: "uppercase",
+        fontSize: 9, color: T.text3, textTransform: "uppercase",
         letterSpacing: 0.9, fontWeight: 700, marginBottom: 3,
       }}>
         {label}
       </div>
-      <div style={{ fontSize: 12, fontWeight: 700, color: color || C.text }}>
+      <div style={{ fontSize: 12, fontWeight: 700, color: color || T.text }}>
         {value}
       </div>
     </div>
@@ -130,7 +130,7 @@ export function StepFacts({ step, support }) {
     <div style={{
       display: "flex", gap: 22, flexWrap: "wrap", alignItems: "flex-start",
       padding: "9px 12px", borderRadius: 8,
-      background: C.bg, border: `1px solid ${C.border}`,
+      background: T.surface, border: `1px solid ${T.border}`,
     }}>
       <Fact
         label="Benefit"
@@ -138,13 +138,13 @@ export function StepFacts({ step, support }) {
           <>
             {benefitBand ? benefitBand.toUpperCase() : "—"}
             {typeof gain === "number" && (
-              <span style={{ fontWeight: 500, color: C.textMuted, marginLeft: 6, fontFamily: "monospace" }}>
+              <span style={{ fontWeight: 500, color: T.text3, marginLeft: 6, fontFamily: T.mono }}>
                 {formatPoints(gain)}
               </span>
             )}
           </>
         }
-        color={BENEFIT_COLOR[benefitBand] || C.textMuted}
+        color={BENEFIT_COLOR[benefitBand] || T.text3}
         detail={
           manual
             ? "Potential quality gain if this refactoring is done by hand."
@@ -154,7 +154,7 @@ export function StepFacts({ step, support }) {
       <Fact
         label="Risk"
         value={riskBand ? riskBand.toUpperCase() : "—"}
-        color={RISK_COLOR[riskBand] || C.textMuted}
+        color={RISK_COLOR[riskBand] || T.text3}
         detail="Transformation risk — the worse of RDP's rating and the Stage 1 impact record."
       />
       <Fact
@@ -166,7 +166,7 @@ export function StepFacts({ step, support }) {
       <Fact
         label="Scope"
         value={typeof files === "number" && files > 0 ? `${files} file${files > 1 ? "s" : ""}` : "—"}
-        color={C.textSub}
+        color={T.text2}
         detail="Files the transformation is expected to touch."
       />
     </div>
@@ -180,7 +180,7 @@ function Consequence({ title, tone, lines, empty }) {
     <div style={{
       flex: "1 1 220px", minWidth: 200,
       padding: "9px 12px", borderRadius: 8,
-      background: `${tone}08`, borderLeft: `3px solid ${tone}`,
+      background: tint(tone, 3), borderLeft: `3px solid ${tone}`,
     }}>
       <div style={{
         fontSize: 9, color: tone, textTransform: "uppercase",
@@ -189,12 +189,12 @@ function Consequence({ title, tone, lines, empty }) {
         {title}
       </div>
       {lines.length === 0 ? (
-        <div style={{ fontSize: 11, color: C.textMuted, lineHeight: 1.5 }}>{empty}</div>
+        <div style={{ fontSize: 11, color: T.text3, lineHeight: 1.5 }}>{empty}</div>
       ) : (
         <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
           {lines.map((line) => (
             <div key={line.key} style={{
-              fontSize: 11.5, color: C.textSub, lineHeight: 1.5,
+              fontSize: 11.5, color: T.text2, lineHeight: 1.5,
               display: "flex", gap: 7, alignItems: "baseline",
             }}>
               <span aria-hidden="true" style={{ color: tone, flexShrink: 0, fontWeight: 700 }}>
@@ -260,8 +260,8 @@ function approvedLines(step, support) {
   if (!manual && support?.capability) {
     lines.push({
       key: "auto",
-      mark: automation.color === C.accent ? "✓" : "⚠",
-      text: automation.color === C.accent
+      mark: automation.color === T.accent ? "✓" : "⚠",
+      text: automation.color === T.accent
         ? "SCTVA can perform this transformation automatically"
         : `Automatic transformation ${automation.label.toLowerCase()}`,
     });
@@ -330,7 +330,7 @@ export default function PlanConsequencePreview({ step, support }) {
     <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
       <Consequence
         title="If you approve"
-        tone={C.accent}
+        tone={T.accent}
         lines={approved}
         empty={
           hasRecord
@@ -340,7 +340,7 @@ export default function PlanConsequencePreview({ step, support }) {
       />
       <Consequence
         title="If you skip"
-        tone={C.warn}
+        tone={T.medium}
         lines={skipped}
         empty="No deferral cost was recorded for this step."
       />
