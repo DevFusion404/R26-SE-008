@@ -253,8 +253,8 @@ function CodePreview({ step }) {
         <span className="sd-row" style={{ gap: 16, fontSize: 13 }}>
           {after !== null && (
             <>
-              <span className="sd-row sd-muted" style={{ gap: 6 }}><span className="sd-swatch" style={{ background: "#F87171" }} />Removed</span>
-              <span className="sd-row sd-muted" style={{ gap: 6 }}><span className="sd-swatch" style={{ background: "#2DD4BF" }} />Added</span>
+              <span className="sd-row sd-muted" style={{ gap: 6 }}><span className="sd-swatch" style={{ background: "var(--sd-red)" }} />Removed</span>
+              <span className="sd-row sd-muted" style={{ gap: 6 }}><span className="sd-swatch" style={{ background: "var(--sd-teal)" }} />Added</span>
             </>
           )}
           {lines && <span className="sd-dim"><span className="sd-mono">{lines}</span> lines in file</span>}
@@ -332,7 +332,7 @@ function CodePane({ title, tone, copyLabel, copyText, runs, empty }) {
     <div className="sd-code">
       <div className={`sd-code-head sd-code-head--${tone}`}>
         <span className="sd-row" style={{ gap: 8 }}>
-          <span className="sd-swatch" style={{ borderRadius: 999, background: tone === "red" ? "#F87171" : "#2DD4BF" }} aria-hidden="true" />
+          <span className="sd-swatch" style={{ borderRadius: 999, background: tone === "red" ? "var(--sd-red)" : "var(--sd-teal)" }} aria-hidden="true" />
           {title}
         </span>
         {copyText != null && (
@@ -441,7 +441,7 @@ function FullDiffDialog({ file, before, after, range, onClose }) {
 const EFFECT = {
   better: { label: "Better", icon: "check", color: "var(--sd-teal)" },
   worse: { label: "Worse", icon: "x", color: "var(--sd-red)" },
-  same: { label: "No change", icon: null, color: "#8A9AB5" },
+  same: { label: "No change", icon: null, color: "var(--sd-neutral)" },
 };
 
 function QualityChange({ step }) {
