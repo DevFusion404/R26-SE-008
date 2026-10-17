@@ -19,15 +19,20 @@ export default function PlanSubmitDialog({
   totalSteps, counts, forcedManual, overrides, notes, onNotes, onConfirm, onCancel,
 }) {
   const confirmRef = useRef(null);
+  // The parent passes a fresh onCancel on every render — including each
+  // keystroke in the notes box — so read it through a ref. Depending on it
+  // directly re-ran the focus call and pulled focus out of the textarea.
+  const cancelRef = useRef(onCancel);
+  useEffect(() => { cancelRef.current = onCancel; }, [onCancel]);
 
   useEffect(() => {
     confirmRef.current?.focus();
     const onKey = (e) => {
-      if (e.key === "Escape") onCancel?.();
+      if (e.key === "Escape") cancelRef.current?.();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [onCancel]);
+  }, []);
 
   const willSend = counts.approved;
 

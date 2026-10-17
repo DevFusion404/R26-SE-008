@@ -22,7 +22,9 @@ import { Chip } from "../codeSmellUi.jsx";
 export default function PlanApprovalHeader({
   plan, totalSteps, fileCount, counts, willSend, forcedManual,
   canProceed, blockedReason, onSend, onFallback, children,
+  sending = false, sendError = null, onDismissSendError,
 }) {
+  const canSend = canProceed && !sending;
   const methods = [...new Set((plan.steps || []).map((s) => s.refactoring).filter(Boolean))];
   const skipped = plan.skipped_smells || [];
 
@@ -90,25 +92,51 @@ export default function PlanApprovalHeader({
         </div>
       )}
 
+      {sendError && !sending && (
+        <div role="alert" style={{
+          display: "flex", alignItems: "flex-start", gap: 10,
+          padding: "10px 18px", borderTop: `1px solid ${tint(T.high, 35)}`,
+          background: tint(T.high, 8), fontSize: 12.5, color: T.text, lineHeight: 1.5,
+        }}>
+          <span aria-hidden="true" style={{ color: T.high }}>⚠</span>
+          <span style={{ flex: 1, minWidth: 0, wordBreak: "break-word" }}>{sendError}</span>
+          {onDismissSendError && (
+            <button
+              type="button"
+              onClick={onDismissSendError}
+              aria-label="Dismiss error"
+              className="dw-focus"
+              style={{ background: "none", border: "none", color: T.text2, cursor: "pointer", fontSize: 14, padding: 0 }}
+            >
+              ✕
+            </button>
+          )}
+        </div>
+      )}
+
       {/* ── The two ways out of this stage, at the bottom of the panel ──── */}
       <div style={{
         display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap",
         padding: "10px 18px", borderTop: `1px solid ${T.border}`,
         background: !canProceed && blockedReason ? tint(T.medium, 6) : T.sunken,
       }}>
-        <span style={{ flex: "1 1 260px", fontSize: 11.5, color: canProceed ? T.accentText : T.medium }}>
-          {canProceed
+        <span role="status" style={{ flex: "1 1 260px", fontSize: 11.5, color: canProceed ? T.accentText : T.medium }}>
+          {sending
+            ? `Sending ${willSend} approved step${willSend === 1 ? "" : "s"} to SCTVA…`
+            : canProceed
             ? `${willSend} approved step${willSend === 1 ? "" : "s"} ready to send to SCTVA.`
             : blockedReason ? `⚠ ${blockedReason}` : null}
         </span>
         <button
           type="button"
           onClick={onFallback}
+          disabled={sending}
           className="dw-focus"
           style={{
             display: "inline-flex", alignItems: "center", gap: 8,
             padding: "12px 22px", borderRadius: 10, fontSize: 14, fontWeight: 700,
-            cursor: "pointer", background: "#dc2626", color: "#ffffff",
+            cursor: sending ? "not-allowed" : "pointer", opacity: sending ? 0.6 : 1,
+            background: "#dc2626", color: "#ffffff",
             border: "1px solid #dc2626", boxShadow: T.shadowSm,
           }}
         >
@@ -117,12 +145,15 @@ export default function PlanApprovalHeader({
         <button
           type="button"
           onClick={onSend}
-          disabled={!canProceed}
+          disabled={!canSend}
+          aria-busy={sending}
           title={canProceed ? undefined : blockedReason}
           className="dw-focus"
-          style={primaryButton(canProceed, { padding: "12px 24px", borderRadius: 10, fontSize: 14 })}
+          style={primaryButton(canSend, { padding: "12px 24px", borderRadius: 10, fontSize: 14 })}
         >
-          Send {willSend} approved step{willSend === 1 ? "" : "s"} to SCTVA →
+          {sending
+            ? "Sending to SCTVA…"
+            : `Send ${willSend} approved step${willSend === 1 ? "" : "s"} to SCTVA →`}
         </button>
       </div>
     </section>
