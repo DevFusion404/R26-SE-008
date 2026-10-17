@@ -105,6 +105,9 @@ export default function RefactoringPlanApprovalPage({
   planData,
   planMeta,
   loading = false,
+  sending = false,
+  submitError = null,
+  onDismissSubmitError,
 }) {
   const [decisions, setDecisions] = useState({});
   const [opinion, setOpinion] = useState("");
@@ -344,7 +347,7 @@ export default function RefactoringPlanApprovalPage({
   const confirmingStep = confirmQueue.length ? stepById(confirmQueue[0]) : null;
 
   const submit = () => {
-    if (!canProceed) return;
+    if (!canProceed || sending) return;
 
     // The structured override reasons ride along with the free-text note, so an
     // older backend keeps them without a schema change; they are also sent as
@@ -380,7 +383,10 @@ export default function RefactoringPlanApprovalPage({
         forcedManual={forcedManual}
         canProceed={canProceed}
         blockedReason={blockedReason}
-        onSend={() => canProceed && setSubmitting(true)}
+        sending={sending}
+        sendError={submitError}
+        onDismissSendError={onDismissSubmitError}
+        onSend={() => canProceed && !sending && setSubmitting(true)}
         onFallback={onFallback}
       >
         <PlanFilters
