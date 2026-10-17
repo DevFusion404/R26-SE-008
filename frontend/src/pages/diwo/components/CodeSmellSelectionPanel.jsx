@@ -30,6 +30,11 @@ import { Spinner } from "../codeSmellUi.jsx";
 import { formatEffort } from "../utils/smellGrouping";
 import TradeOffPanel from "./TradeOffPanel.jsx";
 
+// Section labels a step larger than the shared eyebrow, to match the
+// Smell Selection section beside this panel.
+const eyebrowLg = { ...eyebrow, fontSize: 12 };
+
+
 const MODE_LABEL = { file: "File wise", smell: "Smell wise", category: "Category wise" };
 
 export default function CodeSmellSelectionPanel({
@@ -69,9 +74,9 @@ export default function CodeSmellSelectionPanel({
     >
       <div style={{ padding: 16 }}>
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
-          <span style={eyebrow}>Selection for RDP</span>
+          <span style={eyebrowLg}>Selection for RDP</span>
           <span style={{
-            fontSize: 10.5, fontWeight: 700, padding: "2px 8px", borderRadius: 999,
+            fontSize: 12, fontWeight: 700, padding: "2px 8px", borderRadius: 999,
             background: T.sunken, border: `1px solid ${T.border}`, color: T.text2,
           }}>
             {MODE_LABEL[mode]}
@@ -80,18 +85,18 @@ export default function CodeSmellSelectionPanel({
 
         <div style={{ display: "flex", alignItems: "baseline", gap: 8, marginTop: 10 }} aria-live="polite">
           <span style={{
-            fontSize: 30, fontWeight: 800, fontFamily: T.mono, lineHeight: 1,
+            fontSize: 34, fontWeight: 800, fontFamily: T.mono, lineHeight: 1,
             color: nothing ? T.text3 : T.accentText,
           }}>
             {selectionCount}
           </span>
-          <span style={{ fontSize: 13, color: T.text2 }}>
+          <span style={{ fontSize: 15, color: T.text2 }}>
             {isFile ? "file" : "finding"}{selectionCount === 1 ? "" : "s"} selected
             <span style={{ color: T.text3 }}> of {total}</span>
           </span>
         </div>
         {isFile && !nothing && (
-          <div style={{ fontSize: 11.5, color: T.text2, marginTop: 4 }}>
+          <div style={{ fontSize: 13, color: T.text2, marginTop: 4 }}>
             covering <b style={{ fontFamily: T.mono, color: T.text }}>{findingCount}</b> finding
             {findingCount === 1 ? "" : "s"} — every smell in a selected file is sent
           </div>
@@ -112,7 +117,7 @@ export default function CodeSmellSelectionPanel({
         </div>
 
         {nothing ? (
-          <p style={{ fontSize: 12, color: T.text2, lineHeight: 1.6, margin: "12px 0 0" }}>
+          <p style={{ fontSize: 14, color: T.text2, lineHeight: 1.6, margin: "12px 0 0" }}>
             {isFile
               ? "Tick the files whose findings should be planned. Only selected files are forwarded."
               : "Tick findings, or whole smell types and categories. Only selected findings are forwarded."}
@@ -139,7 +144,7 @@ export default function CodeSmellSelectionPanel({
 
         {optimised && !nothing && (
           <div style={{
-            marginTop: 10, padding: "7px 10px", borderRadius: 8, fontSize: 11.5, lineHeight: 1.5,
+            marginTop: 10, padding: "7px 10px", borderRadius: 8, fontSize: 13, lineHeight: 1.5,
             background: tint(T.violet, 9), border: `1px solid ${tint(T.violet, 30)}`, color: T.text,
           }}>
             <b style={{ color: T.violet }}>DIWO optimised selection</b> — {optimised.label}, {optimised.count}{" "}
@@ -163,7 +168,7 @@ export default function CodeSmellSelectionPanel({
             className="dw-focus"
             style={{
               width: "100%", marginTop: 6, padding: "6px", border: "none", background: "none",
-              color: T.text3, fontSize: 11.5, fontWeight: 600, cursor: "pointer", borderRadius: 6,
+              color: T.text3, fontSize: 13, fontWeight: 600, cursor: "pointer", borderRadius: 6,
             }}
           >
             Clear selection
@@ -181,17 +186,17 @@ export default function CodeSmellSelectionPanel({
             style={{
               width: "100%", display: "flex", alignItems: "center", gap: 8,
               padding: "11px 16px", border: "none", background: "transparent",
-              cursor: "pointer", color: T.text, fontSize: 12.5, fontWeight: 700, textAlign: "left",
+              cursor: "pointer", color: T.text, fontSize: 14, fontWeight: 700, textAlign: "left",
             }}
           >
             <span aria-hidden="true" style={{
-              fontSize: 9, color: T.text3, display: "inline-block",
+              fontSize: 11, color: T.text3, display: "inline-block",
               transform: showTradeOff ? "rotate(90deg)" : "none", transition: "transform 0.15s",
             }}>
               ▶
             </span>
             Impact & optimiser
-            <span style={{ marginLeft: "auto", fontSize: 11, fontWeight: 600, color: T.text3 }}>
+            <span style={{ marginLeft: "auto", fontSize: 13, fontWeight: 600, color: T.text3 }}>
               {Math.round((impactSummary.capture_rate || 0) * 100)}% captured
             </span>
           </button>
@@ -226,6 +231,7 @@ export function ReviewButton({ selectionCount, isFile, isSubmitting, submitPhase
       className="dw-focus"
       title={isSubmitting ? "Working — the Refactoring Planning Agent is generating the plan" : undefined}
       style={primaryButton(ready || isSubmitting, {
+        fontSize: 14,
         cursor: isSubmitting ? "wait" : ready ? "pointer" : "not-allowed",
         opacity: isSubmitting ? 0.85 : 1,
         ...style,
@@ -252,7 +258,7 @@ export function MobileActionBar({ selectionCount, findingCount, isFile, isSubmit
         padding: "11px 14px",
         display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap",
       }}>
-        <span style={{ fontSize: 12.5, color: selectionCount ? T.text : T.text3, flex: "1 1 160px" }}>
+        <span style={{ fontSize: 14, color: selectionCount ? T.text : T.text3, flex: "1 1 160px" }}>
           {selectionCount > 0 ? (
             <>
               <b style={{ fontFamily: T.mono, color: T.accentText }}>{selectionCount}</b>{" "}
@@ -280,10 +286,10 @@ function Stat({ label, value, tone, dot, wide = false }) {
       display: "flex", alignItems: "center", gap: 6, minWidth: 0,
     }}>
       {dot && <span aria-hidden="true" style={{ width: 7, height: 7, borderRadius: "50%", background: dot, flexShrink: 0 }} />}
-      <span style={{ fontSize: 11, color: T.text3, flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+      <span style={{ fontSize: 13, color: T.text3, flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
         {label}
       </span>
-      <b style={{ fontSize: 13, fontFamily: T.mono, color: tone || T.text }}>{value}</b>
+      <b style={{ fontSize: 15, fontFamily: T.mono, color: tone || T.text }}>{value}</b>
     </div>
   );
 }
