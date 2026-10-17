@@ -24,7 +24,7 @@
  */
 
 import { categoryStyle } from "../utils/planningDecisionSupport";
-import { C } from "../diwoTheme.jsx";
+import { T, tint } from "../codeSmellTheme.js";
 
 export default function PlanningRecommendationBadge({
   support,
@@ -44,8 +44,8 @@ export default function PlanningRecommendationBadge({
         display: "inline-flex", alignItems: "center", gap: 8, flexShrink: 0,
         padding: compact ? "2px 9px" : "4px 12px",
         borderRadius: 999,
-        background: `${style.color}14`,
-        border: `1px solid ${style.color}55`,
+        background: tint(style.color, 8),
+        border: `1px solid ${tint(style.color, 33)}`,
         fontSize: compact ? 10 : 11,
         whiteSpace: "nowrap",
       }}
@@ -57,10 +57,10 @@ export default function PlanningRecommendationBadge({
 
       {showScore && !isManual && score !== null && (
         <>
-          <span style={{ color: C.textMuted, opacity: 0.6 }}>·</span>
-          <span style={{ color: style.color, fontWeight: 700, fontFamily: "monospace" }}>
+          <span style={{ color: T.text3, opacity: 0.6 }}>·</span>
+          <span style={{ color: style.color, fontWeight: 700, fontFamily: T.mono }}>
             {score}
-            <span style={{ color: C.textMuted, fontWeight: 500 }}>/100</span>
+            <span style={{ color: T.text3, fontWeight: 500 }}>/100</span>
           </span>
         </>
       )}
@@ -85,18 +85,18 @@ export function CategoryCount({ category, count, active = false, onClick, title 
       style={{
         display: "inline-flex", alignItems: "center", gap: 7,
         padding: "5px 11px", borderRadius: 8,
-        background: active ? `${style.color}22` : C.bg,
-        border: `1px solid ${active ? style.color : C.border}`,
-        color: C.text, fontSize: 11, fontWeight: 600,
+        background: active ? tint(style.color, 13) : T.surface,
+        border: `1px solid ${active ? style.color : T.border}`,
+        color: T.text, fontSize: 11, fontWeight: 600,
         cursor: interactive ? "pointer" : "default",
         transition: "all 0.15s",
       }}
     >
       <span aria-hidden="true">{style.icon}</span>
-      <span style={{ color: count > 0 ? C.text : C.textMuted }}>{style.short}</span>
+      <span style={{ color: count > 0 ? T.text : T.text3 }}>{style.short}</span>
       <span style={{
-        fontFamily: "monospace", fontWeight: 800,
-        color: count > 0 ? style.color : C.textMuted,
+        fontFamily: T.mono, fontWeight: 800,
+        color: count > 0 ? style.color : T.text3,
       }}>
         {count}
       </span>

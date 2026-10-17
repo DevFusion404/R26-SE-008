@@ -25,7 +25,7 @@
  */
 
 import { categoryStyle } from "../utils/planningDecisionSupport";
-import { C } from "../diwoTheme.jsx";
+import { T, tint } from "../codeSmellTheme.js";
 
 const FACTOR_LABEL = {
   rdp_quality: "RDP recommendation quality",
@@ -92,27 +92,27 @@ function FactorRow({ name, factor }) {
   const estimated = /^estimated|^not enough/.test(note || "");
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
-      <div style={{ display: "flex", justifyContent: "space-between", gap: 10, fontSize: 11 }}>
-        <span style={{ color: C.textSub, fontWeight: 600 }}>{FACTOR_LABEL[name] || name}</span>
-        <span style={{ color: C.text, fontFamily: "monospace", fontWeight: 700, flexShrink: 0 }}>
+    <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 10, fontSize: 14 }}>
+        <span style={{ color: T.text, fontWeight: 700, letterSpacing: "0.05em" }}>{FACTOR_LABEL[name] || name}</span>
+        <span style={{ color: T.text, fontFamily: T.mono, fontWeight: 800, fontSize: 15, flexShrink: 0 }}>
           {factor.points}
-          <span style={{ color: C.textMuted, fontWeight: 500 }}> / {max}</span>
+          <span style={{ color: T.text3, fontWeight: 500, fontSize: 13 }}> / {max}</span>
         </span>
       </div>
 
-      <div style={{ height: 5, borderRadius: 3, background: C.bg, overflow: "hidden" }}>
+      <div style={{ height: 7, borderRadius: 4, background: T.surface, overflow: "hidden" }}>
         <div style={{
           height: "100%", width: `${ratio * 100}%`,
           background: estimated
-            ? `repeating-linear-gradient(90deg, ${C.textMuted} 0 4px, transparent 4px 8px)`
-            : C.gradient,
+            ? `repeating-linear-gradient(90deg, ${T.text3} 0 4px, transparent 4px 8px)`
+            : T.accent,
           transition: "width 0.25s",
         }} />
       </div>
 
       {note && (
-        <div style={{ fontSize: 10, color: estimated ? C.warn : C.textMuted }}>
+        <div style={{ fontSize: 12, color: estimated ? T.medium : T.text2 }}>
           {estimated && <span aria-hidden="true">⌁ </span>}{note}
         </div>
       )}
@@ -131,13 +131,13 @@ export default function PlanningScoreBreakdown({ support }) {
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
       <div>
         <div style={{
-          fontSize: 10, color: C.textMuted, textTransform: "uppercase",
+          fontSize: 10, color: T.text3, textTransform: "uppercase",
           letterSpacing: 1, marginBottom: 9,
         }}>
           Decision Support Score — how it was calculated
         </div>
 
-        <div style={{ display: "flex", flexDirection: "column", gap: 9 }}>
+        <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
           {FACTOR_ORDER.filter((key) => factors[key]).map((key) => (
             <FactorRow key={key} name={key} factor={factors[key]} />
           ))}
@@ -145,18 +145,19 @@ export default function PlanningScoreBreakdown({ support }) {
 
         <div style={{
           display: "flex", justifyContent: "space-between", alignItems: "center",
-          marginTop: 11, paddingTop: 9, borderTop: `1px solid ${C.borderAcc}`,
+          gap: 10, flexWrap: "wrap",
+          marginTop: 12, paddingTop: 12, borderTop: `1px solid ${T.borderStrong}`,
         }}>
-          <span style={{ fontSize: 11, fontWeight: 700, color: C.textSub }}>
+          <span style={{ fontSize: 15, fontWeight: 800, color: T.text }}>
             Decision Support Score
           </span>
-          <span style={{ fontSize: 15, fontWeight: 800, fontFamily: "monospace", color: style.color }}>
+          <span style={{ fontSize: 36, fontWeight: 800, fontFamily: T.mono, color: style.color, lineHeight: 1 }}>
             {support.score}
-            <span style={{ color: C.textMuted, fontSize: 11, fontWeight: 500 }}> / 100</span>
+            <span style={{ color: T.text2, fontSize: 18, fontWeight: 700 }}> / 100</span>
           </span>
         </div>
 
-        <div style={{ fontSize: 10, color: C.textMuted, marginTop: 5, lineHeight: 1.5 }}>
+        <div style={{ fontSize: 10, color: T.text3, marginTop: 5, lineHeight: 1.5 }}>
           A weighted sum of the factors above — not a calibrated probability.
           Thresholds: ≥ 80 recommended, ≥ 60 review carefully.
         </div>
@@ -166,8 +167,8 @@ export default function PlanningScoreBreakdown({ support }) {
           reader will try to reconcile a 64 with a blue badge. */}
       {gated && (
         <div style={{
-          fontSize: 11, color: C.textSub, lineHeight: 1.55,
-          background: `${style.color}0d`, border: `1px solid ${style.color}33`,
+          fontSize: 11, color: T.text2, lineHeight: 1.55,
+          background: tint(style.color, 5), border: `1px solid ${tint(style.color, 20)}`,
           borderRadius: 8, padding: "9px 12px",
         }}>
           <b style={{ color: style.color }}>Decided by a safety gate, not by the score.</b>{" "}
@@ -188,10 +189,10 @@ export default function PlanningScoreBreakdown({ support }) {
       {typeof support.impact?.quality_gain_low === "number" &&
         typeof support.impact?.quality_gain_high === "number" &&
         support.impact.quality_gain_high > 0 && (
-          <div style={{ fontSize: 10, color: C.textMuted }}>
+          <div style={{ fontSize: 10, color: T.text3 }}>
             Quality gain is an estimate with a stated band: likely between{" "}
-            <b style={{ color: C.textSub }}>+{support.impact.quality_gain_low}</b> and{" "}
-            <b style={{ color: C.textSub }}>+{support.impact.quality_gain_high}</b> points.
+            <b style={{ color: T.text2 }}>+{support.impact.quality_gain_low}</b> and{" "}
+            <b style={{ color: T.text2 }}>+{support.impact.quality_gain_high}</b> points.
           </div>
         )}
     </div>

@@ -29,7 +29,7 @@
 
 import { useEffect, useState } from "react";
 import { OVERRIDE_REASONS, categoryStyle, MANUAL_ONLY } from "../utils/planningDecisionSupport";
-import { C } from "../diwoTheme.jsx";
+import { T, tint } from "../codeSmellTheme.js";
 
 export default function OverrideConfirmDialog({ step, support, reason, onReason, onConfirm, onCancel }) {
   const [picked, setPicked] = useState(reason || "");
@@ -66,7 +66,7 @@ export default function OverrideConfirmDialog({ step, support, reason, onReason,
       aria-label={`Approve step ${step.step_id} against DIWO's recommendation`}
       style={{
         position: "fixed", inset: 0, zIndex: 1200,
-        background: "rgba(4,6,10,0.74)", backdropFilter: "blur(2px)",
+        background: T.overlay, backdropFilter: "blur(2px)",
         display: "flex", alignItems: "center", justifyContent: "center", padding: 24,
       }}
     >
@@ -74,8 +74,8 @@ export default function OverrideConfirmDialog({ step, support, reason, onReason,
         onClick={(e) => e.stopPropagation()}
         style={{
           width: "min(560px, 100%)", maxHeight: "86vh", overflowY: "auto",
-          background: C.bg, border: `1px solid ${style.color}55`, borderRadius: 14,
-          boxShadow: "0 24px 60px rgba(0,0,0,0.55)", padding: "20px 22px",
+          background: T.surface, border: `1px solid ${tint(style.color, 33)}`, borderRadius: 14,
+          boxShadow: T.shadowLg, padding: "20px 22px",
         }}
       >
         <div style={{ display: "flex", alignItems: "center", gap: 9, marginBottom: 10 }}>
@@ -85,30 +85,30 @@ export default function OverrideConfirmDialog({ step, support, reason, onReason,
           </span>
         </div>
 
-        <div style={{ fontSize: 12.5, color: C.text, lineHeight: 1.6, marginBottom: 12 }}>
+        <div style={{ fontSize: 12.5, color: T.text, lineHeight: 1.6, marginBottom: 12 }}>
           <b>{step.smell_type ? `${step.smell_type} → ` : ""}{step.refactoring}</b>
-          <span style={{ color: C.textMuted, fontFamily: "monospace", marginLeft: 8, fontSize: 11 }}>
+          <span style={{ color: T.text3, fontFamily: T.mono, marginLeft: 8, fontSize: 11 }}>
             {step.target?.file || "(module level)"}
           </span>
         </div>
 
         {isManual ? (
           <div style={{
-            fontSize: 12, color: C.textSub, lineHeight: 1.65, marginBottom: 14,
+            fontSize: 12, color: T.text2, lineHeight: 1.65, marginBottom: 14,
             padding: "10px 13px", borderRadius: 8,
-            background: `${C.info}0c`, border: `1px solid ${C.info}40`,
+            background: tint(T.info, 5), border: `1px solid ${tint(T.info, 25)}`,
           }}>
-            <b style={{ color: C.info }}>SCTVA cannot execute this refactoring.</b>{" "}
+            <b style={{ color: T.info }}>SCTVA cannot execute this refactoring.</b>{" "}
             Approving it forwards a step the Transformation Agent has no automatic
             form for, so it is likely to produce no code change. To keep it on
             your list without sending it to SCTVA, cancel and choose{" "}
-            <b style={{ color: C.textSub }}>Add to manual work</b> instead.
+            <b style={{ color: T.text2 }}>Add to manual work</b> instead.
           </div>
         ) : (
           <div style={{
-            fontSize: 12, color: C.textSub, lineHeight: 1.65, marginBottom: 14,
+            fontSize: 12, color: T.text2, lineHeight: 1.65, marginBottom: 14,
             padding: "10px 13px", borderRadius: 8,
-            background: `${C.danger}0c`, border: `1px solid ${C.danger}40`,
+            background: tint(T.high, 5), border: `1px solid ${tint(T.high, 25)}`,
           }}>
             {support?.summary || "The expected benefit does not cover the risk for this step."}
           </div>
@@ -117,21 +117,21 @@ export default function OverrideConfirmDialog({ step, support, reason, onReason,
         {(warnings.length > 0 || missing.length > 0) && (
           <div style={{ marginBottom: 14 }}>
             <div style={{
-              fontSize: 9.5, color: C.textMuted, textTransform: "uppercase",
+              fontSize: 9.5, color: T.text3, textTransform: "uppercase",
               letterSpacing: 1, fontWeight: 700, marginBottom: 6,
             }}>
               Why DIWO says so
             </div>
             <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
               {warnings.map((warning) => (
-                <div key={warning} style={{ fontSize: 11.5, color: C.textSub, display: "flex", gap: 7 }}>
-                  <span aria-hidden="true" style={{ color: C.warn, fontWeight: 700 }}>⚠</span>
+                <div key={warning} style={{ fontSize: 11.5, color: T.text2, display: "flex", gap: 7 }}>
+                  <span aria-hidden="true" style={{ color: T.medium, fontWeight: 700 }}>⚠</span>
                   <span>{warning}</span>
                 </div>
               ))}
               {missing.length > 0 && (
-                <div style={{ fontSize: 11.5, color: C.textSub, display: "flex", gap: 7 }}>
-                  <span aria-hidden="true" style={{ color: C.warn, fontWeight: 700 }}>⚠</span>
+                <div style={{ fontSize: 11.5, color: T.text2, display: "flex", gap: 7 }}>
+                  <span aria-hidden="true" style={{ color: T.medium, fontWeight: 700 }}>⚠</span>
                   <span>Missing transformation input: {missing.join("; ")}</span>
                 </div>
               )}
@@ -142,7 +142,7 @@ export default function OverrideConfirmDialog({ step, support, reason, onReason,
         {/* Optional. The workflow is never blocked on a reason. */}
         <div style={{ marginBottom: 16 }}>
           <div style={{
-            fontSize: 9.5, color: C.textMuted, textTransform: "uppercase",
+            fontSize: 9.5, color: T.text3, textTransform: "uppercase",
             letterSpacing: 1, fontWeight: 700, marginBottom: 7,
           }}>
             Why are you overriding? <span style={{ textTransform: "none", letterSpacing: 0 }}>(optional)</span>
@@ -157,9 +157,9 @@ export default function OverrideConfirmDialog({ step, support, reason, onReason,
                 style={{
                   padding: "4px 11px", borderRadius: 20, fontSize: 10.5, fontWeight: 600,
                   cursor: "pointer",
-                  background: picked === option ? `${C.info}25` : C.panel,
-                  color: picked === option ? C.info : C.textMuted,
-                  border: `1px solid ${picked === option ? C.info : C.border}`,
+                  background: picked === option ? tint(T.info, 15) : T.surface2,
+                  color: picked === option ? T.info : T.text3,
+                  border: `1px solid ${picked === option ? T.info : T.border}`,
                 }}
               >
                 {option}
@@ -174,8 +174,8 @@ export default function OverrideConfirmDialog({ step, support, reason, onReason,
             onClick={onCancel}
             style={{
               padding: "9px 18px", borderRadius: 8, fontSize: 12, fontWeight: 700,
-              cursor: "pointer", background: C.panel, color: C.textSub,
-              border: `1px solid ${C.border}`,
+              cursor: "pointer", background: T.surface2, color: T.text2,
+              border: `1px solid ${T.border}`,
             }}
           >
             Cancel
@@ -186,15 +186,15 @@ export default function OverrideConfirmDialog({ step, support, reason, onReason,
             style={{
               padding: "9px 18px", borderRadius: 8, fontSize: 12, fontWeight: 700,
               cursor: "pointer", border: "none",
-              background: `${style.color}22`, color: style.color,
-              boxShadow: `inset 0 0 0 1px ${style.color}66`,
+              background: tint(style.color, 13), color: style.color,
+              boxShadow: `inset 0 0 0 1px ${tint(style.color, 40)}`,
             }}
           >
             {isManual ? "Force automatic anyway" : "Approve anyway"}
           </button>
         </div>
 
-        <div style={{ marginTop: 11, fontSize: 10.5, color: C.textMuted, lineHeight: 1.5 }}>
+        <div style={{ marginTop: 11, fontSize: 10.5, color: T.text3, lineHeight: 1.5 }}>
           You keep the final say — DIWO advises, you decide. Nothing is
           transformed until you forward the plan.
         </div>

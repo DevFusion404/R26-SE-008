@@ -110,6 +110,9 @@ export default function DIWOAgentPage() {
   const [metricsBeforeApi, setMetricsBeforeApi]     = useState(null);
   const [metricsAfterApi, setMetricsAfterApi]       = useState(null);
   const [backendBusy, setBackendBusy]         = useState(false);  // FIX [F2]
+  // Why the last "Send to SCTVA" did not go through, shown on the plan page
+  // itself — the log panel alone left the click looking like it did nothing.
+  const [planSubmitError, setPlanSubmitError] = useState(null);
   const [workflow, setWorkflow]               = useState(null);
   const [auditLog, setAuditLog]               = useState([
     { id: `local-init`, time: new Date().toLocaleTimeString(), event: "Session initialized", type: "info" },
@@ -478,6 +481,7 @@ export default function DIWOAgentPage() {
     decisions, opinion, plan, preferences, override_reasons: overrideReasons,
   }) => {
     if (backendBusy) return; // FIX [F2]
+    setPlanSubmitError(null);
 
     // The page hands back the plan it rendered (RDP-generated or workflow copy),
     // so the approved steps always match what the developer reviewed.
@@ -531,6 +535,7 @@ export default function DIWOAgentPage() {
 
     if (!workflowId || !activePlan) {
       addLog("No backend session — cannot submit plan. Check backend connection.", "danger");
+      setPlanSubmitError("No backend session — the plan could not be sent. Check the DIWO backend connection and reload.");
       return;
     }
 
@@ -543,6 +548,7 @@ export default function DIWOAgentPage() {
       const approvedSteps = automaticSteps(planSteps, decisions);
 
       if (approvedSteps.length === 0) {
+        setPlanSubmitError("No step is approved for automatic transformation, so there is nothing to send to SCTVA.");
         addLog(
           manual > 0
             ? "Every decided step was kept for manual work — at least one step must be " +
@@ -634,6 +640,7 @@ export default function DIWOAgentPage() {
       setPhase(2);
     } catch (e) {
       addLog(`Plan decision failed: ${e.message}`, "danger"); // FIX [F3]
+      setPlanSubmitError(`Sending the plan to SCTVA failed: ${e.message}`);
     } finally {
       setBackendBusy(false);
     }
@@ -973,6 +980,9 @@ export default function DIWOAgentPage() {
               loading={backendBusy && !planData}
               onDecisionChange={handlePlanDecisionChange}
               onApprove={handlePlanApproved}
+              sending={backendBusy && Boolean(planData)}
+              submitError={planSubmitError}
+              onDismissSubmitError={() => setPlanSubmitError(null)}
               onFallback={handleFallbackToSmellReview}
             />
           )}

@@ -18,6 +18,11 @@
 import { T, tint, eyebrow, panelStyle, sevTone } from "../codeSmellTheme.js";
 import { categoryIcon } from "../utils/smellIcons";
 
+// Section labels a step larger than the shared eyebrow, to match the
+// Smell Selection section beside this panel.
+const eyebrowLg = { ...eyebrow, fontSize: 12 };
+
+
 const PRIORITY_TONE = { critical: T.high, high: T.high, medium: T.medium, low: T.text3 };
 
 export default function CodeSmellFilterRail({
@@ -64,7 +69,7 @@ export default function CodeSmellFilterRail({
                   <span
                     title={`${c.priority} priority (CUQA taxonomy)`}
                     style={{
-                      fontSize: 10.5, fontWeight: 700, letterSpacing: 0.4, textTransform: "uppercase",
+                      fontSize: 12, fontWeight: 700, letterSpacing: 0.4, textTransform: "uppercase",
                       color: PRIORITY_TONE[c.priority] || T.text3,
                     }}
                   >
@@ -84,7 +89,7 @@ export default function CodeSmellFilterRail({
           className="dw-focus dw-hover"
           style={{
             ...panelStyle, boxShadow: "none",
-            padding: "9px 12px", fontSize: 12, fontWeight: 700, cursor: "pointer",
+            padding: "9px 12px", fontSize: 14, fontWeight: 700, cursor: "pointer",
             color: T.accentText, textAlign: "center",
           }}
         >
@@ -100,7 +105,7 @@ export default function CodeSmellFilterRail({
 function Section({ title, hint, children }) {
   return (
     <section style={{ ...panelStyle, padding: 12 }}>
-      <div style={{ ...eyebrow, marginBottom: 8 }} title={hint}>{title}</div>
+      <div style={{ ...eyebrowLg, marginBottom: 8 }} title={hint}>{title}</div>
       {children}
     </section>
   );
@@ -119,17 +124,17 @@ function FilterRow({ active, onClick, label, count, dot, icon, trailing }) {
         background: active ? tint(T.accent, 12) : "transparent",
         border: `1px solid ${active ? tint(T.accent, 40) : "transparent"}`,
         color: active ? T.text : T.text2,
-        fontSize: 12, fontWeight: active ? 700 : 500,
+        fontSize: 14, fontWeight: active ? 700 : 500,
       }}
     >
       {dot && <span aria-hidden="true" style={{ width: 8, height: 8, borderRadius: "50%", background: dot, flexShrink: 0 }} />}
-      {icon && <span aria-hidden="true" style={{ fontSize: 12, flexShrink: 0 }}>{icon}</span>}
+      {icon && <span aria-hidden="true" style={{ fontSize: 14, flexShrink: 0 }}>{icon}</span>}
       <span style={{ flex: 1, minWidth: 0, whiteSpace: "normal", overflowWrap: "anywhere", lineHeight: 1.35 }}>
         {label}
       </span>
       {trailing}
       <span style={{
-        fontFamily: T.mono, fontSize: 11, fontWeight: 700, flexShrink: 0,
+        fontFamily: T.mono, fontSize: 13, fontWeight: 700, flexShrink: 0,
         padding: "0 7px", borderRadius: 999,
         background: active ? tint(T.accent, 18) : T.sunken,
         color: active ? T.accentText : T.text3,

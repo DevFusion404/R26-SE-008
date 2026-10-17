@@ -129,6 +129,9 @@
   .dw-grid {
     grid-template-columns: minmax(0, 1fr) 280px;
     grid-template-areas: "rail side" "main side";
+    /* The panel spans both rows; any extra height it brings goes to the
+       findings row, not between the filters and the toolbar. */
+    grid-template-rows: auto 1fr;
   }
   .dw-area-side { position: sticky; top: 0; }
   .dw-mobile-cta { display: none; }

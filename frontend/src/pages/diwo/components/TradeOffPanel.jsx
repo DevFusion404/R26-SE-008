@@ -21,6 +21,11 @@
 import { T, tint, eyebrow, riskTone } from "../codeSmellTheme.js";
 import { PRESETS } from "../utils/impactPresets";
 
+// Section labels a step larger than the shared eyebrow, to match the
+// Smell Selection section beside this panel.
+const eyebrowLg = { ...eyebrow, fontSize: 12 };
+
+
 const LEVEL = {
   error: { color: T.high, icon: "⛔" },
   warning: { color: T.medium, icon: "⚠" },
@@ -49,9 +54,9 @@ export default function TradeOffPanel({
     }}>
       {/* ── Capture bar ───────────────────────────────────────────────────── */}
       <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 8, marginBottom: 6 }}>
-        <span style={eyebrow}>Quality capture</span>
+        <span style={eyebrowLg}>Quality capture</span>
         <span style={{
-          fontSize: 15, fontWeight: 800, fontFamily: T.mono,
+          fontSize: 18, fontWeight: 800, fontFamily: T.mono,
           color: capturePct > 0 ? T.accentText : T.text3,
         }}>
           {capturePct}%
@@ -68,11 +73,11 @@ export default function TradeOffPanel({
         <div style={{ height: "100%", width: `${capturePct}%`, background: T.accent, transition: "width 0.25s ease" }} />
       </div>
 
-      <div style={{ fontSize: 11.5, color: T.text2, marginTop: 8, lineHeight: 1.6 }}>
+      <div style={{ fontSize: 13, color: T.text2, marginTop: 8, lineHeight: 1.6 }}>
         Quality <Mono>{summary.quality_before}</Mono> → <Mono tone={T.accentText}>{summary.quality_projected}</Mono>
         {" "}projected · ceiling <Mono tone={T.medium}>{summary.quality_ceiling}</Mono>
         {headroom > 0.05 && <> · <Mono tone={T.medium}>{headroom.toFixed(1)}</Mono> pts unclaimed</>}
-        <div style={{ color: T.text3, fontSize: 10.5 }}>
+        <div style={{ color: T.text3, fontSize: 12 }}>
           ±{Math.round((summary.error_band ?? 0.35) * 100)}% static estimate
         </div>
       </div>
@@ -122,7 +127,7 @@ export default function TradeOffPanel({
                 }}
               >
                 <span aria-hidden="true" style={{ color: tone.color, flexShrink: 0 }}>{tone.icon}</span>
-                <span style={{ fontSize: 11.5, color: T.text, lineHeight: 1.5 }}>
+                <span style={{ fontSize: 13, color: T.text, lineHeight: 1.5 }}>
                   {note.message}
                 </span>
               </div>
@@ -135,8 +140,8 @@ export default function TradeOffPanel({
       {onOptimise && (
         <div style={{ marginTop: 14, paddingTop: 12, borderTop: `1px solid ${T.border}` }}>
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, marginBottom: 8 }}>
-            <span style={eyebrow}>Optimise selection</span>
-            <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11.5, color: T.text2 }}>
+            <span style={eyebrowLg}>Optimise selection</span>
+            <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13, color: T.text2 }}>
               Budget
               <input
                 type="number"
@@ -148,7 +153,7 @@ export default function TradeOffPanel({
                 className="dw-input"
                 style={{
                   width: 60, background: T.sunken, border: `1px solid ${T.border}`,
-                  borderRadius: 6, padding: "4px 7px", color: T.text, fontSize: 11.5,
+                  borderRadius: 6, padding: "4px 7px", color: T.text, fontSize: 13,
                   fontFamily: T.mono,
                 }}
               />
@@ -166,7 +171,7 @@ export default function TradeOffPanel({
                 onClick={() => onOptimise(preset.key)}
                 className="dw-focus dw-hover"
                 style={{
-                  padding: "6px 11px", borderRadius: 7, fontSize: 11.5, fontWeight: 700,
+                  padding: "6px 11px", borderRadius: 7, fontSize: 13, fontWeight: 700,
                   background: T.surface, color: optimising ? T.text3 : T.text2,
                   border: `1px solid ${T.border}`,
                   cursor: optimising ? "wait" : "pointer",
@@ -176,7 +181,7 @@ export default function TradeOffPanel({
               </button>
             ))}
           </div>
-          <div style={{ fontSize: 10.5, color: T.text3, marginTop: 6, lineHeight: 1.5 }}>
+          <div style={{ fontSize: 12, color: T.text3, marginTop: 6, lineHeight: 1.5 }}>
             Replaces the current selection with DIWO's suggestion and switches to Smell wise so you can edit it.
           </div>
         </div>
@@ -202,12 +207,12 @@ function Side({ title, accent, titleTone, facts }) {
       padding: "9px 11px", borderRadius: 8,
       background: tint(accent, 6), border: `1px solid ${tint(accent, 24)}`,
     }}>
-      <div style={{ ...eyebrow, color: titleTone, marginBottom: 5 }}>{title}</div>
+      <div style={{ ...eyebrowLg, color: titleTone, marginBottom: 5 }}>{title}</div>
       <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
         {facts.filter(Boolean).map((fact) => {
           const text = typeof fact === "string" ? fact : fact.text;
           return (
-            <span key={text} style={{ fontSize: 11.5, color: typeof fact === "string" ? T.text2 : fact.tone }}>
+            <span key={text} style={{ fontSize: 13, color: typeof fact === "string" ? T.text2 : fact.tone }}>
               {text}
             </span>
           );
