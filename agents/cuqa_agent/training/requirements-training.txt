@@ -1,0 +1,12 @@
+# ============================================================
+# CUQA Agent - ML model training requirements
+# Only needed to retrain the smell model. The CUQA service itself
+# scores the exported JSON model with the standard library.
+# ============================================================
+
+scikit-learn>=1.4
+pandas>=2.0
+numpy>=1.26
+matplotlib>=3.8
+requests>=2.31.0
+javalang>=0.13.0

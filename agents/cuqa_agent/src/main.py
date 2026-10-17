@@ -58,6 +58,7 @@ from ast_parser import parse_source, detect_language
 from ast_visualizer import enrich_ast, build_summary
 from report_generator import generate_file_report, generate_repo_report, build_repo_name_index
 from repository_understanding import analyze_repository_overview
+from ml_detector import detector as ml_detector
 
 # ---------------------------------------------------------------------------
 # FastAPI Application Initialization & CORS Configuration
@@ -509,13 +510,17 @@ def quality_report(payload: dict = None): # type: ignore
     """
     Generate a quality report for one or all files in the workspace.
 
-    Body (optional): { "file_path": "relative/path/File.py" }
+    Body (optional): { "file_path": "relative/path/File.py", "detector": "rules" | "hybrid" | "ml" | "off" }
     If file_path omitted, reports on all loaded files (capped at 50).
+    If detector omitted, the CUQA_SMELL_DETECTOR environment variable applies (default "rules").
     """
     if not _workspace["root"]:
         raise HTTPException(400, "No repository loaded.")
 
     file_path = (payload or {}).get("file_path")
+    detector = (payload or {}).get("detector")
+    if detector is not None and detector not in ml_detector.VALID_MODES:
+        raise HTTPException(400, f"detector must be one of: {', '.join(ml_detector.VALID_MODES)}.")
 
     if file_path:
         # SEC-FIX: path traversal prevention
@@ -524,7 +529,7 @@ def quality_report(payload: dict = None): # type: ignore
             raise HTTPException(404, f"File not found: {file_path}")
         with open(full_path, "r", encoding="utf-8", errors="replace") as f:
             source = f.read()
-        report = generate_file_report(source, os.path.basename(full_path))
+        report = generate_file_report(source, os.path.basename(full_path), detector=detector)
         return {"type": "file", "report": report}
 
     # All files — cap at 50 to avoid timeout
@@ -538,7 +543,7 @@ def quality_report(payload: dict = None): # type: ignore
         try:
             with open(full_path, "r", encoding="utf-8", errors="replace") as f:
                 source = f.read()
-            report = generate_file_report(source, os.path.basename(full_path))
+            report = generate_file_report(source, os.path.basename(full_path), detector=detector)
             report["relative_path"] = rel.replace("\\", "/")
             # Collect Python sources for repo-wide dead-code index
             if os.path.splitext(full_path)[-1].lower() == ".py":
@@ -552,6 +557,74 @@ def quality_report(payload: dict = None): # type: ignore
     repo_report = generate_repo_report(file_reports, sources=all_sources)
     repo_report["repo_name"] = _workspace["repo_name"]
     return {"type": "repository", "report": repo_report}
+
+
+# ── 5b. ML Smell Detection ───────────────────────────────────────────────────
+
+MAX_ML_FILES = 200
+
+@app.get("/api/ml-model")
+def ml_model():
+    """Describe the trained smell model: version, smells, thresholds and test metrics."""
+    return ml_detector.model_info()
+
+
+@app.post("/api/ml-smells")
+def ml_smells(payload: dict = None): # type: ignore
+    """
+    Detect code smells with the trained model only (no rules). Java files only.
+
+    Body (optional): { "file_path": "relative/path/File.java" }
+    If file_path omitted, scores the Java files of the workspace (capped at 200).
+    """
+    if not _workspace["root"]:
+        raise HTTPException(400, "No repository loaded.")
+
+    file_path = (payload or {}).get("file_path")
+
+    if file_path:
+        # SEC-FIX: path traversal prevention
+        full_path = _safe_resolve_path(_workspace["root"], file_path)
+        if not os.path.isfile(full_path):
+            raise HTTPException(404, f"File not found: {file_path}")
+        if detect_language(full_path) != "java":
+            raise HTTPException(400, "The ML smell model supports Java files only.")
+        with open(full_path, "r", encoding="utf-8", errors="replace") as f:
+            source = f.read()
+        result = ml_detector.detect_smells(source)
+        result["file"] = file_path.replace("\\", "/")
+        return {"type": "file", "result": result}
+
+    java_files = [rel for rel in _workspace["files"] if rel.lower().endswith(".java")]
+    file_results = []
+    by_type: dict[str, int] = {}
+    for rel in java_files[:MAX_ML_FILES]:
+        full_path = os.path.join(_workspace["root"], rel)
+        try:
+            with open(full_path, "r", encoding="utf-8", errors="replace") as f:
+                source = f.read()
+            result = ml_detector.detect_smells(source)
+        except OSError as exc:
+            result = {"status": "read_failed", "detail": str(exc), "entities_scored": 0, "smells": []}
+        result["file"] = rel.replace("\\", "/")
+        for smell in result["smells"]:
+            by_type[smell["type"]] = by_type.get(smell["type"], 0) + 1
+        file_results.append(result)
+
+    return {
+        "type": "repository",
+        "repo_name": _workspace["repo_name"],
+        "model": ml_detector.model_info(),
+        "summary": {
+            "java_files_total": len(java_files),
+            "files_scored": sum(1 for r in file_results if r["status"] == "ok"),
+            "entities_scored": sum(r["entities_scored"] for r in file_results),
+            "total_smells": sum(by_type.values()),
+            "by_type": by_type,
+            "truncated": len(java_files) > MAX_ML_FILES,
+        },
+        "files": file_results,
+    }
 
 
 # ── 6. List source files ─────────────────────────────────────────────────────

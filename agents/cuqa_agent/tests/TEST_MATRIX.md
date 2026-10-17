@@ -60,3 +60,11 @@
 | CUQA-EDGE-005 | Edge Case | Parser Failures | 49 valid + 1 malformed | Polyglot repo with error | 49 files processed cleanly | All | High | Yes | `edge_cases/test_parser_failures.py` | PASS |
 | CUQA-REG-001 | Regression | Security Bugs | All known fixed bugs | Regression test cases | All pass permanently | All | Critical | Yes | `regression/test_known_regressions.py` | PASS |
 | CUQA-PERF-001 | Performance | Scaling | 100 source file repository | Synthetic 100 file repo | Benchmark logged <10s | Python | Medium | Yes | `performance/test_repository_scaling.py` | PASS |
+| CUQA-ML-001 | Unit | ml_detector.java_features | Feature values of a hand-written class | `OrderService` sample class | Counts equal the hand-counted values | Java | High | Yes | `unit/test_ml_features.py` | PASS |
+| CUQA-ML-002 | Unit | ml_detector.java_features | Malformed Java source | `void x( {` | `JavaFeatureError`, no crash | Java | High | Yes | `unit/test_ml_features.py` | PASS |
+| CUQA-ML-003 | Unit | ml_detector.model | Tree traversal and probability | Model with two small trees | Probability equals the hand calculation | Java | High | Yes | `unit/test_ml_model.py` | PASS |
+| CUQA-ML-004 | Unit | ml_detector.model | Model file matches the feature extractor | Shipped `smell_model.json` | Feature lists are identical | Java | Critical | Yes | `unit/test_ml_model.py` | PASS |
+| CUQA-ML-005 | Unit | ml_detector.detector | Long method found by the model | Generated method with 240 lines | LongMethod with confidence and evidence | Java | High | Yes | `unit/test_ml_detector.py` | PASS |
+| CUQA-ML-006 | Unit | ml_detector.detector | Missing model or unparsable file | Absent model file, broken source | Status returned, no exception | Java | High | Yes | `unit/test_ml_detector.py` | PASS |
+| CUQA-ML-007 | Unit | report_generator | Default mode leaves rule output unchanged | Java class with a long method | Report equals the report without the model | Java | Critical | Yes | `unit/test_ml_detector.py` | PASS |
+| CUQA-ML-008 | API | /api/ml-smells | Repository scan with the model | ZIP with 3 Java files and 1 Python file | 2 files scored, 1 parse failure reported | Java | High | Yes | `api/test_ml_smells_api.py` | PASS |
