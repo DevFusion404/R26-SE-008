@@ -20,14 +20,14 @@
  *
  * THREE VIEWS OF ONE SET OF FINDINGS
  * ----------------------------------
- *     File wise      file -> the smell types inside it     (whole-file select)
- *     Smell wise     smell type, repository-wide -> occurrences
- *     Category wise  CUQA category -> smell type -> occurrences
+ *     File wise      file card -> one box per smell type in it
+ *     Smell wise     smell type card -> one box per file it appears in
+ *     Category wise  category card -> one box per smell type in it
  *
- * Smell wise and Category wise both write to `selectedIds`, so switching
- * between them never loses a tick. File wise selects whole paths into
- * `selected` and shows no per-occurrence checkbox — offering one would promise
- * a partial-file selection that the mode cannot express or send.
+ * Rendered by SmellSelectionSection. All three views write to `selectedIds`,
+ * so switching between them never loses a tick. File wise still sends the
+ * file-mode payload when the selection is exactly a set of whole files, and
+ * the smell-mode payload once single smells inside a file are picked.
  *
  * The arrangement that mattered most: Smell wise groups by TYPE across the
  * whole repository. It used to group by file first, so a Magic Number occurring
@@ -85,21 +85,14 @@ import { T, tint, eyebrow, panelStyle, ghostButton, primaryButton } from "../cod
 import { Spinner } from "../codeSmellUi.jsx";
 import SourceViewer from "../components/SourceViewer.jsx";
 import ImpactDrawer from "../components/ImpactDrawer.jsx";
-import QuickSelectDropdown from "../components/QuickSelectDropdown.jsx";
 import CodeSmellContextBar from "../components/CodeSmellContextBar.jsx";
 import CodeSmellFilterRail from "../components/CodeSmellFilterRail.jsx";
 import CodeSmellSelectionPanel, { MobileActionBar } from "../components/CodeSmellSelectionPanel.jsx";
 import CodeSmellApprovalDialog from "../components/CodeSmellApprovalDialog.jsx";
-import {
-  CategoryWiseView, FileWiseView, SmellWiseView,
-} from "../components/SmellReviewViews.jsx";
-import { ReviewToolbar } from "../components/CodeSmellToolbar.jsx";
+import SmellSelectionSection from "../components/SmellSelectionSection.jsx";
 import { DEFAULT_BUDGET_MINUTES, PRESETS } from "../utils/impactPresets";
 import { qualityBaseline, summariseSelection } from "../utils/impactSummary";
-import {
-  categoryOptions, expandAllKeys, groupByCategory, groupByFile,
-  groupBySmellType, selectionSummary, severitySpread, smellTypeOptions,
-} from "../utils/smellGrouping";
+import { selectionSummary, severitySpread } from "../utils/smellGrouping";
 import {
   analyseSelectionImpact, fetchProjectStructure, fetchQualityReport,
   fetchSmellCategories, fetchSmellImpacts, optimiseSelection,
@@ -123,32 +116,6 @@ const round = (value, dp = 0) => {
 const smellId = (relativePath, smell, index) =>
   `${relativePath}:${smell?.line || 0}:${index}`;
 
-/**
- * Re-order the top-level groups of the active view.
- *
- * "default" keeps the grouping's own order (worst severity first for files and
- * smell types, taxonomy priority for categories). Effort and quality gain sort
- * only by figures the backend supplied — the caller disables them without
- * impact records, and a group with no figure sorts last rather than as zero.
- */
-const SEVERITY_ORDER = { high: 0, medium: 1, low: 2, unknown: 3 };
-const groupName = (g) => g.type || g.category || g.file || "";
-
-function sortGroups(groups, sort, gainOf) {
-  if (sort === "default") return groups;
-  const compare = {
-    severity: (a, b) =>
-      (SEVERITY_ORDER[a.worstSeverity] ?? 9) - (SEVERITY_ORDER[b.worstSeverity] ?? 9)
-      || (b.severity?.high || 0) - (a.severity?.high || 0)
-      || b.findingCount - a.findingCount,
-    findings: (a, b) => b.findingCount - a.findingCount,
-    effort: (a, b) => (b.effort ?? -1) - (a.effort ?? -1),
-    gain: (a, b) => gainOf(b.rows) - gainOf(a.rows),
-    name: () => 0,
-  }[sort];
-  return [...groups].sort((a, b) => (compare ? compare(a, b) : 0) || groupName(a).localeCompare(groupName(b)));
-}
-
 export default function CodeSmellApprovalPage({
   onProceed,
   workflowId,
@@ -157,12 +124,12 @@ export default function CodeSmellApprovalPage({
   onReloadWorkspace,
 }) {
   // ── Review arrangement ─────────────────────────────────────────────────────
-  // Opens on File wise: the first question a developer asks of a fresh report
-  // is which files are in trouble, and it is the only mode whose unit — a path
-  // — they already know before reading anything. Smell wise and Category wise
-  // are both one click away, and neither loses a tick when switched to.
-  const [mode, setMode] = useState("file");
-  const [selected, setSelected] = useState(new Set());          // file paths
+  // Opens on Smell wise, with every card collapsed, so the first view is a
+  // short list of smell types. File wise and Category wise are one click away,
+  // and neither loses a tick when switched to.
+  const [mode, setMode] = useState("smell");
+  // One selection store for all three views — File wise can pick single smells
+  // inside a file, so whole-file selection is derived from it, not kept apart.
   const [selectedIds, setSelectedIds] = useState(new Set());    // smell ids
 
   // Four independent filter axes. Deliberately not one field: "the Bloaters I
@@ -172,12 +139,6 @@ export default function CodeSmellApprovalPage({
   const [severity, setSeverity] = useState("all");
   const [categoryFilter, setCategoryFilter] = useState("all");
   const [smellTypeFilter, setSmellTypeFilter] = useState("all");
-
-  // Accordion state, one Set for all three views — keys are namespaced by view
-  // so they cannot collide. `autoOpen` keeps the first group open until the
-  // developer expands or collapses something themselves.
-  const [openKeys, setOpenKeys] = useState(() => new Set());
-  const [autoOpen, setAutoOpen] = useState(true);
 
   const [isSubmitting, setIsSubmitting] = useState(false);
   // Which half of the hand-off is running: "filtering" (fast, local to the
@@ -195,8 +156,8 @@ export default function CodeSmellApprovalPage({
   // The confirmation shown before the hand-off. It only summarises; confirming
   // calls handleApproveSelection, the one submit path this stage has.
   const [confirming, setConfirming] = useState(false);
-  // How the active view's top-level groups are ordered. View-only.
-  const [sort, setSort] = useState("default");
+  // How the cards and the boxes inside them are ordered. View-only.
+  const [sort, setSort] = useState("severity");
   // Provenance of the last optimiser run — { ids, label, count } — so a
   // finding it proposed can say so. Display only: `selectedIds` stays the one
   // record of what is selected.
@@ -227,7 +188,6 @@ export default function CodeSmellApprovalPage({
   const applyReport = useCallback((result) => {
     setFetched(result);
     setUseSample(false);
-    setSelected(new Set());
     setSelectedIds(new Set());
     setLoadError(null);
     setLoading(false);
@@ -281,7 +241,6 @@ export default function CodeSmellApprovalPage({
       setFetched(null);
       setLoadError(null);
       setUseSample(false);
-      setSelected(new Set());
       setSelectedIds(new Set());
       setLoading(false);
       setViewing(null);
@@ -435,109 +394,9 @@ export default function CodeSmellApprovalPage({
     return matchesSearch && matchesSeverity && matchesCategory && matchesType;
   }), [reviewRows, term, severity, categoryFilter, smellTypeFilter, categoryOf]);
 
-  // ── Grouping, one per view ─────────────────────────────────────────────────
-  const smellGroups = useMemo(
-    () => groupBySmellType(visibleRows, { impacts, selectedIds }),
-    [visibleRows, impacts, selectedIds]
-  );
-  const catGroups = useMemo(
-    () => groupByCategory(visibleRows, { impacts, selectedIds, categoryOf, order: categoryOrder }),
-    [visibleRows, impacts, selectedIds, categoryOf, categoryOrder]
-  );
-  const fileGroups = useMemo(
-    () => groupByFile(visibleRows, { impacts, selectedIds, selectedFiles: selected }),
-    [visibleRows, impacts, selectedIds, selected]
-  );
-
-  // Dropdown options are built from ALL rows, not the filtered ones: the
-  // dropdown is how a developer reaches something the current filter hides.
-  const typeOptions = useMemo(
-    () => smellTypeOptions(smellRows, { impacts, selectedIds }),
-    [smellRows, impacts, selectedIds]
-  );
-  const catOptions = useMemo(
-    () => categoryOptions(smellRows, { impacts, selectedIds, categoryOf, order: categoryOrder }),
-    [smellRows, impacts, selectedIds, categoryOf, categoryOrder]
-  );
-
   const isFileMode = mode === "file";
-  const groupedView = isFileMode ? fileGroups : mode === "category" ? catGroups : smellGroups;
-
-  // Quality gain per group, summed from the backend records. Only reachable
-  // when impacts exist — the sort option is disabled otherwise.
-  const gainOf = useCallback((rows) => rows.reduce(
-    (total, r) => total + (impacts?.get(r.id)?.if_selected?.quality_gain?.automated_points || 0), 0
-  ), [impacts]);
-  const effectiveSort = !impacts && (sort === "effort" || sort === "gain") ? "default" : sort;
-  const activeGroups = useMemo(
-    () => sortGroups(groupedView, effectiveSort, gainOf),
-    [groupedView, effectiveSort, gainOf]
-  );
-
-  // Keep the first group open until the developer touches an accordion.
-  const effectiveOpen = useMemo(() => {
-    if (!autoOpen || activeGroups.length === 0) return openKeys;
-    const next = new Set(openKeys);
-    next.add(activeGroups[0].key);
-    return next;
-  }, [autoOpen, activeGroups, openKeys]);
-
-  /**
-   * Expand or collapse one group.
-   *
-   * Two SEPARATE state updates, and the openKeys updater is pure. It used to
-   * call setOpenKeys from inside the setAutoOpen updater, which React invokes
-   * twice under StrictMode — so every expand toggled the key on and straight
-   * back off, and the button did nothing at all.
-   *
-   * `autoOpen` is read from the closure rather than from an updater argument:
-   * on the first interaction the auto-opened group is folded into the real set,
-   * so collapsing the default group actually closes it instead of having the
-   * next render put it back.
-   */
-  const toggleOpen = useCallback((key) => {
-    setOpenKeys((prev) => {
-      const next = new Set(prev);
-      if (autoOpen && activeGroups[0]) next.add(activeGroups[0].key);
-      if (next.has(key)) next.delete(key);
-      else next.add(key);
-      return next;
-    });
-    setAutoOpen(false);
-  }, [autoOpen, activeGroups]);
-
-  /**
-   * Open every group in the current view, all the way down.
-   *
-   * `expandAllKeys` composes the keys the same way the views do, so this opens
-   * the nested levels too — an "Expand all" that opened only the headings
-   * would be a worse version of clicking them.
-   *
-   * Scoped to the ACTIVE view: openKeys is shared across all three, and keys
-   * for a view that is not on screen would be invisible state the Hide all
-   * button then appears to do nothing about.
-   */
-  const expandAll = useCallback(() => {
-    setOpenKeys(expandAllKeys(mode, activeGroups));
-    setAutoOpen(false);
-  }, [mode, activeGroups]);
-
-  /** Collapse everything, including the group auto-opened on first paint. */
-  const collapseAll = useCallback(() => {
-    setOpenKeys(new Set());
-    setAutoOpen(false);
-  }, []);
 
   // ── Selection ──────────────────────────────────────────────────────────────
-  const toggleFile = (path) => {
-    setSelected((prev) => {
-      const next = new Set(prev);
-      if (next.has(path)) next.delete(path);
-      else next.add(path);
-      return next;
-    });
-  };
-
   const toggleSmell = (id) => {
     setSelectedIds((prev) => {
       const next = new Set(prev);
@@ -548,9 +407,8 @@ export default function CodeSmellApprovalPage({
   };
 
   /**
-   * Tick or untick a whole group — a smell type, a category, or a category's
-   * type. Every level in every view routes through here, so there is one
-   * selection store and the dropdowns update on the same frame as the tables.
+   * Tick or untick a set of findings — a card, a box, or anything else. Every
+   * level in every view routes through here, so there is one selection store.
    */
   const toggleRows = useCallback((rows) => {
     const allOn = rows.length > 0 && rows.every((r) => selectedIds.has(r.id));
@@ -569,10 +427,6 @@ export default function CodeSmellApprovalPage({
    * filtered out and never saw.
    */
   const selectAll = () => {
-    if (isFileMode) {
-      setSelected(new Set(fileGroups.map((g) => g.file)));
-      return;
-    }
     setSelectedIds((prev) => {
       const next = new Set(prev);
       visibleRows.forEach((r) => next.add(r.id));
@@ -588,11 +442,9 @@ export default function CodeSmellApprovalPage({
    * plan, not what to ignore. So this clears the selection, and the count in
    * the footer is the whole record of the decision.
    */
-  const rejectAll = () => (isFileMode ? setSelected(new Set()) : setSelectedIds(new Set()));
+  const rejectAll = () => setSelectedIds(new Set());
 
-  const selectedRows = isFileMode
-    ? smellRows.filter((r) => selected.has(r.file))
-    : smellRows.filter((r) => selectedIds.has(r.id));
+  const selectedRows = smellRows.filter((r) => selectedIds.has(r.id));
 
   const selectedFiles = Array.from(new Set(selectedRows.map((r) => r.file)));
   const selectedSmells = selectedRows.map(({ id, file, smell }) => ({
@@ -605,7 +457,16 @@ export default function CodeSmellApprovalPage({
     ...(smell.entity ? { entity: smell.entity } : {}),
   }));
 
-  const selectionCount = isFileMode ? selected.size : selectedIds.size;
+  // File wise sends the old file-mode payload when what is ticked is exactly a
+  // set of whole files. Once a single smell inside a file is picked, the
+  // backend's file expansion would pull the rest of that file back in, so the
+  // selection goes as individual smells instead.
+  const wholeFiles = selectedFiles.length > 0 && selectedFiles.every((file) =>
+    smellRows.every((r) => r.file !== file || selectedIds.has(r.id)));
+  const payloadMode = isFileMode && wholeFiles ? "file" : "smell";
+  const sendsFiles = payloadMode === "file";
+
+  const selectionCount = sendsFiles ? selectedFiles.length : selectedIds.size;
 
   // Optional-chained on purpose. Every derived value above runs BEFORE the
   // loading/error guards below, so on the first paint — report not fetched yet —
@@ -666,7 +527,6 @@ export default function CodeSmellApprovalPage({
       // The optimiser only ever proposes individual smells, so a smell-level
       // view is what makes its answer visible and editable.
       if (isFileMode) setMode("smell");
-      setSelected(new Set());
     } catch (error) {
       console.error("Optimise failed:", error);
       alert(error.message);
@@ -687,7 +547,7 @@ export default function CodeSmellApprovalPage({
    * category mode, and inventing one here would be a contract change the
    * server does not implement.
    */
-  const selectionPayload = isFileMode
+  const selectionPayload = sendsFiles
     ? {
         selected_files: selectedFiles,
         selected_smells: selectedSmells,
@@ -731,7 +591,7 @@ export default function CodeSmellApprovalPage({
       const report = await previewSmellSelection(workflowId, {
         ...selectionPayload,
         feedback: {
-          reason: isFileMode
+          reason: sendsFiles
             ? "File-wise selection in CodeSmellApprovalPage"
             : `${mode === "category" ? "Category" : "Smell"}-wise selection in CodeSmellApprovalPage`,
         },
@@ -772,26 +632,6 @@ export default function CodeSmellApprovalPage({
     setSmellTypeFilter("all");
   };
 
-  const activeFilters = [
-    term && { key: "search", label: "Search", value: `"${search.trim()}"`, onClear: () => setSearch("") },
-    severity !== "all" && {
-      key: "severity", label: "Severity", value: severity,
-      tone: { high: T.high, medium: T.medium, low: T.low }[severity],
-      onClear: () => setSeverity("all"),
-    },
-    categoryFilter !== "all" && { key: "category", label: "Category", value: categoryFilter, onClear: () => setCategoryFilter("all") },
-    smellTypeFilter !== "all" && { key: "type", label: "Smell type", value: smellTypeFilter, onClear: () => setSmellTypeFilter("all") },
-  ].filter(Boolean);
-
-  const sortOptions = [
-    { key: "default", label: mode === "category" ? "Category priority" : "Severity" },
-    ...(mode === "category" ? [{ key: "severity", label: "Severity" }] : []),
-    { key: "findings", label: "Most findings" },
-    { key: "effort", label: "Review effort", disabled: !impacts },
-    { key: "gain", label: "Quality gain", disabled: !impacts },
-    { key: "name", label: "Name (A–Z)" },
-  ];
-
   /** Open the confirmation — never submits on its own. */
   const openReview = () => {
     if (selectionCount === 0 || isSubmitting) return;
@@ -817,8 +657,6 @@ export default function CodeSmellApprovalPage({
   const emptyMessage = filesWithSmells.length === 0
     ? "The CUQA agent reported no code smells in this workspace — nothing to refactor."
     : "No findings match the current search, severity, category or smell type filters.";
-
-  const openViewer = (file, id) => setViewing({ file, focusId: id });
 
   return (
     <div>
@@ -865,145 +703,31 @@ export default function CodeSmellApprovalPage({
           </div>
 
           <section className="dw-area-main" aria-label="Findings">
-            <ReviewToolbar
+            <SmellSelectionSection
               mode={mode}
               onModeChange={setMode}
-              modeCounts={{
-                file: fileGroups.length,
-                smell: smellGroups.length,
-                category: catGroups.length,
-              }}
+              rows={visibleRows}
+              allRows={reviewRows}
+              selectedIds={selectedIds}
+              onToggleRows={toggleRows}
+              onSelectShown={selectAll}
+              onClearSelection={rejectAll}
+              selectedCount={selectedRows.length}
               search={search}
               onSearch={setSearch}
-              sort={effectiveSort}
-              sortOptions={sortOptions}
+              sort={sort}
               onSort={setSort}
-              onSelectAll={selectAll}
-              onClearSelection={rejectAll}
-              selectableCount={isFileMode ? fileGroups.length : visibleRows.length}
-              selectionCount={selectionCount}
-              onExpandAll={expandAll}
-              onCollapseAll={collapseAll}
-              groupCount={activeGroups.length}
-              anyOpen={effectiveOpen.size > 0}
-              shownFindings={visibleRows.length}
-              totalFindings={smellRows.length}
-              activeFilters={activeFilters}
+              smellTypeFilter={smellTypeFilter}
+              onSmellTypeFilter={setSmellTypeFilter}
+              categoryFilter={categoryFilter}
+              onCategoryFilter={setCategoryFilter}
+              filtersActive={filtersActive}
               onClearFilters={clearFilters}
-              quickSelect={(
-                <>
-                  <QuickSelectDropdown
-                    label="Smell type"
-                    options={typeOptions}
-                    searchPlaceholder="Search smell types…"
-                    emptyLabel="No smell types match"
-                    onToggleOption={(option) => toggleRows(option.rows)}
-                    onNavigateOption={(option) => {
-                      // The label navigates; the checkbox selects. Clicking a
-                      // name to go and look at 53 findings is not a request to
-                      // select all 53.
-                      setMode("smell");
-                      setSmellTypeFilter(option.key);
-                      setCategoryFilter("all");
-                      setAutoOpen(false);
-                      setOpenKeys(new Set([option.key]));
-                    }}
-                    onClear={() => {
-                      const ids = new Set(smellRows.map((r) => r.id));
-                      setSelectedIds((prev) => new Set([...prev].filter((id) => !ids.has(id))));
-                    }}
-                  />
-                  <QuickSelectDropdown
-                    label="Category"
-                    options={catOptions}
-                    expandable
-                    searchPlaceholder="Search categories…"
-                    emptyLabel="No categories available"
-                    onToggleOption={(option) => toggleRows(option.rows)}
-                    onNavigateOption={(option) => {
-                      setMode("category");
-                      setCategoryFilter(option.rows[0] ? categoryOf(option.rows[0]) : "all");
-                      setSmellTypeFilter("all");
-                      setAutoOpen(false);
-                      setOpenKeys(new Set([option.key]));
-                    }}
-                    onClear={() => setSelectedIds(new Set())}
-                  />
-                </>
-              )}
+              emptyMessage={emptyMessage}
+              impacts={impacts}
+              qualityOf={qualityOf}
+              onViewFile={(file, focusId = null) => setViewing({ file, focusId })}
             />
-
-            {isFileMode && (
-              <div style={{
-                fontSize: 11.5, color: T.text2, marginBottom: 10, padding: "7px 12px",
-                borderRadius: 8, background: tint(T.info, 7), border: `1px solid ${tint(T.info, 25)}`,
-              }}>
-                <b style={{ color: T.info }}>File wise:</b> ticking a file sends every finding inside it.
-                Switch to Smell wise or Category wise to pick individual findings.
-              </div>
-            )}
-
-            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-              {activeGroups.length === 0 && (
-                <div style={{
-                  padding: "36px 20px", textAlign: "center", background: T.surface,
-                  border: `1px dashed ${T.borderStrong}`, borderRadius: 12,
-                  color: T.text2, fontSize: 13,
-                }}>
-                  {emptyMessage}
-                  {filtersActive && (
-                    <div style={{ marginTop: 10 }}>
-                      <button type="button" onClick={clearFilters} className="dw-focus dw-hover" style={ghostButton(true)}>
-                        Reset filters
-                      </button>
-                    </div>
-                  )}
-                </div>
-              )}
-
-              {mode === "smell" && (
-                <SmellWiseView
-                  groups={activeGroups}
-                  selectedIds={selectedIds}
-                  openKeys={effectiveOpen}
-                  onToggleOpen={toggleOpen}
-                  onToggleRows={toggleRows}
-                  onToggleSmell={toggleSmell}
-                  onView={openViewer}
-                  onShowImpact={setImpactRow}
-                  impacts={impacts}
-                />
-              )}
-
-              {mode === "category" && (
-                <CategoryWiseView
-                  groups={activeGroups}
-                  priorities={categoryPriority}
-                  selectedIds={selectedIds}
-                  openKeys={effectiveOpen}
-                  onToggleOpen={toggleOpen}
-                  onToggleRows={toggleRows}
-                  onToggleSmell={toggleSmell}
-                  onView={openViewer}
-                  onShowImpact={setImpactRow}
-                  impacts={impacts}
-                />
-              )}
-
-              {isFileMode && (
-                <FileWiseView
-                  groups={activeGroups}
-                  openKeys={effectiveOpen}
-                  onToggleOpen={toggleOpen}
-                  onToggleFile={toggleFile}
-                  onViewFile={(file) => setViewing({ file, focusId: null })}
-                  onView={openViewer}
-                  onShowImpact={setImpactRow}
-                  qualityOf={qualityOf}
-                  impacts={impacts}
-                />
-              )}
-            </div>
 
             {hiddenCount > 0 && (
               <div style={{ marginTop: 10, fontSize: 11.5, color: T.text3 }}>
@@ -1015,7 +739,7 @@ export default function CodeSmellApprovalPage({
 
           <div className="dw-area-side">
             <CodeSmellSelectionPanel
-              mode={mode}
+              mode={payloadMode}
               selectionCount={selectionCount}
               findingCount={selectedRows.length}
               totalFindings={smellRows.length}
@@ -1039,7 +763,7 @@ export default function CodeSmellApprovalPage({
         <MobileActionBar
           selectionCount={selectionCount}
           findingCount={selectedRows.length}
-          isFile={isFileMode}
+          isFile={sendsFiles}
           isSubmitting={isSubmitting}
           submitPhase={submitPhase}
           onReview={openReview}
@@ -1048,7 +772,7 @@ export default function CodeSmellApprovalPage({
 
       {confirming && (
         <CodeSmellApprovalDialog
-          mode={mode}
+          mode={payloadMode}
           selectedRows={selectedRows}
           selectedFiles={selectedFiles}
           totalFindings={smellRows.length}
@@ -1067,10 +791,7 @@ export default function CodeSmellApprovalPage({
           record={impacts.get(impactRow.id)}
           smell={impactRow.smell}
           isSelected={selectedIds.has(impactRow.id)}
-          // No select action in File wise: the unit of selection there is the
-          // file, so offering to add ONE finding would promise something the
-          // mode cannot send.
-          onToggleSmell={isFileMode ? undefined : toggleSmell}
+          onToggleSmell={toggleSmell}
           onClose={() => setImpactRow(null)}
         />
       )}
@@ -1083,10 +804,8 @@ export default function CodeSmellApprovalPage({
           language={viewerLanguage}
           smells={viewerSmells}
           focusId={viewing?.focusId || null}
-          // File mode selects whole files — a per-smell tick there would
-          // suggest a partial selection the mode cannot express.
-          selectedIds={isFileMode ? null : selectedIds}
-          onToggleSmell={isFileMode ? undefined : toggleSmell}
+          selectedIds={selectedIds}
+          onToggleSmell={toggleSmell}
           onClose={() => setViewing(null)}
         />
       )}
