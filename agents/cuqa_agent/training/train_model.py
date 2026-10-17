@@ -24,7 +24,6 @@ import argparse
 import csv
 import json
 import math
-import re
 import sys
 import warnings
 from collections import defaultdict
@@ -267,19 +266,12 @@ def apply_single_metric_rule(rule: dict, X) -> np.ndarray:
     return column >= rule["threshold"] if rule["direction"] == ">=" else column <= rule["threshold"]
 
 
-_NEVER_MATCHES = re.compile(r"(?!)")
-
-
 def _rule_smells_for_file(file_path: str) -> list[dict]:
     """Run the existing CUQA Java rules on one cached source file.
 
-    Only LongMethod and LargeClass are needed here. The magic-number scan of the
-    rule engine is switched off for this call because it re-splits the whole file
-    for every numeric literal and takes minutes on large generated files. It runs
-    after the two smells of interest and does not influence them.
+    Only LongMethod and LargeClass are needed here.
     """
     import report_generator
-    report_generator._JAVA_MAGIC_NUM_RE = _NEVER_MATCHES
     try:
         source = Path(file_path).read_text(encoding="utf-8", errors="replace")
         smells = report_generator._analyze_java_smells(source)

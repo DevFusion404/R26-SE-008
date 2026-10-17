@@ -12,7 +12,7 @@ import os
 import re
 import ast as pyast
 import hashlib
-from collections import defaultdict
+from collections import defaultdict, deque
 from typing import Any
 
 try:
@@ -26,12 +26,13 @@ try:
     from c_ast_parser import (
         _find_functions_regex,
         _find_global_vars_regex,
+        _mask_c_like,
         _strip_comments,
-        _strip_string_literals,
         _INCLUDE_RE,
         _UNSAFE_CALL_RE,
-        _NUMERIC_LIT_RE,
-        _max_nesting_depth,
+        _C_STATEMENT_WORDS,
+        _max_control_nesting,
+        _preprocessor_lines,
         _estimate_cyclomatic,
         analyze_c_magic_numbers,
     )
@@ -41,13 +42,13 @@ except ImportError:
         from .c_ast_parser import (
             _find_functions_regex,
             _find_global_vars_regex,
-            _count_code_lines,
+            _mask_c_like,
             _strip_comments,
-            _strip_string_literals,
             _INCLUDE_RE,
             _UNSAFE_CALL_RE,
-            _NUMERIC_LIT_RE,
-            _max_nesting_depth,
+            _C_STATEMENT_WORDS,
+            _max_control_nesting,
+            _preprocessor_lines,
             _estimate_cyclomatic,
             analyze_c_magic_numbers,
         )
@@ -57,13 +58,13 @@ except ImportError:
             from agents.cuqa_agent.src.c_ast_parser import (
                 _find_functions_regex,
                 _find_global_vars_regex,
-                _count_code_lines,
+                _mask_c_like,
                 _strip_comments,
-                _strip_string_literals,
                 _INCLUDE_RE,
                 _UNSAFE_CALL_RE,
-                _NUMERIC_LIT_RE,
-                _max_nesting_depth,
+                _C_STATEMENT_WORDS,
+                _max_control_nesting,
+                _preprocessor_lines,
                 _estimate_cyclomatic,
                 analyze_c_magic_numbers,
             )
@@ -192,34 +193,72 @@ def _estimate_cc(func_node: pyast.AST) -> int:
     return cc
 
 
-def _count_elif_branches(func_node: pyast.AST) -> int:
-    """Count elif branches within a function node.
+def _longest_elif_chain(func_node: pyast.AST) -> int:
+    """Number of elif branches in the longest single if/elif chain of a function.
 
-    FIX-06: an elif in Python AST is an If node that appears as the first
-    element of another If node's orelse list.
+    FIX-06: an elif in Python AST is an If node that is the only element of
+    another If node's orelse list. Separate if/elif statements are separate
+    chains and are not added together.
     """
-    count = 0
+    links = {
+        id(n.orelse[0]) for n in pyast.walk(func_node)
+        if isinstance(n, pyast.If) and len(n.orelse) == 1 and isinstance(n.orelse[0], pyast.If)
+    }
+    longest = 0
     for n in pyast.walk(func_node):
-        if isinstance(n, pyast.If):
-            for orelse_item in n.orelse:
-                if isinstance(orelse_item, pyast.If):
-                    count += 1
-    return count
+        if isinstance(n, pyast.If) and id(n) not in links:  # head of a chain
+            count, current = 0, n
+            while len(current.orelse) == 1 and isinstance(current.orelse[0], pyast.If):
+                count += 1
+                current = current.orelse[0]
+            longest = max(longest, count)
+    return longest
 
 
-def _chain_depth(node: pyast.expr) -> int:  # type: ignore[type-arg]
+# String / bytes methods that return a transformed copy of the same value
+_VALUE_METHODS = {
+    "replace", "strip", "lstrip", "rstrip", "lower", "upper", "casefold", "title",
+    "capitalize", "split", "rsplit", "splitlines", "join", "format", "encode",
+    "decode", "removeprefix", "removesuffix", "zfill", "ljust", "rjust", "center",
+}
+
+
+def _expr_root(node: pyast.AST | None) -> str | None:
+    """Leftmost name of a dotted expression (`cst.CSTTransformer` -> 'cst')."""
+    while isinstance(node, (pyast.Attribute, pyast.Call, pyast.Subscript)):
+        node = node.func if isinstance(node, pyast.Call) else node.value
+    return node.id if isinstance(node, pyast.Name) else None
+
+
+def _chain_depth(node: pyast.expr, namespace_roots: set[str] | frozenset = frozenset()) -> int:  # type: ignore[type-arg]
     """Return the depth of an attribute/call chain starting at *node*.
 
     FIX-10: e.g. a.b().c().d() has depth 3.
+    A chain that starts at self/cls does not count its first hop (the object's own
+    field). A chain that starts at an imported module or class only counts the hops
+    after its first call, because walking a namespace (os.path.join) is not a
+    message chain.
     """
-    depth = 0
+    steps: list[str] = []
     current = node
     while isinstance(current, (pyast.Attribute, pyast.Call)):
         if isinstance(current, pyast.Attribute):
-            depth += 1
+            # str / bytes transformations return a new value of the same kind:
+            # a pipeline, not a walk through other objects
+            steps.append("value" if current.attr in _VALUE_METHODS else "attr")
             current = current.value
         else:  # Call
+            steps.append("call")
             current = current.func
+    steps.reverse()  # root first
+    depth = steps.count("attr")
+    root = current.id if isinstance(current, pyast.Name) else None
+    if root in ("self", "cls"):
+        return max(0, depth - 1)
+    if root in namespace_roots:
+        if "call" not in steps:
+            return 0
+        return steps[steps.index("call"):].count("attr")
     return depth
 
 
@@ -229,6 +268,57 @@ def _normalize_function_body(func_node: pyast.FunctionDef | pyast.AsyncFunctionD
     FIX-09: used for duplicate-body detection (ignores names/values).
     """
     return "|".join(type(n).__name__ for n in pyast.walk(func_node))
+
+
+def _statement_count(func_node: pyast.AST) -> int:
+    """Statements inside a function, not counting its docstring."""
+    count = 0
+    for n in pyast.walk(func_node):
+        if n is func_node or not isinstance(n, pyast.stmt):
+            continue
+        if isinstance(n, pyast.Expr) and isinstance(n.value, pyast.Constant) and isinstance(n.value.value, str):
+            continue
+        count += 1
+    return count
+
+
+def _walk_local(node: pyast.AST):
+    """Like ast.walk, but never enters nested function, class or lambda definitions,
+    which are analysed on their own. Visits in the same breadth-first order as ast.walk."""
+    todo = deque(pyast.iter_child_nodes(node))
+    while todo:
+        n = todo.popleft()
+        if isinstance(n, (pyast.FunctionDef, pyast.AsyncFunctionDef, pyast.ClassDef, pyast.Lambda)):
+            continue
+        yield n
+        todo.extend(pyast.iter_child_nodes(n))
+
+
+def _imported_names(tree: pyast.AST) -> set[str]:
+    """Names bound by import statements: modules, aliases and imported symbols."""
+    names: set[str] = set()
+    for node in pyast.walk(tree):
+        if isinstance(node, pyast.Import):
+            for alias in node.names:
+                names.add(alias.asname or alias.name.split(".")[0])
+        elif isinstance(node, pyast.ImportFrom):
+            for alias in node.names:
+                if alias.name != "*":
+                    names.add(alias.asname or alias.name)
+    return names
+
+
+def _expr_name(node: pyast.AST | None) -> str | None:
+    """Last name of a Name / Attribute / Call / Subscript expression (`a.b.C()` -> 'C')."""
+    if isinstance(node, pyast.Call):
+        node = node.func
+    if isinstance(node, pyast.Subscript):
+        node = node.value
+    if isinstance(node, pyast.Name):
+        return node.id
+    if isinstance(node, pyast.Attribute):
+        return node.attr
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -267,9 +357,13 @@ def _java_cc(method_body: str) -> int:
     return 1 + len(_JAVA_BRANCH_RE.findall(method_body))
 
 
-# FIX-13: regex + safe-set for Java magic number detection
-_JAVA_MAGIC_NUM_RE = re.compile(r'(?<![.\w])\b(\d+\.?\d*[fFdDlL]?)\b(?![\w.])')
-_JAVA_SAFE_NUMS = {"0", "1", "-1", "2", "0.0", "1.0", "0f", "1f", "0L", "1L"}
+# FIX-13: values never reported as Java magic numbers
+_JAVA_SAFE_VALUES = {0, 1, 2, -1}
+_JAVA_RELATIONAL_OPS = {"==", "!=", "<", ">", "<=", ">="}
+
+# Unit conversion factors (ms -> s, s -> min, ...) explain themselves next to * / %.
+# Kept in step with c_ast_parser._UNIT_FACTORS.
+_UNIT_FACTORS = {60, 1000, 3600, 86400, 1000000, 1000000000}
 
 
 # ---------------------------------------------------------------------------
@@ -372,19 +466,15 @@ def _detect_unreachable_code(
     # Top-level function body
     results.extend(_scan_block(func_node.body))
 
-    # Nested blocks one level deep
-    for stmt in pyast.walk(func_node):
-        if stmt is func_node:
-            continue
+    # Nested blocks (if/for/while/with/try bodies, except handlers, match cases).
+    # Nested functions and classes are skipped: they are reported on their own.
+    for stmt in _walk_local(func_node):
         for attr in ("body", "orelse", "finalbody"):
             block = getattr(stmt, attr, None)
             if isinstance(block, list) and block:
                 results.extend(_scan_block(block))
-        # try/except handlers
-        if isinstance(stmt, pyast.Try):
-            for handler in (stmt.handlers or []):
-                results.extend(_scan_block(handler.body))
 
+    results.sort()
     return results
 
 
@@ -413,11 +503,19 @@ def _detect_unused_variables(
     - Names used in augmented assignment (``x += 1``) — the ``AugAssign``
       target appears as ``Store`` in CPython's AST but semantically the
       variable must already have a value, so it is *read first*.
+    - Names declared ``global`` / ``nonlocal`` — writing them changes state
+      outside the function, so they are not unused locals.
+    - Assignments inside nested functions — those are checked on their own.
 
     Returns
     -------
     List of ``(lineno, variable_name)`` for each unused local.
     """
+    outer_scope: set[str] = set()
+    for node in _walk_local(func_node):
+        if isinstance(node, (pyast.Global, pyast.Nonlocal)):
+            outer_scope.update(node.names)
+
     # Collect parameter names — these are not "unused variables"
     param_names: set[str] = set()
     for arg in (
@@ -447,9 +545,13 @@ def _detect_unused_variables(
             bare_ann_names.add(node.target.id)
 
     stored: dict[str, int] = {}   # name → first-assignment lineno
-    loaded: set[str] = set()
+    # Reads anywhere, nested functions and lambdas included (closures read outer locals)
+    loaded: set[str] = {
+        node.id for node in pyast.walk(func_node)
+        if isinstance(node, pyast.Name) and isinstance(node.ctx, pyast.Load)
+    }
 
-    for node in pyast.walk(func_node):
+    for node in _walk_local(func_node):
         # Plain assignment target
         if isinstance(node, pyast.Name):
             if isinstance(node.ctx, pyast.Store):
@@ -463,8 +565,6 @@ def _detect_unused_variables(
                     and name not in stored          # keep the first assignment lineno
                 ):
                     stored[name] = node.lineno
-            elif isinstance(node.ctx, pyast.Load):
-                loaded.add(node.id)
         # Annotated assignment:  x: int = 5
         elif isinstance(node, pyast.AnnAssign) and isinstance(node.target, pyast.Name):
             name = node.target.id
@@ -488,12 +588,20 @@ def _detect_unused_variables(
             if name != "_" and not name.startswith("__") and name not in param_names:
                 stored.setdefault(name, node.target.lineno)
 
-    unused = [(lineno, name) for name, lineno in stored.items() if name not in loaded]
+    unused = [
+        (lineno, name) for name, lineno in stored.items()
+        if name not in loaded and name not in outer_scope
+    ]
     unused.sort(key=lambda t: t[0])
     return unused
 
 
 _CONST_PREFIXES = ("MAX_", "MIN_", "DEFAULT_", "CONST_", "NUM_", "TIMEOUT_", "PORT_", "LIMIT_", "TOTAL_")
+
+
+def _is_const_like_name(name: str | None) -> bool:
+    return bool(name) and (name.isupper() or name.startswith(_CONST_PREFIXES))
+
 
 def _count_code_lines(source_lines: list[str], start_line: int, end_line: int) -> int:
     """Count non-blank and non-comment lines of code within [start_line, end_line] (1-indexed)."""
@@ -520,46 +628,65 @@ def _count_code_lines(source_lines: list[str], start_line: int, end_line: int) -
     return count
 
 
-def _is_python_constant_assignment(node: pyast.Constant) -> bool:
-    """Return True if node is assigned to a constant identifier (e.g. MAX_RETRY = 5)."""
+def _python_literal_is_not_magic(node: pyast.Constant) -> bool:
+    """Return True when a numeric literal is not a magic number in its context.
+
+    Not magic: constant definitions (MAX_RETRY = 5, including UPPER_CASE
+    collections), class attributes and dataclass field defaults, parameter
+    defaults (def f(timeout=30)), keyword arguments (connect(retries=3)),
+    entries of list/tuple/set/dict displays (data tables), assert statements,
+    and unit conversion factors next to * / % (seconds * 1000).
+    """
     parent = getattr(node, "parent", None)
-    while parent and isinstance(parent, (pyast.UnaryOp, pyast.BinOp)):
+    in_collection = False
+    while isinstance(parent, (pyast.UnaryOp, pyast.BinOp, pyast.Tuple, pyast.List, pyast.Set, pyast.Dict)):
+        if isinstance(parent, (pyast.Tuple, pyast.List, pyast.Set, pyast.Dict)):
+            in_collection = True
         parent = getattr(parent, "parent", None)
 
-    if not parent:
-        return False
-
-    def _is_const_name(name: str) -> bool:
-        if not name:
-            return False
-        if name.isupper() or any(name.startswith(p) for p in _CONST_PREFIXES):
+    direct = getattr(node, "parent", None)
+    if isinstance(direct, pyast.UnaryOp):
+        direct = getattr(direct, "parent", None)
+    if abs(node.value) in _UNIT_FACTORS:
+        if isinstance(direct, pyast.BinOp) and isinstance(direct.op, (pyast.Mult, pyast.Div, pyast.FloorDiv, pyast.Mod)):
             return True
-        return False
-
-    if isinstance(parent, pyast.Assign):
-        for target in parent.targets:
-            if isinstance(target, pyast.Name) and _is_const_name(target.id):
-                return True
-            elif isinstance(target, pyast.Attribute) and _is_const_name(target.attr):
-                return True
-            elif isinstance(target, (pyast.Tuple, pyast.List)):
-                for elt in target.elts:
-                    name = elt.id if isinstance(elt, pyast.Name) else getattr(elt, "attr", "")
-                    if _is_const_name(name):
-                        return True
-
-    elif isinstance(parent, pyast.AnnAssign):
-        target = parent.target
-        name = target.id if isinstance(target, pyast.Name) else getattr(target, "attr", "")
-        if _is_const_name(name):
+        if isinstance(direct, pyast.AugAssign) and isinstance(direct.op, (pyast.Mult, pyast.Div, pyast.FloorDiv, pyast.Mod)):
             return True
 
-    return False
+    if in_collection or isinstance(parent, (pyast.keyword, pyast.arguments)):
+        return True
+
+    if isinstance(parent, (pyast.Assign, pyast.AnnAssign)):
+        if isinstance(getattr(parent, "parent", None), pyast.ClassDef):
+            return True  # class attribute / field default: the attribute names it
+        targets = parent.targets if isinstance(parent, pyast.Assign) else [parent.target]
+        for target in targets:
+            elts = target.elts if isinstance(target, (pyast.Tuple, pyast.List)) else [target]
+            for elt in elts:
+                name = elt.id if isinstance(elt, pyast.Name) else getattr(elt, "attr", "")
+                if _is_const_like_name(name):
+                    return True
+
+    ancestor = parent
+    while ancestor is not None and not isinstance(ancestor, pyast.stmt):
+        ancestor = getattr(ancestor, "parent", None)
+    return isinstance(ancestor, pyast.Assert)
 
 
 # ---------------------------------------------------------------------------
 # Code smell detectors (Python)
 # ---------------------------------------------------------------------------
+
+# Base classes and decorators of classes that are small by design (not LazyClass)
+_SMALL_BY_DESIGN_BASES = {
+    "Exception", "BaseException", "Enum", "IntEnum", "StrEnum", "Flag", "IntFlag",
+    "NamedTuple", "TypedDict", "Protocol", "BaseModel", "BaseSettings", "ABC",
+}
+_RECORD_DECORATORS = {"dataclass", "define", "frozen", "mutable", "attrs", "s"}
+
+# Underscore attributes that are public API by convention (namedtuple, Django models)
+_PUBLIC_UNDERSCORE_ATTRS = {"_replace", "_asdict", "_fields", "_make", "_field_defaults", "_meta"}
+
 
 class _PythonSmellVisitor(pyast.NodeVisitor):
     """Walk a Python AST and collect code smells with full entity context."""
@@ -569,6 +696,9 @@ class _PythonSmellVisitor(pyast.NodeVisitor):
         self._class_stack: list[str] = []
         self._func_stack: list[str] = []  # tracks enclosing function names
         self.source_lines: list[str] = []
+        self.import_names: set[str] = set()     # modules / symbols bound by imports
+        self.subclassed_names: set[str] = set() # every name used as a base class in the file
+        self.repo_names: set[str] | None = None # names referenced anywhere in the repository
 
     def _add(self, smell_type: str, message: str, line: int | None,
              severity: str = "medium", entity: str | None = None, **extra: Any):
@@ -598,8 +728,11 @@ class _PythonSmellVisitor(pyast.NodeVisitor):
 
         end_line = node.end_lineno or node.lineno
         code_lines = _count_code_lines(self.source_lines, node.lineno + 1, end_line) if self.source_lines else ((node.end_lineno or node.lineno) - node.lineno)
-        # Exclude self/cls from parameter count (FIX-01)
-        real_args = [a for a in node.args.args if a.arg not in ("self", "cls")]
+        # Exclude self/cls from parameter count (FIX-01); keyword-only parameters count too
+        real_args = [
+            a for a in node.args.posonlyargs + node.args.args + node.args.kwonlyargs
+            if a.arg not in ("self", "cls")
+        ]
         # FIX-04: compute CC once, reuse for all smells on this function
         cc = _estimate_cc(node)
 
@@ -629,12 +762,12 @@ class _PythonSmellVisitor(pyast.NodeVisitor):
                 end_line=end_line,
             )
 
-        # FIX-06: SwitchStatements — if/elif chains with >= 4 elif branches
-        elif_count = _count_elif_branches(node)
+        # FIX-06: SwitchStatements — one if/elif chain with >= 4 elif branches
+        elif_count = _longest_elif_chain(node)
         if elif_count >= 4:
             self._add(
                 "SwitchStatements",
-                f"Function '{node.name}' has {elif_count} elif branches (>=4) — "
+                f"Function '{node.name}' has an if/elif chain with {elif_count} elif branches (>=4) — "
                 "consider Replace Conditional with Polymorphism",
                 node.lineno, "medium", entity=node.name,
                 cyclomatic_complexity=cc,
@@ -643,9 +776,9 @@ class _PythonSmellVisitor(pyast.NodeVisitor):
             )
 
         # FIX-10: MessageChains — detect deep attribute/call chains (>= 3)
-        for child in pyast.walk(node):
+        for child in _walk_local(node):
             if isinstance(child, (pyast.Attribute, pyast.Call)):
-                depth = _chain_depth(child)
+                depth = _chain_depth(child, self.import_names)
                 if depth >= 3:
                     self._add(
                         "MessageChains",
@@ -689,11 +822,18 @@ class _PythonSmellVisitor(pyast.NodeVisitor):
     # ── Large class / Lazy class / Phase 4 class-level detectors ─────────────
     def visit_ClassDef(self, node: pyast.ClassDef):
         self._class_stack.append(node.name)
-        method_count = sum(
-            1 for n in pyast.walk(node)
-            if isinstance(n, (pyast.FunctionDef, pyast.AsyncFunctionDef))
-        )
+        methods = [n for n in node.body if isinstance(n, (pyast.FunctionDef, pyast.AsyncFunctionDef))]
+        method_count = len(methods)
         class_loc = (node.end_lineno or node.lineno) - node.lineno
+        base_names = [b for b in (_expr_name(base) for base in node.bases) if b]
+        decorator_names = {_expr_name(d) for d in node.decorator_list}
+        is_abstract = (
+            any(b in ("ABC", "ABCMeta") for b in base_names)
+            or any(kw.arg == "metaclass" and _expr_name(kw.value) == "ABCMeta" for kw in node.keywords)
+            or any("abstractmethod" in {_expr_name(d) for d in m.decorator_list} for m in methods)
+            or bool(re.match(r"(?:Abstract|Base)[A-Z]", node.name))
+            or node.name.endswith("Mixin")
+        )
 
         if method_count > 15:
             # FIX-03: method_count
@@ -704,8 +844,19 @@ class _PythonSmellVisitor(pyast.NodeVisitor):
                 method_count=method_count,
             )
 
-        # FIX-11: LazyClass — near-empty class (≤ 2 methods, < 30 lines)
-        if method_count <= 2 and class_loc < 30:
+        # FIX-11: LazyClass — near-empty class (≤ 2 methods, < 30 lines).
+        # Classes that are small by design are not lazy: exceptions, enums,
+        # dataclasses / attrs / pydantic models, typed records, protocols,
+        # abstract interfaces and test classes.
+        special_purpose = (
+            is_abstract
+            or node.name.startswith("Test")
+            or any(_expr_root(base) in self.import_names for base in node.bases)
+            or any(b in _SMALL_BY_DESIGN_BASES or b.endswith(("Error", "Exception", "Warning"))
+                   for b in base_names)
+            or bool(decorator_names & _RECORD_DECORATORS)
+        )
+        if method_count <= 2 and class_loc < 30 and not special_purpose:
             self._add(
                 "LazyClass",
                 f"Class '{node.name}' has only {method_count} methods and "
@@ -715,17 +866,20 @@ class _PythonSmellVisitor(pyast.NodeVisitor):
             )
 
         # FIX-18: PrimitiveObsession — 4+ primitive-annotated instance fields
+        # (class-level annotations and `self.x: int = ...`; method locals do not count)
         primitive_types = {"str", "int", "float", "bool"}
-        primitive_count = 0
-        for child in pyast.walk(node):
-            if isinstance(child, pyast.AnnAssign):
-                ann = child.annotation
-                ann_name = (
-                    ann.id if isinstance(ann, pyast.Name)
-                    else getattr(ann, "attr", None)
-                )
-                if ann_name in primitive_types:
-                    primitive_count += 1
+        field_annotations = [n for n in node.body if isinstance(n, pyast.AnnAssign)]
+        for method in methods:
+            field_annotations.extend(
+                n for n in pyast.walk(method)
+                if isinstance(n, pyast.AnnAssign)
+                and isinstance(n.target, pyast.Attribute)
+                and isinstance(n.target.value, pyast.Name)
+                and n.target.value.id == "self"
+            )
+        primitive_count = sum(
+            1 for child in field_annotations if _expr_name(child.annotation) in primitive_types
+        )
         if primitive_count >= 4:
             self._add(
                 "PrimitiveObsession",
@@ -735,44 +889,63 @@ class _PythonSmellVisitor(pyast.NodeVisitor):
                 primitive_field_count=primitive_count,
             )
 
-        # FIX-19: InappropriateIntimacy — access to private attr of external obj
-        for child in pyast.walk(node):
-            if isinstance(child, pyast.Attribute):
-                attr = child.attr
-                if (attr.startswith("_")
-                        and isinstance(child.value, pyast.Name)
-                        and child.value.id not in ("self", "cls")):
-                    self._add(
-                        "InappropriateIntimacy",
-                        f"Class '{node.name}' accesses private attribute "
-                        f"'{attr}' of '{child.value.id}' — consider Move Method or "
-                        "Introduce Facade",
-                        getattr(child, "lineno", node.lineno), "medium",
-                        entity=node.name,
-                    )
-                    break  # one report per class
+        # FIX-19: InappropriateIntimacy — access to a private attribute of another object.
+        # Not counted: dunder attributes (obj.__dict__), the public namedtuple API
+        # (_replace, _asdict, ...), Django's _meta, private names of imported
+        # modules (sys._getframe), and another instance of the same class (`other`
+        # in __eq__, or a parameter annotated with this class).
+        intimacy_found = False
+        for item in node.body:
+            if intimacy_found:
+                break
+            same_class_params: set[str] = set()
+            if isinstance(item, (pyast.FunctionDef, pyast.AsyncFunctionDef)):
+                is_dunder = item.name.startswith("__") and item.name.endswith("__")
+                for arg in item.args.posonlyargs + item.args.args + item.args.kwonlyargs:
+                    ann = arg.annotation
+                    ann_name = ann.value if isinstance(ann, pyast.Constant) else _expr_name(ann)
+                    if is_dunder or ann_name == node.name:
+                        same_class_params.add(arg.arg)
+            for child in pyast.walk(item):
+                if not (isinstance(child, pyast.Attribute) and isinstance(child.value, pyast.Name)):
+                    continue
+                attr, owner = child.attr, child.value.id
+                if (
+                    not attr.startswith("_")
+                    or (attr.startswith("__") and attr.endswith("__"))
+                    or attr in _PUBLIC_UNDERSCORE_ATTRS
+                    or owner in ("self", "cls")
+                    or owner in self.import_names
+                    or owner in same_class_params
+                    or owner == node.name
+                ):
+                    continue
+                self._add(
+                    "InappropriateIntimacy",
+                    f"Class '{node.name}' accesses private attribute "
+                    f"'{attr}' of '{owner}' — consider Move Method or "
+                    "Introduce Facade",
+                    getattr(child, "lineno", node.lineno), "medium",
+                    entity=node.name,
+                )
+                intimacy_found = True  # one report per class
+                break
 
-        # FIX-20: SpeculativeGenerality — ABC / Mixin / Base with no siblings
-        base_names: list[str] = []
-        for base in node.bases:
-            if isinstance(base, pyast.Name):
-                base_names.append(base.id)
-            elif isinstance(base, pyast.Attribute):
-                base_names.append(base.attr)
-        is_abstract = any(
-            b in ("ABC", "ABCMeta")
-            or "Mixin" in b
-            or b.startswith("Base")
-            or b.endswith("Base")
-            for b in base_names
-        )
+        # FIX-20: SpeculativeGenerality — an abstract class / base / mixin that
+        # nothing extends. A class that merely inherits from a base (e.g. a
+        # pydantic BaseModel) is concrete and is not reported.
         if is_abstract:
-            self._add(
-                "SpeculativeGenerality",
-                f"Class '{node.name}' extends {base_names} — verify it has concrete "
-                "subclasses in the codebase (possible Speculative Generality)",
-                node.lineno, "low", entity=node.name,
+            extended = node.name in self.subclassed_names or (
+                self.repo_names is not None and node.name in self.repo_names
             )
+            if not extended:
+                scope = "this repository" if self.repo_names is not None else "this file"
+                self._add(
+                    "SpeculativeGenerality",
+                    f"Abstract class '{node.name}' has no subclasses in {scope} — "
+                    "consider Collapse Hierarchy (possible Speculative Generality)",
+                    node.lineno, "low", entity=node.name,
+                )
 
         self.generic_visit(node)
         self._class_stack.pop()
@@ -801,9 +974,13 @@ class _PythonSmellVisitor(pyast.NodeVisitor):
         return None
 
     def visit_Constant(self, node: pyast.Constant):
-        if isinstance(node.value, (int, float)) and node.value not in (0, 1, -1, 2, True, False):
-            if _is_python_constant_assignment(node):
-                return  # Constant assignment -> NOT a magic number
+        if (
+            isinstance(node.value, (int, float))
+            and not isinstance(node.value, bool)
+            and node.value not in (0, 1, -1, 2)
+        ):
+            if _python_literal_is_not_magic(node):
+                return  # Named or data value -> NOT a magic number
 
             parent = getattr(node, "parent", None)
             while parent and isinstance(parent, (pyast.UnaryOp, pyast.BinOp)):
@@ -877,8 +1054,15 @@ def _analyze_python_smells(
     except SyntaxError:
         return []
 
+    import_names = _imported_names(tree)
     visitor = _PythonSmellVisitor()
     visitor.source_lines = source.splitlines()
+    visitor.import_names = import_names
+    visitor.subclassed_names = {
+        name for node in pyast.walk(tree) if isinstance(node, pyast.ClassDef)
+        for name in (_expr_name(base) for base in node.bases) if name
+    }
+    visitor.repo_names = repo_ref_index
     visitor.visit(tree)
     smells = list(visitor.smells)
 
@@ -897,26 +1081,42 @@ def _analyze_python_smells(
     # ------------------------------------------
     # Falls back to checking only within the current file.  The message
     # explicitly says "within this file" to avoid misleading the developer.
+    #
+    # Never checked: public methods (they can be called through inheritance,
+    # a framework or another module, which static analysis cannot see) and
+    # decorated definitions (routes, fixtures, properties, CLI commands are
+    # registered by their decorator, not called by name).
     try:
-        defined_funcs: dict[str, int] = {}
-        defined_classes: dict[str, int] = {}
+        defined: dict[str, int] = {}
         for node in pyast.walk(tree):
-            if isinstance(node, (pyast.FunctionDef, pyast.AsyncFunctionDef)):
-                if node.name not in defined_funcs:
-                    defined_funcs[node.name] = node.lineno
-            elif isinstance(node, pyast.ClassDef):
-                if node.name not in defined_classes:
-                    defined_classes[node.name] = node.lineno
+            if not isinstance(node, (pyast.FunctionDef, pyast.AsyncFunctionDef, pyast.ClassDef)):
+                continue
+            if node.decorator_list:
+                continue
+            if isinstance(getattr(node, "parent", None), pyast.ClassDef):
+                is_private = node.name.startswith("_") and not node.name.startswith("__")
+                if not is_private:
+                    continue
+            defined.setdefault(node.name, node.lineno)
 
-        # Build the set of names actually used inside THIS file (Load context)
-        # We use Load-context Name nodes which represent actual references, not
-        # definitions — this is more precise than the old approach that counted
-        # all Name occurrences (which included the definition itself).
-        locally_loaded: set[str] = {
-            node.id
-            for node in pyast.walk(tree)
-            if isinstance(node, pyast.Name) and isinstance(node.ctx, pyast.Load)
-        }
+        # Build the set of names actually used inside THIS file: Load-context
+        # names (calls, references), attribute names (self._helper(), obj.run)
+        # and the strings listed in __all__.
+        locally_loaded: set[str] = set()
+        for node in pyast.walk(tree):
+            if isinstance(node, pyast.Name) and isinstance(node.ctx, pyast.Load):
+                locally_loaded.add(node.id)
+            elif isinstance(node, pyast.Attribute):
+                locally_loaded.add(node.attr)
+            elif (
+                isinstance(node, pyast.Assign)
+                and any(isinstance(t, pyast.Name) and t.id == "__all__" for t in node.targets)
+                and isinstance(node.value, (pyast.List, pyast.Tuple))
+            ):
+                locally_loaded.update(
+                    e.value for e in node.value.elts
+                    if isinstance(e, pyast.Constant) and isinstance(e.value, str)
+                )
 
         # Names that are "definitely alive": present in local load set OR repo index
         alive: set[str] = locally_loaded
@@ -932,12 +1132,12 @@ def _analyze_python_smells(
             "handler", "lambda_handler", "wsgi", "asgi",
         }
 
-        for name, lineno in {**defined_funcs, **defined_classes}.items():
+        for name, lineno in defined.items():
             # Skip dunder names — they are called via protocol, not by name
             if name.startswith("__"):
                 continue
             # Skip well-known framework entry points
-            if name in _SAFE_NAMES or name.startswith("test_"):
+            if name in _SAFE_NAMES or name.startswith(("test_", "Test")):
                 continue
             # Only flag if the name is genuinely absent from the live set
             if name not in alive:
@@ -955,15 +1155,17 @@ def _analyze_python_smells(
         pass
 
     # ── FIX-09: DuplicateCode — hash normalised function body structures ───────
+    # Bodies with fewer than 3 statements (getters, one-line __init__, stubs)
+    # are too small to be a meaningful clone and are not compared.
     try:
         body_hashes: dict[str, list[tuple[str, int]]] = defaultdict(list)
         for node in pyast.walk(tree):
             if isinstance(node, (pyast.FunctionDef, pyast.AsyncFunctionDef)):
+                if _statement_count(node) < 3:
+                    continue
                 body_str = _normalize_function_body(node)
-                # Skip trivial bodies (too short to be meaningful)
-                if len(body_str) > 30:
-                    h = hashlib.md5(body_str.encode()).hexdigest()
-                    body_hashes[h].append((node.name, node.lineno))
+                h = hashlib.md5(body_str.encode()).hexdigest()
+                body_hashes[h].append((node.name, node.lineno))
 
         reported_keys: set[tuple] = set()
         for h, funcs in body_hashes.items():
@@ -986,31 +1188,56 @@ def _analyze_python_smells(
     except Exception:
         pass
 
-    # ── FIX-16: FeatureEnvy — method accesses more external attrs than self ───
+    # ── FIX-16: FeatureEnvy — a method uses another object's features more than its own ──
+    # Only instance methods are checked (a module function has no class to envy
+    # from). The envied object must be a parameter or local variable: imported
+    # modules (os.path.join, json.dumps) are library calls, not envy. Distinct
+    # attribute names are counted, so calling one method five times counts once.
     try:
-        for node in pyast.walk(tree):
-            if isinstance(node, (pyast.FunctionDef, pyast.AsyncFunctionDef)):
-                self_acc = 0
-                ext_acc = 0
+        for cls in pyast.walk(tree):
+            if not isinstance(cls, pyast.ClassDef):
+                continue
+            for node in cls.body:
+                if not isinstance(node, (pyast.FunctionDef, pyast.AsyncFunctionDef)):
+                    continue
+                if not node.args.args or node.args.args[0].arg != "self":
+                    continue
+                if node.name.startswith(("test_", "visit_", "leave_", "depart_")):
+                    continue  # test assertions and AST-visitor callbacks
+                local_names = {
+                    a.arg for a in node.args.posonlyargs + node.args.args[1:] + node.args.kwonlyargs
+                }
+                local_names.update(
+                    n.id for n in pyast.walk(node)
+                    if isinstance(n, pyast.Name) and isinstance(n.ctx, pyast.Store)
+                )
+                local_names -= import_names
+                self_attrs: set[str] = set()
+                foreign: dict[str, set[str]] = defaultdict(set)
                 for child in pyast.walk(node):
-                    if isinstance(child, pyast.Attribute):
-                        if (isinstance(child.value, pyast.Name)
-                                and child.value.id in ("self", "cls")):
-                            self_acc += 1
-                        else:
-                            ext_acc += 1
-                if ext_acc > self_acc and ext_acc >= 3:
+                    if isinstance(child, pyast.Attribute) and isinstance(child.value, pyast.Name):
+                        owner = child.value.id
+                        if owner == "self":
+                            self_attrs.add(child.attr)
+                        elif owner in local_names:
+                            foreign[owner].add(child.attr)
+                if not foreign:
+                    continue
+                envied, envied_attrs = max(foreign.items(), key=lambda kv: len(kv[1]))
+                if len(envied_attrs) >= 3 and len(envied_attrs) > len(self_attrs):
                     smells.append({
                         "type": "FeatureEnvy",
                         "message": (
-                            f"Method '{node.name}' accesses {ext_acc} external attributes "
-                            f"vs {self_acc} self attributes — consider Move Method"
+                            f"Method '{node.name}' uses {len(envied_attrs)} attributes of "
+                            f"'{envied}' but only {len(self_attrs)} of its own class — "
+                            "consider Move Method"
                         ),
                         "line": node.lineno,
                         "severity": "medium",
                         "entity": node.name,
-                        "external_field_accesses": ext_acc,
-                        "self_field_accesses": self_acc,
+                        "external_field_accesses": len(envied_attrs),
+                        "self_field_accesses": len(self_attrs),
+                        "envied_object": envied,
                     })
     except Exception:
         pass
@@ -1033,6 +1260,8 @@ def _analyze_python_smells(
             for j, (ofn, ofl, ops) in enumerate(func_param_sets):
                 if i >= j:
                     continue
+                if fn == ofn:
+                    continue  # same name: an override sharing its parent's signature
                 common = ps & ops
                 if len(common) >= 3:
                     pair = (min(fn, ofn), max(fn, ofn))
@@ -1097,15 +1326,58 @@ def _python_metrics(source: str, filename: str) -> dict:
 # Code smell detectors (Java - structural heuristics)
 # ---------------------------------------------------------------------------
 
-def _is_java_constant_line(line_str: str) -> bool:
-    if not line_str:
-        return False
-    if "final" in line_str or "#define" in line_str:
-        return True
-    m = re.search(r'\b([A-Za-z0-9_]*[A-Z][A-Z0-9_]*)\s*=\s*', line_str)
-    if m:
-        name = m.group(1)
-        if name.isupper() or any(name.startswith(p) for p in _CONST_PREFIXES):
+def _java_number_value(raw: str):
+    """Value of a decimal Java number literal, or None for strings, chars, booleans,
+    null and bit patterns written in hex or binary (masks are not reported)."""
+    t = raw.replace("_", "").lower()
+    if not t or t[0] not in "0123456789." or t.startswith(("0x", "0b")):
+        return None
+    t = t.rstrip("lfd")
+    try:
+        if "." in t or "e" in t:
+            return float(t)
+        if len(t) > 1 and t.startswith("0"):
+            return int(t, 8)
+        return int(t)
+    except ValueError:
+        return None
+
+
+def _java_literal_is_not_magic(literal, value, ancestors: list) -> bool:
+    """
+    True when a numeric literal is not a magic number in its context: constant
+    definitions (final / UPPER_CASE / interface constants), enum constant arguments,
+    annotations, array initializer lists and sizes, case labels, assert statements,
+    hashCode() bodies, and unit conversion factors next to * / %.
+    """
+    tree = javalang.tree
+    for anc in ancestors:
+        if isinstance(anc, (tree.ConstantDeclaration, tree.EnumConstantDeclaration,
+                            tree.Annotation, tree.ElementValuePair,
+                            tree.ArrayInitializer, tree.AssertStatement)):
+            return True
+        if isinstance(anc, (tree.FieldDeclaration, tree.LocalVariableDeclaration)):
+            if "final" in (getattr(anc, "modifiers", None) or ()):
+                return True
+        if isinstance(anc, tree.VariableDeclarator) and _is_const_like_name(getattr(anc, "name", None)):
+            return True
+        if isinstance(anc, tree.Assignment):
+            if _is_const_like_name(getattr(getattr(anc, "expressionl", None), "member", None)):
+                return True
+        if isinstance(anc, tree.MethodDeclaration) and getattr(anc, "name", None) == "hashCode":
+            return True
+        if isinstance(anc, tree.SwitchStatementCase):
+            if any(c is literal for c in (getattr(anc, "case", None) or [])):
+                return True
+        if isinstance(anc, tree.ArrayCreator):
+            if any(d is literal for d in (getattr(anc, "dimensions", None) or [])):
+                return True
+
+    parent = ancestors[-1] if ancestors else None
+    if abs(value) in _UNIT_FACTORS:
+        if isinstance(parent, tree.BinaryOperation) and getattr(parent, "operator", None) in ("*", "/", "%"):
+            return True
+        if isinstance(parent, tree.Assignment) and getattr(parent, "type", None) in ("*=", "/=", "%="):
             return True
     return False
 
@@ -1119,15 +1391,14 @@ def _analyze_java_smells(source: str) -> list[dict]:
     except Exception:
         return smells
 
-    source_lines = source.splitlines()
-
-    # Strip comments for magic-number scan (FIX-13)
-    clean_java = re.sub(r'//.*?$', '', source, flags=re.MULTILINE)
-    clean_java = re.sub(r'/\*.*?\*/', '', clean_java, flags=re.DOTALL)
+    # Comments, strings and char literals blanked (newlines kept) so a brace inside
+    # them cannot move the end of a method, and comment lines are not counted as code
+    masked = _mask_c_like(source) if _C_HELPERS_AVAILABLE else source
+    source_lines = masked.splitlines()
 
     for _, node in tree:
-        # ── FIX-12 + FIX-14: LongMethod for Java ─────────────────────────────
-        if isinstance(node, javalang.tree.MethodDeclaration):
+        # ── FIX-12 + FIX-14: LongMethod for Java (methods and constructors) ──
+        if isinstance(node, (javalang.tree.MethodDeclaration, javalang.tree.ConstructorDeclaration)):
             method_name = getattr(node, "name", "") or ""
             params = getattr(node, "parameters", []) or []
             start_line = (
@@ -1157,15 +1428,12 @@ def _analyze_java_smells(source: str) -> list[dict]:
 
             # Existing: TooManyParameters for Java
             if len(params) > 5:
-                line = (
-                    getattr(node.position, "line", None) if node.position else None
-                )
                 smells.append({
                     "type": "TooManyParameters",
                     "message": (
                         f"Method '{method_name}' has {len(params)} parameters (>5)"
                     ),
-                    "line": line,
+                    "line": start_line,
                     "severity": "medium",
                     "entity": method_name,
                     "parameter_count": len(params),
@@ -1192,116 +1460,73 @@ def _analyze_java_smells(source: str) -> list[dict]:
                 })
 
     # ── FIX-13: MagicNumber for Java ─────────────────────────────────────────
-    COMP_LEFT_RE = re.compile(r'\b([A-Za-z_]\w*)\s*(?:==|!=|<=|>=|<|>)\s*(-?\d+\.?\d*[fFdDlL]?)\b')
-    COMP_RIGHT_RE = re.compile(r'\b(-?\d+\.?\d*[fFdDlL]?)\s*(?:==|!=|<=|>=|<|>)\s*([A-Za-z_]\w*)\b')
+    # Taken from the javalang AST only, so numbers inside strings and comments are
+    # never seen and every literal is reported once, on its own line.
+    for path, node in tree:
+        if not isinstance(node, javalang.tree.Literal):
+            continue
+        raw = str(getattr(node, "value", "") or "").strip()
+        value = _java_number_value(raw)
+        if value is None:
+            continue
+        if "-" in (getattr(node, "prefix_operators", None) or []):
+            value, raw = -value, f"-{raw}"
+        if value in _JAVA_SAFE_VALUES:
+            continue
 
-    java_magic_found = set()
-    if JAVALANG_AVAILABLE and tree:
-        for path, node in tree:
-            if isinstance(node, javalang.tree.Literal):
-                val = getattr(node, "value", None)
-                if val is None:
-                    continue
-                raw_val = str(val).strip()
-                clean_val = raw_val.rstrip("fFlLdD")
-                if clean_val not in _JAVA_SAFE_NUMS and raw_val not in _JAVA_SAFE_NUMS:
-                    try:
-                        float(clean_val)
-                    except ValueError:
-                        continue
+        ancestors = [p for p in (path or []) if isinstance(p, javalang.tree.Node)]
+        if _java_literal_is_not_magic(node, value, ancestors):
+            continue
 
-                    pos = getattr(node, "position", None)
-                    line_no = getattr(pos, "line", None) if pos else None
-                    line_str = source_lines[line_no - 1] if line_no and line_no <= len(source_lines) else ""
-                    if _is_java_constant_line(line_str):
-                        continue  # Constant definition -> NOT a magic number
+        pos = getattr(node, "position", None)
+        line_no = getattr(pos, "line", None) if pos else None
+        entity = next(
+            (getattr(a, "name", None) for a in reversed(ancestors)
+             if isinstance(a, (javalang.tree.MethodDeclaration, javalang.tree.ConstructorDeclaration))),
+            None,
+        )
 
-                    parent = path[-1] if path else None
-                    var_context = None
-                    if isinstance(parent, javalang.tree.BinaryOperation):
-                        relational_ops = {"==", "!=", "<", ">", "<=", ">="}
-                        op = getattr(parent, "operator", getattr(parent, "op", None))
-                        if op in relational_ops:
-                            operandl = getattr(parent, "operandl", None)
-                            operandr = getattr(parent, "operandr", None)
-                            sibling = operandr if operandl is node else operandl
-                            if sibling is not None:
-                                if isinstance(sibling, javalang.tree.MemberReference):
-                                    var_context = getattr(sibling, "member", None)
-                                elif isinstance(sibling, javalang.tree.VariableDeclarator):
-                                    var_context = getattr(sibling, "name", None)
-                                elif hasattr(sibling, "member") and getattr(sibling, "member"):
-                                    var_context = getattr(sibling, "member")
-                                elif hasattr(sibling, "name") and getattr(sibling, "name"):
-                                    var_context = getattr(sibling, "name")
+        parent = ancestors[-1] if ancestors else None
+        var_context = None
+        if isinstance(parent, javalang.tree.BinaryOperation):
+            op = getattr(parent, "operator", getattr(parent, "op", None))
+            if op in _JAVA_RELATIONAL_OPS:
+                operandl = getattr(parent, "operandl", None)
+                operandr = getattr(parent, "operandr", None)
+                sibling = operandr if operandl is node else operandl
+                if sibling is not None:
+                    if isinstance(sibling, javalang.tree.MemberReference):
+                        var_context = getattr(sibling, "member", None)
+                    elif isinstance(sibling, javalang.tree.VariableDeclarator):
+                        var_context = getattr(sibling, "name", None)
+                    elif hasattr(sibling, "member") and getattr(sibling, "member"):
+                        var_context = getattr(sibling, "member")
+                    elif hasattr(sibling, "name") and getattr(sibling, "name"):
+                        var_context = getattr(sibling, "name")
 
-                    java_magic_found.add((raw_val, line_no))
-                    if var_context:
-                        msg = f"Magic number {raw_val} compared to variable '{var_context}'"
-                        smells.append({
-                            "type": "MagicNumber",
-                            "message": msg,
-                            "details": msg,
-                            "variable_context": var_context,
-                            "line": line_no,
-                            "severity": "low",
-                            "entity": None,
-                        })
-                    else:
-                        msg = f"Magic number {raw_val} detected"
-                        smells.append({
-                            "type": "MagicNumber",
-                            "message": msg,
-                            "details": msg,
-                            "line": line_no,
-                            "severity": "low",
-                            "entity": None,
-                        })
-
-    for m in _JAVA_MAGIC_NUM_RE.finditer(clean_java):
-        val = m.group(0).strip()
-        if val not in _JAVA_SAFE_NUMS:
-            line_no = clean_java[: m.start()].count("\n") + 1
-            if (val, line_no) in java_magic_found:
-                continue
-
-            split_lines = clean_java.splitlines()
-            line_str = split_lines[line_no - 1] if line_no <= len(split_lines) else ""
-            if _is_java_constant_line(line_str):
-                continue  # Constant definition -> NOT a magic number
-
-            var_context = None
-            m_left = COMP_LEFT_RE.search(line_str)
-            m_right = COMP_RIGHT_RE.search(line_str)
-            if m_left and m_left.group(2).strip() == val:
-                var_context = m_left.group(1)
-            elif m_right and m_right.group(1).strip() == val:
-                var_context = m_right.group(2)
-
-            if var_context:
-                msg = f"Magic number {val} compared to variable '{var_context}'"
-                smells.append({
-                    "type": "MagicNumber",
-                    "message": msg,
-                    "details": msg,
-                    "variable_context": var_context,
-                    "line": line_no,
-                    "severity": "low",
-                    "entity": None,
-                })
-            else:
-                msg = f"Magic number {val} detected"
-                smells.append({
-                    "type": "MagicNumber",
-                    "message": msg,
-                    "details": msg,
-                    "line": line_no,
-                    "severity": "low",
-                    "entity": None,
-                })
+        if var_context:
+            msg = f"Magic number {raw} compared to variable '{var_context}'"
+            smells.append({
+                "type": "MagicNumber",
+                "message": msg,
+                "details": msg,
+                "variable_context": var_context,
+                "line": line_no,
+                "severity": "low",
+                "entity": entity,
+            })
+        else:
+            msg = f"Magic number {raw} detected"
+            smells.append({
+                "type": "MagicNumber",
+                "message": msg,
+                "details": msg,
+                "line": line_no,
+                "severity": "low",
+                "entity": entity,
+            })
 
     return smells
-
 
 
 def _java_metrics(source: str, filename: str) -> dict:
@@ -1389,20 +1614,58 @@ def _c_metrics(source: str, filename: str) -> dict:
     }
 
 
+_C_KEYWORDS = {
+    "auto", "break", "case", "char", "const", "continue", "default", "do", "double",
+    "else", "enum", "extern", "float", "for", "goto", "if", "inline", "int", "long",
+    "register", "restrict", "return", "short", "signed", "sizeof", "static", "struct",
+    "switch", "typedef", "union", "unsigned", "void", "volatile", "while",
+}
+
+# A file-scope `type name(...);` line: a prototype, which declares but does not use a function
+_C_PROTOTYPE_PREFIX_RE = re.compile(r"^\s*(?:[A-Za-z_]\w*[\s\*]+)+\**$")
+_C_PROTOTYPE_SUFFIX_RE = re.compile(r"\s*\((?:[^();{}]|\([^()]*\))*\)\s*;")
+
+
+def _c_function_is_referenced(masked: str, fn: dict, funcs: list[dict]) -> bool:
+    """True when a C function's name is used anywhere other than its own definition,
+    its own body (recursion) or a prototype."""
+    name = fn["name"]
+    for m in re.finditer(rf"\b{re.escape(name)}\b", masked):
+        pos = m.start()
+        if fn["start_pos"] <= pos < fn["end_pos"]:
+            continue  # its own header or a recursive call
+        if any(f["start_pos"] <= pos < f["end_pos"] for f in funcs):
+            return True  # called (or its address taken) inside another function
+        line_start = masked.rfind("\n", 0, pos) + 1
+        prefix = masked[line_start:pos]
+        first_word = prefix.split(None, 1)[0] if prefix.strip() else ""
+        is_prototype = (
+            _C_PROTOTYPE_PREFIX_RE.match(prefix)
+            and not re.fullmatch(_C_STATEMENT_WORDS, first_word)
+            and _C_PROTOTYPE_SUFFIX_RE.match(masked, m.end())
+        )
+        if not is_prototype:
+            return True  # e.g. a function-pointer table or a macro
+    return False
+
+
 def _analyze_c_smells(source: str, filename: str, repo_ref_index: set[str] | None = None) -> list[dict]:
     """
     Detect C code smells using AST and regex heuristics.
 
     Rules:
-      1. LongFunction         - function body > 40 lines            [high]
+      1. LongFunction         - function body > 40 lines of code     [high]
       2. TooManyParameters    - function with > 5 params             [medium]
-      3. DeepNesting          - function nesting depth > 4           [high]
+      3. DeepNesting          - control-flow nesting depth > 3       [high]
       4. DuplicateCode        - structurally identical functions     [medium]
       5. DeadCode             - unused static or unreferenced func   [medium]
       6. MagicNumber          - un-aliased numeric literals          [low]
       7. UnsafeFunctionUsage  - gets/strcpy/strcat/sprintf/scanf     [high]
       8. GlobalVariable       - global variable declaration          [medium]
       9. LargeHeaderFile      - .h file > 300 lines                  [medium]
+
+    All rules work on the masked source (comments and literals blanked, newlines
+    kept), so every reported line is the real line in the file.
     """
     if not _C_HELPERS_AVAILABLE:
         return []
@@ -1410,13 +1673,14 @@ def _analyze_c_smells(source: str, filename: str, repo_ref_index: set[str] | Non
     smells: list[dict] = []
     ext = os.path.splitext(filename)[-1].lower()
 
-    source_lines = source.splitlines()
     funcs = _find_functions_regex(source)
-    clean_no_comments = _strip_comments(source)
-    clean = _strip_string_literals(clean_no_comments)
+    masked = _mask_c_like(source)
+    masked_lines = masked.splitlines()
+    source_lines = source.splitlines()
 
     for fn in funcs:
-        body_lines = _count_code_lines(source_lines, fn["start_line"] + 1, fn["end_line"])
+        span = {"start_line": fn["start_line"], "end_line": fn["end_line"]}
+        body_lines = _count_code_lines(masked_lines, fn["start_line"] + 1, fn["end_line"])
         if body_lines > 40:
             smells.append({
                 "type": "LongFunction",
@@ -1424,6 +1688,7 @@ def _analyze_c_smells(source: str, filename: str, repo_ref_index: set[str] | Non
                 "line": fn["line"],
                 "severity": "high",
                 "entity": fn["name"],
+                **span,
             })
         if fn["param_count"] > 5:
             smells.append({
@@ -1432,29 +1697,34 @@ def _analyze_c_smells(source: str, filename: str, repo_ref_index: set[str] | Non
                 "line": fn["line"],
                 "severity": "medium",
                 "entity": fn["name"],
+                "parameter_count": fn["param_count"],
+                **span,
             })
 
         # ── DeepNesting per function ─────────────────────────────────────────
-        fn_text_lines = source_lines[fn["start_line"] - 1 : fn["end_line"]]
-        fn_source = "\n".join(fn_text_lines)
-        fn_depth = _max_nesting_depth(fn_source)
-        if fn_depth > 4:
+        fn_source = "\n".join(source_lines[fn["start_line"] - 1 : fn["end_line"]])
+        fn_depth = _max_control_nesting(fn_source)
+        if fn_depth > 3:
             smells.append({
                 "type": "DeepNesting",
-                "message": f"Maximum nesting depth in function '{fn['name']}' is {fn_depth} (>4)",
+                "message": (
+                    f"Control-flow nesting depth in function '{fn['name']}' is {fn_depth} (>3)"
+                ),
                 "line": fn["line"],
                 "severity": "high",
                 "entity": fn["name"],
+                "nesting_depth": fn_depth,
+                **span,
             })
 
         # ── DeadCode per function ────────────────────────────────────────────
+        # Unused static inline functions in a header are normal: every file that
+        # includes the header gets its own copy, so headers are not checked.
         fn_name = fn["name"]
-        fn_header = fn_source.split("{")[0]
-        if fn_name != "main":
-            is_static = "static" in fn_header
-            # Remove own definition from search text
-            other_text = clean.replace(fn_header, "", 1)
-            is_called_locally = bool(re.search(rf"\b{re.escape(fn_name)}\b", other_text))
+        if fn_name != "main" and ext != ".h":
+            header = masked[fn["start_pos"]:masked.find("{", fn["start_pos"])]
+            is_static = bool(re.search(r"\bstatic\b", header))
+            is_called_locally = _c_function_is_referenced(masked, fn, funcs)
             if is_static:
                 if not is_called_locally:
                     smells.append({
@@ -1476,17 +1746,23 @@ def _analyze_c_smells(source: str, filename: str, repo_ref_index: set[str] | Non
                     })
 
     # ── DuplicateCode for C functions ─────────────────────────────────────────
+    # Type-2 clones: bodies equal once identifiers and literals are normalised.
+    # Bodies with fewer than 3 statements (getters, one-line wrappers) are too
+    # small to be a meaningful clone and are not compared.
     body_hashes: dict[str, list[tuple[str, int]]] = defaultdict(list)
     for fn in funcs:
-        fn_text_lines = source_lines[fn["start_line"] - 1 : fn["end_line"]]
-        fn_source = "\n".join(fn_text_lines)
-        fn_clean = _strip_string_literals(_strip_comments(fn_source))
-        # Normalize identifiers and whitespace
-        normalized = re.sub(r"\b[A-Za-z_]\w*\b", "VAR", fn_clean)
+        body = masked[masked.find("{", fn["start_pos"]):fn["end_pos"]]
+        if body.count(";") < 3:
+            continue
+        normalized = re.sub(
+            r"\b[A-Za-z_]\w*\b",
+            lambda m: m.group(0) if m.group(0) in _C_KEYWORDS else "ID",
+            body,
+        )
+        normalized = re.sub(r"\b\d[\w.]*", "N", normalized)
         normalized = re.sub(r"\s+", " ", normalized).strip()
-        if len(normalized) > 25:
-            h = hashlib.md5(normalized.encode()).hexdigest()
-            body_hashes[h].append((fn["name"], fn["line"]))
+        h = hashlib.md5(normalized.encode()).hexdigest()
+        body_hashes[h].append((fn["name"], fn["line"]))
 
     reported_dups: set[tuple] = set()
     for h, duplicate_funcs in body_hashes.items():
@@ -1510,9 +1786,21 @@ def _analyze_c_smells(source: str, filename: str, repo_ref_index: set[str] | Non
     smells.extend(c_magic_smells)
 
     # ── UnsafeFunctionUsage ────────────────────────────────────────────────
-    for m in _UNSAFE_CALL_RE.finditer(clean):
+    # Skips preprocessor lines (e.g. `#define strcpy(a, b) banned_strcpy`), member
+    # calls (`ops->sprintf(`) and declarations of a function with the same name.
+    directive_lines = _preprocessor_lines(masked)
+    for m in _UNSAFE_CALL_RE.finditer(masked):
         fn_name = m.group("fn")
-        line_no = clean[: m.start()].count("\n") + 1
+        line_no = masked.count("\n", 0, m.start()) + 1
+        if line_no in directive_lines:
+            continue
+        if masked[max(0, m.start() - 2):m.start()].rstrip().endswith(("->", ".")):
+            continue
+        line_start = masked.rfind("\n", 0, m.start()) + 1
+        prefix = masked[line_start:m.start()]
+        first_word = prefix.split(None, 1)[0] if prefix.strip() else ""
+        if _C_PROTOTYPE_PREFIX_RE.match(prefix) and not re.fullmatch(_C_STATEMENT_WORDS, first_word):
+            continue
         smells.append({
             "type": "UnsafeFunctionUsage",
             "message": f"Unsafe function '{fn_name}()' detected — prefer a safe alternative",
@@ -1549,6 +1837,83 @@ def _analyze_c_smells(source: str, filename: str, repo_ref_index: set[str] | Non
 # ---------------------------------------------------------------------------
 # Category enrichment helpers
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Comments smell
+# ---------------------------------------------------------------------------
+
+_LICENSE_HINT_RE = re.compile(r"copyright|licen[cs]e|spdx|all rights reserved", re.IGNORECASE)
+_C_STYLE_COMMENT_RE = re.compile(r"//[^\n]*|/\*.*?\*/", re.DOTALL)
+
+
+def _explanatory_comment_lines(source: str, language: str) -> int:
+    """Comment lines that count towards the Comments smell.
+
+    Documentation is not a sign of code that needs explaining, so it is left
+    out: Javadoc blocks (/** ... */), a license header at the top of the file,
+    and the shebang / encoding lines of a Python script. Python docstrings are
+    strings, not comments, and were never counted.
+    """
+    if language == "python":
+        lines = source.splitlines()
+        header_end = 0
+        while header_end < len(lines) and (
+            not lines[header_end].strip() or lines[header_end].lstrip().startswith("#")
+        ):
+            header_end += 1
+        skip_header = bool(_LICENSE_HINT_RE.search("\n".join(lines[:header_end])))
+        count = 0
+        for i, line in enumerate(lines):
+            text = line.strip()
+            if not text.startswith("#"):
+                continue
+            if i < header_end and (
+                skip_header or text.startswith("#!") or (i < 2 and "coding" in text)
+            ):
+                continue
+            count += 1
+        return count
+
+    text = _mask_c_like(source, mask_comments=False) if _C_HELPERS_AVAILABLE else source
+    comment_lines: set[int] = set()
+    for m in _C_STYLE_COMMENT_RE.finditer(text):
+        body = m.group(0)
+        if body.startswith("/**"):
+            continue  # Javadoc API documentation
+        if not text[:m.start()].strip() and _LICENSE_HINT_RE.search(body):
+            continue  # license header
+        first = text.count("\n", 0, m.start()) + 1
+        comment_lines.update(range(first, first + body.count("\n") + 1))
+    return len(comment_lines)
+
+
+def _comments_smell(source: str, language: str, filename: str, loc: int) -> dict | None:
+    """Comments smell: more than 30% explanatory comment lines in a file over 50 lines."""
+    if loc <= 50:
+        return None
+    comment_lines = _explanatory_comment_lines(source, language)
+    if comment_lines / loc <= 0.3:
+        return None
+    return {
+        "type": "Comments",
+        "message": (
+            f"Comment ratio {comment_lines / loc:.0%} (>30%) suggests "
+            "overly complex code — consider Extract Method or Rename Method"
+        ),
+        "line": None,
+        "severity": "low",
+        "entity": filename,
+    }
+
+
+def _is_test_file(filename: str) -> bool:
+    """Test files: their literals are expected values, not magic numbers."""
+    stem, ext = os.path.splitext(os.path.basename(filename))
+    if ext.lower() == ".java":
+        return bool(re.match(r"Test[A-Z]", stem) or re.search(r"[a-z0-9](?:Test|Tests|IT)$", stem))
+    low = stem.lower()
+    return low.startswith("test_") or low.endswith(("_test", "_tests")) or low in ("conftest", "tests")
+
 
 def _enrich_smells_with_category(smells: list[dict]) -> None:
     """Stamp each smell dict in-place with 'category' and 'category_priority'.
@@ -1672,21 +2037,14 @@ def generate_file_report(
             "error": f"Unsupported file type: '{ext}'",
         }
 
+    if _is_test_file(filename):
+        smells = [s for s in smells if s["type"] != "MagicNumber"]
+
     # Comments smell heuristic — high comment density often indicates complex or unreadable logic
     if language in ("python", "java"):
-        loc = metrics.get("lines_of_code", 0)
-        comment_lines = metrics.get("comment_lines", 0)
-        if loc > 50 and comment_lines / loc > 0.3:
-            smells.append({
-                "type": "Comments",
-                "message": (
-                    f"Comment ratio {comment_lines / loc:.0%} (>30%) suggests "
-                    "overly complex code — consider Extract Method or Rename Method"
-                ),
-                "line": None,
-                "severity": "low",
-                "entity": filename,
-            })
+        comments_smell = _comments_smell(source, language, filename, metrics.get("lines_of_code", 0))
+        if comments_smell:
+            smells.append(comments_smell)
 
     # ML smell detection (Java only) — additive unless the mode is "hybrid" or "ml"
     ml_analysis = None
@@ -1786,21 +2144,13 @@ def generate_repo_report(
                     continue
                 # Re-detect smells with full cross-file context
                 accurate_smells = _analyze_python_smells(src, repo_ref_index=repo_index)
+                if _is_test_file(fname):
+                    accurate_smells = [s for s in accurate_smells if s["type"] != "MagicNumber"]
                 metrics = report.get("metrics", {})
                 # Reapply comments smell heuristic
-                loc = metrics.get("lines_of_code", 0)
-                comment_lines = metrics.get("comment_lines", 0)
-                if loc > 50 and comment_lines / max(loc, 1) > 0.3:
-                    accurate_smells.append({
-                        "type": "Comments",
-                        "message": (
-                            f"Comment ratio {comment_lines / loc:.0%} (>30%) suggests "
-                            "overly complex code — consider Extract Method or Rename Method"
-                        ),
-                        "line": None,
-                        "severity": "low",
-                        "entity": fname,
-                    })
+                comments_smell = _comments_smell(src, "python", fname, metrics.get("lines_of_code", 0))
+                if comments_smell:
+                    accurate_smells.append(comments_smell)
                 _enrich_smells_with_category(accurate_smells)
                 severity_counts = {"high": 0, "medium": 0, "low": 0}
                 for smell in accurate_smells:

@@ -65,10 +65,13 @@ The API is then available at `http://localhost:8080`.
 |------|---------|----------|
 | `LongFunction` | Function body > 40 lines | **high** |
 | `TooManyParameters` | Function has > 5 parameters | **medium** |
-| `DeepNesting` | Brace-nesting depth > 4 | **high** |
-| `MagicNumber` | Numeric literal not in `{0, 1, -1, 2}` | **low** |
+| `DeepNesting` | `if`/`else`/`for`/`while`/`do`/`switch` blocks nested > 3 deep | **high** |
+| `MagicNumber` | Unnamed numeric literal in a function body (not `#define`, `const`, enum, case label, array size, initializer list, unit factor like `/ 1000`) | **low** |
 | `UnsafeFunctionUsage` | Calls to `gets`, `strcpy`, `strcat`, `sprintf`, `scanf` | **high** |
-| `GlobalVariable` | Variable declared at file scope (outside any function) | **medium** |
+| `GlobalVariable` | Non-`const`, non-`extern` variable declared at file scope | **medium** |
+
+All C rules blank out comments and string literals with their newlines kept, so
+every finding is reported on its real line.
 | `LargeHeaderFile` | `.h` file has > 300 lines | **medium** |
 
 ---
