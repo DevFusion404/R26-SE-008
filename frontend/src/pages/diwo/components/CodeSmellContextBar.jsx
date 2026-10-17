@@ -17,6 +17,11 @@
 import { T, tint, eyebrow, ghostButton } from "../codeSmellTheme.js";
 import { Chip, Spinner } from "../codeSmellUi.jsx";
 
+// Section labels a step larger than the shared eyebrow, to match the
+// Smell Selection section beside this panel.
+const eyebrowLg = { ...eyebrow, fontSize: 12 };
+
+
 const VIA_LABEL = { "diwo-proxy": "via DIWO orchestration backend" };
 
 export default function CodeSmellContextBar({
@@ -61,20 +66,20 @@ export default function CodeSmellContextBar({
         <div style={{ minWidth: 0, flex: "1 1 260px" }}>
           <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
             {report?.repo_name && (
-              <span style={{ fontSize: 14, fontWeight: 800, color: T.text, fontFamily: T.mono }}>
+              <span style={{ fontSize: 16, fontWeight: 800, color: T.text, fontFamily: T.mono }}>
                 {report.repo_name}
               </span>
             )}
-            <span style={{ fontSize: 12.5, color: T.text2, fontWeight: 600 }}>{label}</span>
+            <span style={{ fontSize: 14, color: T.text2, fontWeight: 600 }}>{label}</span>
             <Chip tone={status.tone}>{status.text}</Chip>
           </div>
           {details.length > 0 && (
-            <div style={{ fontSize: 11.5, color: T.text3, marginTop: 2 }}>
+            <div style={{ fontSize: 13, color: T.text3, marginTop: 2 }}>
               {details.join(" · ")}
             </div>
           )}
           {error && (
-            <div role="alert" style={{ fontSize: 11.5, color: T.high, marginTop: 3 }}>
+            <div role="alert" style={{ fontSize: 13, color: T.high, marginTop: 3 }}>
               Refresh failed: {error.message}
             </div>
           )}
@@ -90,7 +95,7 @@ export default function CodeSmellContextBar({
               ? "Re-read the repository currently loaded in CUQA and start a fresh workflow for it"
               : "Re-read the quality report from the CUQA agent"
           }
-          style={ghostButton(!loading, { cursor: loading ? "wait" : "pointer" })}
+          style={ghostButton(!loading, { fontSize: 13, cursor: loading ? "wait" : "pointer" })}
         >
           {loading ? <Spinner size={12} /> : <span aria-hidden="true">↻</span>}
           {loading ? "Analyzing…" : isSample ? "Retry CUQA" : "Re-analyze repository"}
@@ -109,7 +114,7 @@ export default function CodeSmellContextBar({
         {typeof stats.categories === "number" && <Metric label="Categories" value={stats.categories} />}
         {stats.languages.length > 0 && (
           <div style={metricCell}>
-            <dt style={eyebrow}>Languages</dt>
+            <dt style={eyebrowLg}>Languages</dt>
             <dd style={{ margin: "5px 0 0", display: "flex", gap: 4, flexWrap: "wrap" }}>
               {stats.languages.map((l) => <Chip key={l}>{l}</Chip>)}
             </dd>
@@ -128,8 +133,8 @@ const metricCell = {
 function Metric({ label, value, tone }) {
   return (
     <div style={metricCell}>
-      <dt style={eyebrow}>{label}</dt>
-      <dd style={{ margin: "3px 0 0", fontSize: 19, fontWeight: 800, fontFamily: T.mono, color: tone || T.text, lineHeight: 1.2 }}>
+      <dt style={eyebrowLg}>{label}</dt>
+      <dd style={{ margin: "3px 0 0", fontSize: 22, fontWeight: 800, fontFamily: T.mono, color: tone || T.text, lineHeight: 1.2 }}>
         {value}
       </dd>
     </div>
