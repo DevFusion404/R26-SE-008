@@ -1325,18 +1325,50 @@ class StructuralValidator:
         ).strip()
         source_method = str(
             applied.get("source_method")
+            or params.get("source_method")
             or params.get("method")
             or params.get("method_name")
             or ""
         ).strip()
-        extracted_method = str(
+        planned_extracted_method = str(
             applied.get("extracted_method")
             or params.get("new_method_name")
             or params.get("extracted_method_name")
             or ""
         ).strip()
+        extracted_method = planned_extracted_method
+        helper_resolution: Dict[str, Any] = {}
+        if source_class and source_method:
+            helper_resolution = java_extract_method.infer_extracted_method_name(
+                original_code,
+                transformed_code,
+                source_class=source_class,
+                source_method=source_method,
+            )
+            inferred_name = str(helper_resolution.get("method_name") or "").strip()
+            model = _parse_java_class(transformed_code, source_class)
+            planned_matches = [] if model is None else model.methods_by_name.get(planned_extracted_method, [])
+            original_model = _parse_java_class(original_code, source_class)
+            planned_is_new = bool(
+                planned_extracted_method
+                and original_model is not None
+                and planned_extracted_method not in original_model.methods_by_name
+            )
+            planned_called = bool(
+                planned_matches
+                and any(
+                    re.search(rf"\b{re.escape(planned_extracted_method)}\s*\(", item.body)
+                    for item in (model.methods_by_name.get(source_method) or [])
+                )
+            )
+            if not planned_is_new or not planned_called or len(planned_matches) != 1:
+                extracted_method = inferred_name
         if not all((source_class, source_method, extracted_method)):
-            return {"passed": False, "reason": "missing_java_extract_method_metadata"}
+            return {
+                "passed": False,
+                "reason": "missing_java_extract_method_metadata",
+                "helper_resolution": helper_resolution,
+            }
         result = java_extract_method.validate_java_extract_method_result(
             original_code,
             transformed_code,
@@ -1347,6 +1379,9 @@ class StructuralValidator:
         compilation = applied.get("compilation_validation")
         compilation = compilation if isinstance(compilation, dict) else {}
         result["compilation_validation"] = compilation
+        result["planned_extracted_method"] = planned_extracted_method
+        result["resolved_extracted_method"] = extracted_method
+        result["helper_resolution"] = helper_resolution
         if compilation.get("status") == "LOCAL_SOURCE_COMPILATION_ERROR":
             result["passed"] = False
             result["reason"] = "LOCAL_SOURCE_COMPILATION_ERROR"

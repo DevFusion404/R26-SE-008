@@ -3024,6 +3024,72 @@ class BehavioralValidator:
         seen: set[tuple[str, str, str, str]] = set()
 
         for action in actions:
+            if action.action_type in {"extract_method", "extract_java_method"}:
+                params = action.parameters or {}
+                applied = params.get("applied_transformation_metadata")
+                applied = applied if isinstance(applied, dict) else {}
+                target_class = str(
+                    applied.get("source_class")
+                    or params.get("source_class")
+                    or params.get("target_class")
+                    or params.get("class_name")
+                    or ""
+                ).strip()
+                target_method = str(
+                    applied.get("source_method")
+                    or params.get("source_method")
+                    or params.get("method")
+                    or params.get("method_name")
+                    or params.get("target_method")
+                    or ""
+                ).strip()
+                if not target_class:
+                    target_class = (
+                        self._find_java_method_owner(original_code, target_method)
+                        or ""
+                    )
+                candidate = next(
+                    (
+                        item
+                        for item in self._extract_java_method_candidates(
+                            original_code=original_code,
+                            class_name=target_class,
+                        )
+                        if item["name"] == target_method
+                    ),
+                    None,
+                )
+                if not target_class or not target_method or candidate is None:
+                    continue
+                key = (target_class, target_method, target_class, target_method)
+                if key in seen:
+                    continue
+                seen.add(key)
+                for probe_index, probe_args in enumerate(
+                    self._java_probe_arg_variants(candidate.get("param_types", [])),
+                    start=1,
+                ):
+                    inferred.append({
+                        "name": (
+                            f"auto_{target_class}_{target_method}_extract_method_"
+                            f"{probe_index}"
+                        ),
+                        "original_target_class": target_class,
+                        "original_target_method": target_method,
+                        "transformed_target_class": target_class,
+                        "transformed_target_method": target_method,
+                        "args": probe_args,
+                        "timeout_seconds": self.DEFAULT_JAVA_TIMEOUT_SECONDS,
+                        "auto_generated": True,
+                        "source_step_id": action.source_step_id,
+                        "source_refactoring": action.source_refactoring,
+                    })
+                    if len(inferred) >= self.AUTO_PROBE_LIMIT:
+                        break
+                if len(inferred) >= self.AUTO_PROBE_LIMIT:
+                    break
+                continue
+
             if action.action_type in {
                 "introduce_parameter_object",
                 "introduce_java_parameter_object",
@@ -3708,39 +3774,72 @@ class BehavioralValidator:
 
         return ""
 
+    @classmethod
+    def _java_probe_arg_variants(cls, type_names: Sequence[str]) -> List[List[str]]:
+        """Create a small deterministic input matrix for behavior comparisons."""
+
+        defaults = [cls._java_raw_arg_for_type(type_name) for type_name in type_names]
+
+        def alternate(type_name: str, *, negative: bool) -> str:
+            base = re.sub(r"<.*?>", "", str(type_name or ""))
+            base = base.replace("...", "").replace("[]", "")
+            base = base.replace("java.lang.", "").strip()
+            lower = base.lower()
+            if lower in {"int", "integer", "short", "byte", "long"}:
+                return "-3" if negative else "7"
+            if lower in {"double", "float"}:
+                return "-2.5" if negative else "2.5"
+            if lower in {"boolean", "bool"}:
+                return "false" if negative else "true"
+            if lower in {"char", "character"}:
+                return "b" if negative else "z"
+            if base == "String" or lower.endswith("string"):
+                return "" if negative else "sctva"
+            return cls._java_raw_arg_for_type(type_name)
+
+        candidates = [
+            defaults,
+            [alternate(type_name, negative=False) for type_name in type_names],
+            [alternate(type_name, negative=True) for type_name in type_names],
+        ]
+        unique: List[List[str]] = []
+        for candidate in candidates:
+            if candidate not in unique:
+                unique.append(candidate)
+        return unique
+
     @staticmethod
     def _extract_java_class_names(source_code: str) -> List[str]:
-        source_code = source_code.lstrip("\ufeff")
-
+        source_code = BehavioralValidator._strip_java_comments_and_literals(
+            source_code.lstrip("\ufeff")
+        )
         return [
-            match.group(1)
+            match.group("name")
             for match in re.finditer(
-                r"\bclass\s+([A-Za-z_][A-Za-z0-9_]*)\b",
+                r"\b(?:(?:public|protected|private|abstract|final|static|sealed|non-sealed|strictfp)\s+)*(?:@interface|class|interface|enum|record)\s+(?P<name>[A-Za-z_$][A-Za-z0-9_$]*)\b",
                 source_code,
             )
         ]
 
     @staticmethod
     def _extract_java_class_name(source_code: str) -> str:
-        source_code = source_code.lstrip("\ufeff")
-
-        public_match = re.search(
-            r"\bpublic\s+class\s+([A-Za-z_][A-Za-z0-9_]*)\b",
-            source_code,
+        clean_source = BehavioralValidator._strip_java_comments_and_literals(
+            source_code.lstrip("\ufeff")
         )
-
-        if public_match:
-            return public_match.group(1)
-
-        match = re.search(
-            r"\bclass\s+([A-Za-z_][A-Za-z0-9_]*)\b",
-            source_code,
+        declaration_pattern = re.compile(
+            r"(?P<public>\bpublic\s+)?"
+            r"(?:(?:protected|private|abstract|final|static|sealed|non-sealed|strictfp)\s+)*"
+            r"(?:@interface|class|interface|enum|record)\s+"
+            r"(?P<name>[A-Za-z_$][A-Za-z0-9_$]*)\b"
         )
-
-        if not match:
+        declarations = list(declaration_pattern.finditer(clean_source))
+        if not declarations:
             raise ValueError("Could not determine Java class name from source.")
-
-        return match.group(1)
+        public_declaration = next(
+            (match for match in declarations if match.group("public")),
+            None,
+        )
+        return (public_declaration or declarations[0]).group("name")
 
     @staticmethod
     def _extract_java_package(source_code: str) -> str | None:
@@ -3821,7 +3920,21 @@ class BehavioralValidator:
             )
 
         source_code = source_code.lstrip("\ufeff")
-        class_name = self._extract_java_class_name(source_code)
+        try:
+            class_name = self._extract_java_class_name(source_code)
+        except ValueError as exc:
+            return self._java_runtime_probe_failure(
+                category="JAVA_TYPE_NAME_UNRESOLVED",
+                details=str(exc),
+                diagnostics={
+                    "source_file": current_file_name or "",
+                    "target_class": target_class,
+                    "target_method": target_method,
+                    "java_type_declaration_found": False,
+                },
+                infrastructure=False,
+                exception_type="TargetResolutionError",
+            )
         package_name = self._extract_java_package(source_code)
         target_class_name = self._java_binary_class_name(source_code, target_class)
         if package_name and "." not in target_class_name:
@@ -4140,12 +4253,16 @@ class BehavioralValidator:
         if not requested or "$" in requested:
             return requested
         simple_name = requested.rsplit(".", 1)[-1]
-        class_pattern = re.compile(r"\bclass\s+([A-Za-z_][A-Za-z0-9_]*)\b[^\{;]*\{")
+        clean_source = BehavioralValidator._strip_java_comments_and_literals(source_code)
+        class_pattern = re.compile(
+            r"(?:@interface|class|interface|enum|record)\s+"
+            r"([A-Za-z_$][A-Za-z0-9_$]*)\b[^\{;]*\{"
+        )
         spans: list[tuple[str, int, int]] = []
         target_span: tuple[str, int, int] | None = None
-        for match in class_pattern.finditer(source_code):
-            open_brace = source_code.find("{", match.start(), match.end())
-            close_brace = cls._find_matching_brace(source_code, open_brace)
+        for match in class_pattern.finditer(clean_source):
+            open_brace = clean_source.find("{", match.start(), match.end())
+            close_brace = cls._find_matching_brace(clean_source, open_brace)
             if close_brace == -1:
                 continue
             span = (match.group(1), match.start(), close_brace)
