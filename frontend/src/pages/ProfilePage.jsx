@@ -1,24 +1,49 @@
-﻿import { useState, useEffect } from 'react';
+﻿import { useState, useEffect, useCallback } from 'react';
 import UserService from '../services/userService';
+import { loadHistory } from '../utils/analysisHistory';
+import { loadSessionReports } from '../utils/sessionReports';
+import './pages.css';
 
-export default function ProfilePage({ currentUser, isGuest, onLogout, onProfileUpdate }) {
+const initialsOf = (name) =>
+  (name || '').trim().split(/\s+/).slice(0, 2).map((p) => p[0]?.toUpperCase() || '').join('') || 'U';
+
+/** What this browser has recorded — the same for guests and signed-in users. */
+function ActivityCard({ onNavigate }) {
+  const analyses = loadHistory().length;
+  const sessions = loadSessionReports().length;
+  return (
+    <div className="card">
+      <div className="card-header"><span className="card-title">Your activity in this browser</span></div>
+      <div className="rg-2" style={{ gap: 10, padding: 16 }}>
+        <button type="button" className="ui-stat ui-click" style={{ '--c': 'var(--accent)', textAlign: 'left', fontFamily: 'var(--font-body)' }} onClick={() => onNavigate?.('dashboard')}>
+          <span className="k">Analyses <span>→</span></span>
+          <span className="v">{analyses}</span>
+          <span className="s">open the dashboard</span>
+        </button>
+        <button type="button" className="ui-stat ui-click" style={{ '--c': 'var(--color-orchestrate)', textAlign: 'left', fontFamily: 'var(--font-body)' }} onClick={() => onNavigate?.('reports')}>
+          <span className="k">Session reports <span>→</span></span>
+          <span className="v">{sessions}</span>
+          <span className="s">open the reports</span>
+        </button>
+      </div>
+    </div>
+  );
+}
+
+export default function ProfilePage({ currentUser, isGuest, onLogout, onProfileUpdate, onNavigate }) {
   const [fullName, setFullName] = useState(currentUser?.full_name || '');
-  const [email, setEmail] = useState(currentUser?.email || '');
   const [error, setError] = useState('');
   const [message, setMessage] = useState('');
   const [loading, setLoading] = useState(false);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [adminUsers, setAdminUsers] = useState([]);
   const [adminError, setAdminError] = useState('');
+  const [adminQuery, setAdminQuery] = useState('');
 
-  // Fetch admin panel data if current user is admin
-  useEffect(() => {
-    if (currentUser?.role === 'admin') {
-      fetchAdminUsers();
-    }
-  }, [currentUser]);
+  const isAdmin = currentUser?.role === 'admin';
+  const dirty = fullName.trim() !== (currentUser?.full_name || '').trim();
 
-  const fetchAdminUsers = async () => {
+  const fetchAdminUsers = useCallback(async () => {
     try {
       const result = await UserService.getAllUsers();
       if (result.success) {
@@ -29,7 +54,18 @@ export default function ProfilePage({ currentUser, isGuest, onLogout, onProfileU
     } catch {
       setAdminError('Failed to connect to admin endpoints.');
     }
-  };
+  }, []);
+
+  // Fetch admin panel data if current user is admin (after the first render)
+  useEffect(() => {
+    if (!isAdmin) return undefined;
+    let alive = true;
+    (async () => {
+      await Promise.resolve();
+      if (alive) await fetchAdminUsers();
+    })();
+    return () => { alive = false; };
+  }, [isAdmin, fetchAdminUsers]);
 
   const handleUpdate = async (e) => {
     e.preventDefault();
@@ -45,12 +81,12 @@ export default function ProfilePage({ currentUser, isGuest, onLogout, onProfileU
     try {
       const result = await UserService.updateProfile({ full_name: fullName });
       if (result.success) {
-        setMessage('Profile updated successfully!');
+        setMessage('Profile updated.');
         onProfileUpdate(result.profile);
       } else {
         setError(result.error);
       }
-    } catch (err) {
+    } catch {
       setError('Connection failure updating profile.');
     } finally {
       setLoading(false);
@@ -68,7 +104,7 @@ export default function ProfilePage({ currentUser, isGuest, onLogout, onProfileU
         setError(result.error);
         setShowDeleteConfirm(false);
       }
-    } catch (err) {
+    } catch {
       setError('Connection error deleting account.');
       setShowDeleteConfirm(false);
     } finally {
@@ -81,380 +117,169 @@ export default function ProfilePage({ currentUser, isGuest, onLogout, onProfileU
     try {
       const result = await UserService.updateUserRole(userId, newRole);
       if (result.success) {
-        // Refresh users list
         fetchAdminUsers();
       } else {
         alert(`Error: ${result.error}`);
       }
-    } catch (err) {
+    } catch {
       alert('Failed to change role.');
     }
   };
 
+  // ── Guest ────────────────────────────────────────────────────────────────
   if (isGuest) {
     return (
       <div className="page-container">
-        <div className="page-header">
-          <div className="page-header-left">
-            <div className="page-header-icon" style={{ background: 'var(--accent-muted)', borderColor: 'var(--border-accent)' }}>
-              ??
+        <section className="ui-hero">
+          <div style={{ display: 'flex', gap: 16, alignItems: 'center', flexWrap: 'wrap' }}>
+            <div className="ui-avatar" style={{ background: 'var(--bg-hover)', color: 'var(--text-secondary)' }}>G</div>
+            <div style={{ flex: '1 1 260px' }}>
+              <span className="ui-kicker">Guest session</span>
+              <h1 className="ui-title" style={{ marginTop: 2 }}>You are exploring as a guest</h1>
+              <p className="ui-lead" style={{ marginTop: 4 }}>Every agent works. Your analyses and reports are kept in this browser only.</p>
             </div>
-            <div>
-              <div className="page-title">Guest Profile</div>
-              <div className="page-subtitle">Standard read-only sandbox mode</div>
+            <button className="btn btn-primary" onClick={onLogout}>Sign in or register</button>
+          </div>
+        </section>
+
+        <div className="rg-2" style={{ gap: 16, alignItems: 'start' }}>
+          <div className="card">
+            <div className="card-header"><span className="card-title">Guest and account compared</span></div>
+            <div style={{ padding: 16, display: 'flex', flexDirection: 'column', gap: 10, fontSize: 13.5 }}>
+              {[
+                ['Run all four agents', true, true],
+                ['Session reports in this browser', true, true],
+                ['Saved profile and name', false, true],
+                ['Manage user roles (admin)', false, true],
+              ].map(([label, guest, account]) => (
+                <div key={label} style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) 70px 70px', alignItems: 'center', gap: 8 }}>
+                  <span style={{ color: 'var(--text-primary)' }}>{label}</span>
+                  <span style={{ textAlign: 'center', color: guest ? 'var(--color-ok)' : 'var(--text-muted)' }}>{guest ? '✓' : '—'}</span>
+                  <span style={{ textAlign: 'center', color: 'var(--color-ok)' }}>{account ? '✓' : '—'}</span>
+                </div>
+              ))}
+              <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) 70px 70px', gap: 8, fontSize: 12, color: 'var(--text-muted)', borderTop: '1px solid var(--border)', paddingTop: 8 }}>
+                <span />
+                <span style={{ textAlign: 'center' }}>Guest</span>
+                <span style={{ textAlign: 'center' }}>Account</span>
+              </div>
             </div>
           </div>
-        </div>
-
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr', gap: '24px', marginTop: '20px' }}>
-          <div style={{
-            background: 'var(--bg-sidebar)',
-            border: '1px solid var(--border)',
-            borderRadius: 'var(--r-md)',
-            padding: '24px',
-          }}>
-            <h3 style={{ fontSize: 'var(--text-lg)', color: 'var(--text-primary)', marginBottom: '12px' }}>
-              Account Type: Guest
-            </h3>
-            <p style={{ color: 'var(--text-secondary)', fontSize: 'var(--text-sm)', lineHeight: 1.5, marginBottom: '20px' }}>
-              You are currently logged in as a Guest. Guest accounts do not have profiles stored in Supabase, and cannot update details or list other users. 
-              Register an account to save plans, manage permissions, or utilize admin features.
-            </p>
-
-            <button
-              onClick={onLogout}
-              style={{
-                background: 'var(--accent)',
-                color: '#000',
-                border: 'none',
-                borderRadius: 'var(--r-sm)',
-                padding: '10px 18px',
-                fontWeight: 700,
-                fontSize: 'var(--text-sm)',
-                cursor: 'pointer',
-              }}
-            >
-              Sign In or Register
-            </button>
-          </div>
+          <ActivityCard onNavigate={onNavigate} />
         </div>
       </div>
     );
   }
 
+  // ── Signed-in user ───────────────────────────────────────────────────────
+  const shownUsers = adminUsers.filter((u) =>
+    `${u.full_name} ${u.email}`.toLowerCase().includes(adminQuery.trim().toLowerCase()));
+
   return (
-    <div className="page-container" style={{ overflowY: 'auto', maxHeight: 'calc(100vh - var(--topbar-height) - 40px)' }}>
-      <div className="page-header">
-        <div className="page-header-left">
-          <div className="page-header-icon" style={{ background: 'var(--accent-muted)', borderColor: 'var(--border-accent)' }}>
-            ??
-          </div>
-          <div>
-            <div className="page-title">User Account</div>
-            <div className="page-subtitle">Manage your credentials and view server access level</div>
-          </div>
-        </div>
-      </div>
-
-      {/* Main Alert notifications */}
-      {(error || message) && (
-        <div style={{ marginTop: '16px' }}>
-          {error && (
-            <div className="alert alert-error" style={{ fontSize: 'var(--text-sm)', padding: '10px 14px', borderRadius: 'var(--r-sm)' }}>
-              ?? {error}
+    <div className="page-container">
+      <section className="ui-hero">
+        <div style={{ display: 'flex', gap: 16, alignItems: 'center', flexWrap: 'wrap' }}>
+          <div className="ui-avatar">{initialsOf(currentUser?.full_name)}</div>
+          <div style={{ flex: '1 1 260px', minWidth: 0 }}>
+            <span className="ui-kicker">Account</span>
+            <h1 className="ui-title" style={{ marginTop: 2 }}>{currentUser?.full_name || 'Your profile'}</h1>
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 8 }}>
+              <span className="ui-chip">✉ <b>{currentUser?.email}</b></span>
+              <span className={`ui-chip ${isAdmin ? 'ok' : ''}`}>{isAdmin ? '🛡 Admin' : '👤 User'}</span>
             </div>
-          )}
-          {message && (
-            <div className="alert alert-success" style={{ fontSize: 'var(--text-sm)', padding: '10px 14px', borderRadius: 'var(--r-sm)' }}>
-              ? {message}
-            </div>
-          )}
+          </div>
+          <button className="btn btn-outline" onClick={onLogout}>Log out</button>
         </div>
-      )}
+      </section>
 
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1.2fr', gap: '24px', marginTop: '20px' }}>
-        
-        {/* Left Side: Profile Form */}
-        <div style={{
-          background: 'var(--bg-sidebar)',
-          border: '1px solid var(--border)',
-          borderRadius: 'var(--r-md)',
-          padding: '24px',
-          display: 'flex',
-          flexDirection: 'column',
-          justifyContent: 'space-between',
-        }}>
-          <div>
-            <h3 style={{ fontSize: 'var(--text-lg)', color: 'var(--text-primary)', marginBottom: '18px' }}>
-              Update Profile Details
-            </h3>
+      {error && <div className="alert alert-error">⚠ {error}</div>}
+      {message && <div className="alert alert-success">✓ {message}</div>}
 
-            <form onSubmit={handleUpdate} style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
+      <div className="rg-split" style={{ gap: 16, alignItems: 'start' }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+          {/* Profile form */}
+          <div className="card">
+            <div className="card-header"><span className="card-title">Profile details</span></div>
+            <form onSubmit={handleUpdate} style={{ padding: 16, display: 'flex', flexDirection: 'column', gap: 14 }}>
               <div>
-                <label style={{ display: 'block', fontSize: 'var(--text-xs)', color: 'var(--text-secondary)', marginBottom: '6px' }}>
-                  Full Name
-                </label>
-                <input
-                  type="text"
-                  value={fullName}
-                  onChange={e => setFullName(e.target.value)}
-                  style={{
-                    width: '100%',
-                    background: 'var(--bg-input)',
-                    border: '1px solid var(--border)',
-                    borderRadius: 'var(--r-sm)',
-                    color: 'var(--text-primary)',
-                    padding: '8px 12px',
-                    fontSize: 'var(--text-sm)',
-                  }}
-                />
+                <label className="field-label" htmlFor="pf-name">Full name</label>
+                <input id="pf-name" className="input" type="text" value={fullName} onChange={e => setFullName(e.target.value)} />
               </div>
-
               <div>
-                <label style={{ display: 'block', fontSize: 'var(--text-xs)', color: 'var(--text-secondary)', marginBottom: '6px' }}>
-                  Email (Read-Only)
-                </label>
-                <input
-                  type="text"
-                  value={email}
-                  disabled
-                  style={{
-                    width: '100%',
-                    background: 'var(--bg-root)',
-                    border: '1px solid var(--border)',
-                    borderRadius: 'var(--r-sm)',
-                    color: 'var(--text-secondary)',
-                    padding: '8px 12px',
-                    fontSize: 'var(--text-sm)',
-                    cursor: 'not-allowed',
-                  }}
-                />
+                <label className="field-label" htmlFor="pf-email">Email (cannot be changed)</label>
+                <input id="pf-email" className="input" type="text" value={currentUser?.email || ''} disabled style={{ opacity: 0.7, cursor: 'not-allowed' }} />
               </div>
-
-              <div>
-                <label style={{ display: 'block', fontSize: 'var(--text-xs)', color: 'var(--text-secondary)', marginBottom: '6px' }}>
-                  Role Permission
-                </label>
-                <div style={{
-                  display: 'inline-block',
-                  background: currentUser?.role === 'admin' ? 'rgba(16,185,129,0.15)' : 'rgba(59,130,246,0.15)',
-                  border: `1px solid ${currentUser?.role === 'admin' ? 'rgba(16,185,129,0.3)' : 'rgba(59,130,246,0.3)'}`,
-                  color: currentUser?.role === 'admin' ? 'var(--color-orchestrate)' : 'var(--color-low)',
-                  fontSize: 'var(--text-xs)',
-                  fontWeight: 700,
-                  textTransform: 'uppercase',
-                  padding: '3px 10px',
-                  borderRadius: 'var(--r-full)',
-                }}>
-                  {currentUser?.role || 'user'}
-                </div>
-              </div>
-
-              <button
-                type="submit"
-                disabled={loading}
-                style={{
-                  background: 'var(--accent)',
-                  color: '#000',
-                  border: 'none',
-                  borderRadius: 'var(--r-sm)',
-                  padding: '10px 14px',
-                  fontWeight: 700,
-                  fontSize: 'var(--text-sm)',
-                  cursor: loading ? 'not-allowed' : 'pointer',
-                  marginTop: '10px',
-                  opacity: loading ? 0.7 : 1,
-                }}
-              >
-                {loading ? 'Saving…' : 'Save Changes'}
+              <button type="submit" className="btn btn-primary" disabled={loading || !dirty} style={{ alignSelf: 'flex-start' }}>
+                {loading ? 'Saving…' : dirty ? 'Save changes' : 'No changes'}
               </button>
             </form>
           </div>
 
-          {/* Danger zone / Logout */}
-          <div style={{ marginTop: '32px', paddingTop: '20px', borderTop: '1px solid var(--border)' }}>
-            <div style={{ display: 'flex', gap: '12px' }}>
-              <button
-                onClick={onLogout}
-                style={{
-                  flex: 1,
-                  background: 'transparent',
-                  border: '1px solid var(--border)',
-                  borderRadius: 'var(--r-sm)',
-                  color: 'var(--text-primary)',
-                  padding: '10px 14px',
-                  fontSize: 'var(--text-sm)',
-                  fontWeight: 600,
-                  cursor: 'pointer',
-                }}
-              >
-                Logout
-              </button>
+          <ActivityCard onNavigate={onNavigate} />
 
-              <button
-                onClick={() => setShowDeleteConfirm(true)}
-                style={{
-                  flex: 1,
-                  background: 'rgba(239,68,68,0.1)',
-                  border: '1px solid rgba(239,68,68,0.3)',
-                  borderRadius: 'var(--r-sm)',
-                  color: 'var(--color-critical)',
-                  padding: '10px 14px',
-                  fontSize: 'var(--text-sm)',
-                  fontWeight: 600,
-                  cursor: 'pointer',
-                }}
-              >
-                Delete Account
-              </button>
-            </div>
-
-            {showDeleteConfirm && (
-              <div style={{
-                marginTop: '16px',
-                padding: '12px',
-                background: 'rgba(239,68,68,0.05)',
-                border: '1px solid rgba(239,68,68,0.25)',
-                borderRadius: 'var(--r-sm)',
-              }}>
-                <p style={{ fontSize: 'var(--text-xs)', color: 'var(--text-primary)', marginBottom: '10px' }}>
-                  Are you absolutely sure? This will delete your profile and account credentials permanently.
-                </p>
-                <div style={{ display: 'flex', gap: '8px' }}>
-                  <button
-                    onClick={handleDeleteAccount}
-                    disabled={loading}
-                    style={{
-                      background: 'var(--color-critical)',
-                      border: 'none',
-                      borderRadius: 'var(--r-xs)',
-                      color: '#fff',
-                      padding: '4px 10px',
-                      fontSize: 'var(--text-xs)',
-                      fontWeight: 600,
-                      cursor: 'pointer',
-                    }}
-                  >
-                    Confirm Delete
-                  </button>
-                  <button
-                    onClick={() => setShowDeleteConfirm(false)}
-                    style={{
-                      background: 'transparent',
-                      border: '1px solid var(--border)',
-                      borderRadius: 'var(--r-xs)',
-                      color: 'var(--text-secondary)',
-                      padding: '4px 10px',
-                      fontSize: 'var(--text-xs)',
-                      cursor: 'pointer',
-                    }}
-                  >
-                    Cancel
-                  </button>
-                </div>
-              </div>
-            )}
-          </div>
-        </div>
-
-        {/* Right Side: Admin User Management Panel (Visible only to Admin Role) */}
-        <div style={{
-          background: 'var(--bg-sidebar)',
-          border: '1px solid var(--border)',
-          borderRadius: 'var(--r-md)',
-          padding: '24px',
-        }}>
-          {currentUser?.role !== 'admin' ? (
-            <div style={{
-              display: 'flex',
-              flexDirection: 'column',
-              alignItems: 'center',
-              justifyContent: 'center',
-              height: '100%',
-              textAlign: 'center',
-              color: 'var(--text-muted)',
-              padding: '20px',
-            }}>
-              <span style={{ fontSize: '32px', marginBottom: '8px' }}>??</span>
-              <h4 style={{ color: 'var(--text-secondary)', fontSize: 'var(--text-md)', fontWeight: 600 }}>
-                Admin Portal Restricted
-              </h4>
-              <p style={{ fontSize: 'var(--text-xs)', marginTop: '4px', maxWidth: '280px', lineHeight: 1.4 }}>
-                Only accounts with an 'admin' privilege level can view or alter client authorization roles.
-              </p>
-            </div>
-          ) : (
-            <div>
-              <h3 style={{ fontSize: 'var(--text-lg)', color: 'var(--text-primary)', marginBottom: '8px' }}>
-                System Users Directory
-              </h3>
-              <p style={{ fontSize: 'var(--text-xs)', color: 'var(--text-secondary)', marginBottom: '16px' }}>
-                Promote or demote user permission levels across the RefactorIQ network.
-              </p>
-
-              {adminError ? (
-                <div style={{ color: 'var(--color-critical)', fontSize: 'var(--text-sm)' }}>
-                  {adminError}
-                </div>
+          {/* Danger zone */}
+          <div className="card" style={{ borderColor: 'color-mix(in srgb, var(--color-critical) 35%, transparent)' }}>
+            <div className="card-header"><span className="card-title" style={{ color: 'var(--color-critical)' }}>Delete account</span></div>
+            <div style={{ padding: 16, display: 'flex', flexDirection: 'column', gap: 10 }}>
+              <p style={{ fontSize: 13.5, color: 'var(--text-secondary)' }}>Deletes your profile and sign-in permanently. Reports in this browser are not affected.</p>
+              {!showDeleteConfirm ? (
+                <button className="btn btn-outline" style={{ alignSelf: 'flex-start', color: 'var(--color-critical)', borderColor: 'color-mix(in srgb, var(--color-critical) 45%, transparent)' }} onClick={() => setShowDeleteConfirm(true)}>
+                  Delete my account…
+                </button>
               ) : (
-                <div style={{ overflowX: 'auto' }}>
-                  <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 'var(--text-sm)' }}>
-                    <thead>
-                      <tr style={{ borderBottom: '1px solid var(--border)', textAlign: 'left' }}>
-                        <th style={{ padding: '8px', color: 'var(--text-secondary)', fontWeight: 500 }}>Name</th>
-                        <th style={{ padding: '8px', color: 'var(--text-secondary)', fontWeight: 500 }}>Email</th>
-                        <th style={{ padding: '8px', color: 'var(--text-secondary)', fontWeight: 500 }}>Role</th>
-                        <th style={{ padding: '8px', color: 'var(--text-secondary)', fontWeight: 500, textAlign: 'right' }}>Actions</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {adminUsers.map(u => (
-                        <tr key={u.id} style={{ borderBottom: '1px solid rgba(255,255,255,0.02)' }}>
-                          <td style={{ padding: '8px 4px', color: 'var(--text-primary)' }}>{u.full_name}</td>
-                          <td style={{ padding: '8px 4px', color: 'var(--text-secondary)', fontSize: 'var(--text-xs)' }}>{u.email}</td>
-                          <td style={{ padding: '8px 4px' }}>
-                            <span style={{
-                              background: u.role === 'admin' ? 'rgba(16,185,129,0.1)' : 'rgba(59,130,246,0.1)',
-                              color: u.role === 'admin' ? 'var(--color-orchestrate)' : 'var(--color-low)',
-                              fontSize: '10px',
-                              fontWeight: 700,
-                              textTransform: 'uppercase',
-                              padding: '2px 6px',
-                              borderRadius: 'var(--r-xs)',
-                            }}>
-                              {u.role}
-                            </span>
-                          </td>
-                          <td style={{ padding: '8px 4px', textAlign: 'right' }}>
-                            {u.id !== currentUser.id ? (
-                              <button
-                                onClick={() => handleToggleRole(u.id, u.role)}
-                                style={{
-                                  background: 'transparent',
-                                  border: '1px solid var(--border)',
-                                  borderRadius: 'var(--r-xs)',
-                                  color: 'var(--accent)',
-                                  fontSize: '11px',
-                                  padding: '2px 8px',
-                                  cursor: 'pointer',
-                                }}
-                              >
-                                Toggle Role
-                              </button>
-                            ) : (
-                              <span style={{ fontSize: '11px', color: 'var(--text-muted)' }}>Self</span>
-                            )}
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
+                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+                  <span style={{ fontSize: 13.5, color: 'var(--text-primary)', fontWeight: 600 }}>Are you sure?</span>
+                  <button className="btn btn-sm" style={{ background: 'var(--color-critical)', color: '#fff' }} onClick={handleDeleteAccount} disabled={loading}>Yes, delete</button>
+                  <button className="btn btn-ghost btn-sm" onClick={() => setShowDeleteConfirm(false)}>Cancel</button>
                 </div>
               )}
             </div>
-          )}
+          </div>
         </div>
 
+        {/* Admin directory */}
+        <div className="card">
+          <div className="card-header">
+            <span className="card-title">🛡 User directory</span>
+            {isAdmin && (
+              <input className="input" style={{ maxWidth: 200, padding: '6px 12px', fontSize: 13 }} placeholder="Search users…" value={adminQuery} onChange={e => setAdminQuery(e.target.value)} />
+            )}
+          </div>
+          {!isAdmin ? (
+            <div className="empty-state" style={{ padding: 32 }}>
+              <span className="empty-icon">🔒</span>
+              <p>Only admin accounts can see and change user roles.</p>
+            </div>
+          ) : adminError ? (
+            <div className="alert alert-error" style={{ margin: 16 }}>{adminError}</div>
+          ) : (
+            <div style={{ overflowX: 'auto' }}>
+              <table className="data-table">
+                <thead>
+                  <tr><th>Name</th><th>Email</th><th>Role</th><th style={{ textAlign: 'right' }}>Action</th></tr>
+                </thead>
+                <tbody>
+                  {shownUsers.map(u => (
+                    <tr key={u.id}>
+                      <td style={{ color: 'var(--text-primary)', fontWeight: 600 }}>{u.full_name}</td>
+                      <td>{u.email}</td>
+                      <td><span className={`ui-chip ${u.role === 'admin' ? 'ok' : ''}`}>{u.role}</span></td>
+                      <td style={{ textAlign: 'right' }}>
+                        {u.id !== currentUser.id ? (
+                          <button className="btn btn-ghost btn-sm" onClick={() => handleToggleRole(u.id, u.role)}>
+                            Make {u.role === 'admin' ? 'user' : 'admin'}
+                          </button>
+                        ) : (
+                          <span style={{ fontSize: 12.5, color: 'var(--text-muted)' }}>You</span>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );

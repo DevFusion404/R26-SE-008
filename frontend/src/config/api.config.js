@@ -36,6 +36,7 @@ const API_CONFIG = {
       projectStructure: '/api/project-structure',
       parseAst: '/api/parse-ast',
       qualityReport: '/api/quality-report',
+      mlModel: '/api/ml-model',
       files: '/api/files',
       repositoryOverview: '/api/repository-overview',
     },

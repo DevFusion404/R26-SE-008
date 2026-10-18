@@ -124,9 +124,10 @@ class CUQAAgentService {
    * @param {string|null} [filePath=null] - Optional relative path for single file report
    * @returns {Promise<{type: string, report: object}>}
    */
-  static async getQualityReport(filePath = null) {
+  static async getQualityReport(filePath = null, detector = null) {
     const url = this.getEndpointUrl('qualityReport');
     const body = filePath ? { file_path: filePath } : {};
+    if (detector) body.detector = detector;
 
     const response = await fetch(url, {
       method: 'POST',
@@ -137,6 +138,20 @@ class CUQAAgentService {
     const data = await response.json();
     if (!response.ok) {
       throw new Error(data.detail || 'Failed to generate quality report.');
+    }
+    return data;
+  }
+
+  /**
+   * Describe the trained ML smell model (version, learned smells, test metrics).
+   * @returns {Promise<object>} model info; `available` is false when the model cannot be loaded
+   */
+  static async getMlModel() {
+    const url = this.getEndpointUrl('mlModel');
+    const response = await fetch(url, { method: 'GET' });
+    const data = await response.json();
+    if (!response.ok) {
+      throw new Error(data.detail || 'Failed to read the ML model details.');
     }
     return data;
   }
