@@ -20,13 +20,33 @@ RUN python -m pip install --no-cache-dir --upgrade \
     setuptools \
     wheel
 
-# Copy dependency file
+# Copy dependency files
 COPY requirements.txt /tmp/requirements.txt
+COPY requirements-codet5.txt /tmp/requirements-codet5.txt
 
 # Install all dependencies from requirements.txt
 RUN python -m pip install --no-cache-dir \
     --prefix=/install/packages \
     -r /tmp/requirements.txt
+
+# CodeT5+ is SCTVA's primary candidate generator in production. Install the
+# CPU PyTorch wheel explicitly so the image remains usable on Azure instances
+# without a CUDA runtime, then install the lazy model adapter dependencies.
+RUN python -m pip install --no-cache-dir \
+    --prefix=/install/packages \
+    --index-url https://download.pytorch.org/whl/cpu \
+    "torch>=2.4,<3" && \
+    PYTHONPATH=/install/packages/lib/python3.11/site-packages \
+    python -m pip install --no-cache-dir \
+    --prefix=/install/packages \
+    -r /tmp/requirements-codet5.txt
+
+# Bundle the checkpoint at image-build time. Production containers therefore
+# do not depend on an outbound Hugging Face download during the first request.
+ARG SCTVA_CODET5_MODEL_ID=Qwen/Qwen2.5-Coder-0.5B-Instruct
+RUN PYTHONPATH=/install/packages/lib/python3.11/site-packages \
+    HF_HOME=/install/huggingface \
+    python -c "from huggingface_hub import snapshot_download; snapshot_download('${SCTVA_CODET5_MODEL_ID}', allow_patterns=['added_tokens.json','chat_template.jinja','config.json','generation_config.json','merges.txt','model.safetensors','pytorch_model.bin','special_tokens_map.json','tokenizer.json','tokenizer_config.json','vocab.json'])"
 
 
 # ------------------------------------------------------------
@@ -57,6 +77,7 @@ WORKDIR /app
 # Copy installed Python packages from builder stage
 # ------------------------------------------------------------
 COPY --from=builder /install/packages /usr/local
+COPY --from=builder --chown=sctva:sctva /install/huggingface /home/sctva/.cache/huggingface
 
 
 # ------------------------------------------------------------
@@ -78,6 +99,25 @@ ENV FLASK_APP=app.py
 
 ENV SCTVA_PORT=8002
 ENV PORT=8002
+
+# The model is attempted first; all candidates still pass SCTVA syntax,
+# structural, behavioral and invariant validation. Deterministic rules remain
+# the fallback whenever the model output cannot be proven safe.
+ENV SCTVA_ENABLE_CODET5=true
+ENV SCTVA_CODET5_MODE=primary
+ENV SCTVA_CODET5_DEVICE=cpu
+ENV SCTVA_CODET5_MODEL_ID=Qwen/Qwen2.5-Coder-0.5B-Instruct
+ENV SCTVA_CODET5_MAX_NEW_TOKENS=256
+ENV SCTVA_CODET5_CPU_THREADS=4
+ENV SCTVA_CODET5_MAX_ACTIONS_PER_REQUEST=100
+ENV SCTVA_CODET5_MAX_ACTIONS_PER_FILE=100
+ENV SCTVA_CODET5_ENABLE_FILE_BUNDLING=false
+ENV SCTVA_CODET5_MAX_ACTIONS_PER_BUNDLE=5
+ENV SCTVA_CODET5_GENERATION_TIMEOUT_SECONDS=30
+ENV SCTVA_CODET5_ALLOW_DOWNLOAD=false
+ENV HF_HOME=/home/sctva/.cache/huggingface
+ENV HF_HUB_OFFLINE=1
+ENV TRANSFORMERS_OFFLINE=1
 
 
 # ------------------------------------------------------------
