@@ -1,0 +1,2765 @@
+[
+  {
+    "smell_id": "java_lm_001",
+    "language": "java",
+    "target": "OrderService.java",
+    "smell_type": "Long Method",
+    "severity": "high",
+    "location": {
+      "class": "OrderService",
+      "method": "processOrder",
+      "lines": [
+        45,
+        185
+      ]
+    },
+    "metrics": {
+      "lines_of_code": 140,
+      "cyclomatic_complexity": 24,
+      "parameter_count": 3,
+      "duplicate_blocks": 0
+    },
+    "details": "Large monolithic execution block with multiple sub-routines",
+    "expected_refactoring": "Extract Method",
+    "acceptable_alternatives": [
+      "Replace Temp with Query"
+    ],
+    "category": "single_smell"
+  },
+  {
+    "smell_id": "java_lm_002",
+    "language": "java",
+    "target": "InvoiceCalculator.java",
+    "smell_type": "Long Method",
+    "severity": "medium",
+    "location": {
+      "class": "InvoiceCalculator",
+      "method": "calculateSubtotals",
+      "lines": [
+        20,
+        95
+      ]
+    },
+    "metrics": {
+      "lines_of_code": 75,
+      "cyclomatic_complexity": 14,
+      "parameter_count": 2,
+      "has_temp_variables": true
+    },
+    "details": "Temporary variables holding calculated tax and discount values",
+    "expected_refactoring": "Replace Temp with Query",
+    "acceptable_alternatives": [
+      "Extract Method"
+    ],
+    "category": "competitive_candidates"
+  },
+  {
+    "smell_id": "java_lm_003",
+    "language": "java",
+    "target": "PaymentGateway.java",
+    "smell_type": "Long Method",
+    "severity": "high",
+    "location": {
+      "class": "PaymentGateway",
+      "method": "chargeCustomer",
+      "lines": [
+        30,
+        160
+      ]
+    },
+    "metrics": {
+      "lines_of_code": 130,
+      "cyclomatic_complexity": 18,
+      "parameter_count": 8,
+      "has_multiple_parameters": true
+    },
+    "details": "Long parameter list combined with long calculation sequence",
+    "expected_refactoring": "Introduce Parameter Object",
+    "acceptable_alternatives": [
+      "Extract Method"
+    ],
+    "category": "competitive_candidates"
+  },
+  {
+    "smell_id": "java_lm_004",
+    "language": "java",
+    "target": "SingleLineStub.java",
+    "smell_type": "Long Method",
+    "severity": "low",
+    "location": {
+      "class": "SingleLineStub",
+      "method": "stub",
+      "lines": [
+        10,
+        11
+      ]
+    },
+    "metrics": {
+      "lines_of_code": 1,
+      "cyclomatic_complexity": 1
+    },
+    "details": "False positive detection on short accessor",
+    "expected_refactoring": null,
+    "category": "precondition_boundary"
+  },
+  {
+    "smell_id": "java_gc_001",
+    "language": "java",
+    "target": "UserManager.java",
+    "smell_type": "God Class",
+    "severity": "critical",
+    "location": {
+      "class": "UserManager",
+      "method": null,
+      "lines": [
+        1,
+        950
+      ]
+    },
+    "metrics": {
+      "lines_of_code": 950,
+      "method_count": 38,
+      "field_count": 24,
+      "cyclomatic_complexity": 48
+    },
+    "details": "Class handles user authentication, billing, notification, and logging",
+    "expected_refactoring": "Extract Class",
+    "acceptable_alternatives": [
+      "Extract Subclass"
+    ],
+    "category": "single_smell"
+  },
+  {
+    "smell_id": "java_gc_002",
+    "language": "java",
+    "target": "DocumentHandler.java",
+    "smell_type": "God Class",
+    "severity": "high",
+    "location": {
+      "class": "DocumentHandler",
+      "method": null,
+      "lines": [
+        1,
+        700
+      ]
+    },
+    "metrics": {
+      "lines_of_code": 700,
+      "method_count": 26,
+      "field_count": 18,
+      "inheritance_depth": 2
+    },
+    "details": "Handles specialized PDF and Word variants within the same class",
+    "expected_refactoring": "Extract Subclass",
+    "acceptable_alternatives": [
+      "Extract Class"
+    ],
+    "category": "competitive_candidates"
+  },
+  {
+    "smell_id": "java_fe_001",
+    "language": "java",
+    "target": "OrderProcessor.java",
+    "smell_type": "Feature Envy",
+    "severity": "high",
+    "location": {
+      "class": "OrderProcessor",
+      "method": "calculateCustomerPoints",
+      "lines": [
+        110,
+        145
+      ]
+    },
+    "metrics": {
+      "lines_of_code": 35,
+      "external_field_accesses": 9,
+      "internal_field_accesses": 1
+    },
+    "details": "Method accesses CustomerAccount fields exclusively",
+    "expected_refactoring": "Move Method",
+    "category": "single_smell"
+  },
+  {
+    "smell_id": "java_fe_002",
+    "language": "java",
+    "target": "ReportGenerator.java",
+    "smell_type": "Feature Envy",
+    "severity": "medium",
+    "location": {
+      "class": "ReportGenerator",
+      "method": "formatRow",
+      "lines": [
+        80,
+        105
+      ]
+    },
+    "metrics": {
+      "lines_of_code": 25,
+      "external_field_accesses": 7,
+      "internal_field_accesses": 0
+    },
+    "details": "Row formatting logic belongs to TableModel",
+    "expected_refactoring": "Move Method",
+    "category": "single_smell"
+  },
+  {
+    "smell_id": "java_dc_001",
+    "language": "java",
+    "target": "ShippingService.java",
+    "smell_type": "Data Clumps",
+    "location": {
+      "class": "ShippingService",
+      "method": "createShipment",
+      "lines": [
+        30,
+        60
+      ]
+    },
+    "metrics": {
+      "parameter_count": 6,
+      "clump_size": 4,
+      "lines_of_code": 30
+    },
+    "severity": "medium",
+    "details": "Parameters street, city, zip, state repeatedly passed together",
+    "expected_refactoring": "Introduce Parameter Object",
+    "acceptable_alternatives": [
+      "Extract Class"
+    ],
+    "category": "single_smell"
+  },
+  {
+    "smell_id": "java_dc_002",
+    "language": "java",
+    "target": "CustomerProfile.java",
+    "smell_type": "Data Clumps",
+    "location": {
+      "class": "CustomerProfile",
+      "method": null,
+      "lines": [
+        10,
+        120
+      ]
+    },
+    "metrics": {
+      "field_count": 15,
+      "clump_size": 5,
+      "lines_of_code": 110
+    },
+    "severity": "medium",
+    "details": "Contact fields phone, mobile, email, fax, pager clustered in class",
+    "expected_refactoring": "Extract Class",
+    "acceptable_alternatives": [
+      "Introduce Parameter Object"
+    ],
+    "category": "competitive_candidates"
+  },
+  {
+    "smell_id": "java_dup_001",
+    "language": "java",
+    "target": "AnalyticsEngine.java",
+    "smell_type": "Duplicate Code",
+    "location": {
+      "class": "AnalyticsEngine",
+      "method": "renderDailyStats",
+      "lines": [
+        100,
+        140
+      ]
+    },
+    "metrics": {
+      "lines_of_code": 40,
+      "duplicate_blocks": 3
+    },
+    "severity": "high",
+    "details": "Identical aggregation loop found across 3 reporting methods",
+    "expected_refactoring": "Extract Method",
+    "category": "single_smell"
+  },
+  {
+    "smell_id": "java_dup_002",
+    "language": "java",
+    "target": "PremiumCustomer.java",
+    "smell_type": "Duplicate Code",
+    "location": {
+      "class": "PremiumCustomer",
+      "method": "validateCredentials",
+      "lines": [
+        50,
+        75
+      ]
+    },
+    "metrics": {
+      "lines_of_code": 25,
+      "has_parent_class": true,
+      "duplicate_blocks": 2
+    },
+    "severity": "medium",
+    "details": "Same validation method exists in RegularCustomer and PremiumCustomer with common base Customer",
+    "expected_refactoring": "Pull Up Method",
+    "acceptable_alternatives": [
+      "Extract Method"
+    ],
+    "category": "competitive_candidates"
+  },
+  {
+    "smell_id": "java_mn_001",
+    "language": "java",
+    "target": "InterestRateHelper.java",
+    "smell_type": "Magic Number",
+    "location": {
+      "class": "InterestRateHelper",
+      "method": "applyPenalty",
+      "lines": [
+        42,
+        43
+      ]
+    },
+    "metrics": {
+      "lines_of_code": 15,
+      "literal_occurrences": 4
+    },
+    "severity": "low",
+    "details": "Hard-coded literal 0.0825 used across calculations",
+    "expected_refactoring": "Introduce Constant",
+    "category": "single_smell"
+  },
+  {
+    "smell_id": "java_mn_002",
+    "language": "java",
+    "target": "CryptoEncoder.java",
+    "smell_type": "Magic Number",
+    "location": {
+      "class": "CryptoEncoder",
+      "method": "padBlock",
+      "lines": [
+        90,
+        91
+      ]
+    },
+    "metrics": {
+      "lines_of_code": 20,
+      "literal_occurrences": 6
+    },
+    "severity": "low",
+    "details": "Hard-coded block size 256 repeated without constant name",
+    "expected_refactoring": "Introduce Constant",
+    "category": "single_smell"
+  },
+  {
+    "smell_id": "java_dc_003",
+    "language": "java",
+    "target": "LegacyUtility.java",
+    "smell_type": "Dead Code",
+    "location": {
+      "class": "LegacyUtility",
+      "method": "obsoleteV1Formatter",
+      "lines": [
+        210,
+        245
+      ]
+    },
+    "metrics": {
+      "lines_of_code": 35,
+      "call_site_count": 0
+    },
+    "severity": "low",
+    "details": "Private helper method with zero internal and external invocations",
+    "expected_refactoring": "Remove Dead Code",
+    "category": "single_smell"
+  },
+  {
+    "smell_id": "java_ii_001",
+    "language": "java",
+    "target": "AccountManager.java",
+    "smell_type": "Inappropriate Intimacy",
+    "location": {
+      "class": "AccountManager",
+      "method": "syncLedger",
+      "lines": [
+        120,
+        160
+      ]
+    },
+    "metrics": {
+      "lines_of_code": 40,
+      "external_field_accesses": 12,
+      "is_class_method": true,
+      "has_valid_destination": true
+    },
+    "severity": "high",
+    "details": "Deep private access into Ledger internal collections",
+    "expected_refactoring": "Move Method",
+    "acceptable_alternatives": [
+      "Extract Method"
+    ],
+    "category": "competitive_candidates"
+  },
+  {
+    "smell_id": "java_syn_017",
+    "language": "java",
+    "target": "Component17.java",
+    "smell_type": "Magic Number",
+    "severity": "medium",
+    "location": {
+      "class": "Component17",
+      "method": "action17",
+      "lines": [
+        10,
+        101
+      ]
+    },
+    "metrics": {
+      "lines_of_code": 74,
+      "cyclomatic_complexity": 12,
+      "duplicate_blocks": 0
+    },
+    "details": "Realistic codebase sample 17 for Magic Number",
+    "expected_refactoring": "Introduce Constant",
+    "category": "single_smell"
+  },
+  {
+    "smell_id": "java_syn_018",
+    "language": "java",
+    "target": "Component18.java",
+    "smell_type": "Long Method",
+    "severity": "high",
+    "location": {
+      "class": "Component18",
+      "method": "action18",
+      "lines": [
+        10,
+        104
+      ]
+    },
+    "metrics": {
+      "lines_of_code": 76,
+      "cyclomatic_complexity": 13,
+      "duplicate_blocks": 0
+    },
+    "details": "Realistic codebase sample 18 for Long Method",
+    "expected_refactoring": "Extract Method",
+    "category": "single_smell"
+  },
+  {
+    "smell_id": "java_syn_019",
+    "language": "java",
+    "target": "Component19.java",
+    "smell_type": "God Class",
+    "severity": "critical",
+    "location": {
+      "class": "Component19",
+      "method": "action19",
+      "lines": [
+        10,
+        107
+      ]
+    },
+    "metrics": {
+      "lines_of_code": 78,
+      "cyclomatic_complexity": 14,
+      "duplicate_blocks": 0
+    },
+    "details": "Realistic codebase sample 19 for God Class",
+    "expected_refactoring": "Extract Class",
+    "category": "single_smell"
+  },
+  {
+    "smell_id": "java_syn_020",
+    "language": "java",
+    "target": "Component20.java",
+    "smell_type": "Feature Envy",
+    "severity": "low",
+    "location": {
+      "class": "Component20",
+      "method": "action20",
+      "lines": [
+        10,
+        110
+      ]
+    },
+    "metrics": {
+      "lines_of_code": 80,
+      "cyclomatic_complexity": 5,
+      "duplicate_blocks": 0
+    },
+    "details": "Realistic codebase sample 20 for Feature Envy",
+    "expected_refactoring": "Move Method",
+    "category": "single_smell"
+  },
+  {
+    "smell_id": "java_syn_021",
+    "language": "java",
+    "target": "Component21.java",
+    "smell_type": "Data Clumps",
+    "severity": "medium",
+    "location": {
+      "class": "Component21",
+      "method": "action21",
+      "lines": [
+        10,
+        113
+      ]
+    },
+    "metrics": {
+      "lines_of_code": 82,
+      "cyclomatic_complexity": 6,
+      "duplicate_blocks": 0
+    },
+    "details": "Realistic codebase sample 21 for Data Clumps",
+    "expected_refactoring": "Introduce Parameter Object",
+    "category": "single_smell"
+  },
+  {
+    "smell_id": "java_syn_022",
+    "language": "java",
+    "target": "Component22.java",
+    "smell_type": "Duplicate Code",
+    "severity": "high",
+    "location": {
+      "class": "Component22",
+      "method": "action22",
+      "lines": [
+        10,
+        116
+      ]
+    },
+    "metrics": {
+      "lines_of_code": 84,
+      "cyclomatic_complexity": 7,
+      "duplicate_blocks": 1
+    },
+    "details": "Realistic codebase sample 22 for Duplicate Code",
+    "expected_refactoring": "Extract Method",
+    "category": "single_smell"
+  },
+  {
+    "smell_id": "java_syn_023",
+    "language": "java",
+    "target": "Component23.java",
+    "smell_type": "Magic Number",
+    "severity": "critical",
+    "location": {
+      "class": "Component23",
+      "method": "action23",
+      "lines": [
+        10,
+        119
+      ]
+    },
+    "metrics": {
+      "lines_of_code": 86,
+      "cyclomatic_complexity": 8,
+      "duplicate_blocks": 0
+    },
+    "details": "Realistic codebase sample 23 for Magic Number",
+    "expected_refactoring": "Introduce Constant",
+    "category": "single_smell"
+  },
+  {
+    "smell_id": "java_syn_024",
+    "language": "java",
+    "target": "Component24.java",
+    "smell_type": "Long Method",
+    "severity": "low",
+    "location": {
+      "class": "Component24",
+      "method": "action24",
+      "lines": [
+        10,
+        122
+      ]
+    },
+    "metrics": {
+      "lines_of_code": 88,
+      "cyclomatic_complexity": 9,
+      "duplicate_blocks": 0
+    },
+    "details": "Realistic codebase sample 24 for Long Method",
+    "expected_refactoring": "Extract Method",
+    "category": "single_smell"
+  },
+  {
+    "smell_id": "java_syn_025",
+    "language": "java",
+    "target": "Component25.java",
+    "smell_type": "God Class",
+    "severity": "medium",
+    "location": {
+      "class": "Component25",
+      "method": "action25",
+      "lines": [
+        10,
+        125
+      ]
+    },
+    "metrics": {
+      "lines_of_code": 90,
+      "cyclomatic_complexity": 10,
+      "duplicate_blocks": 0
+    },
+    "details": "Realistic codebase sample 25 for God Class",
+    "expected_refactoring": "Extract Class",
+    "category": "single_smell"
+  },
+  {
+    "smell_id": "java_syn_026",
+    "language": "java",
+    "target": "Component26.java",
+    "smell_type": "Feature Envy",
+    "severity": "high",
+    "location": {
+      "class": "Component26",
+      "method": "action26",
+      "lines": [
+        10,
+        128
+      ]
+    },
+    "metrics": {
+      "lines_of_code": 92,
+      "cyclomatic_complexity": 11,
+      "duplicate_blocks": 0
+    },
+    "details": "Realistic codebase sample 26 for Feature Envy",
+    "expected_refactoring": "Move Method",
+    "category": "single_smell"
+  },
+  {
+    "smell_id": "java_syn_027",
+    "language": "java",
+    "target": "Component27.java",
+    "smell_type": "Data Clumps",
+    "severity": "critical",
+    "location": {
+      "class": "Component27",
+      "method": "action27",
+      "lines": [
+        10,
+        131
+      ]
+    },
+    "metrics": {
+      "lines_of_code": 94,
+      "cyclomatic_complexity": 12,
+      "duplicate_blocks": 0
+    },
+    "details": "Realistic codebase sample 27 for Data Clumps",
+    "expected_refactoring": "Introduce Parameter Object",
+    "category": "single_smell"
+  },
+  {
+    "smell_id": "java_syn_028",
+    "language": "java",
+    "target": "Component28.java",
+    "smell_type": "Duplicate Code",
+    "severity": "low",
+    "location": {
+      "class": "Component28",
+      "method": "action28",
+      "lines": [
+        10,
+        134
+      ]
+    },
+    "metrics": {
+      "lines_of_code": 96,
+      "cyclomatic_complexity": 13,
+      "duplicate_blocks": 1
+    },
+    "details": "Realistic codebase sample 28 for Duplicate Code",
+    "expected_refactoring": "Extract Method",
+    "category": "single_smell"
+  },
+  {
+    "smell_id": "java_syn_029",
+    "language": "java",
+    "target": "Component29.java",
+    "smell_type": "Magic Number",
+    "severity": "medium",
+    "location": {
+      "class": "Component29",
+      "method": "action29",
+      "lines": [
+        10,
+        137
+      ]
+    },
+    "metrics": {
+      "lines_of_code": 98,
+      "cyclomatic_complexity": 14,
+      "duplicate_blocks": 0
+    },
+    "details": "Realistic codebase sample 29 for Magic Number",
+    "expected_refactoring": "Introduce Constant",
+    "category": "single_smell"
+  },
+  {
+    "smell_id": "java_syn_030",
+    "language": "java",
+    "target": "Component30.java",
+    "smell_type": "Long Method",
+    "severity": "high",
+    "location": {
+      "class": "Component30",
+      "method": "action30",
+      "lines": [
+        10,
+        140
+      ]
+    },
+    "metrics": {
+      "lines_of_code": 100,
+      "cyclomatic_complexity": 5,
+      "duplicate_blocks": 0
+    },
+    "details": "Realistic codebase sample 30 for Long Method",
+    "expected_refactoring": "Extract Method",
+    "category": "single_smell"
+  },
+  {
+    "smell_id": "java_syn_031",
+    "language": "java",
+    "target": "Component31.java",
+    "smell_type": "God Class",
+    "severity": "critical",
+    "location": {
+      "class": "Component31",
+      "method": "action31",
+      "lines": [
+        10,
+        143
+      ]
+    },
+    "metrics": {
+      "lines_of_code": 102,
+      "cyclomatic_complexity": 6,
+      "duplicate_blocks": 0
+    },
+    "details": "Realistic codebase sample 31 for God Class",
+    "expected_refactoring": "Extract Class",
+    "category": "single_smell"
+  },
+  {
+    "smell_id": "java_syn_032",
+    "language": "java",
+    "target": "Component32.java",
+    "smell_type": "Feature Envy",
+    "severity": "low",
+    "location": {
+      "class": "Component32",
+      "method": "action32",
+      "lines": [
+        10,
+        146
+      ]
+    },
+    "metrics": {
+      "lines_of_code": 104,
+      "cyclomatic_complexity": 7,
+      "duplicate_blocks": 0
+    },
+    "details": "Realistic codebase sample 32 for Feature Envy",
+    "expected_refactoring": "Move Method",
+    "category": "single_smell"
+  },
+  {
+    "smell_id": "java_syn_033",
+    "language": "java",
+    "target": "Component33.java",
+    "smell_type": "Data Clumps",
+    "severity": "medium",
+    "location": {
+      "class": "Component33",
+      "method": "action33",
+      "lines": [
+        10,
+        149
+      ]
+    },
+    "metrics": {
+      "lines_of_code": 106,
+      "cyclomatic_complexity": 8,
+      "duplicate_blocks": 0
+    },
+    "details": "Realistic codebase sample 33 for Data Clumps",
+    "expected_refactoring": "Introduce Parameter Object",
+    "category": "single_smell"
+  },
+  {
+    "smell_id": "java_syn_034",
+    "language": "java",
+    "target": "Component34.java",
+    "smell_type": "Duplicate Code",
+    "severity": "high",
+    "location": {
+      "class": "Component34",
+      "method": "action34",
+      "lines": [
+        10,
+        152
+      ]
+    },
+    "metrics": {
+      "lines_of_code": 108,
+      "cyclomatic_complexity": 9,
+      "duplicate_blocks": 1
+    },
+    "details": "Realistic codebase sample 34 for Duplicate Code",
+    "expected_refactoring": "Extract Method",
+    "category": "single_smell"
+  },
+  {
+    "smell_id": "java_syn_035",
+    "language": "java",
+    "target": "Component35.java",
+    "smell_type": "Magic Number",
+    "severity": "critical",
+    "location": {
+      "class": "Component35",
+      "method": "action35",
+      "lines": [
+        10,
+        155
+      ]
+    },
+    "metrics": {
+      "lines_of_code": 110,
+      "cyclomatic_complexity": 10,
+      "duplicate_blocks": 0
+    },
+    "details": "Realistic codebase sample 35 for Magic Number",
+    "expected_refactoring": "Introduce Constant",
+    "category": "single_smell"
+  },
+  {
+    "smell_id": "java_syn_036",
+    "language": "java",
+    "target": "Component36.java",
+    "smell_type": "Long Method",
+    "severity": "low",
+    "location": {
+      "class": "Component36",
+      "method": "action36",
+      "lines": [
+        10,
+        158
+      ]
+    },
+    "metrics": {
+      "lines_of_code": 112,
+      "cyclomatic_complexity": 11,
+      "duplicate_blocks": 0
+    },
+    "details": "Realistic codebase sample 36 for Long Method",
+    "expected_refactoring": "Extract Method",
+    "category": "single_smell"
+  },
+  {
+    "smell_id": "java_syn_037",
+    "language": "java",
+    "target": "Component37.java",
+    "smell_type": "God Class",
+    "severity": "medium",
+    "location": {
+      "class": "Component37",
+      "method": "action37",
+      "lines": [
+        10,
+        161
+      ]
+    },
+    "metrics": {
+      "lines_of_code": 114,
+      "cyclomatic_complexity": 12,
+      "duplicate_blocks": 0
+    },
+    "details": "Realistic codebase sample 37 for God Class",
+    "expected_refactoring": "Extract Class",
+    "category": "single_smell"
+  },
+  {
+    "smell_id": "java_syn_038",
+    "language": "java",
+    "target": "Component38.java",
+    "smell_type": "Feature Envy",
+    "severity": "high",
+    "location": {
+      "class": "Component38",
+      "method": "action38",
+      "lines": [
+        10,
+        164
+      ]
+    },
+    "metrics": {
+      "lines_of_code": 116,
+      "cyclomatic_complexity": 13,
+      "duplicate_blocks": 0
+    },
+    "details": "Realistic codebase sample 38 for Feature Envy",
+    "expected_refactoring": "Move Method",
+    "category": "single_smell"
+  },
+  {
+    "smell_id": "java_syn_039",
+    "language": "java",
+    "target": "Component39.java",
+    "smell_type": "Data Clumps",
+    "severity": "critical",
+    "location": {
+      "class": "Component39",
+      "method": "action39",
+      "lines": [
+        10,
+        167
+      ]
+    },
+    "metrics": {
+      "lines_of_code": 118,
+      "cyclomatic_complexity": 14,
+      "duplicate_blocks": 0
+    },
+    "details": "Realistic codebase sample 39 for Data Clumps",
+    "expected_refactoring": "Introduce Parameter Object",
+    "category": "single_smell"
+  },
+  {
+    "smell_id": "java_syn_040",
+    "language": "java",
+    "target": "Component40.java",
+    "smell_type": "Duplicate Code",
+    "severity": "low",
+    "location": {
+      "class": "Component40",
+      "method": "action40",
+      "lines": [
+        10,
+        170
+      ]
+    },
+    "metrics": {
+      "lines_of_code": 120,
+      "cyclomatic_complexity": 5,
+      "duplicate_blocks": 1
+    },
+    "details": "Realistic codebase sample 40 for Duplicate Code",
+    "expected_refactoring": "Extract Method",
+    "category": "single_smell"
+  },
+  {
+    "smell_id": "py_lf_001",
+    "language": "python",
+    "target": "data_pipeline.py",
+    "smell_type": "Long Function",
+    "severity": "high",
+    "location": {
+      "class": null,
+      "method": "transform_dataset",
+      "lines": [
+        15,
+        120
+      ]
+    },
+    "metrics": {
+      "lines_of_code": 105,
+      "cyclomatic_complexity": 18
+    },
+    "details": "Pipeline function performing extraction, cleaning, and normalization",
+    "expected_refactoring": "Extract Method",
+    "category": "single_smell"
+  },
+  {
+    "smell_id": "py_tmp_001",
+    "language": "python",
+    "target": "notifier.py",
+    "smell_type": "Too Many Parameters",
+    "severity": "medium",
+    "location": {
+      "class": "Notifier",
+      "method": "send_email_notification",
+      "lines": [
+        40,
+        65
+      ]
+    },
+    "metrics": {
+      "parameter_count": 9,
+      "lines_of_code": 25
+    },
+    "details": "Nine distinct parameters specifying headers, auth, recipient, smtp",
+    "expected_refactoring": "Introduce Parameter Object",
+    "acceptable_alternatives": [
+      "Replace Parameter with Method Call"
+    ],
+    "category": "single_smell"
+  },
+  {
+    "smell_id": "py_lc_001",
+    "language": "python",
+    "target": "orchestrator.py",
+    "smell_type": "Large Class",
+    "severity": "critical",
+    "location": {
+      "class": "TaskOrchestrator",
+      "method": null,
+      "lines": [
+        1,
+        620
+      ]
+    },
+    "metrics": {
+      "lines_of_code": 620,
+      "method_count": 32,
+      "cyclomatic_complexity": 42
+    },
+    "details": "Orchestrator handles scheduling, queuing, network retries, and persistence",
+    "expected_refactoring": "Extract Class",
+    "category": "single_smell"
+  },
+  {
+    "smell_id": "py_cc_001",
+    "language": "python",
+    "target": "access_control.py",
+    "smell_type": "Complex Condition",
+    "severity": "high",
+    "location": {
+      "class": "SecurityFilter",
+      "method": "has_permission",
+      "lines": [
+        80,
+        110
+      ]
+    },
+    "metrics": {
+      "cyclomatic_complexity": 16,
+      "nesting_depth": 4,
+      "lines_of_code": 30
+    },
+    "details": "Multi-term Boolean logic with nested and/or expressions",
+    "expected_refactoring": "Decompose Conditional",
+    "acceptable_alternatives": [
+      "Replace Conditional with Polymorphism"
+    ],
+    "category": "single_smell"
+  },
+  {
+    "smell_id": "py_syn_005",
+    "language": "python",
+    "target": "service_5.py",
+    "smell_type": "Too Many Parameters",
+    "severity": "medium",
+    "location": {
+      "class": "Service5",
+      "method": "handler_5",
+      "lines": [
+        20,
+        70
+      ]
+    },
+    "metrics": {
+      "lines_of_code": 50,
+      "cyclomatic_complexity": 11
+    },
+    "details": "Python codebase benchmark 5 for Too Many Parameters",
+    "expected_refactoring": "Introduce Parameter Object",
+    "category": "single_smell"
+  },
+  {
+    "smell_id": "py_syn_006",
+    "language": "python",
+    "target": "service_6.py",
+    "smell_type": "Large Class",
+    "severity": "high",
+    "location": {
+      "class": "Service6",
+      "method": "handler_6",
+      "lines": [
+        20,
+        72
+      ]
+    },
+    "metrics": {
+      "lines_of_code": 51,
+      "cyclomatic_complexity": 12
+    },
+    "details": "Python codebase benchmark 6 for Large Class",
+    "expected_refactoring": "Extract Class",
+    "category": "single_smell"
+  },
+  {
+    "smell_id": "py_syn_007",
+    "language": "python",
+    "target": "service_7.py",
+    "smell_type": "Complex Condition",
+    "severity": "critical",
+    "location": {
+      "class": "Service7",
+      "method": "handler_7",
+      "lines": [
+        20,
+        74
+      ]
+    },
+    "metrics": {
+      "lines_of_code": 52,
+      "cyclomatic_complexity": 13
+    },
+    "details": "Python codebase benchmark 7 for Complex Condition",
+    "expected_refactoring": "Decompose Conditional",
+    "category": "single_smell"
+  },
+  {
+    "smell_id": "py_syn_008",
+    "language": "python",
+    "target": "service_8.py",
+    "smell_type": "Long Function",
+    "severity": "low",
+    "location": {
+      "class": "Service8",
+      "method": "handler_8",
+      "lines": [
+        20,
+        76
+      ]
+    },
+    "metrics": {
+      "lines_of_code": 53,
+      "cyclomatic_complexity": 6
+    },
+    "details": "Python codebase benchmark 8 for Long Function",
+    "expected_refactoring": "Extract Method",
+    "category": "single_smell"
+  },
+  {
+    "smell_id": "py_syn_009",
+    "language": "python",
+    "target": "service_9.py",
+    "smell_type": "Too Many Parameters",
+    "severity": "medium",
+    "location": {
+      "class": "Service9",
+      "method": "handler_9",
+      "lines": [
+        20,
+        78
+      ]
+    },
+    "metrics": {
+      "lines_of_code": 54,
+      "cyclomatic_complexity": 7
+    },
+    "details": "Python codebase benchmark 9 for Too Many Parameters",
+    "expected_refactoring": "Introduce Parameter Object",
+    "category": "single_smell"
+  },
+  {
+    "smell_id": "py_syn_010",
+    "language": "python",
+    "target": "service_10.py",
+    "smell_type": "Large Class",
+    "severity": "high",
+    "location": {
+      "class": "Service10",
+      "method": "handler_10",
+      "lines": [
+        20,
+        80
+      ]
+    },
+    "metrics": {
+      "lines_of_code": 55,
+      "cyclomatic_complexity": 8
+    },
+    "details": "Python codebase benchmark 10 for Large Class",
+    "expected_refactoring": "Extract Class",
+    "category": "single_smell"
+  },
+  {
+    "smell_id": "py_syn_011",
+    "language": "python",
+    "target": "service_11.py",
+    "smell_type": "Complex Condition",
+    "severity": "critical",
+    "location": {
+      "class": "Service11",
+      "method": "handler_11",
+      "lines": [
+        20,
+        82
+      ]
+    },
+    "metrics": {
+      "lines_of_code": 56,
+      "cyclomatic_complexity": 9
+    },
+    "details": "Python codebase benchmark 11 for Complex Condition",
+    "expected_refactoring": "Decompose Conditional",
+    "category": "single_smell"
+  },
+  {
+    "smell_id": "py_syn_012",
+    "language": "python",
+    "target": "service_12.py",
+    "smell_type": "Long Function",
+    "severity": "low",
+    "location": {
+      "class": "Service12",
+      "method": "handler_12",
+      "lines": [
+        20,
+        84
+      ]
+    },
+    "metrics": {
+      "lines_of_code": 57,
+      "cyclomatic_complexity": 10
+    },
+    "details": "Python codebase benchmark 12 for Long Function",
+    "expected_refactoring": "Extract Method",
+    "category": "single_smell"
+  },
+  {
+    "smell_id": "py_syn_013",
+    "language": "python",
+    "target": "service_13.py",
+    "smell_type": "Too Many Parameters",
+    "severity": "medium",
+    "location": {
+      "class": "Service13",
+      "method": "handler_13",
+      "lines": [
+        20,
+        86
+      ]
+    },
+    "metrics": {
+      "lines_of_code": 58,
+      "cyclomatic_complexity": 11
+    },
+    "details": "Python codebase benchmark 13 for Too Many Parameters",
+    "expected_refactoring": "Introduce Parameter Object",
+    "category": "single_smell"
+  },
+  {
+    "smell_id": "py_syn_014",
+    "language": "python",
+    "target": "service_14.py",
+    "smell_type": "Large Class",
+    "severity": "high",
+    "location": {
+      "class": "Service14",
+      "method": "handler_14",
+      "lines": [
+        20,
+        88
+      ]
+    },
+    "metrics": {
+      "lines_of_code": 59,
+      "cyclomatic_complexity": 12
+    },
+    "details": "Python codebase benchmark 14 for Large Class",
+    "expected_refactoring": "Extract Class",
+    "category": "single_smell"
+  },
+  {
+    "smell_id": "py_syn_015",
+    "language": "python",
+    "target": "service_15.py",
+    "smell_type": "Complex Condition",
+    "severity": "critical",
+    "location": {
+      "class": "Service15",
+      "method": "handler_15",
+      "lines": [
+        20,
+        90
+      ]
+    },
+    "metrics": {
+      "lines_of_code": 60,
+      "cyclomatic_complexity": 13
+    },
+    "details": "Python codebase benchmark 15 for Complex Condition",
+    "expected_refactoring": "Decompose Conditional",
+    "category": "single_smell"
+  },
+  {
+    "smell_id": "py_syn_016",
+    "language": "python",
+    "target": "service_16.py",
+    "smell_type": "Long Function",
+    "severity": "low",
+    "location": {
+      "class": "Service16",
+      "method": "handler_16",
+      "lines": [
+        20,
+        92
+      ]
+    },
+    "metrics": {
+      "lines_of_code": 61,
+      "cyclomatic_complexity": 6
+    },
+    "details": "Python codebase benchmark 16 for Long Function",
+    "expected_refactoring": "Extract Method",
+    "category": "single_smell"
+  },
+  {
+    "smell_id": "py_syn_017",
+    "language": "python",
+    "target": "service_17.py",
+    "smell_type": "Too Many Parameters",
+    "severity": "medium",
+    "location": {
+      "class": "Service17",
+      "method": "handler_17",
+      "lines": [
+        20,
+        94
+      ]
+    },
+    "metrics": {
+      "lines_of_code": 62,
+      "cyclomatic_complexity": 7
+    },
+    "details": "Python codebase benchmark 17 for Too Many Parameters",
+    "expected_refactoring": "Introduce Parameter Object",
+    "category": "single_smell"
+  },
+  {
+    "smell_id": "py_syn_018",
+    "language": "python",
+    "target": "service_18.py",
+    "smell_type": "Large Class",
+    "severity": "high",
+    "location": {
+      "class": "Service18",
+      "method": "handler_18",
+      "lines": [
+        20,
+        96
+      ]
+    },
+    "metrics": {
+      "lines_of_code": 63,
+      "cyclomatic_complexity": 8
+    },
+    "details": "Python codebase benchmark 18 for Large Class",
+    "expected_refactoring": "Extract Class",
+    "category": "single_smell"
+  },
+  {
+    "smell_id": "py_syn_019",
+    "language": "python",
+    "target": "service_19.py",
+    "smell_type": "Complex Condition",
+    "severity": "critical",
+    "location": {
+      "class": "Service19",
+      "method": "handler_19",
+      "lines": [
+        20,
+        98
+      ]
+    },
+    "metrics": {
+      "lines_of_code": 64,
+      "cyclomatic_complexity": 9
+    },
+    "details": "Python codebase benchmark 19 for Complex Condition",
+    "expected_refactoring": "Decompose Conditional",
+    "category": "single_smell"
+  },
+  {
+    "smell_id": "py_syn_020",
+    "language": "python",
+    "target": "service_20.py",
+    "smell_type": "Long Function",
+    "severity": "low",
+    "location": {
+      "class": "Service20",
+      "method": "handler_20",
+      "lines": [
+        20,
+        100
+      ]
+    },
+    "metrics": {
+      "lines_of_code": 65,
+      "cyclomatic_complexity": 10
+    },
+    "details": "Python codebase benchmark 20 for Long Function",
+    "expected_refactoring": "Extract Method",
+    "category": "single_smell"
+  },
+  {
+    "smell_id": "py_syn_021",
+    "language": "python",
+    "target": "service_21.py",
+    "smell_type": "Too Many Parameters",
+    "severity": "medium",
+    "location": {
+      "class": "Service21",
+      "method": "handler_21",
+      "lines": [
+        20,
+        102
+      ]
+    },
+    "metrics": {
+      "lines_of_code": 66,
+      "cyclomatic_complexity": 11
+    },
+    "details": "Python codebase benchmark 21 for Too Many Parameters",
+    "expected_refactoring": "Introduce Parameter Object",
+    "category": "single_smell"
+  },
+  {
+    "smell_id": "py_syn_022",
+    "language": "python",
+    "target": "service_22.py",
+    "smell_type": "Large Class",
+    "severity": "high",
+    "location": {
+      "class": "Service22",
+      "method": "handler_22",
+      "lines": [
+        20,
+        104
+      ]
+    },
+    "metrics": {
+      "lines_of_code": 67,
+      "cyclomatic_complexity": 12
+    },
+    "details": "Python codebase benchmark 22 for Large Class",
+    "expected_refactoring": "Extract Class",
+    "category": "single_smell"
+  },
+  {
+    "smell_id": "py_syn_023",
+    "language": "python",
+    "target": "service_23.py",
+    "smell_type": "Complex Condition",
+    "severity": "critical",
+    "location": {
+      "class": "Service23",
+      "method": "handler_23",
+      "lines": [
+        20,
+        106
+      ]
+    },
+    "metrics": {
+      "lines_of_code": 68,
+      "cyclomatic_complexity": 13
+    },
+    "details": "Python codebase benchmark 23 for Complex Condition",
+    "expected_refactoring": "Decompose Conditional",
+    "category": "single_smell"
+  },
+  {
+    "smell_id": "py_syn_024",
+    "language": "python",
+    "target": "service_24.py",
+    "smell_type": "Long Function",
+    "severity": "low",
+    "location": {
+      "class": "Service24",
+      "method": "handler_24",
+      "lines": [
+        20,
+        108
+      ]
+    },
+    "metrics": {
+      "lines_of_code": 69,
+      "cyclomatic_complexity": 6
+    },
+    "details": "Python codebase benchmark 24 for Long Function",
+    "expected_refactoring": "Extract Method",
+    "category": "single_smell"
+  },
+  {
+    "smell_id": "py_syn_025",
+    "language": "python",
+    "target": "service_25.py",
+    "smell_type": "Too Many Parameters",
+    "severity": "medium",
+    "location": {
+      "class": "Service25",
+      "method": "handler_25",
+      "lines": [
+        20,
+        110
+      ]
+    },
+    "metrics": {
+      "lines_of_code": 70,
+      "cyclomatic_complexity": 7
+    },
+    "details": "Python codebase benchmark 25 for Too Many Parameters",
+    "expected_refactoring": "Introduce Parameter Object",
+    "category": "single_smell"
+  },
+  {
+    "smell_id": "py_syn_026",
+    "language": "python",
+    "target": "service_26.py",
+    "smell_type": "Large Class",
+    "severity": "high",
+    "location": {
+      "class": "Service26",
+      "method": "handler_26",
+      "lines": [
+        20,
+        112
+      ]
+    },
+    "metrics": {
+      "lines_of_code": 71,
+      "cyclomatic_complexity": 8
+    },
+    "details": "Python codebase benchmark 26 for Large Class",
+    "expected_refactoring": "Extract Class",
+    "category": "single_smell"
+  },
+  {
+    "smell_id": "py_syn_027",
+    "language": "python",
+    "target": "service_27.py",
+    "smell_type": "Complex Condition",
+    "severity": "critical",
+    "location": {
+      "class": "Service27",
+      "method": "handler_27",
+      "lines": [
+        20,
+        114
+      ]
+    },
+    "metrics": {
+      "lines_of_code": 72,
+      "cyclomatic_complexity": 9
+    },
+    "details": "Python codebase benchmark 27 for Complex Condition",
+    "expected_refactoring": "Decompose Conditional",
+    "category": "single_smell"
+  },
+  {
+    "smell_id": "py_syn_028",
+    "language": "python",
+    "target": "service_28.py",
+    "smell_type": "Long Function",
+    "severity": "low",
+    "location": {
+      "class": "Service28",
+      "method": "handler_28",
+      "lines": [
+        20,
+        116
+      ]
+    },
+    "metrics": {
+      "lines_of_code": 73,
+      "cyclomatic_complexity": 10
+    },
+    "details": "Python codebase benchmark 28 for Long Function",
+    "expected_refactoring": "Extract Method",
+    "category": "single_smell"
+  },
+  {
+    "smell_id": "py_syn_029",
+    "language": "python",
+    "target": "service_29.py",
+    "smell_type": "Too Many Parameters",
+    "severity": "medium",
+    "location": {
+      "class": "Service29",
+      "method": "handler_29",
+      "lines": [
+        20,
+        118
+      ]
+    },
+    "metrics": {
+      "lines_of_code": 74,
+      "cyclomatic_complexity": 11
+    },
+    "details": "Python codebase benchmark 29 for Too Many Parameters",
+    "expected_refactoring": "Introduce Parameter Object",
+    "category": "single_smell"
+  },
+  {
+    "smell_id": "py_syn_030",
+    "language": "python",
+    "target": "service_30.py",
+    "smell_type": "Large Class",
+    "severity": "high",
+    "location": {
+      "class": "Service30",
+      "method": "handler_30",
+      "lines": [
+        20,
+        120
+      ]
+    },
+    "metrics": {
+      "lines_of_code": 75,
+      "cyclomatic_complexity": 12
+    },
+    "details": "Python codebase benchmark 30 for Large Class",
+    "expected_refactoring": "Extract Class",
+    "category": "single_smell"
+  },
+  {
+    "smell_id": "py_syn_031",
+    "language": "python",
+    "target": "service_31.py",
+    "smell_type": "Complex Condition",
+    "severity": "critical",
+    "location": {
+      "class": "Service31",
+      "method": "handler_31",
+      "lines": [
+        20,
+        122
+      ]
+    },
+    "metrics": {
+      "lines_of_code": 76,
+      "cyclomatic_complexity": 13
+    },
+    "details": "Python codebase benchmark 31 for Complex Condition",
+    "expected_refactoring": "Decompose Conditional",
+    "category": "single_smell"
+  },
+  {
+    "smell_id": "py_syn_032",
+    "language": "python",
+    "target": "service_32.py",
+    "smell_type": "Long Function",
+    "severity": "low",
+    "location": {
+      "class": "Service32",
+      "method": "handler_32",
+      "lines": [
+        20,
+        124
+      ]
+    },
+    "metrics": {
+      "lines_of_code": 77,
+      "cyclomatic_complexity": 6
+    },
+    "details": "Python codebase benchmark 32 for Long Function",
+    "expected_refactoring": "Extract Method",
+    "category": "single_smell"
+  },
+  {
+    "smell_id": "py_syn_033",
+    "language": "python",
+    "target": "service_33.py",
+    "smell_type": "Too Many Parameters",
+    "severity": "medium",
+    "location": {
+      "class": "Service33",
+      "method": "handler_33",
+      "lines": [
+        20,
+        126
+      ]
+    },
+    "metrics": {
+      "lines_of_code": 78,
+      "cyclomatic_complexity": 7
+    },
+    "details": "Python codebase benchmark 33 for Too Many Parameters",
+    "expected_refactoring": "Introduce Parameter Object",
+    "category": "single_smell"
+  },
+  {
+    "smell_id": "py_syn_034",
+    "language": "python",
+    "target": "service_34.py",
+    "smell_type": "Large Class",
+    "severity": "high",
+    "location": {
+      "class": "Service34",
+      "method": "handler_34",
+      "lines": [
+        20,
+        128
+      ]
+    },
+    "metrics": {
+      "lines_of_code": 79,
+      "cyclomatic_complexity": 8
+    },
+    "details": "Python codebase benchmark 34 for Large Class",
+    "expected_refactoring": "Extract Class",
+    "category": "single_smell"
+  },
+  {
+    "smell_id": "py_syn_035",
+    "language": "python",
+    "target": "service_35.py",
+    "smell_type": "Complex Condition",
+    "severity": "critical",
+    "location": {
+      "class": "Service35",
+      "method": "handler_35",
+      "lines": [
+        20,
+        130
+      ]
+    },
+    "metrics": {
+      "lines_of_code": 80,
+      "cyclomatic_complexity": 9
+    },
+    "details": "Python codebase benchmark 35 for Complex Condition",
+    "expected_refactoring": "Decompose Conditional",
+    "category": "single_smell"
+  },
+  {
+    "smell_id": "py_syn_036",
+    "language": "python",
+    "target": "service_36.py",
+    "smell_type": "Long Function",
+    "severity": "low",
+    "location": {
+      "class": "Service36",
+      "method": "handler_36",
+      "lines": [
+        20,
+        132
+      ]
+    },
+    "metrics": {
+      "lines_of_code": 81,
+      "cyclomatic_complexity": 10
+    },
+    "details": "Python codebase benchmark 36 for Long Function",
+    "expected_refactoring": "Extract Method",
+    "category": "single_smell"
+  },
+  {
+    "smell_id": "py_syn_037",
+    "language": "python",
+    "target": "service_37.py",
+    "smell_type": "Too Many Parameters",
+    "severity": "medium",
+    "location": {
+      "class": "Service37",
+      "method": "handler_37",
+      "lines": [
+        20,
+        134
+      ]
+    },
+    "metrics": {
+      "lines_of_code": 82,
+      "cyclomatic_complexity": 11
+    },
+    "details": "Python codebase benchmark 37 for Too Many Parameters",
+    "expected_refactoring": "Introduce Parameter Object",
+    "category": "single_smell"
+  },
+  {
+    "smell_id": "py_syn_038",
+    "language": "python",
+    "target": "service_38.py",
+    "smell_type": "Large Class",
+    "severity": "high",
+    "location": {
+      "class": "Service38",
+      "method": "handler_38",
+      "lines": [
+        20,
+        136
+      ]
+    },
+    "metrics": {
+      "lines_of_code": 83,
+      "cyclomatic_complexity": 12
+    },
+    "details": "Python codebase benchmark 38 for Large Class",
+    "expected_refactoring": "Extract Class",
+    "category": "single_smell"
+  },
+  {
+    "smell_id": "py_syn_039",
+    "language": "python",
+    "target": "service_39.py",
+    "smell_type": "Complex Condition",
+    "severity": "critical",
+    "location": {
+      "class": "Service39",
+      "method": "handler_39",
+      "lines": [
+        20,
+        138
+      ]
+    },
+    "metrics": {
+      "lines_of_code": 84,
+      "cyclomatic_complexity": 13
+    },
+    "details": "Python codebase benchmark 39 for Complex Condition",
+    "expected_refactoring": "Decompose Conditional",
+    "category": "single_smell"
+  },
+  {
+    "smell_id": "py_syn_040",
+    "language": "python",
+    "target": "service_40.py",
+    "smell_type": "Long Function",
+    "severity": "low",
+    "location": {
+      "class": "Service40",
+      "method": "handler_40",
+      "lines": [
+        20,
+        140
+      ]
+    },
+    "metrics": {
+      "lines_of_code": 85,
+      "cyclomatic_complexity": 6
+    },
+    "details": "Python codebase benchmark 40 for Long Function",
+    "expected_refactoring": "Extract Method",
+    "category": "single_smell"
+  },
+  {
+    "smell_id": "c_dn_001",
+    "language": "c",
+    "target": "packet_parser.c",
+    "smell_type": "Deep Nesting",
+    "severity": "high",
+    "location": {
+      "class": null,
+      "method": "parse_packet_header",
+      "lines": [
+        30,
+        95
+      ]
+    },
+    "metrics": {
+      "lines_of_code": 65,
+      "nesting_depth": 6,
+      "cyclomatic_complexity": 14
+    },
+    "details": "Heavily nested if-statements validating checksum, version, payload length",
+    "expected_refactoring": "Replace Nested Conditional with Guard Clauses",
+    "acceptable_alternatives": [
+      "Extract Method"
+    ],
+    "category": "single_smell"
+  },
+  {
+    "smell_id": "c_uf_001",
+    "language": "c",
+    "target": "string_utils.c",
+    "smell_type": "Unsafe Function Usage",
+    "severity": "critical",
+    "location": {
+      "class": null,
+      "method": "copy_buffer_safe",
+      "lines": [
+        45,
+        60
+      ]
+    },
+    "metrics": {
+      "lines_of_code": 15,
+      "unsafe_function_count": 3
+    },
+    "details": "Invocation of strcpy and gets without boundary checks",
+    "expected_refactoring": "Replace Unsafe Function",
+    "category": "single_smell"
+  },
+  {
+    "smell_id": "c_gv_001",
+    "language": "c",
+    "target": "hardware_bus.c",
+    "smell_type": "Global Variable",
+    "severity": "medium",
+    "location": {
+      "class": null,
+      "method": null,
+      "lines": [
+        12,
+        13
+      ]
+    },
+    "metrics": {
+      "global_variable_usages": 14,
+      "lines_of_code": 200
+    },
+    "details": "Global bus_state accessed arbitrarily across 6 functions",
+    "expected_refactoring": "Encapsulate Variable",
+    "acceptable_alternatives": [
+      "Move Method"
+    ],
+    "category": "single_smell"
+  },
+  {
+    "smell_id": "c_lh_001",
+    "language": "c",
+    "target": "types_core.h",
+    "smell_type": "Large Header File",
+    "severity": "high",
+    "location": {
+      "class": null,
+      "method": null,
+      "lines": [
+        1,
+        550
+      ]
+    },
+    "metrics": {
+      "lines_of_code": 550,
+      "struct_count": 22,
+      "macro_count": 45
+    },
+    "details": "Header contains unrelated subsystem definitions and inline routines",
+    "expected_refactoring": "Extract Class",
+    "acceptable_alternatives": [
+      "Remove Dead Code"
+    ],
+    "category": "single_smell"
+  },
+  {
+    "smell_id": "c_syn_005",
+    "language": "c",
+    "target": "module_5.c",
+    "smell_type": "Unsafe Function Usage",
+    "severity": "medium",
+    "location": {
+      "class": null,
+      "method": "process_5",
+      "lines": [
+        15,
+        75
+      ]
+    },
+    "metrics": {
+      "lines_of_code": 60,
+      "nesting_depth": 2,
+      "cyclomatic_complexity": 13
+    },
+    "details": "C embedded legacy sample 5 for Unsafe Function Usage",
+    "expected_refactoring": "Replace Unsafe Function",
+    "category": "single_smell"
+  },
+  {
+    "smell_id": "c_syn_006",
+    "language": "c",
+    "target": "module_6.c",
+    "smell_type": "Global Variable",
+    "severity": "high",
+    "location": {
+      "class": null,
+      "method": "process_6",
+      "lines": [
+        15,
+        76
+      ]
+    },
+    "metrics": {
+      "lines_of_code": 61,
+      "nesting_depth": 2,
+      "cyclomatic_complexity": 8
+    },
+    "details": "C embedded legacy sample 6 for Global Variable",
+    "expected_refactoring": "Encapsulate Variable",
+    "category": "single_smell"
+  },
+  {
+    "smell_id": "c_syn_007",
+    "language": "c",
+    "target": "module_7.c",
+    "smell_type": "Large Header File",
+    "severity": "critical",
+    "location": {
+      "class": null,
+      "method": "process_7",
+      "lines": [
+        15,
+        77
+      ]
+    },
+    "metrics": {
+      "lines_of_code": 62,
+      "nesting_depth": 2,
+      "cyclomatic_complexity": 9
+    },
+    "details": "C embedded legacy sample 7 for Large Header File",
+    "expected_refactoring": "Extract Class",
+    "category": "single_smell"
+  },
+  {
+    "smell_id": "c_syn_008",
+    "language": "c",
+    "target": "module_8.c",
+    "smell_type": "Deep Nesting",
+    "severity": "low",
+    "location": {
+      "class": null,
+      "method": "process_8",
+      "lines": [
+        15,
+        78
+      ]
+    },
+    "metrics": {
+      "lines_of_code": 63,
+      "nesting_depth": 5,
+      "cyclomatic_complexity": 10
+    },
+    "details": "C embedded legacy sample 8 for Deep Nesting",
+    "expected_refactoring": "Replace Nested Conditional with Guard Clauses",
+    "category": "single_smell"
+  },
+  {
+    "smell_id": "c_syn_009",
+    "language": "c",
+    "target": "module_9.c",
+    "smell_type": "Unsafe Function Usage",
+    "severity": "medium",
+    "location": {
+      "class": null,
+      "method": "process_9",
+      "lines": [
+        15,
+        79
+      ]
+    },
+    "metrics": {
+      "lines_of_code": 64,
+      "nesting_depth": 2,
+      "cyclomatic_complexity": 11
+    },
+    "details": "C embedded legacy sample 9 for Unsafe Function Usage",
+    "expected_refactoring": "Replace Unsafe Function",
+    "category": "single_smell"
+  },
+  {
+    "smell_id": "c_syn_010",
+    "language": "c",
+    "target": "module_10.c",
+    "smell_type": "Global Variable",
+    "severity": "high",
+    "location": {
+      "class": null,
+      "method": "process_10",
+      "lines": [
+        15,
+        80
+      ]
+    },
+    "metrics": {
+      "lines_of_code": 65,
+      "nesting_depth": 2,
+      "cyclomatic_complexity": 12
+    },
+    "details": "C embedded legacy sample 10 for Global Variable",
+    "expected_refactoring": "Encapsulate Variable",
+    "category": "single_smell"
+  },
+  {
+    "smell_id": "c_syn_011",
+    "language": "c",
+    "target": "module_11.c",
+    "smell_type": "Large Header File",
+    "severity": "critical",
+    "location": {
+      "class": null,
+      "method": "process_11",
+      "lines": [
+        15,
+        81
+      ]
+    },
+    "metrics": {
+      "lines_of_code": 66,
+      "nesting_depth": 2,
+      "cyclomatic_complexity": 13
+    },
+    "details": "C embedded legacy sample 11 for Large Header File",
+    "expected_refactoring": "Extract Class",
+    "category": "single_smell"
+  },
+  {
+    "smell_id": "c_syn_012",
+    "language": "c",
+    "target": "module_12.c",
+    "smell_type": "Deep Nesting",
+    "severity": "low",
+    "location": {
+      "class": null,
+      "method": "process_12",
+      "lines": [
+        15,
+        82
+      ]
+    },
+    "metrics": {
+      "lines_of_code": 67,
+      "nesting_depth": 5,
+      "cyclomatic_complexity": 8
+    },
+    "details": "C embedded legacy sample 12 for Deep Nesting",
+    "expected_refactoring": "Replace Nested Conditional with Guard Clauses",
+    "category": "single_smell"
+  },
+  {
+    "smell_id": "c_syn_013",
+    "language": "c",
+    "target": "module_13.c",
+    "smell_type": "Unsafe Function Usage",
+    "severity": "medium",
+    "location": {
+      "class": null,
+      "method": "process_13",
+      "lines": [
+        15,
+        83
+      ]
+    },
+    "metrics": {
+      "lines_of_code": 68,
+      "nesting_depth": 2,
+      "cyclomatic_complexity": 9
+    },
+    "details": "C embedded legacy sample 13 for Unsafe Function Usage",
+    "expected_refactoring": "Replace Unsafe Function",
+    "category": "single_smell"
+  },
+  {
+    "smell_id": "c_syn_014",
+    "language": "c",
+    "target": "module_14.c",
+    "smell_type": "Global Variable",
+    "severity": "high",
+    "location": {
+      "class": null,
+      "method": "process_14",
+      "lines": [
+        15,
+        84
+      ]
+    },
+    "metrics": {
+      "lines_of_code": 69,
+      "nesting_depth": 2,
+      "cyclomatic_complexity": 10
+    },
+    "details": "C embedded legacy sample 14 for Global Variable",
+    "expected_refactoring": "Encapsulate Variable",
+    "category": "single_smell"
+  },
+  {
+    "smell_id": "c_syn_015",
+    "language": "c",
+    "target": "module_15.c",
+    "smell_type": "Large Header File",
+    "severity": "critical",
+    "location": {
+      "class": null,
+      "method": "process_15",
+      "lines": [
+        15,
+        85
+      ]
+    },
+    "metrics": {
+      "lines_of_code": 70,
+      "nesting_depth": 2,
+      "cyclomatic_complexity": 11
+    },
+    "details": "C embedded legacy sample 15 for Large Header File",
+    "expected_refactoring": "Extract Class",
+    "category": "single_smell"
+  },
+  {
+    "smell_id": "c_syn_016",
+    "language": "c",
+    "target": "module_16.c",
+    "smell_type": "Deep Nesting",
+    "severity": "low",
+    "location": {
+      "class": null,
+      "method": "process_16",
+      "lines": [
+        15,
+        86
+      ]
+    },
+    "metrics": {
+      "lines_of_code": 71,
+      "nesting_depth": 5,
+      "cyclomatic_complexity": 12
+    },
+    "details": "C embedded legacy sample 16 for Deep Nesting",
+    "expected_refactoring": "Replace Nested Conditional with Guard Clauses",
+    "category": "single_smell"
+  },
+  {
+    "smell_id": "c_syn_017",
+    "language": "c",
+    "target": "module_17.c",
+    "smell_type": "Unsafe Function Usage",
+    "severity": "medium",
+    "location": {
+      "class": null,
+      "method": "process_17",
+      "lines": [
+        15,
+        87
+      ]
+    },
+    "metrics": {
+      "lines_of_code": 72,
+      "nesting_depth": 2,
+      "cyclomatic_complexity": 13
+    },
+    "details": "C embedded legacy sample 17 for Unsafe Function Usage",
+    "expected_refactoring": "Replace Unsafe Function",
+    "category": "single_smell"
+  },
+  {
+    "smell_id": "c_syn_018",
+    "language": "c",
+    "target": "module_18.c",
+    "smell_type": "Global Variable",
+    "severity": "high",
+    "location": {
+      "class": null,
+      "method": "process_18",
+      "lines": [
+        15,
+        88
+      ]
+    },
+    "metrics": {
+      "lines_of_code": 73,
+      "nesting_depth": 2,
+      "cyclomatic_complexity": 8
+    },
+    "details": "C embedded legacy sample 18 for Global Variable",
+    "expected_refactoring": "Encapsulate Variable",
+    "category": "single_smell"
+  },
+  {
+    "smell_id": "c_syn_019",
+    "language": "c",
+    "target": "module_19.c",
+    "smell_type": "Large Header File",
+    "severity": "critical",
+    "location": {
+      "class": null,
+      "method": "process_19",
+      "lines": [
+        15,
+        89
+      ]
+    },
+    "metrics": {
+      "lines_of_code": 74,
+      "nesting_depth": 2,
+      "cyclomatic_complexity": 9
+    },
+    "details": "C embedded legacy sample 19 for Large Header File",
+    "expected_refactoring": "Extract Class",
+    "category": "single_smell"
+  },
+  {
+    "smell_id": "c_syn_020",
+    "language": "c",
+    "target": "module_20.c",
+    "smell_type": "Deep Nesting",
+    "severity": "low",
+    "location": {
+      "class": null,
+      "method": "process_20",
+      "lines": [
+        15,
+        90
+      ]
+    },
+    "metrics": {
+      "lines_of_code": 75,
+      "nesting_depth": 5,
+      "cyclomatic_complexity": 10
+    },
+    "details": "C embedded legacy sample 20 for Deep Nesting",
+    "expected_refactoring": "Replace Nested Conditional with Guard Clauses",
+    "category": "single_smell"
+  },
+  {
+    "smell_id": "c_syn_021",
+    "language": "c",
+    "target": "module_21.c",
+    "smell_type": "Unsafe Function Usage",
+    "severity": "medium",
+    "location": {
+      "class": null,
+      "method": "process_21",
+      "lines": [
+        15,
+        91
+      ]
+    },
+    "metrics": {
+      "lines_of_code": 76,
+      "nesting_depth": 2,
+      "cyclomatic_complexity": 11
+    },
+    "details": "C embedded legacy sample 21 for Unsafe Function Usage",
+    "expected_refactoring": "Replace Unsafe Function",
+    "category": "single_smell"
+  },
+  {
+    "smell_id": "c_syn_022",
+    "language": "c",
+    "target": "module_22.c",
+    "smell_type": "Global Variable",
+    "severity": "high",
+    "location": {
+      "class": null,
+      "method": "process_22",
+      "lines": [
+        15,
+        92
+      ]
+    },
+    "metrics": {
+      "lines_of_code": 77,
+      "nesting_depth": 2,
+      "cyclomatic_complexity": 12
+    },
+    "details": "C embedded legacy sample 22 for Global Variable",
+    "expected_refactoring": "Encapsulate Variable",
+    "category": "single_smell"
+  },
+  {
+    "smell_id": "c_syn_023",
+    "language": "c",
+    "target": "module_23.c",
+    "smell_type": "Large Header File",
+    "severity": "critical",
+    "location": {
+      "class": null,
+      "method": "process_23",
+      "lines": [
+        15,
+        93
+      ]
+    },
+    "metrics": {
+      "lines_of_code": 78,
+      "nesting_depth": 2,
+      "cyclomatic_complexity": 13
+    },
+    "details": "C embedded legacy sample 23 for Large Header File",
+    "expected_refactoring": "Extract Class",
+    "category": "single_smell"
+  },
+  {
+    "smell_id": "c_syn_024",
+    "language": "c",
+    "target": "module_24.c",
+    "smell_type": "Deep Nesting",
+    "severity": "low",
+    "location": {
+      "class": null,
+      "method": "process_24",
+      "lines": [
+        15,
+        94
+      ]
+    },
+    "metrics": {
+      "lines_of_code": 79,
+      "nesting_depth": 5,
+      "cyclomatic_complexity": 8
+    },
+    "details": "C embedded legacy sample 24 for Deep Nesting",
+    "expected_refactoring": "Replace Nested Conditional with Guard Clauses",
+    "category": "single_smell"
+  },
+  {
+    "smell_id": "c_syn_025",
+    "language": "c",
+    "target": "module_25.c",
+    "smell_type": "Unsafe Function Usage",
+    "severity": "medium",
+    "location": {
+      "class": null,
+      "method": "process_25",
+      "lines": [
+        15,
+        95
+      ]
+    },
+    "metrics": {
+      "lines_of_code": 80,
+      "nesting_depth": 2,
+      "cyclomatic_complexity": 9
+    },
+    "details": "C embedded legacy sample 25 for Unsafe Function Usage",
+    "expected_refactoring": "Replace Unsafe Function",
+    "category": "single_smell"
+  },
+  {
+    "smell_id": "c_syn_026",
+    "language": "c",
+    "target": "module_26.c",
+    "smell_type": "Global Variable",
+    "severity": "high",
+    "location": {
+      "class": null,
+      "method": "process_26",
+      "lines": [
+        15,
+        96
+      ]
+    },
+    "metrics": {
+      "lines_of_code": 81,
+      "nesting_depth": 2,
+      "cyclomatic_complexity": 10
+    },
+    "details": "C embedded legacy sample 26 for Global Variable",
+    "expected_refactoring": "Encapsulate Variable",
+    "category": "single_smell"
+  },
+  {
+    "smell_id": "c_syn_027",
+    "language": "c",
+    "target": "module_27.c",
+    "smell_type": "Large Header File",
+    "severity": "critical",
+    "location": {
+      "class": null,
+      "method": "process_27",
+      "lines": [
+        15,
+        97
+      ]
+    },
+    "metrics": {
+      "lines_of_code": 82,
+      "nesting_depth": 2,
+      "cyclomatic_complexity": 11
+    },
+    "details": "C embedded legacy sample 27 for Large Header File",
+    "expected_refactoring": "Extract Class",
+    "category": "single_smell"
+  },
+  {
+    "smell_id": "c_syn_028",
+    "language": "c",
+    "target": "module_28.c",
+    "smell_type": "Deep Nesting",
+    "severity": "low",
+    "location": {
+      "class": null,
+      "method": "process_28",
+      "lines": [
+        15,
+        98
+      ]
+    },
+    "metrics": {
+      "lines_of_code": 83,
+      "nesting_depth": 5,
+      "cyclomatic_complexity": 12
+    },
+    "details": "C embedded legacy sample 28 for Deep Nesting",
+    "expected_refactoring": "Replace Nested Conditional with Guard Clauses",
+    "category": "single_smell"
+  },
+  {
+    "smell_id": "c_syn_029",
+    "language": "c",
+    "target": "module_29.c",
+    "smell_type": "Unsafe Function Usage",
+    "severity": "medium",
+    "location": {
+      "class": null,
+      "method": "process_29",
+      "lines": [
+        15,
+        99
+      ]
+    },
+    "metrics": {
+      "lines_of_code": 84,
+      "nesting_depth": 2,
+      "cyclomatic_complexity": 13
+    },
+    "details": "C embedded legacy sample 29 for Unsafe Function Usage",
+    "expected_refactoring": "Replace Unsafe Function",
+    "category": "single_smell"
+  },
+  {
+    "smell_id": "c_syn_030",
+    "language": "c",
+    "target": "module_30.c",
+    "smell_type": "Global Variable",
+    "severity": "high",
+    "location": {
+      "class": null,
+      "method": "process_30",
+      "lines": [
+        15,
+        100
+      ]
+    },
+    "metrics": {
+      "lines_of_code": 85,
+      "nesting_depth": 2,
+      "cyclomatic_complexity": 8
+    },
+    "details": "C embedded legacy sample 30 for Global Variable",
+    "expected_refactoring": "Encapsulate Variable",
+    "category": "single_smell"
+  },
+  {
+    "smell_id": "c_syn_031",
+    "language": "c",
+    "target": "module_31.c",
+    "smell_type": "Large Header File",
+    "severity": "critical",
+    "location": {
+      "class": null,
+      "method": "process_31",
+      "lines": [
+        15,
+        101
+      ]
+    },
+    "metrics": {
+      "lines_of_code": 86,
+      "nesting_depth": 2,
+      "cyclomatic_complexity": 9
+    },
+    "details": "C embedded legacy sample 31 for Large Header File",
+    "expected_refactoring": "Extract Class",
+    "category": "single_smell"
+  },
+  {
+    "smell_id": "c_syn_032",
+    "language": "c",
+    "target": "module_32.c",
+    "smell_type": "Deep Nesting",
+    "severity": "low",
+    "location": {
+      "class": null,
+      "method": "process_32",
+      "lines": [
+        15,
+        102
+      ]
+    },
+    "metrics": {
+      "lines_of_code": 87,
+      "nesting_depth": 5,
+      "cyclomatic_complexity": 10
+    },
+    "details": "C embedded legacy sample 32 for Deep Nesting",
+    "expected_refactoring": "Replace Nested Conditional with Guard Clauses",
+    "category": "single_smell"
+  },
+  {
+    "smell_id": "c_syn_033",
+    "language": "c",
+    "target": "module_33.c",
+    "smell_type": "Unsafe Function Usage",
+    "severity": "medium",
+    "location": {
+      "class": null,
+      "method": "process_33",
+      "lines": [
+        15,
+        103
+      ]
+    },
+    "metrics": {
+      "lines_of_code": 88,
+      "nesting_depth": 2,
+      "cyclomatic_complexity": 11
+    },
+    "details": "C embedded legacy sample 33 for Unsafe Function Usage",
+    "expected_refactoring": "Replace Unsafe Function",
+    "category": "single_smell"
+  },
+  {
+    "smell_id": "c_syn_034",
+    "language": "c",
+    "target": "module_34.c",
+    "smell_type": "Global Variable",
+    "severity": "high",
+    "location": {
+      "class": null,
+      "method": "process_34",
+      "lines": [
+        15,
+        104
+      ]
+    },
+    "metrics": {
+      "lines_of_code": 89,
+      "nesting_depth": 2,
+      "cyclomatic_complexity": 12
+    },
+    "details": "C embedded legacy sample 34 for Global Variable",
+    "expected_refactoring": "Encapsulate Variable",
+    "category": "single_smell"
+  },
+  {
+    "smell_id": "c_syn_035",
+    "language": "c",
+    "target": "module_35.c",
+    "smell_type": "Large Header File",
+    "severity": "critical",
+    "location": {
+      "class": null,
+      "method": "process_35",
+      "lines": [
+        15,
+        105
+      ]
+    },
+    "metrics": {
+      "lines_of_code": 90,
+      "nesting_depth": 2,
+      "cyclomatic_complexity": 13
+    },
+    "details": "C embedded legacy sample 35 for Large Header File",
+    "expected_refactoring": "Extract Class",
+    "category": "single_smell"
+  },
+  {
+    "smell_id": "c_syn_036",
+    "language": "c",
+    "target": "module_36.c",
+    "smell_type": "Deep Nesting",
+    "severity": "low",
+    "location": {
+      "class": null,
+      "method": "process_36",
+      "lines": [
+        15,
+        106
+      ]
+    },
+    "metrics": {
+      "lines_of_code": 91,
+      "nesting_depth": 5,
+      "cyclomatic_complexity": 8
+    },
+    "details": "C embedded legacy sample 36 for Deep Nesting",
+    "expected_refactoring": "Replace Nested Conditional with Guard Clauses",
+    "category": "single_smell"
+  },
+  {
+    "smell_id": "c_syn_037",
+    "language": "c",
+    "target": "module_37.c",
+    "smell_type": "Unsafe Function Usage",
+    "severity": "medium",
+    "location": {
+      "class": null,
+      "method": "process_37",
+      "lines": [
+        15,
+        107
+      ]
+    },
+    "metrics": {
+      "lines_of_code": 92,
+      "nesting_depth": 2,
+      "cyclomatic_complexity": 9
+    },
+    "details": "C embedded legacy sample 37 for Unsafe Function Usage",
+    "expected_refactoring": "Replace Unsafe Function",
+    "category": "single_smell"
+  },
+  {
+    "smell_id": "c_syn_038",
+    "language": "c",
+    "target": "module_38.c",
+    "smell_type": "Global Variable",
+    "severity": "high",
+    "location": {
+      "class": null,
+      "method": "process_38",
+      "lines": [
+        15,
+        108
+      ]
+    },
+    "metrics": {
+      "lines_of_code": 93,
+      "nesting_depth": 2,
+      "cyclomatic_complexity": 10
+    },
+    "details": "C embedded legacy sample 38 for Global Variable",
+    "expected_refactoring": "Encapsulate Variable",
+    "category": "single_smell"
+  },
+  {
+    "smell_id": "c_syn_039",
+    "language": "c",
+    "target": "module_39.c",
+    "smell_type": "Large Header File",
+    "severity": "critical",
+    "location": {
+      "class": null,
+      "method": "process_39",
+      "lines": [
+        15,
+        109
+      ]
+    },
+    "metrics": {
+      "lines_of_code": 94,
+      "nesting_depth": 2,
+      "cyclomatic_complexity": 11
+    },
+    "details": "C embedded legacy sample 39 for Large Header File",
+    "expected_refactoring": "Extract Class",
+    "category": "single_smell"
+  },
+  {
+    "smell_id": "c_syn_040",
+    "language": "c",
+    "target": "module_40.c",
+    "smell_type": "Deep Nesting",
+    "severity": "low",
+    "location": {
+      "class": null,
+      "method": "process_40",
+      "lines": [
+        15,
+        110
+      ]
+    },
+    "metrics": {
+      "lines_of_code": 95,
+      "nesting_depth": 5,
+      "cyclomatic_complexity": 12
+    },
+    "details": "C embedded legacy sample 40 for Deep Nesting",
+    "expected_refactoring": "Replace Nested Conditional with Guard Clauses",
+    "category": "single_smell"
+  }
+]
