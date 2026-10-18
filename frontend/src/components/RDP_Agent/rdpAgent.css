@@ -1,0 +1,669 @@
+/* ================================================================
+   rdpAgent.css — Refactoring Decision & Planning Agent UI Styles
+   High-contrast, accessible, responsive styling for RDP Plan & Pipeline.
+   ================================================================ */
+
+/* ── Plan Main Container Card ───────────────────────────────── */
+.rdp-plan-card {
+  margin-top: 24px;
+  background: var(--rdp-card-bg);
+  border: 1px solid var(--rdp-card-border);
+  border-radius: 12px;
+  padding: 24px;
+  box-shadow: var(--shadow-card);
+  transition: border-color var(--transition-base), box-shadow var(--transition-base);
+}
+
+/* ── Plan Header ────────────────────────────────────────────── */
+.rdp-plan-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 20px;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.rdp-plan-title {
+  font-size: 20px;
+  font-weight: 700;
+  color: var(--text-primary);
+  margin: 0;
+  letter-spacing: -0.2px;
+}
+
+.rdp-plan-target-subtitle {
+  font-size: 13px;
+  color: var(--text-secondary);
+  margin-top: 4px;
+}
+
+.rdp-plan-target-highlight {
+  color: var(--rdp-target-color);
+  font-weight: 700;
+  font-family: var(--font-mono);
+}
+
+.rdp-header-actions {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+
+.rdp-btn-action {
+  padding: 8px 16px;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  transition: all var(--transition-fast);
+}
+
+.rdp-btn-copy {
+  background: rgba(59, 130, 246, 0.1);
+  border: 1px solid rgba(59, 130, 246, 0.35);
+  color: var(--text-info);
+}
+
+[data-theme="light"] .rdp-btn-copy {
+  background: #eff6ff;
+  border-color: #93c5fd;
+  color: #1d4ed8;
+}
+
+.rdp-btn-copy:hover {
+  background: rgba(59, 130, 246, 0.2);
+  border-color: rgba(59, 130, 246, 0.5);
+}
+
+.rdp-btn-download {
+  background: rgba(34, 197, 94, 0.12);
+  border: 1px solid rgba(34, 197, 94, 0.35);
+  color: var(--rdp-success-text);
+}
+
+[data-theme="light"] .rdp-btn-download {
+  background: #f0fdf4;
+  border-color: #86efac;
+  color: #15803d;
+}
+
+.rdp-btn-download:hover {
+  background: rgba(34, 197, 94, 0.22);
+  border-color: rgba(34, 197, 94, 0.5);
+}
+
+/* ── Summary Metrics Grid ───────────────────────────────────── */
+.rdp-metrics-grid {
+  padding: 16px 20px;
+  background: var(--rdp-meta-bg);
+  border-radius: 10px;
+  border: 1px solid var(--rdp-card-border);
+  margin-bottom: 24px;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 16px;
+}
+
+.rdp-metric-item {
+  display: flex;
+  flex-direction: column;
+}
+
+.rdp-metric-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted);
+  margin-bottom: 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+}
+
+.rdp-metric-val {
+  font-size: 26px;
+  font-weight: 800;
+  line-height: 1.1;
+  font-family: var(--font-body);
+}
+
+/* ── Plan Summary Banner ────────────────────────────────────── */
+.rdp-summary-banner {
+  padding: 14px 18px;
+  background: var(--rdp-pill-bg);
+  border-left: 4px solid var(--color-rdp);
+  border-radius: 6px;
+  margin-bottom: 24px;
+  font-size: 14px;
+  color: var(--text-primary);
+  line-height: 1.6;
+}
+
+/* ── Filter & Search Toolbar ────────────────────────────────── */
+.rdp-filter-toolbar {
+  background: var(--rdp-meta-bg);
+  border: 1px solid var(--rdp-card-border);
+  border-radius: 10px;
+  padding: 16px;
+  margin-bottom: 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.rdp-filter-toolbar-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.rdp-filter-title {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--text-primary);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.rdp-filter-count {
+  font-size: 12px;
+  color: var(--text-muted);
+  font-weight: 500;
+}
+
+.rdp-btn-reset-filter {
+  font-size: 12px;
+  padding: 5px 12px;
+  border-radius: 6px;
+  background: rgba(239, 68, 68, 0.12);
+  border: 1px solid rgba(239, 68, 68, 0.35);
+  color: var(--color-critical);
+  cursor: pointer;
+  font-weight: 600;
+  transition: all var(--transition-fast);
+}
+
+.rdp-btn-reset-filter:hover {
+  background: rgba(239, 68, 68, 0.22);
+}
+
+.rdp-filter-controls {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 10px;
+}
+
+.rdp-input,
+.rdp-select {
+  padding: 9px 12px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--bg-card);
+  color: var(--text-primary);
+  font-size: 13px;
+  outline: none;
+  transition: border-color var(--transition-fast);
+}
+
+.rdp-input:focus,
+.rdp-select:focus {
+  border-color: var(--color-rdp);
+  box-shadow: 0 0 0 2px rgba(139, 92, 246, 0.15);
+}
+
+/* ── Step Cards ─────────────────────────────────────────────── */
+.rdp-steps-container {
+  margin-bottom: 24px;
+  display: grid;
+  gap: 14px;
+}
+
+.rdp-step-card {
+  padding: 16px 18px;
+  background: var(--rdp-card-bg);
+  border: 1px solid var(--rdp-card-border);
+  border-radius: 10px;
+  display: grid;
+  grid-template-columns: 40px 1fr;
+  gap: 16px;
+  align-items: start;
+  transition: transform var(--transition-fast), border-color var(--transition-fast), box-shadow var(--transition-fast);
+  box-shadow: var(--shadow-sm);
+}
+
+.rdp-step-card:hover {
+  border-color: var(--rdp-card-hover);
+  box-shadow: var(--shadow-md);
+}
+
+.rdp-step-badge {
+  width: 38px;
+  height: 38px;
+  border-radius: 50%;
+  background: var(--rdp-badge-bg);
+  border: 1px solid var(--rdp-badge-border);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--rdp-badge-text);
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+
+.rdp-step-main {
+  display: flex;
+  flex-direction: column;
+}
+
+.rdp-step-header {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.rdp-step-name {
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.rdp-tag-c {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 9px;
+  border-radius: 99px;
+  background: rgba(249, 115, 22, 0.12);
+  border: 1px solid rgba(249, 115, 22, 0.35);
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--color-high);
+}
+
+.rdp-tag-security {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 9px;
+  border-radius: 99px;
+  background: rgba(239, 68, 68, 0.12);
+  border: 1px solid rgba(239, 68, 68, 0.35);
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--color-critical);
+}
+
+.rdp-step-explanation {
+  font-size: 14px;
+  color: var(--text-secondary);
+  margin-bottom: 12px;
+  line-height: 1.6;
+}
+
+/* ── Target & Metadata Box ──────────────────────────────────── */
+.rdp-meta-box {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  font-size: 13px;
+  background: var(--rdp-meta-bg);
+  padding: 10px 14px;
+  border-radius: 8px;
+  border: 1px solid var(--rdp-meta-border);
+  align-items: center;
+}
+
+.rdp-meta-item {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.rdp-meta-label {
+  color: var(--text-muted);
+  font-weight: 600;
+  font-size: 12px;
+}
+
+.rdp-meta-target-val {
+  color: var(--rdp-target-color);
+  font-weight: 700;
+  font-family: var(--font-mono);
+}
+
+.rdp-meta-file-val {
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+.rdp-meta-smell-val {
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-weight: 500;
+}
+
+/* ── Parameters Row ─────────────────────────────────────────── */
+.rdp-params-row {
+  margin-top: 12px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.rdp-params-label {
+  font-size: 12px;
+  color: var(--text-muted);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+}
+
+.rdp-param-chip {
+  font-size: 13px;
+  padding: 4px 10px;
+  border-radius: 6px;
+  background: var(--rdp-pill-bg);
+  border: 1px solid var(--rdp-pill-border);
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+}
+
+.rdp-param-chip strong {
+  color: var(--rdp-pill-key);
+  font-weight: 700;
+}
+
+/* ── Alert Callouts (Security & Encapsulation) ──────────────── */
+.rdp-alert-callout {
+  margin-top: 12px;
+  padding: 10px 14px;
+  border-radius: 8px;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.rdp-alert-security {
+  background: rgba(239, 68, 68, 0.08);
+  border: 1px solid rgba(239, 68, 68, 0.3);
+  color: var(--text-primary);
+}
+
+.rdp-alert-security strong {
+  color: var(--color-critical);
+}
+
+.rdp-alert-encapsulate {
+  background: rgba(249, 115, 22, 0.08);
+  border: 1px solid rgba(249, 115, 22, 0.3);
+  color: var(--text-primary);
+}
+
+.rdp-alert-encapsulate strong {
+  color: var(--color-high);
+}
+
+/* ── Grouped View Cards ─────────────────────────────────────── */
+.rdp-group-container {
+  background: var(--rdp-card-bg);
+  border: 1px solid var(--rdp-card-border);
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+.rdp-group-header {
+  padding: 14px 18px;
+  background: var(--rdp-pill-bg);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  cursor: pointer;
+  user-select: none;
+  border-bottom: 1px solid var(--rdp-card-border);
+}
+
+.rdp-group-header-left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.rdp-group-title {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.rdp-group-badge {
+  font-size: 12px;
+  font-weight: 700;
+  padding: 3px 12px;
+  border-radius: 99px;
+  background: var(--rdp-badge-bg);
+  color: var(--rdp-badge-text);
+  border: 1px solid var(--rdp-badge-border);
+}
+
+.rdp-group-body {
+  padding: 16px;
+  display: grid;
+  gap: 12px;
+}
+
+/* ── Pipeline Viewer Styles ─────────────────────────────────── */
+.rdp-pipeline-section {
+  background: var(--rdp-card-bg);
+  border: 1px solid var(--rdp-card-border);
+  border-radius: 12px;
+  overflow: hidden;
+  margin-top: 24px;
+  padding: 24px;
+  box-shadow: var(--shadow-card);
+}
+
+.rdp-pipeline-title {
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--text-primary);
+  margin-bottom: 4px;
+}
+
+.rdp-pipeline-subtitle {
+  font-size: 13px;
+  color: var(--text-secondary);
+  margin-bottom: 20px;
+}
+
+.rdp-pipeline-nav {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 24px;
+  overflow-x: auto;
+  padding-bottom: 8px;
+}
+
+.rdp-pipeline-tab {
+  padding: 9px 14px;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  white-space: nowrap;
+  transition: all var(--transition-fast);
+  border: 1px solid var(--border);
+  background: var(--bg-card);
+  color: var(--text-secondary);
+}
+
+.rdp-pipeline-tab:hover {
+  background: var(--rdp-pill-bg);
+  border-color: var(--color-rdp);
+  color: var(--text-primary);
+}
+
+.rdp-pipeline-tab.active {
+  background: var(--rdp-badge-bg);
+  border-color: var(--color-rdp);
+  color: var(--rdp-badge-text);
+  box-shadow: 0 2px 8px rgba(139, 92, 246, 0.25);
+}
+
+[data-theme="light"] .rdp-pipeline-tab.active {
+  background: #7c3aed;
+  border-color: #6d28d9;
+  color: #ffffff;
+}
+
+.rdp-pipeline-connector {
+  width: 14px;
+  height: 2px;
+  background: var(--border);
+  flex-shrink: 0;
+}
+
+.rdp-panel-card {
+  padding: 18px;
+  background: var(--rdp-meta-bg);
+  border-radius: 8px;
+  border: 1px solid var(--rdp-card-border);
+}
+
+.rdp-panel-desc {
+  font-size: 14px;
+  color: var(--text-secondary);
+  margin-bottom: 18px;
+  line-height: 1.6;
+}
+
+/* ── Trace Tables (Impact, ML Scoring, MCDA) ───────────────── */
+.rdp-table-wrap {
+  overflow-x: auto;
+  background: var(--bg-card);
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  margin-bottom: 16px;
+}
+
+.rdp-trace-table {
+  width: 100%;
+  font-size: 13px;
+  border-collapse: collapse;
+}
+
+.rdp-trace-table th {
+  padding: 12px 14px;
+  font-weight: 700;
+  color: var(--text-primary);
+  font-size: 13px;
+  background: var(--rdp-table-head);
+  border-bottom: 2px solid var(--border);
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+}
+
+.rdp-trace-table td {
+  padding: 12px 14px;
+  color: var(--text-secondary);
+  font-size: 13px;
+  border-bottom: 1px solid var(--border-light);
+}
+
+.rdp-trace-table tr:last-child td {
+  border-bottom: none;
+}
+
+.rdp-trace-table tr:nth-child(even) {
+  background: var(--rdp-table-zebra);
+}
+
+/* Winner / Selected Row in MCDA */
+.rdp-trace-table tr.rdp-mcda-winner {
+  background: var(--rdp-winner-bg) !important;
+  border-left: 4px solid var(--rdp-winner-border);
+}
+
+.rdp-trace-table tr.rdp-mcda-winner td {
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+.rdp-mcda-winner-check {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--rdp-winner-border);
+  color: #ffffff;
+  font-size: 12px;
+  font-weight: 800;
+  margin-right: 6px;
+}
+
+.rdp-scoring-method-chip {
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--text-muted);
+  font-weight: 500;
+}
+
+/* ── Execution Order Comparison ────────────────────────────── */
+.rdp-exec-grid {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  gap: 20px;
+  align-items: stretch;
+}
+
+.rdp-exec-column {
+  background: var(--bg-card);
+  padding: 16px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+}
+
+.rdp-exec-col-title {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text-secondary);
+  margin-bottom: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.rdp-exec-list {
+  font-size: 14px;
+  padding-left: 20px;
+  line-height: 1.8;
+  color: var(--text-secondary);
+}
+
+.rdp-exec-list li {
+  margin-bottom: 8px;
+}
+
+.rdp-exec-list strong {
+  color: var(--text-primary);
+}
+
+.rdp-exec-arrow {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 28px;
+  color: var(--color-rdp);
+  user-select: none;
+}

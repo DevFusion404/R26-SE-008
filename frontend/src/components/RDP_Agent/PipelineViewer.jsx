@@ -1,14 +1,16 @@
 /**
  * PipelineViewer.jsx — Pipeline Trace Visualization
- * Displays the RDP Agent's 7-step pipeline with detailed trace information
+ * Displays the RDP Agent's multi-step pipeline with detailed trace information.
+ * Optimized for high-contrast light mode, scaled typography, and clear visual hierarchy for viva presentations.
  */
 
 import { useState } from 'react';
+import './rdpAgent.css';
 
 const getSeverityColor = (severity) => {
-  if (severity === 'high' || severity === 'critical') return 'rgba(239,68,68,1)';
-  if (severity === 'medium') return 'rgba(234,179,8,1)';
-  return 'rgba(34,197,94,1)';
+  if (severity === 'high' || severity === 'critical') return 'var(--color-critical)';
+  if (severity === 'medium') return 'var(--color-high)';
+  return 'var(--color-ok)';
 };
 
 const getSeverityIcon = (severity) => {
@@ -46,28 +48,31 @@ export default function PipelineViewer({ trace, id = 'pipeline-section' }) {
     const smellTypes = [...new Set(smells.map(s => s.type))];
 
     return (
-      <div style={{ padding: '12px', background: 'rgba(139,92,246,0.02)', borderRadius: '6px', border: '1px solid rgba(139,92,246,0.1)' }}>
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '20px' }}>
-          <div>
-            <div style={{ fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '6px', fontWeight: '600' }}>Target</div>
-            <div style={{ fontSize: '14px', fontWeight: '700', color: 'var(--text-primary)' }}>{input.target || 'unknown'}</div>
+      <div className="rdp-panel-card">
+        <p className="rdp-panel-desc">
+          Summary of input quality report received from Code Understanding Agent.
+        </p>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '20px' }}>
+          <div style={{ background: 'var(--bg-card)', padding: '14px', borderRadius: '8px', border: '1px solid var(--border)' }}>
+            <div style={{ fontSize: '12px', color: 'var(--text-muted)', marginBottom: '6px', fontWeight: '700', textTransform: 'uppercase' }}>Target Scope</div>
+            <div style={{ fontSize: '15px', fontWeight: '700', color: 'var(--rdp-target-color)', fontFamily: 'var(--font-mono)' }}>{input.target || 'unknown'}</div>
           </div>
-          <div>
-            <div style={{ fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '6px', fontWeight: '600' }}>Code Smells Detected</div>
-            <div style={{ fontSize: '14px', fontWeight: '700', color: 'var(--text-primary)' }}>{input.total_smells || 0}</div>
+          <div style={{ background: 'var(--bg-card)', padding: '14px', borderRadius: '8px', border: '1px solid var(--border)' }}>
+            <div style={{ fontSize: '12px', color: 'var(--text-muted)', marginBottom: '6px', fontWeight: '700', textTransform: 'uppercase' }}>Code Smells Detected</div>
+            <div style={{ fontSize: '20px', fontWeight: '800', color: 'var(--text-primary)' }}>{input.total_smells || 0}</div>
           </div>
-          <div>
-            <div style={{ fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '6px', fontWeight: '600' }}>Severity Breakdown</div>
-            <div style={{ fontSize: '13px', lineHeight: '1.6', color: 'var(--text-secondary)' }}>
-              🔴 {severityDist.high || severityDist.critical || 0} high<br />
-              🟡 {severityDist.medium || 0} medium<br />
-              🟢 {severityDist.low || 0} low
+          <div style={{ background: 'var(--bg-card)', padding: '14px', borderRadius: '8px', border: '1px solid var(--border)' }}>
+            <div style={{ fontSize: '12px', color: 'var(--text-muted)', marginBottom: '6px', fontWeight: '700', textTransform: 'uppercase' }}>Severity Breakdown</div>
+            <div style={{ fontSize: '14px', lineHeight: '1.7', color: 'var(--text-secondary)' }}>
+              🔴 <strong>{severityDist.high || severityDist.critical || 0}</strong> high / critical<br />
+              🟡 <strong>{severityDist.medium || 0}</strong> medium<br />
+              🟢 <strong>{severityDist.low || 0}</strong> low
             </div>
           </div>
-          <div>
-            <div style={{ fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '6px', fontWeight: '600' }}>Smell Types Found</div>
-            <div style={{ fontSize: '13px', lineHeight: '1.6', color: 'var(--text-secondary)' }}>
-              {smellTypes.length > 0 ? smellTypes.join(', ') : 'N/A'}
+          <div style={{ background: 'var(--bg-card)', padding: '14px', borderRadius: '8px', border: '1px solid var(--border)' }}>
+            <div style={{ fontSize: '12px', color: 'var(--text-muted)', marginBottom: '6px', fontWeight: '700', textTransform: 'uppercase' }}>Smell Types Found</div>
+            <div style={{ fontSize: '14px', lineHeight: '1.7', color: 'var(--text-secondary)' }}>
+              {smellTypes.length > 0 ? smellTypes.join(', ') : 'None'}
             </div>
           </div>
         </div>
@@ -84,21 +89,19 @@ export default function PipelineViewer({ trace, id = 'pipeline-section' }) {
     // Handle both old array format and new object format for backwards compatibility
     if (Array.isArray(data)) {
       if (data.length === 0) {
-        return <div style={{ padding: '12px', background: 'rgba(139,92,246,0.02)', borderRadius: '6px', border: '1px solid rgba(139,92,246,0.1)' }}><p style={{ fontSize: '13px', color: 'var(--text-secondary)', marginBottom: '12px' }}>No interpretation data available</p></div>;
+        return <div className="rdp-panel-card"><p className="rdp-panel-desc">No interpretation data available</p></div>;
       }
-      // Old format handling
       return (
-        <div style={{ padding: '12px', background: 'rgba(139,92,246,0.02)', borderRadius: '6px', border: '1px solid rgba(139,92,246,0.1)' }}>
-          <p style={{ fontSize: '13px', color: 'var(--text-secondary)', marginBottom: '16px', lineHeight: '1.5' }}>Evaluates preconditions for each candidate refactoring to determine applicability.</p>
-          
+        <div className="rdp-panel-card">
+          <p className="rdp-panel-desc">Evaluates preconditions for each candidate refactoring to determine applicability.</p>
           {data.map((item, idx) => (
-            <div key={idx} style={{ padding: '12px', background: 'rgba(139,92,246,0.05)', borderRadius: '6px', borderLeft: '4px solid rgba(139,92,246,0.3)', marginBottom: '12px' }}>
+            <div key={idx} style={{ padding: '14px', background: 'var(--bg-card)', borderRadius: '8px', border: '1px solid var(--border)', borderLeft: '4px solid var(--color-rdp)', marginBottom: '14px' }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
-                <div style={{ fontSize: '14px', fontWeight: '700', color: 'var(--text-primary)' }}>
+                <div style={{ fontSize: '15px', fontWeight: '700', color: 'var(--text-primary)' }}>
                   {item.smell_type || item.smell_id || `Smell ${idx}`}
                 </div>
                 {item.severity && (
-                  <span style={{ fontSize: '12px', fontWeight: '600', color: getSeverityColor(item.severity) }}>
+                  <span style={{ fontSize: '12px', fontWeight: '700', color: getSeverityColor(item.severity) }}>
                     [{getSeverityIcon(item.severity)} {item.severity.toUpperCase()}]
                   </span>
                 )}
@@ -107,19 +110,19 @@ export default function PipelineViewer({ trace, id = 'pipeline-section' }) {
               {item.preconditions_evaluated && item.preconditions_evaluated.length > 0 ? (
                 <div>
                   {item.preconditions_evaluated.map((pe, i) => (
-                    <div key={i} style={{ display: 'flex', gap: '8px', alignItems: 'center', marginBottom: '6px', fontSize: '12px' }}>
-                      <span style={{ color: pe.passed ? 'rgba(34,197,94,1)' : 'rgba(239,68,68,1)', fontWeight: '700', fontSize: '14px' }}>
+                    <div key={i} style={{ display: 'flex', gap: '10px', alignItems: 'center', marginBottom: '8px', fontSize: '13px' }}>
+                      <span style={{ color: pe.passed ? 'var(--rdp-success-text)' : 'var(--rdp-danger-text)', fontWeight: '800', fontSize: '16px' }}>
                         {pe.passed ? '✓' : '✗'}
                       </span>
-                      <span style={{ fontWeight: '600', color: 'var(--text-secondary)' }}>{pe.candidate}</span>
+                      <span style={{ fontWeight: '600', color: 'var(--text-primary)' }}>{pe.candidate}</span>
                       {pe.preconditions && pe.preconditions.length > 0 && (
-                        <span style={{ opacity: 0.7, fontSize: '11px' }}>({pe.preconditions.join(', ')})</span>
+                        <span style={{ color: 'var(--text-muted)', fontSize: '12px' }}>({pe.preconditions.join(', ')})</span>
                       )}
                     </div>
                   ))}
                 </div>
               ) : (
-                <div style={{ fontSize: '12px', color: 'var(--text-secondary)', fontStyle: 'italic' }}>No preconditions evaluated</div>
+                <div style={{ fontSize: '13px', color: 'var(--text-muted)', fontStyle: 'italic' }}>No preconditions evaluated</div>
               )}
             </div>
           ))}
@@ -129,7 +132,7 @@ export default function PipelineViewer({ trace, id = 'pipeline-section' }) {
 
     // New object format
     if (!data.target) {
-      return <div style={{ padding: '12px', background: 'rgba(139,92,246,0.02)', borderRadius: '6px', border: '1px solid rgba(139,92,246,0.1)' }}><p style={{ fontSize: '13px', color: 'var(--text-secondary)', marginBottom: '12px' }}>No interpretation data available</p></div>;
+      return <div className="rdp-panel-card"><p className="rdp-panel-desc">No interpretation data available</p></div>;
     }
 
     const severitySummary = data.severity_summary || {};
@@ -139,26 +142,26 @@ export default function PipelineViewer({ trace, id = 'pipeline-section' }) {
     const recommendations = data.recommendations || [];
 
     return (
-      <div style={{ padding: '12px', background: 'rgba(139,92,246,0.02)', borderRadius: '6px', border: '1px solid rgba(139,92,246,0.1)' }}>
-        <p style={{ fontSize: '13px', color: 'var(--text-secondary)', marginBottom: '16px', lineHeight: '1.5' }}>Analyzes code smells: classifies severity, groups by type, builds risk factors, and generates recommendations.</p>
+      <div className="rdp-panel-card">
+        <p className="rdp-panel-desc">Analyzes code smells: classifies severity, groups by type, builds risk factors, and generates recommendations.</p>
         
         {/* Summary Overview */}
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px', marginBottom: '20px' }}>
-          <div style={{ padding: '12px', background: 'rgba(139,92,246,0.05)', borderRadius: '6px', borderLeft: '4px solid rgba(139,92,246,0.3)' }}>
-            <div style={{ fontSize: '11px', color: 'var(--text-secondary)', marginBottom: '6px', fontWeight: '600' }}>Severity Breakdown</div>
-            <div style={{ fontSize: '13px', lineHeight: '1.6', color: 'var(--text-secondary)' }}>
-              🔴 {severitySummary.critical || 0} critical<br />
-              🔴 {severitySummary.high || 0} high<br />
-              🟡 {severitySummary.medium || 0} medium<br />
-              🟢 {severitySummary.low || 0} low
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: '14px', marginBottom: '20px' }}>
+          <div style={{ padding: '14px', background: 'var(--bg-card)', borderRadius: '8px', border: '1px solid var(--border)', borderLeft: '4px solid var(--color-rdp)' }}>
+            <div style={{ fontSize: '12px', color: 'var(--text-muted)', marginBottom: '8px', fontWeight: '700', textTransform: 'uppercase' }}>Severity Breakdown</div>
+            <div style={{ fontSize: '14px', lineHeight: '1.7', color: 'var(--text-secondary)' }}>
+              🔴 <strong>{severitySummary.critical || 0}</strong> critical<br />
+              🔴 <strong>{severitySummary.high || 0}</strong> high<br />
+              🟡 <strong>{severitySummary.medium || 0}</strong> medium<br />
+              🟢 <strong>{severitySummary.low || 0}</strong> low
             </div>
           </div>
           
-          <div style={{ padding: '12px', background: 'rgba(139,92,246,0.05)', borderRadius: '6px', borderLeft: '4px solid rgba(139,92,246,0.3)' }}>
-            <div style={{ fontSize: '11px', color: 'var(--text-secondary)', marginBottom: '6px', fontWeight: '600' }}>Smell Types</div>
-            <div style={{ fontSize: '13px', lineHeight: '1.6', color: 'var(--text-secondary)' }}>
+          <div style={{ padding: '14px', background: 'var(--bg-card)', borderRadius: '8px', border: '1px solid var(--border)', borderLeft: '4px solid var(--color-rdp)' }}>
+            <div style={{ fontSize: '12px', color: 'var(--text-muted)', marginBottom: '8px', fontWeight: '700', textTransform: 'uppercase' }}>Smell Types</div>
+            <div style={{ fontSize: '14px', lineHeight: '1.7', color: 'var(--text-secondary)' }}>
               {Object.entries(typeSummary).map(([type, count]) => (
-                <div key={type}>{type}: <span style={{ fontWeight: '600', color: 'var(--text-primary)' }}>{count}</span></div>
+                <div key={type}>{type}: <strong style={{ color: 'var(--text-primary)' }}>{count}</strong></div>
               ))}
             </div>
           </div>
@@ -167,19 +170,19 @@ export default function PipelineViewer({ trace, id = 'pipeline-section' }) {
         {/* Problem Groups */}
         {problemGroups.length > 0 && (
           <div style={{ marginBottom: '20px' }}>
-            <div style={{ fontSize: '12px', fontWeight: '600', color: 'var(--text-secondary)', marginBottom: '10px', textTransform: 'uppercase' }}>Problem Groups</div>
+            <div style={{ fontSize: '13px', fontWeight: '700', color: 'var(--text-secondary)', marginBottom: '10px', textTransform: 'uppercase', letterSpacing: '0.4px' }}>Problem Groups</div>
             {problemGroups.map((group, idx) => (
-              <div key={idx} style={{ padding: '12px', background: 'rgba(139,92,246,0.05)', borderRadius: '6px', borderLeft: '4px solid rgba(139,92,246,0.3)', marginBottom: '10px' }}>
+              <div key={idx} style={{ padding: '14px', background: 'var(--bg-card)', borderRadius: '8px', border: '1px solid var(--border)', borderLeft: '4px solid var(--color-rdp)', marginBottom: '10px' }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
-                  <div style={{ fontSize: '13px', fontWeight: '700', color: 'var(--text-primary)' }}>{group.description}</div>
-                  <span style={{ fontSize: '11px', fontWeight: '600', color: getSeverityColor(group.severity_level) }}>
+                  <div style={{ fontSize: '14px', fontWeight: '700', color: 'var(--text-primary)' }}>{group.description}</div>
+                  <span style={{ fontSize: '12px', fontWeight: '700', color: getSeverityColor(group.severity_level) }}>
                     [{getSeverityIcon(group.severity_level)} {group.severity_level.toUpperCase()}]
                   </span>
                 </div>
                 {Object.keys(group.collective_metrics).length > 0 && (
-                  <div style={{ fontSize: '12px', color: 'var(--text-secondary)', display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px' }}>
+                  <div style={{ fontSize: '13px', color: 'var(--text-secondary)', display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '8px', marginTop: '6px' }}>
                     {Object.entries(group.collective_metrics).map(([metric, value]) => (
-                      <div key={metric} style={{ opacity: 0.8 }}><span style={{ fontWeight: '600' }}>{metric}:</span> {typeof value === 'number' ? value.toFixed(1) : value}</div>
+                      <div key={metric}><span style={{ fontWeight: '600', color: 'var(--text-muted)' }}>{metric}:</span> <strong>{typeof value === 'number' ? value.toFixed(1) : value}</strong></div>
                     ))}
                   </div>
                 )}
@@ -191,9 +194,9 @@ export default function PipelineViewer({ trace, id = 'pipeline-section' }) {
         {/* Critical Issues */}
         {criticalIssues.length > 0 && (
           <div style={{ marginBottom: '20px' }}>
-            <div style={{ fontSize: '12px', fontWeight: '600', color: 'rgba(239,68,68,1)', marginBottom: '10px', textTransform: 'uppercase' }}>🔴 Critical Issues</div>
+            <div style={{ fontSize: '13px', fontWeight: '700', color: 'var(--color-critical)', marginBottom: '10px', textTransform: 'uppercase', letterSpacing: '0.4px' }}>🔴 Critical Issues</div>
             {criticalIssues.map((issue, idx) => (
-              <div key={idx} style={{ padding: '10px', background: 'rgba(239,68,68,0.05)', borderRadius: '6px', borderLeft: '4px solid rgba(239,68,68,0.3)', marginBottom: '8px', fontSize: '12px', color: 'var(--text-secondary)', lineHeight: '1.5' }}>
+              <div key={idx} style={{ padding: '12px 14px', background: 'rgba(239,68,68,0.08)', borderRadius: '8px', border: '1px solid rgba(239,68,68,0.3)', borderLeft: '4px solid var(--color-critical)', marginBottom: '8px', fontSize: '13px', color: 'var(--text-primary)', lineHeight: '1.6' }}>
                 {issue}
               </div>
             ))}
@@ -203,9 +206,9 @@ export default function PipelineViewer({ trace, id = 'pipeline-section' }) {
         {/* Recommendations */}
         {recommendations.length > 0 && (
           <div>
-            <div style={{ fontSize: '12px', fontWeight: '600', color: 'var(--text-secondary)', marginBottom: '10px', textTransform: 'uppercase' }}>Recommendations</div>
+            <div style={{ fontSize: '13px', fontWeight: '700', color: 'var(--text-secondary)', marginBottom: '10px', textTransform: 'uppercase', letterSpacing: '0.4px' }}>Recommendations</div>
             {recommendations.map((rec, idx) => (
-              <div key={idx} style={{ padding: '10px', background: 'rgba(34,197,94,0.05)', borderRadius: '6px', borderLeft: '4px solid rgba(34,197,94,0.3)', marginBottom: '8px', fontSize: '12px', color: 'var(--text-secondary)', lineHeight: '1.5' }}>
+              <div key={idx} style={{ padding: '12px 14px', background: 'rgba(34,197,94,0.08)', borderRadius: '8px', border: '1px solid rgba(34,197,94,0.3)', borderLeft: '4px solid var(--color-ok)', marginBottom: '8px', fontSize: '13px', color: 'var(--text-primary)', lineHeight: '1.6' }}>
                 💡 {rec}
               </div>
             ))}
@@ -222,31 +225,31 @@ export default function PipelineViewer({ trace, id = 'pipeline-section' }) {
     const data = trace.candidate_generation || [];
     
     if (data.length === 0) {
-      return <div style={{ padding: '12px', background: 'rgba(139,92,246,0.02)', borderRadius: '6px', border: '1px solid rgba(139,92,246,0.1)' }}><p style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>No candidate generation data available</p></div>;
+      return <div className="rdp-panel-card"><p className="rdp-panel-desc">No candidate generation data available</p></div>;
     }
 
     return (
-      <div style={{ padding: '12px', background: 'rgba(139,92,246,0.02)', borderRadius: '6px', border: '1px solid rgba(139,92,246,0.1)' }}>
-        <p style={{ fontSize: '13px', color: 'var(--text-secondary)', marginBottom: '16px', lineHeight: '1.5' }}>Retrieves candidates, filters by preconditions, scores using weighted formula, and selects best.</p>
+      <div className="rdp-panel-card">
+        <p className="rdp-panel-desc">Retrieves candidates, filters by preconditions, scores using weighted formula, and selects best.</p>
         
         {data.map((item, idx) => (
-          <div key={idx} style={{ padding: '14px', background: 'rgba(139,92,246,0.05)', borderRadius: '6px', borderLeft: '4px solid rgba(139,92,246,0.3)', marginBottom: '16px' }}>
-            <div style={{ fontSize: '14px', fontWeight: '700', color: 'var(--text-primary)', marginBottom: '12px' }}>
+          <div key={idx} style={{ padding: '16px', background: 'var(--bg-card)', borderRadius: '8px', border: '1px solid var(--border)', borderLeft: '4px solid var(--color-rdp)', marginBottom: '16px' }}>
+            <div style={{ fontSize: '15px', fontWeight: '700', color: 'var(--text-primary)', marginBottom: '8px' }}>
               {item.smell_type || item.smell_id || `Smell ${idx}`}
             </div>
             
             <div style={{ fontSize: '13px', color: 'var(--text-secondary)', marginBottom: '12px' }}>
-              Candidates available: <span style={{ fontWeight: '700', color: 'var(--text-primary)', fontSize: '15px' }}>{item.candidates_from_catalog || 0}</span>
+              Candidates available: <strong style={{ color: 'var(--text-primary)', fontSize: '15px' }}>{item.candidates_from_catalog || 0}</strong>
             </div>
             
             {item.candidates && item.candidates.length > 0 && (
-              <div style={{ marginTop: '12px' }}>
+              <div style={{ marginTop: '10px' }}>
                 {item.candidates.map((c, ci) => (
-                  <div key={ci} style={{ display: 'flex', gap: '8px', alignItems: 'center', marginBottom: '8px', fontSize: '13px', lineHeight: '1.5' }}>
-                    <span style={{ color: c.preconditions_met ? 'rgba(34,197,94,1)' : 'rgba(239,68,68,1)', fontWeight: '700', fontSize: '16px', minWidth: '20px' }}>
+                  <div key={ci} style={{ display: 'flex', gap: '10px', alignItems: 'center', marginBottom: '8px', fontSize: '14px', lineHeight: '1.5' }}>
+                    <span style={{ color: c.preconditions_met ? 'var(--rdp-success-text)' : 'var(--rdp-danger-text)', fontWeight: '800', fontSize: '16px', minWidth: '20px' }}>
                       {c.preconditions_met ? '✓' : '✗'}
                     </span>
-                    <span style={{ color: 'var(--text-secondary)', flex: 1, fontSize: '13px' }}>{c.name}</span>
+                    <span style={{ color: 'var(--text-primary)', fontWeight: '500', flex: 1 }}>{c.name}</span>
                   </div>
                 ))}
               </div>
@@ -264,57 +267,49 @@ export default function PipelineViewer({ trace, id = 'pipeline-section' }) {
     const data = trace.impact_prediction || [];
     
     if (data.length === 0) {
-      return <div style={{ padding: '12px', background: 'rgba(139,92,246,0.02)', borderRadius: '6px', border: '1px solid rgba(139,92,246,0.1)' }}><p style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>No impact predictions available</p></div>;
+      return <div className="rdp-panel-card"><p className="rdp-panel-desc">No impact predictions available</p></div>;
     }
 
     return (
-      <div style={{ padding: '12px', background: 'rgba(139,92,246,0.02)', borderRadius: '6px', border: '1px solid rgba(139,92,246,0.1)' }}>
-        <p style={{ fontSize: '13px', color: 'var(--text-secondary)', marginBottom: '16px', lineHeight: '1.5' }}>Predicts expected improvement in quality metrics for each candidate before scoring.</p>
+      <div className="rdp-panel-card">
+        <p className="rdp-panel-desc">Predicts expected improvement in quality metrics for each candidate before scoring.</p>
         
         {data.map((item, idx) => (
-          <div key={idx} style={{ marginBottom: '20px' }}>
-            <div style={{ fontSize: '14px', fontWeight: '700', color: 'var(--text-primary)', marginBottom: '12px' }}>
+          <div key={idx} style={{ marginBottom: '22px' }}>
+            <div style={{ fontSize: '15px', fontWeight: '700', color: 'var(--text-primary)', marginBottom: '10px' }}>
               {item.smell_type || item.smell_id || `Smell ${idx}`}
             </div>
             
             {!item.predictions || item.predictions.length === 0 ? (
-              <div style={{ fontSize: '12px', color: 'var(--text-secondary)', fontStyle: 'italic' }}>No viable candidates</div>
+              <div style={{ fontSize: '13px', color: 'var(--text-muted)', fontStyle: 'italic' }}>No viable candidates</div>
             ) : (
-              <div style={{ overflowX: 'auto', background: 'rgba(139,92,246,0.02)', borderRadius: '6px', border: '1px solid rgba(139,92,246,0.1)' }}>
-                <table style={{ width: '100%', fontSize: '12px', borderCollapse: 'collapse', tableLayout: 'fixed' }}>
-                  <colgroup>
-                    <col style={{ width: '25%' }} />
-                    <col style={{ width: '15%' }} />
-                    <col style={{ width: '15%' }} />
-                    <col style={{ width: '15%' }} />
-                    <col style={{ width: '15%' }} />
-                    <col style={{ width: '15%' }} />
-                  </colgroup>
+              <div className="rdp-table-wrap">
+                <table className="rdp-trace-table">
                   <thead>
-                    <tr style={{ background: 'rgba(139,92,246,0.08)', borderBottom: '2px solid rgba(139,92,246,0.2)' }}>
-                      <th style={{ padding: '12px', fontWeight: '700', textAlign: 'left', color: 'var(--text-primary)', fontSize: '13px' }}>Refactoring</th>
-                      <th style={{ padding: '12px', fontWeight: '700', textAlign: 'center', color: 'var(--text-primary)', fontSize: '13px' }}>Complexity</th>
-                      <th style={{ padding: '12px', fontWeight: '700', textAlign: 'center', color: 'var(--text-primary)', fontSize: '13px' }}>Coupling Δ</th>
-                      <th style={{ padding: '12px', fontWeight: '700', textAlign: 'center', color: 'var(--text-primary)', fontSize: '13px' }}>Cohesion Δ</th>
-                      <th style={{ padding: '12px', fontWeight: '700', textAlign: 'center', color: 'var(--text-primary)', fontSize: '13px' }}>Maintainability</th>
-                      <th style={{ padding: '12px', fontWeight: '700', textAlign: 'center', color: 'var(--text-primary)', fontSize: '13px' }}>Risk</th>
+                    <tr>
+                      <th style={{ textAlign: 'left', width: '28%' }}>Refactoring</th>
+                      <th style={{ textAlign: 'center', width: '14%' }}>Complexity</th>
+                      <th style={{ textAlign: 'center', width: '14%' }}>Coupling Δ</th>
+                      <th style={{ textAlign: 'center', width: '14%' }}>Cohesion Δ</th>
+                      <th style={{ textAlign: 'center', width: '15%' }}>Maintainability</th>
+                      <th style={{ textAlign: 'center', width: '15%' }}>Risk</th>
                     </tr>
                   </thead>
                   <tbody>
                     {item.predictions.map((pred, pi) => (
-                      <tr key={pi} style={{ borderBottom: '1px solid rgba(139,92,246,0.08)', background: pi % 2 === 0 ? 'transparent' : 'rgba(139,92,246,0.02)' }}>
-                        <td style={{ padding: '12px', color: 'var(--text-secondary)', fontSize: '12px', fontWeight: '500', textAlign: 'left' }}>{pred.refactoring}</td>
-                        <td style={{ padding: '12px', color: 'var(--text-secondary)', fontSize: '12px', textAlign: 'center' }}>{pred.predicted_complexity_after?.toFixed(1) ?? 'N/A'}</td>
-                        <td style={{ padding: '12px', color: (pred.coupling_change || 0) <= 0 ? 'rgba(34,197,94,1)' : 'rgba(239,68,68,1)', fontWeight: '600', fontSize: '12px', textAlign: 'center' }}>
+                      <tr key={pi}>
+                        <td style={{ fontWeight: '600', color: 'var(--text-primary)' }}>{pred.refactoring}</td>
+                        <td style={{ textAlign: 'center' }}>{pred.predicted_complexity_after?.toFixed(1) ?? 'N/A'}</td>
+                        <td style={{ textAlign: 'center', color: (pred.coupling_change || 0) <= 0 ? 'var(--rdp-success-text)' : 'var(--rdp-danger-text)', fontWeight: '700' }}>
                           {(pred.coupling_change || 0) > 0 ? '+' : ''}{pred.coupling_change?.toFixed(2) ?? 'N/A'}
                         </td>
-                        <td style={{ padding: '12px', color: (pred.cohesion_change || 0) >= 0 ? 'rgba(34,197,94,1)' : 'rgba(239,68,68,1)', fontWeight: '600', fontSize: '12px', textAlign: 'center' }}>
+                        <td style={{ textAlign: 'center', color: (pred.cohesion_change || 0) >= 0 ? 'var(--rdp-success-text)' : 'var(--rdp-danger-text)', fontWeight: '700' }}>
                           {(pred.cohesion_change || 0) > 0 ? '+' : ''}{pred.cohesion_change?.toFixed(2) ?? 'N/A'}
                         </td>
-                        <td style={{ padding: '12px', color: 'rgba(34,197,94,1)', fontWeight: '600', fontSize: '12px', textAlign: 'center' }}>
+                        <td style={{ textAlign: 'center', color: 'var(--rdp-success-text)', fontWeight: '700' }}>
                           +{(pred.maintainability_improvement * 100)?.toFixed(1) ?? 'N/A'}%
                         </td>
-                        <td style={{ padding: '12px', color: 'var(--text-secondary)', fontSize: '12px', textAlign: 'center' }}>{(pred.risk_score * 100)?.toFixed(1) ?? 'N/A'}%</td>
+                        <td style={{ textAlign: 'center' }}>{(pred.risk_score * 100)?.toFixed(1) ?? 'N/A'}%</td>
                       </tr>
                     ))}
                   </tbody>
@@ -334,64 +329,58 @@ export default function PipelineViewer({ trace, id = 'pipeline-section' }) {
     const data = trace.ml_prediction || [];
     
     if (data.length === 0) {
-      return <div style={{ padding: '12px', background: 'rgba(139,92,246,0.02)', borderRadius: '6px', border: '1px solid rgba(139,92,246,0.1)' }}><p style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>No ML predictions available</p></div>;
+      return <div className="rdp-panel-card"><p className="rdp-panel-desc">No ML predictions available</p></div>;
     }
 
     const allUnavailable = data.every(ml => !ml.ml_available);
 
     return (
-      <div style={{ padding: '12px', background: 'rgba(139,92,246,0.02)', borderRadius: '6px', border: '1px solid rgba(139,92,246,0.1)' }}>
-        <p style={{ fontSize: '13px', color: 'var(--text-secondary)', marginBottom: '16px', lineHeight: '1.5' }}>CodeBERT embeddings score candidates based on contextual suitability and quality improvement.</p>
+      <div className="rdp-panel-card">
+        <p className="rdp-panel-desc">CodeBERT embeddings score candidates based on contextual suitability and quality improvement.</p>
         
         {allUnavailable && (
-          <div style={{ fontSize: '12px', color: 'rgba(234,179,8,1)', marginBottom: '16px', padding: '10px', background: 'rgba(234,179,8,0.08)', borderRadius: '6px' }}>
+          <div style={{ fontSize: '13px', color: 'var(--color-medium)', marginBottom: '16px', padding: '12px 14px', background: 'rgba(234,179,8,0.1)', border: '1px solid rgba(234,179,8,0.3)', borderRadius: '8px', fontWeight: '600' }}>
             ⚠️ ML scorer not available — using heuristic scoring
           </div>
         )}
         
         {data.map((item, idx) => (
-          <div key={idx} style={{ marginBottom: '20px' }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
-              <div style={{ fontSize: '14px', fontWeight: '700', color: 'var(--text-primary)' }}>
+          <div key={idx} style={{ marginBottom: '22px' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
+              <div style={{ fontSize: '15px', fontWeight: '700', color: 'var(--text-primary)' }}>
                 {item.smell_type || item.smell_id || `Smell ${idx}`}
               </div>
-              <span style={{ fontSize: '12px', fontWeight: '600', color: item.ml_available ? 'rgba(34,197,94,1)' : 'rgba(239,68,68,1)' }}>
+              <span style={{ fontSize: '12px', fontWeight: '700', padding: '3px 10px', borderRadius: '99px', background: item.ml_available ? 'rgba(34,197,94,0.12)' : 'rgba(239,68,68,0.12)', border: `1px solid ${item.ml_available ? 'rgba(34,197,94,0.35)' : 'rgba(239,68,68,0.35)'}`, color: item.ml_available ? 'var(--rdp-success-text)' : 'var(--rdp-danger-text)' }}>
                 {item.ml_available ? '● ML Active' : '● Heuristic'}
               </span>
             </div>
             
             {!item.ml_available && (
-              <div style={{ fontSize: '12px', color: 'var(--text-secondary)', fontStyle: 'italic', marginBottom: '12px' }}>ML unavailable for this smell</div>
+              <div style={{ fontSize: '13px', color: 'var(--text-muted)', fontStyle: 'italic', marginBottom: '10px' }}>ML unavailable for this smell</div>
             )}
             
             {!item.predictions || item.predictions.length === 0 ? (
-              <div style={{ fontSize: '12px', color: 'var(--text-secondary)', fontStyle: 'italic' }}>No predictions available</div>
+              <div style={{ fontSize: '13px', color: 'var(--text-muted)', fontStyle: 'italic' }}>No predictions available</div>
             ) : (
-              <div style={{ overflowX: 'auto', background: 'rgba(139,92,246,0.02)', borderRadius: '6px', border: '1px solid rgba(139,92,246,0.1)' }}>
-                <table style={{ width: '100%', fontSize: '12px', borderCollapse: 'collapse', tableLayout: 'fixed' }}>
-                  <colgroup>
-                    <col style={{ width: '35%' }} />
-                    <col style={{ width: '22%' }} />
-                    <col style={{ width: '22%' }} />
-                    <col style={{ width: '21%' }} />
-                  </colgroup>
+              <div className="rdp-table-wrap">
+                <table className="rdp-trace-table">
                   <thead>
-                    <tr style={{ background: 'rgba(139,92,246,0.08)', borderBottom: '2px solid rgba(139,92,246,0.2)' }}>
-                      <th style={{ padding: '12px', fontWeight: '700', textAlign: 'left', color: 'var(--text-primary)', fontSize: '13px' }}>Refactoring</th>
-                      <th style={{ padding: '12px', fontWeight: '700', textAlign: 'center', color: 'var(--text-primary)', fontSize: '13px' }}>Suitability</th>
-                      <th style={{ padding: '12px', fontWeight: '700', textAlign: 'center', color: 'var(--text-primary)', fontSize: '13px' }}>Quality</th>
-                      <th style={{ padding: '12px', fontWeight: '700', textAlign: 'center', color: 'var(--text-primary)', fontSize: '13px' }}>Confidence</th>
+                    <tr>
+                      <th style={{ textAlign: 'left', width: '38%' }}>Refactoring</th>
+                      <th style={{ textAlign: 'center', width: '20%' }}>Suitability</th>
+                      <th style={{ textAlign: 'center', width: '20%' }}>Quality Gain</th>
+                      <th style={{ textAlign: 'center', width: '22%' }}>Confidence</th>
                     </tr>
                   </thead>
                   <tbody>
                     {item.predictions.map((pred, pi) => (
-                      <tr key={pi} style={{ borderBottom: '1px solid rgba(139,92,246,0.08)', background: pi % 2 === 0 ? 'transparent' : 'rgba(139,92,246,0.02)' }}>
-                        <td style={{ padding: '12px', color: 'var(--text-secondary)', fontSize: '12px', fontWeight: '500', textAlign: 'left' }}>{pred.refactoring}</td>
-                        <td style={{ padding: '12px', color: 'var(--text-secondary)', fontSize: '12px', textAlign: 'center' }}>{pred.contextual_suitability != null ? (pred.contextual_suitability * 100).toFixed(1) + '%' : 'N/A'}</td>
-                        <td style={{ padding: '12px', fontWeight: '600', color: 'rgba(34,197,94,1)', fontSize: '12px', textAlign: 'center' }}>
+                      <tr key={pi}>
+                        <td style={{ fontWeight: '600', color: 'var(--text-primary)' }}>{pred.refactoring}</td>
+                        <td style={{ textAlign: 'center' }}>{pred.contextual_suitability != null ? (pred.contextual_suitability * 100).toFixed(1) + '%' : 'N/A'}</td>
+                        <td style={{ textAlign: 'center', fontWeight: '700', color: 'var(--rdp-success-text)' }}>
                           +{pred.quality_improvement != null ? (pred.quality_improvement * 100).toFixed(1) + '%' : 'N/A'}
                         </td>
-                        <td style={{ padding: '12px', color: 'var(--text-secondary)', fontSize: '12px', textAlign: 'center' }}>{pred.confidence != null ? (pred.confidence * 100).toFixed(1) + '%' : 'N/A'}</td>
+                        <td style={{ textAlign: 'center' }}>{pred.confidence != null ? (pred.confidence * 100).toFixed(1) + '%' : 'N/A'}</td>
                       </tr>
                     ))}
                   </tbody>
@@ -412,7 +401,7 @@ export default function PipelineViewer({ trace, id = 'pipeline-section' }) {
     const candidate_data = trace.candidate_generation || [];
     
     if (mcda_data.length === 0) {
-      return <div style={{ padding: '12px', background: 'rgba(139,92,246,0.02)', borderRadius: '6px', border: '1px solid rgba(139,92,246,0.1)' }}><p style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>No MCDA analysis available</p></div>;
+      return <div className="rdp-panel-card"><p className="rdp-panel-desc">No MCDA analysis available</p></div>;
     }
 
     // Build map of smell_id → selected refactoring from candidate_generation
@@ -425,79 +414,81 @@ export default function PipelineViewer({ trace, id = 'pipeline-section' }) {
     });
 
     return (
-      <div style={{ padding: '12px', background: 'rgba(139,92,246,0.02)', borderRadius: '6px', border: '1px solid rgba(139,92,246,0.1)' }}>
-        <p style={{ fontSize: '13px', color: 'var(--text-secondary)', marginBottom: '16px', lineHeight: '1.5' }}>Multi-Criteria Decision Making evaluates candidates using Quality, Complexity, Risk, and Dependency. When ML scoring is available, Final Score includes the confidence-weighted ML adjustment.</p>
+      <div className="rdp-panel-card">
+        <p className="rdp-panel-desc">
+          Multi-Criteria Decision Making evaluates candidates using Quality, Complexity, Risk, and Dependency.
+          When ML scoring is available, Final Score includes the confidence-weighted ML adjustment.
+        </p>
         
         {mcda_data.map((item, idx) => {
           const selected = selectedMap[item.smell_id];
           return (
-            <div key={idx} style={{ marginBottom: '20px' }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '12px' }}>
-                <div style={{ fontSize: '16px', fontWeight: '700', color: 'rgba(139,92,246,1)', background: 'rgba(139,92,246,0.1)', width: '32px', height: '32px', borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+            <div key={idx} style={{ marginBottom: '24px' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '12px' }}>
+                <div style={{
+                  fontSize: '14px',
+                  fontWeight: '700',
+                  color: 'var(--rdp-badge-text)',
+                  background: 'var(--rdp-badge-bg)',
+                  border: '1px solid var(--rdp-badge-border)',
+                  width: '30px',
+                  height: '30px',
+                  borderRadius: '50%',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center'
+                }}>
                   {idx + 1}
                 </div>
-                <div style={{ fontSize: '14px', fontWeight: '700', color: 'var(--text-primary)' }}>
+                <div style={{ fontSize: '15px', fontWeight: '700', color: 'var(--text-primary)' }}>
                   {item.smell_type || item.smell_id || `Smell ${idx}`}
                 </div>
               </div>
               
               {!item.predictions || item.predictions.length === 0 ? (
-                <div style={{ fontSize: '12px', color: 'var(--text-secondary)', fontStyle: 'italic' }}>No MCDA predictions available</div>
+                <div style={{ fontSize: '13px', color: 'var(--text-muted)', fontStyle: 'italic' }}>No MCDA predictions available</div>
               ) : (
-                <>
-                  <div style={{ overflowX: 'auto', background: 'rgba(139,92,246,0.02)', borderRadius: '6px', border: '1px solid rgba(139,92,246,0.1)', marginBottom: '12px' }}>
-                    <table style={{ width: '100%', fontSize: '12px', borderCollapse: 'collapse', tableLayout: 'fixed' }}>
-                      <colgroup>
-                        <col style={{ width: '18%' }} />
-                        <col style={{ width: '13%' }} />
-                        <col style={{ width: '13%' }} />
-                        <col style={{ width: '13%' }} />
-                        <col style={{ width: '13%' }} />
-                        <col style={{ width: '15%' }} />
-                      </colgroup>
-                      <thead>
-                        <tr style={{ background: 'rgba(139,92,246,0.08)', borderBottom: '2px solid rgba(139,92,246,0.2)' }}>
-                          <th style={{ padding: '12px', fontWeight: '700', textAlign: 'left', color: 'var(--text-primary)', fontSize: '13px' }}>Refactoring</th>
-                          <th style={{ padding: '12px', fontWeight: '700', textAlign: 'center', color: 'var(--text-primary)', fontSize: '13px' }}>Quality</th>
-                          <th style={{ padding: '12px', fontWeight: '700', textAlign: 'center', color: 'var(--text-primary)', fontSize: '13px' }}>Complexity</th>
-                          <th style={{ padding: '12px', fontWeight: '700', textAlign: 'center', color: 'var(--text-primary)', fontSize: '13px' }}>Risk</th>
-                          <th style={{ padding: '12px', fontWeight: '700', textAlign: 'center', color: 'var(--text-primary)', fontSize: '13px' }}>Dependency</th>
-                          <th style={{ padding: '12px', fontWeight: '700', textAlign: 'center', color: 'var(--text-primary)', fontSize: '13px' }}>Final Score</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {item.predictions.map((pred, pi) => {
-                          const isSelected = selected === pred.refactoring;
-                          return (
-                            <tr key={pi} style={{ 
-                              borderBottom: '1px solid rgba(139,92,246,0.08)',
-                              background: isSelected ? 'rgba(34,197,94,0.12)' : (pi % 2 === 0 ? 'transparent' : 'rgba(139,92,246,0.02)'),
-                              borderLeft: isSelected ? '4px solid rgba(34,197,94,1)' : 'none',
-                              paddingLeft: isSelected ? '8px' : '0px'
-                            }}>
-                              <td style={{ padding: '12px', color: 'var(--text-secondary)', fontSize: '12px', fontWeight: isSelected ? '600' : '500', textAlign: 'left', display: 'flex', alignItems: 'center', gap: '6px' }}>
-                                {isSelected && <span style={{ fontSize: '14px', fontWeight: '700', color: 'rgba(34,197,94,1)' }}>✓</span>}
-                                {pred.refactoring}
-                              </td>
-                              <td style={{ padding: '12px', color: 'var(--text-secondary)', fontSize: '12px', textAlign: 'center', fontWeight: isSelected ? '600' : '400' }}>{(pred.quality || 0).toFixed(2)}</td>
-                              <td style={{ padding: '12px', color: 'var(--text-secondary)', fontSize: '12px', textAlign: 'center', fontWeight: isSelected ? '600' : '400' }}>{(pred.complexity || 0).toFixed(2)}</td>
-                              <td style={{ padding: '12px', color: 'var(--text-secondary)', fontSize: '12px', textAlign: 'center', fontWeight: isSelected ? '600' : '400' }}>{(pred.risk || 0).toFixed(2)}</td>
-                              <td style={{ padding: '12px', color: 'var(--text-secondary)', fontSize: '12px', textAlign: 'center', fontWeight: isSelected ? '600' : '400' }}>{(pred.dependency || 0).toFixed(2)}</td>
-                              <td style={{ padding: '12px', fontWeight: '700', color: isSelected ? 'rgba(34,197,94,1)' : 'rgba(139,92,246,1)', fontSize: '12px', textAlign: 'center' }}>
-                                <div>{(pred.final_score || 0).toFixed(3)}</div>
-                                {pred.scoring_method && (
-                                  <div style={{ marginTop: '3px', color: 'var(--text-secondary)', fontSize: '10px', fontWeight: '500' }}>
-                                    {pred.scoring_method}
-                                  </div>
-                                )}
-                              </td>
-                            </tr>
-                          );
-                        })}
-                      </tbody>
-                    </table>
-                  </div>
-                </>
+                <div className="rdp-table-wrap">
+                  <table className="rdp-trace-table">
+                    <thead>
+                      <tr>
+                        <th style={{ textAlign: 'left', width: '26%' }}>Refactoring</th>
+                        <th style={{ textAlign: 'center', width: '13%' }}>Quality</th>
+                        <th style={{ textAlign: 'center', width: '13%' }}>Complexity</th>
+                        <th style={{ textAlign: 'center', width: '13%' }}>Risk</th>
+                        <th style={{ textAlign: 'center', width: '13%' }}>Dependency</th>
+                        <th style={{ textAlign: 'center', width: '22%' }}>Final Score</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {item.predictions.map((pred, pi) => {
+                        const isSelected = selected === pred.refactoring;
+                        return (
+                          <tr key={pi} className={isSelected ? 'rdp-mcda-winner' : ''}>
+                            <td style={{ textAlign: 'left' }}>
+                              {isSelected && <span className="rdp-mcda-winner-check">✓</span>}
+                              <span>{pred.refactoring}</span>
+                            </td>
+                            <td style={{ textAlign: 'center' }}>{(pred.quality || 0).toFixed(2)}</td>
+                            <td style={{ textAlign: 'center' }}>{(pred.complexity || 0).toFixed(2)}</td>
+                            <td style={{ textAlign: 'center' }}>{(pred.risk || 0).toFixed(2)}</td>
+                            <td style={{ textAlign: 'center' }}>{(pred.dependency || 0).toFixed(2)}</td>
+                            <td style={{ textAlign: 'center' }}>
+                              <div style={{ fontSize: '15px', fontWeight: '800', color: isSelected ? 'var(--rdp-winner-text)' : 'var(--text-primary)' }}>
+                                {(pred.final_score || 0).toFixed(3)}
+                              </div>
+                              {pred.scoring_method && (
+                                <div className="rdp-scoring-method-chip">
+                                  {pred.scoring_method}
+                                </div>
+                              )}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
               )}
             </div>
           );
@@ -513,7 +504,7 @@ export default function PipelineViewer({ trace, id = 'pipeline-section' }) {
     const dep = trace.dependency_analysis || {};
 
     if (!dep || Object.keys(dep).length === 0) {
-      return <div style={{ padding: '12px', background: 'rgba(139,92,246,0.02)', borderRadius: '6px', border: '1px solid rgba(139,92,246,0.1)' }}><p style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>No dependency analysis data available</p></div>;
+      return <div className="rdp-panel-card"><p className="rdp-panel-desc">No dependency analysis data available</p></div>;
     }
 
     const hasRules = Object.keys(dep.rules_applied || {}).length > 0;
@@ -521,62 +512,62 @@ export default function PipelineViewer({ trace, id = 'pipeline-section' }) {
     const orderAfter = dep.order_after || [];
 
     return (
-      <div style={{ padding: '12px', background: 'rgba(139,92,246,0.02)', borderRadius: '6px', border: '1px solid rgba(139,92,246,0.1)' }}>
-        <p style={{ fontSize: '13px', color: 'var(--text-secondary)', marginBottom: '16px', lineHeight: '1.5' }}>Analyzes refactoring dependencies and determines safe execution order.</p>
+      <div className="rdp-panel-card">
+        <p className="rdp-panel-desc">Analyzes refactoring dependencies and determines safe execution order.</p>
         
         {hasRules && (
-          <div style={{ marginBottom: '20px' }}>
-            <div style={{ fontSize: '14px', fontWeight: '700', color: 'var(--text-primary)', marginBottom: '12px' }}>Rules Applied</div>
+          <div style={{ marginBottom: '22px' }}>
+            <div style={{ fontSize: '14px', fontWeight: '700', color: 'var(--text-primary)', marginBottom: '10px' }}>Rules Applied</div>
             {Object.entries(dep.rules_applied).map(([rule, count]) => (
-              <div key={rule} style={{ fontSize: '12px', padding: '10px', background: 'rgba(139,92,246,0.05)', borderRadius: '6px', border: '1px solid rgba(139,92,246,0.1)', marginBottom: '6px' }}>
-                <strong style={{ color: 'var(--text-secondary)' }}>{rule}:</strong> <span style={{ color: 'var(--text-secondary)' }}>{count} application(s)</span>
+              <div key={rule} style={{ fontSize: '13px', padding: '10px 14px', background: 'var(--bg-card)', borderRadius: '6px', border: '1px solid var(--border)', marginBottom: '6px' }}>
+                <strong style={{ color: 'var(--text-primary)' }}>{rule}:</strong> <span style={{ color: 'var(--text-secondary)' }}>{count} application(s)</span>
               </div>
             ))}
           </div>
         )}
         
         <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '16px' }}>
-          <div style={{ fontSize: '14px', fontWeight: '700', color: 'var(--text-primary)' }}>Execution Order</div>
-          <span style={{ fontSize: '12px', fontWeight: '600', color: dep.reordered ? 'rgba(234,179,8,1)' : 'rgba(34,197,94,1)' }}>
+          <div style={{ fontSize: '15px', fontWeight: '700', color: 'var(--text-primary)' }}>Execution Order</div>
+          <span style={{ fontSize: '12px', fontWeight: '700', padding: '3px 10px', borderRadius: '99px', background: dep.reordered ? 'rgba(234,179,8,0.12)' : 'rgba(34,197,94,0.12)', border: `1px solid ${dep.reordered ? 'rgba(234,179,8,0.35)' : 'rgba(34,197,94,0.35)'}`, color: dep.reordered ? 'var(--color-medium)' : 'var(--rdp-success-text)' }}>
             {dep.reordered ? '🔄 REORDERED' : '✓ UNCHANGED'}
           </span>
         </div>
         
         {orderBefore.length > 0 || orderAfter.length > 0 ? (
-          <div style={{ display: 'flex', alignItems: 'stretch', gap: '20px', justifyContent: 'space-between' }}>
+          <div className="rdp-exec-grid">
             {/* Before Column */}
-            <div style={{ flex: 1 }}>
-              <h5 style={{ fontSize: '13px', fontWeight: '600', color: 'var(--text-secondary)', marginBottom: '12px', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Before (by severity)</h5>
-              <ol style={{ fontSize: '13px', paddingLeft: '24px', lineHeight: '1.8', color: 'var(--text-secondary)', listStyle: 'decimal' }}>
+            <div className="rdp-exec-column">
+              <h5 className="rdp-exec-col-title">Before (by severity)</h5>
+              <ol className="rdp-exec-list">
                 {orderBefore.map((ref, idx) => (
-                  <li key={idx} style={{ marginBottom: '8px', paddingLeft: '4px' }}>
-                    <strong style={{ fontWeight: '600', color: 'var(--text-primary)' }}>{typeof ref === 'string' ? ref : ref.refactoring || 'Refactoring'}</strong>
-                    {(typeof ref === 'object' && ref.smell_id) && <span style={{ fontSize: '12px', color: 'var(--text-secondary)', marginLeft: '6px' }}>({ref.smell_id})</span>}
+                  <li key={idx}>
+                    <strong>{typeof ref === 'string' ? ref : ref.refactoring || 'Refactoring'}</strong>
+                    {(typeof ref === 'object' && ref.smell_id) && <span style={{ fontSize: '12px', color: 'var(--text-muted)', marginLeft: '6px' }}>({ref.smell_id})</span>}
                   </li>
                 ))}
               </ol>
             </div>
             
-            {/* Arrow/Connector */}
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '24px', color: 'rgba(139,92,246,0.4)', userSelect: 'none' }}>
+            {/* Arrow Connector */}
+            <div className="rdp-exec-arrow">
               →
             </div>
             
             {/* After Column */}
-            <div style={{ flex: 1 }}>
-              <h5 style={{ fontSize: '13px', fontWeight: '600', color: 'var(--text-secondary)', marginBottom: '12px', textTransform: 'uppercase', letterSpacing: '0.5px' }}>After (dependency-resolved)</h5>
-              <ol style={{ fontSize: '13px', paddingLeft: '24px', lineHeight: '1.8', color: 'var(--text-secondary)', listStyle: 'decimal' }}>
+            <div className="rdp-exec-column">
+              <h5 className="rdp-exec-col-title">After (dependency-resolved)</h5>
+              <ol className="rdp-exec-list">
                 {orderAfter.map((ref, idx) => (
-                  <li key={idx} style={{ marginBottom: '8px', paddingLeft: '4px' }}>
-                    <strong style={{ fontWeight: '600', color: 'var(--text-primary)' }}>{typeof ref === 'string' ? ref : ref.refactoring || 'Refactoring'}</strong>
-                    {(typeof ref === 'object' && ref.smell_id) && <span style={{ fontSize: '12px', color: 'var(--text-secondary)', marginLeft: '6px' }}>({ref.smell_id})</span>}
+                  <li key={idx}>
+                    <strong style={{ color: 'var(--color-rdp)' }}>{typeof ref === 'string' ? ref : ref.refactoring || 'Refactoring'}</strong>
+                    {(typeof ref === 'object' && ref.smell_id) && <span style={{ fontSize: '12px', color: 'var(--text-muted)', marginLeft: '6px' }}>({ref.smell_id})</span>}
                   </li>
                 ))}
               </ol>
             </div>
           </div>
         ) : (
-          <div style={{ fontSize: '13px', color: 'var(--text-secondary)', fontStyle: 'italic', padding: '16px', textAlign: 'center' }}>No ordering data available</div>
+          <div style={{ fontSize: '13px', color: 'var(--text-muted)', fontStyle: 'italic', padding: '16px', textAlign: 'center' }}>No ordering data available</div>
         )}
       </div>
     );
@@ -589,36 +580,36 @@ export default function PipelineViewer({ trace, id = 'pipeline-section' }) {
     const pg = trace.plan_generation || {};
 
     if (!pg || Object.keys(pg).length === 0) {
-      return <div style={{ padding: '12px', background: 'rgba(139,92,246,0.02)', borderRadius: '6px', border: '1px solid rgba(139,92,246,0.1)' }}><p style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>No plan generation data available</p></div>;
+      return <div className="rdp-panel-card"><p className="rdp-panel-desc">No plan generation data available</p></div>;
     }
 
     return (
-      <div style={{ padding: '12px', background: 'rgba(139,92,246,0.02)', borderRadius: '6px', border: '1px solid rgba(139,92,246,0.1)' }}>
-        <p style={{ fontSize: '13px', color: 'var(--text-secondary)', marginBottom: '16px', lineHeight: '1.5' }}>Assembles the final machine-executable refactoring plan with explanations and parameters.</p>
+      <div className="rdp-panel-card">
+        <p className="rdp-panel-desc">Assembles the final machine-executable refactoring plan with explanations and parameters.</p>
         
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '20px', marginBottom: '20px' }}>
-          <div>
-            <div style={{ fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '6px', fontWeight: '600' }}>Total Steps Generated</div>
-            <div style={{ fontSize: '18px', fontWeight: '700', color: 'var(--text-primary)' }}>{pg.total_steps || 0}</div>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '16px', marginBottom: '20px' }}>
+          <div style={{ background: 'var(--bg-card)', padding: '14px', borderRadius: '8px', border: '1px solid var(--border)' }}>
+            <div style={{ fontSize: '12px', color: 'var(--text-muted)', marginBottom: '6px', fontWeight: '700', textTransform: 'uppercase' }}>Total Steps Generated</div>
+            <div style={{ fontSize: '20px', fontWeight: '800', color: 'var(--text-primary)' }}>{pg.total_steps || 0}</div>
           </div>
-          <div>
-            <div style={{ fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '6px', fontWeight: '600' }}>Smells Addressed</div>
-            <div style={{ fontSize: '15px', fontWeight: '700', color: 'var(--text-primary)' }}>{pg.smells_addressed ?? pg.total_steps ?? 0}</div>
+          <div style={{ background: 'var(--bg-card)', padding: '14px', borderRadius: '8px', border: '1px solid var(--border)' }}>
+            <div style={{ fontSize: '12px', color: 'var(--text-muted)', marginBottom: '6px', fontWeight: '700', textTransform: 'uppercase' }}>Smells Addressed</div>
+            <div style={{ fontSize: '20px', fontWeight: '800', color: 'var(--rdp-success-text)' }}>{pg.smells_addressed ?? pg.total_steps ?? 0}</div>
           </div>
-          <div>
-            <div style={{ fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '6px', fontWeight: '600' }}>Smells Skipped</div>
-            <div style={{ fontSize: '15px', fontWeight: '700', color: (pg.smells_skipped || 0) > 0 ? 'rgba(234,179,8,1)' : 'rgba(34,197,94,1)' }}>
+          <div style={{ background: 'var(--bg-card)', padding: '14px', borderRadius: '8px', border: '1px solid var(--border)' }}>
+            <div style={{ fontSize: '12px', color: 'var(--text-muted)', marginBottom: '6px', fontWeight: '700', textTransform: 'uppercase' }}>Smells Skipped</div>
+            <div style={{ fontSize: '20px', fontWeight: '800', color: (pg.smells_skipped || 0) > 0 ? 'var(--color-high)' : 'var(--rdp-success-text)' }}>
               {pg.smells_skipped || 0}
             </div>
           </div>
-          <div>
-            <div style={{ fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '6px', fontWeight: '600' }}>Plan ID</div>
-            <div style={{ fontSize: '12px', fontWeight: '700', fontFamily: 'monospace', color: 'var(--text-secondary)' }}>{pg.plan_id || '—'}</div>
+          <div style={{ background: 'var(--bg-card)', padding: '14px', borderRadius: '8px', border: '1px solid var(--border)' }}>
+            <div style={{ fontSize: '12px', color: 'var(--text-muted)', marginBottom: '6px', fontWeight: '700', textTransform: 'uppercase' }}>Plan ID</div>
+            <div style={{ fontSize: '13px', fontWeight: '700', fontFamily: 'var(--font-mono)', color: 'var(--text-primary)' }}>{pg.plan_id || '—'}</div>
           </div>
         </div>
         
         {pg.summary && (
-          <div style={{ padding: '12px', background: 'rgba(139,92,246,0.05)', borderRadius: '6px', borderLeft: '4px solid rgba(139,92,246,0.3)', fontSize: '13px', lineHeight: '1.6', color: 'var(--text-secondary)' }}>
+          <div style={{ padding: '14px 18px', background: 'var(--rdp-pill-bg)', borderRadius: '8px', borderLeft: '4px solid var(--color-rdp)', fontSize: '14px', lineHeight: '1.6', color: 'var(--text-primary)' }}>
             {pg.summary}
           </div>
         )}
@@ -653,61 +644,34 @@ export default function PipelineViewer({ trace, id = 'pipeline-section' }) {
   }
 
   return (
-    <section style={{ background: 'linear-gradient(135deg, rgba(139,92,246,0.02), rgba(168,85,247,0.02))', border: '1px solid rgba(139,92,246,0.15)', borderRadius: 'var(--r-md)', overflow: 'hidden', marginTop: 'var(--sp-4)' }} id={id}>
-      <h2 style={{ fontSize: '16px', fontWeight: '700', color: 'var(--text-primary)', marginBottom: '8px', padding: 'var(--sp-5)', paddingBottom: '0' }}>Pipeline Trace</h2>
-      <p style={{ fontSize: '11px', color: 'var(--text-secondary)', marginBottom: '20px', padding: 'var(--sp-5)', paddingTop: '0' }}>
+    <section className="rdp-pipeline-section" id={id}>
+      <h2 className="rdp-pipeline-title">Pipeline Trace</h2>
+      <p className="rdp-pipeline-subtitle">
         See how each module processed your quality report step by step.
       </p>
 
       {/* Step Navigation */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '24px', overflowX: 'auto', paddingBottom: '8px', paddingLeft: 'var(--sp-5)', paddingRight: 'var(--sp-5)', flexWrap: 'nowrap' }}>
+      <div className="rdp-pipeline-nav">
         {steps.map((step, idx) => (
           <div key={step.id} style={{ display: 'flex', alignItems: 'center', gap: '8px', flexShrink: 0 }}>
             <button
-              style={{
-                padding: '8px 12px',
-                borderRadius: 'var(--r-sm)',
-                border: activeStep === step.id ? '1px solid rgba(139,92,246,0.3)' : '1px solid rgba(139,92,246,0.1)',
-                background: activeStep === step.id ? 'rgba(139,92,246,0.15)' : 'transparent',
-                color: activeStep === step.id ? 'rgba(139,92,246,1)' : 'rgba(139,92,246,0.5)',
-                fontSize: '11px',
-                fontWeight: '500',
-                cursor: 'pointer',
-                transition: 'all 0.2s ease',
-                display: 'flex',
-                alignItems: 'center',
-                gap: '6px',
-                whiteSpace: 'nowrap'
-              }}
+              className={`rdp-pipeline-tab ${activeStep === step.id ? 'active' : ''}`}
               onClick={() => setActiveStep(step.id)}
-              onMouseEnter={(e) => {
-                if (activeStep !== step.id) {
-                  e.target.style.background = 'rgba(139,92,246,0.08)';
-                  e.target.style.borderColor = 'rgba(139,92,246,0.2)';
-                }
-              }}
-              onMouseLeave={(e) => {
-                if (activeStep !== step.id) {
-                  e.target.style.background = 'transparent';
-                  e.target.style.borderColor = 'rgba(139,92,246,0.1)';
-                }
-              }}
             >
               <span>{step.icon}</span>
-              {step.label}
+              <span>{step.label}</span>
             </button>
             {idx < steps.length - 1 && (
-              <div style={{ width: '16px', height: '1px', background: 'rgba(139,92,246,0.2)', flexShrink: 0 }} />
+              <div className="rdp-pipeline-connector" />
             )}
           </div>
         ))}
       </div>
 
       {/* Active Panel Content */}
-      <div style={{ marginLeft: 'var(--sp-5)', marginRight: 'var(--sp-5)', marginBottom: 'var(--sp-5)' }}>
+      <div>
         {getActivePanel()}
       </div>
     </section>
   );
 }
-
