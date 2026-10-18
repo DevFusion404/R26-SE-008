@@ -11,9 +11,14 @@
  */
 
 import { useState, useEffect, useRef } from 'react';
-import QualityReportView from '../components/QualityReportView';
 import CUQAAgentService from '../services/cuqaAgentService';
 import RepositoryUnderstandingSection from '../components/cuqa/RepositoryUnderstandingSection';
+import CuqaIdentityHeader from '../components/cuqa/CuqaIdentityHeader';
+import { CuqaFunctionNav, CuqaSection } from '../components/cuqa/CuqaSections';
+import DetectionEnginePanel from '../components/cuqa/DetectionEnginePanel';
+import QualityAssessmentPanel from '../components/cuqa/QualityAssessmentPanel';
+import DeveloperReviewButton from '../components/cuqa/DeveloperReviewButton';
+import '../components/cuqa/cuqa.css';
 
 
 // ── Node colours by type ───────────────────────────────────────────────────
@@ -119,7 +124,7 @@ function InlineCodeSmellOverview({ overview }) {
       </div>
 
       {/* Category rows — 2-column grid for wider layout */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(360px, 1fr))' }}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(min(360px, 100%), 1fr))' }}>
         {CAT_ORDER.map(cat => {
           const data = overview[cat];
           if (!data) return null;
@@ -253,12 +258,21 @@ function ASTGraph({ ast }) {
     last.current = { x: e.clientX, y: e.clientY };
   }
   function onMouseUp() { dragging.current = false; }
+  // Touch panning so the graph can be moved on a phone or tablet
+  function onTouchStart(e) { const t = e.touches[0]; dragging.current = true; last.current = { x: t.clientX, y: t.clientY }; }
+  function onTouchMove(e) {
+    if (!dragging.current) return;
+    const t = e.touches[0];
+    setPan(p => ({ x: p.x + (t.clientX - last.current.x), y: p.y + (t.clientY - last.current.y) }));
+    last.current = { x: t.clientX, y: t.clientY };
+  }
 
   const cx = svgW / 2 + 20;
 
   return (
-    <div style={{ position: 'relative', width: '100%', height: '100%', background: 'var(--bg-base)', overflow: 'hidden' }}
-      onMouseDown={onMouseDown} onMouseMove={onMouseMove} onMouseUp={onMouseUp}>
+    <div style={{ position: 'relative', width: '100%', height: '100%', background: 'var(--bg-base)', overflow: 'hidden', touchAction: 'none' }}
+      onMouseDown={onMouseDown} onMouseMove={onMouseMove} onMouseUp={onMouseUp} onMouseLeave={onMouseUp}
+      onTouchStart={onTouchStart} onTouchMove={onTouchMove} onTouchEnd={onMouseUp}>
 
       <div style={{ position: 'absolute', top: 10, right: 10, display: 'flex', gap: 6, zIndex: 10 }}>
         <button className="btn btn-ghost btn-sm" onClick={() => setZoom(z => Math.min(z + 0.15, 2))}>+ ZOOM</button>
@@ -356,7 +370,7 @@ function CodeSmellStats({ report, filesWithSmells }) {
     : 0;
 
   return (
-    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(6, 1fr)', gap: 12 }}>
+    <div className="rg-6" style={{ gap: 12 }}>
       <div className="metric-card">
         <div className="metric-label-text">Total Smells</div>
         <div className="metric-value" style={{ color: totalSmells > 10 ? '#ef4444' : '#f59e0b', fontSize: 28 }}>
@@ -401,7 +415,7 @@ function CodeSmellStats({ report, filesWithSmells }) {
 }
 
 // ── Files with Code Smells ───────────────────────────────────────────────────
-function FilesWithSmells({ report, filter = 'all' }) {
+function FilesWithSmells({ report, filter = 'all', onSelect }) {
   const filesData = (report?.files || [])
     .map(f => ({
       name: f.file,
@@ -425,7 +439,7 @@ function FilesWithSmells({ report, filter = 'all' }) {
     : filesData;
 
   return (
-    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: 14 }}>
+    <div className="rg-auto-280" style={{ gap: 14 }}>
       {filtered.length === 0 ? (
         <div className="empty-state" style={{ gridColumn: '1 / -1', padding: 32 }}>
           <span className="empty-icon">✅</span>
@@ -438,7 +452,16 @@ function FilesWithSmells({ report, filter = 'all' }) {
           const lowCount = file.smells.filter(s => s.severity === 'low').length;
 
           return (
-            <div key={idx} className="card" style={{ padding: 16, borderLeft: `4px solid ${file.quality < 50 ? '#ef4444' : file.quality < 70 ? '#f59e0b' : '#22c55e'}` }}>
+            <div
+              key={idx}
+              className="card"
+              role="button"
+              tabIndex={0}
+              title="Show this file's AST (F2)"
+              onClick={() => onSelect?.({ path: file.path, name: file.name })}
+              onKeyDown={e => { if (e.key === 'Enter') onSelect?.({ path: file.path, name: file.name }); }}
+              style={{ padding: 16, cursor: onSelect ? 'pointer' : 'default', borderLeft: `4px solid ${file.quality < 50 ? '#ef4444' : file.quality < 70 ? '#f59e0b' : '#22c55e'}` }}
+            >
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'start', marginBottom: 12 }}>
                 <div>
                   <div style={{ fontWeight: 600, fontSize: 13, color: 'var(--text-primary)' }}>
@@ -515,7 +538,7 @@ function HumanInTheLoopPanel({ report, onContinue, onNavigate, pipelineState }) 
   if (!report) return null;
 
   return (
-    <div style={{
+    <div className="cuqa-handoff" style={{
       marginTop: 32,
       borderRadius: 12,
       border: alreadySent ? '1px solid rgba(34,197,94,0.4)' : '1px solid rgba(139,92,246,0.5)',
@@ -531,20 +554,20 @@ function HumanInTheLoopPanel({ report, onContinue, onNavigate, pipelineState }) 
       <div style={{
         padding: '14px 20px',
         borderBottom: alreadySent ? '1px solid rgba(34,197,94,0.2)' : '1px solid rgba(139,92,246,0.25)',
-        display: 'flex', alignItems: 'center', gap: 10,
+        display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap',
         background: alreadySent
           ? 'rgba(34,197,94,0.08)'
           : 'rgba(139,92,246,0.08)',
       }}>
         <span style={{ fontSize: 20 }}>{alreadySent ? '✅' : '🤖'}</span>
-        <div style={{ flex: 1 }}>
-          <div style={{ fontSize: 13, fontWeight: 700, color: alreadySent ? '#4ade80' : '#c4b5fd' }}>
-            {alreadySent ? 'Report Sent — RDP Agent is Processing' : 'CUQA Analysis Complete — Human Review Required'}
+        <div style={{ flex: '1 1 260px', minWidth: 0 }}>
+          <div style={{ fontSize: 13, fontWeight: 700, color: alreadySent ? 'var(--color-ok)' : 'var(--color-rdp)' }}>
+            {alreadySent ? 'Report Sent — RDP Agent is Processing' : 'CUQA analysis complete — next step: developer review'}
           </div>
           <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginTop: 2 }}>
             {alreadySent
               ? 'The refactoring plan is being generated automatically. Navigate to RDP Agent to see results.'
-              : 'Review the findings below, then click Continue to pass the report to the RDP Agent.'}
+              : 'Open DIWO to choose which smells to fix, approve each refactoring and check the changed code. You can also send the report straight to the RDP agent.'}
           </div>
         </div>
         {/* Pipeline stage chips */}
@@ -565,8 +588,7 @@ function HumanInTheLoopPanel({ report, onContinue, onNavigate, pipelineState }) 
       </div>
 
       {/* Summary metrics */}
-      <div style={{
-        display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)',
+      <div className="rg-5" style={{
         gap: 0, padding: '16px 20px',
         borderBottom: '1px solid rgba(139,92,246,0.12)',
       }}>
@@ -603,101 +625,42 @@ function HumanInTheLoopPanel({ report, onContinue, onNavigate, pipelineState }) 
         <span>📁 Total Files: <strong style={{ color: 'var(--text-primary)' }}>{report?.files?.length ?? 0}</strong></span>
         <span>🔢 Total LOC: <strong style={{ color: 'var(--text-primary)' }}>{summary.total_lines_of_code?.toLocaleString() ?? '—'}</strong></span>
         <span style={{ marginLeft: 'auto', color: 'var(--text-muted)', fontSize: 10, fontStyle: 'italic' }}>
-          All findings above will be forwarded to the RDP Agent.
+          DIWO reads this report from CUQA when it opens.
         </span>
       </div>
 
       {/* Action row */}
       <div style={{
         display: 'flex', justifyContent: 'flex-end', alignItems: 'center',
-        gap: 12, padding: '12px 20px',
+        gap: 12, padding: '12px 20px', flexWrap: 'wrap',
       }}>
         {alreadySent ? (
-          <div style={{ display: 'flex', alignItems: 'center', gap: 12, width: '100%', justifyContent: 'space-between' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12, width: '100%', justifyContent: 'space-between', flexWrap: 'wrap' }}>
             <div style={{ fontSize: 12, color: '#4ade80', display: 'flex', alignItems: 'center', gap: 8 }}>
               <span>✅</span>
               <span>Report successfully forwarded — navigate to <strong>RDP Agent</strong> or <strong>DIWO Agent</strong> to view feedback.</span>
             </div>
             {onNavigate && (
-              <button
-                id="hitl-diwo-btn-sent"
-                onClick={() => onNavigate('orchestrate')}
-                style={{
-                  padding: '8px 18px',
-                  background: 'linear-gradient(135deg, #10b981, #059669)',
-                  color: 'white',
-                  border: 'none',
-                  borderRadius: 8,
-                  fontSize: 12,
-                  fontWeight: 700,
-                  cursor: 'pointer',
-                  display: 'inline-flex',
-                  alignItems: 'center',
-                  gap: 6,
-                  boxShadow: '0 0 14px rgba(16,185,129,0.35)',
-                }}
-                title="Navigate to DIWO Agent (User View)"
-              >
-                <span>👤</span>
-                <span>Go to User View</span>
-              </button>
+              <DeveloperReviewButton id="hitl-diwo-btn-sent" onClick={() => onNavigate('orchestrate')} />
             )}
           </div>
         ) : (
           <>
             <div style={{ fontSize: 11, color: 'var(--text-muted)', marginRight: 'auto' }}>
-              ⚠ Please review the analysis above before continuing.
+              Check the findings above, then start the developer review.
             </div>
-            {onNavigate && (
-              <button
-                id="hitl-diwo-btn"
-                onClick={() => onNavigate('orchestrate')}
-                style={{
-                  padding: '10px 18px',
-                  background: 'linear-gradient(135deg, rgba(16,185,129,0.18), rgba(5,150,105,0.12))',
-                  color: '#34d399',
-                  border: '1px solid rgba(16,185,129,0.4)',
-                  borderRadius: 8,
-                  fontSize: 13,
-                  fontWeight: 700,
-                  cursor: 'pointer',
-                  display: 'inline-flex',
-                  alignItems: 'center',
-                  gap: 6,
-                  transition: 'all 0.2s ease',
-                  boxShadow: '0 0 12px rgba(16,185,129,0.15)',
-                }}
-                title="Navigate to DIWO Agent (User View)"
-              >
-                <span>👤</span>
-                <span>Go to User View</span>
-              </button>
-            )}
             <button
               id="hitl-continue-btn"
+              className="cuqa-btn ghost-rdp"
               onClick={() => onContinue(report)}
               disabled={totalSmells === 0}
-              style={{
-                padding: '10px 28px',
-                background: totalSmells === 0
-                  ? 'rgba(139,92,246,0.15)'
-                  : 'linear-gradient(135deg, #7c3aed, #a855f7)',
-                color: totalSmells === 0 ? '#6b7280' : 'white',
-                border: 'none',
-                borderRadius: 8,
-                fontSize: 13,
-                fontWeight: 700,
-                cursor: totalSmells === 0 ? 'not-allowed' : 'pointer',
-                boxShadow: totalSmells === 0 ? 'none' : '0 0 20px rgba(139,92,246,0.5)',
-                letterSpacing: '0.4px',
-                display: 'flex', alignItems: 'center', gap: 8,
-                transition: 'all 0.2s ease',
-              }}
-              title={totalSmells === 0 ? 'No code smells detected — nothing to send' : 'Send report to RDP Agent and auto-generate refactoring plan'}
+              title={totalSmells === 0 ? 'No code smells detected — nothing to send' : 'Skip the developer review and send the report straight to the RDP agent'}
             >
-              <span>⚡</span>
-              <span>Continue → RDP Agent</span>
+              Send to RDP only
             </button>
+            {onNavigate && (
+              <DeveloperReviewButton id="hitl-diwo-btn" onClick={() => onNavigate('orchestrate')} />
+            )}
           </>
         )}
       </div>
@@ -706,12 +669,13 @@ function HumanInTheLoopPanel({ report, onContinue, onNavigate, pipelineState }) 
 }
 
 // ── Main CUQAAgentPage ─────────────────────────────────────────────────────
-export default function CUQAAgentPage({ repoLoaded, repoMeta, onSendToRdp, onReportReady, onNavigate, analysisConfig, pipelineState, onPipelineStateChange }) {
+// Layout: identity banner → F1–F5 bar → one section per CUQA function, each
+// saying what the function does and what it outputs.
+export default function CUQAAgentPage({ repoLoaded, repoMeta, onSendToRdp, onReportReady, onNavigate, analysisConfig, pipelineState }) {
   // Extract active settings (fall back to sensible defaults if no config provided)
   const threshold     = analysisConfig?.threshold      ?? 75;
   const severityFilts = analysisConfig?.severity_filters ?? { critical: true, naming: true };
   const analysisMode  = analysisConfig?.analysis_mode   ?? 'Comprehensive Refactoring';
-  const langContext   = analysisConfig?.language_context ?? 'All';
 
   const [tree,        setTree]        = useState(null);
   const [selFile,     setSelFile]     = useState(null);
@@ -721,21 +685,46 @@ export default function CUQAAgentPage({ repoLoaded, repoMeta, onSendToRdp, onRep
   const [loadingRep,  setLoadingRep]  = useState(false);
   const [rawJson,     setRawJson]     = useState(false);
   const [err,         setErr]         = useState(null);
+  const [repErr,      setRepErr]      = useState(null);
   const [smellFilter, setSmellFilter] = useState('all');
+  // null = the server's default detector (rules unless CUQA_SMELL_DETECTOR says otherwise)
+  const [detector,    setDetector]    = useState(null);
+  const [modelInfo,   setModelInfo]   = useState(null);
+  const [smellLimit,  setSmellLimit]  = useState(30);
+  const [copied,      setCopied]      = useState(false);
+  // The sticky next-step bar shows once the banner (and its review button) is off screen
+  const [heroInView,  setHeroInView]  = useState(true);
 
   useEffect(() => {
-    if (repoLoaded) { fetchTree(); fetchReport(); }
+    if (repoLoaded) { fetchTree(); fetchReport(); fetchModel(); }
   }, [repoLoaded]);
 
   useEffect(() => {
     if (selFile) parseAst(selFile.path);
   }, [selFile]);
 
+  // Hide the sticky bar while another review button (banner or hand-off panel) is on screen
+  useEffect(() => {
+    if (!repoLoaded || !report || typeof IntersectionObserver === 'undefined') return undefined;
+    const targets = [document.querySelector('.cuqa-hero'), document.querySelector('.cuqa-handoff')].filter(Boolean);
+    if (targets.length === 0) return undefined;
+    const visible = new Set();
+    const observer = new IntersectionObserver(
+      (entries) => {
+        entries.forEach((e) => (e.isIntersecting ? visible.add(e.target) : visible.delete(e.target)));
+        setHeroInView(visible.size > 0);
+      },
+      { root: document.querySelector('.main-content'), threshold: 0.15 },
+    );
+    targets.forEach((t) => observer.observe(t));
+    return () => observer.disconnect();
+  }, [repoLoaded, report]);
+
   async function fetchTree() {
     try {
       const d = await CUQAAgentService.getProjectStructure();
       setTree(d.tree);
-    } catch {}
+    } catch { /* explorer stays on its spinner; the report below still loads */ }
   }
 
   async function parseAst(path) {
@@ -747,19 +736,54 @@ export default function CUQAAgentPage({ repoLoaded, repoMeta, onSendToRdp, onRep
     finally { setLoadingAst(false); }
   }
 
-  async function fetchReport() {
-    setLoadingRep(true);
+  async function fetchReport(mode = detector) {
+    setLoadingRep(true); setRepErr(null);
     try {
-      const d = await CUQAAgentService.getQualityReport();
+      const d = await CUQAAgentService.getQualityReport(null, mode);
       setReport(d.report);
+      setSmellLimit(30);
       if (onReportReady && d.report) {
         onReportReady(d.report);
       }
-    } catch {}
+    } catch (e) { setRepErr(e.message); }
     finally { setLoadingRep(false); }
   }
 
-  const smells = report?.files?.flatMap(f => (f.code_smells || []).map(s => ({ ...s, file: f.file }))) ?? [];
+  async function fetchModel() {
+    try { setModelInfo(await CUQAAgentService.getMlModel()); }
+    catch { setModelInfo({ available: false }); }
+  }
+
+  function changeDetector(mode) {
+    setDetector(mode);
+    fetchReport(mode);
+  }
+
+  /** Open a file in F2 (explorer + AST) from anywhere on the page. */
+  function showFile(file) {
+    if (!file?.path) return;
+    setSelFile({ path: file.path, name: file.name || file.path.split(/[\\/]/).pop() });
+    document.getElementById('cuqa-f2')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
+
+  function exportReport() {
+    if (!report) return;
+    const blob = new Blob([JSON.stringify(report, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `cuqa_report_${report.repo_name || 'repository'}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  function copyReport() {
+    navigator.clipboard?.writeText(JSON.stringify(report, null, 2));
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1500);
+  }
+
+  const smells = report?.files?.flatMap(f => (f.code_smells || []).map(s => ({ ...s, file: f.file, path: f.relative_path || f.file }))) ?? [];
 
   // Apply severity filters from RepositoryInput config
   const filteredSmells = smells.filter(s => {
@@ -776,238 +800,135 @@ export default function CUQAAgentPage({ repoLoaded, repoMeta, onSendToRdp, onRep
   const summary = report?.summary ?? {};
   const ast = astData?.parsed?.ast;
   const astSummary = astData?.summary;
+  const effectiveMode = detector || report?.files?.find(f => f.detection_mode)?.detection_mode || 'rules';
 
   if (!repoLoaded) return (
-    <div className="page-container">
-      <div className="page-header">
-        <div className="page-header-left">
-          <div className="page-header-icon">🔍</div>
-          <div>
-            <div className="page-title">CUQA Agent</div>
-            <div className="page-subtitle">Code Understanding &amp; Quality Assessment</div>
-          </div>
+    <div className="page-container cuqa-page">
+      <CuqaIdentityHeader
+        repoMeta={null}
+        report={null}
+        loading={false}
+        runLabel="📂 Load a repository"
+        onRun={() => onNavigate?.('repository')}
+        onExport={exportReport}
+      />
+      <div className="card">
+        <div className="empty-state" style={{ padding: 40 }}>
+          <span className="empty-icon">📂</span>
+          <p>Load a repository from <strong>Repository Input</strong> to begin the analysis.</p>
         </div>
-      </div>
-      <div className="empty-state" style={{ flex: 1, justifyContent: 'center' }}>
-        <span className="empty-icon">📂</span>
-        <p>Load a repository from <strong>Repository Input</strong> to begin analysis.</p>
       </div>
     </div>
   );
 
+  const spinner = <div className="loading-state"><div className="spinner" /></div>;
+
   return (
-    <div className="page-container">
+    <div className="page-container cuqa-page">
 
-      {/* ── Header ──────────────────────────────────────────── */}
-      <div className="page-header">
-        <div className="page-header-left">
-          <div className="page-header-icon">🔍</div>
-          <div>
-            <div className="page-title">CUQA Agent</div>
-            <div className="page-subtitle">
-              Code Understanding &amp; Quality Assessment — Deep AST analysis, code smell detection,
-              and structural foundation for autonomous refactoring.
-            </div>
-          </div>
-        </div>
-        <div className="page-header-actions">
-          {analysisConfig && (() => {
-            // Build language display from repoMeta (real breakdown) or fall back to config label
-            const breakdown   = repoMeta?.language_breakdown   || {};
-            const detectedArr = repoMeta?.detected_languages   || [];
-            const isPolyglot  = repoMeta?.is_polyglot          || false;
-            const LANG_COLORS = { Python: '#3b82f6', Java: '#f59e0b', C: '#8b5cf6' };
-            const LANG_ICONS  = { Python: '🐍', Java: '☕', C: '⚙️' };
-            const total = Object.values(breakdown).reduce((a, b) => a + b, 0);
-
-            return (
-              <div style={{
-                display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap',
-              }}>
-                {/* Language chips with real file counts */}
-                {detectedArr.length > 0 ? (
-                  detectedArr.map(lang => {
-                    const count = breakdown[lang] || 0;
-                    const pct   = total > 0 ? Math.round((count / total) * 100) : 0;
-                    const color = LANG_COLORS[lang] || 'var(--accent)';
-                    return (
-                      <div key={lang} style={{
-                        display: 'flex', alignItems: 'center', gap: 5,
-                        background: `${color}15`, border: `1px solid ${color}40`,
-                        borderRadius: 'var(--r-sm)', padding: '4px 10px',
-                      }}>
-                        <span style={{ fontSize: 13 }}>{LANG_ICONS[lang] || '📄'}</span>
-                        <div>
-                          <div style={{ fontSize: 11, fontWeight: 700, color, lineHeight: 1.2 }}>{lang}</div>
-                          <div style={{ fontSize: 9, color: 'var(--text-muted)', lineHeight: 1 }}>{count} files · {pct}%</div>
-                        </div>
-                      </div>
-                    );
-                  })
-                ) : (
-                  /* Fallback to config text badge when no breakdown data */
-                  <div style={{
-                    display: 'flex', gap: 6, alignItems: 'center',
-                    background: 'var(--accent-muted)', border: '1px solid var(--border-accent)',
-                    borderRadius: 'var(--r-sm)', padding: '4px 10px', fontSize: 10,
-                  }}>
-                    <span style={{ color: 'var(--accent)', fontWeight: 700 }}>⚙ Config</span>
-                    <span style={{ color: 'var(--text-secondary)' }}>Threshold: {threshold}%</span>
-                    <span style={{ color: 'var(--text-muted)' }}>·</span>
-                    <span style={{ color: 'var(--text-secondary)' }}>{langContext}</span>
-                    <span style={{ color: 'var(--text-muted)' }}>·</span>
-                    <span style={{ color: 'var(--text-secondary)' }}>{analysisMode}</span>
-                  </div>
-                )}
-                {isPolyglot && (
-                  <span style={{
-                    fontSize: 9, fontWeight: 700, letterSpacing: '0.5px',
-                    padding: '2px 7px', borderRadius: 'var(--r-full)',
-                    background: 'rgba(139,92,246,0.2)', color: '#a78bfa',
-                    border: '1px solid rgba(139,92,246,0.4)',
-                  }}>
-                    POLYGLOT
-                  </span>
-                )}
-              </div>
-            );
-          })()}
-
-          <button className="btn btn-primary" onClick={() => { fetchTree(); fetchReport(); }}>
-            ⟳ RUN ANALYSIS
-          </button>
-          {report && onNavigate && (
-            <button
-              id="cuqa-diwo-nav-btn"
-              onClick={() => onNavigate('orchestrate')}
-              title="Navigate to DIWO Agent (User View)"
-              style={{
-                padding: '8px 16px',
-                background: 'linear-gradient(135deg, #10b981, #059669)',
-                color: 'white',
-                border: 'none',
-                borderRadius: '6px',
-                fontSize: '13px',
-                fontWeight: 700,
-                cursor: 'pointer',
-                boxShadow: '0 0 16px rgba(16,185,129,0.4)',
-                letterSpacing: '0.3px',
-                display: 'inline-flex',
-                alignItems: 'center',
-                gap: 6,
-                transition: 'all 0.2s ease',
-              }}
-            >
-              <span>👤</span>
-              <span>Go to User View</span>
-            </button>
-          )}
-          {report && onSendToRdp && (
-            <button
-              onClick={() => onSendToRdp(report)}
-              title="Send quality report to RDP Agent to generate a refactoring plan"
-              style={{
-                padding: '8px 16px',
-                background: 'linear-gradient(135deg, #8b5cf6, #a855f7)',
-                color: 'white',
-                border: 'none',
-                borderRadius: '6px',
-                fontSize: '13px',
-                fontWeight: 700,
-                cursor: 'pointer',
-                boxShadow: '0 0 18px rgba(139,92,246,0.5)',
-                letterSpacing: '0.3px',
-              }}
-            >
-              ⚡ Send to RDP Agent
-            </button>
-          )}
-          <button className="btn btn-outline" onClick={() => {
-            const blob = new Blob([JSON.stringify(report, null, 2)], { type: 'application/json' });
-            const a = document.createElement('a'); a.href = URL.createObjectURL(blob);
-            a.download = 'cuqa_report.json'; a.click();
-          }}>
-            ↓ EXPORT DATA
-          </button>
-        </div>
-      </div>
-
-      {/* ── Repository Understanding & Newcomer Guide ─────────── */}
-      <RepositoryUnderstandingSection
-        repoLoaded={repoLoaded}
-        onFileSelect={setSelFile}
+      {/* ── Identity: which agent, where in the pipeline, input and output ── */}
+      <CuqaIdentityHeader
+        repoMeta={repoMeta}
+        report={report}
+        loading={loadingRep}
+        threshold={threshold}
+        analysisMode={analysisMode}
+        detectorMode={effectiveMode}
+        onRun={() => { fetchTree(); fetchReport(); }}
+        onExport={exportReport}
+        onSendToRdp={report && onSendToRdp ? () => onSendToRdp(report) : undefined}
+        onOpenDiwo={report && onNavigate ? () => onNavigate('orchestrate') : undefined}
       />
 
-      {/* ── Explorer + AST ──────────────────────────────────── */}
-      <div style={{ display: 'grid', gridTemplateColumns: '220px 1fr', gap: 16, height: 380 }}>
+      {repErr && <div className="alert alert-error">⚠ The quality report could not be generated: {repErr}</div>}
 
-        {/* File Explorer */}
-        <div className="card" style={{ display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-          <div className="card-header">
-            <span className="card-title">📁 File Explorer</span>
-          </div>
-          <div style={{ flex: 1, overflowY: 'auto', padding: '8px 4px' }}>
-            {tree
-              ? <div className="file-tree"><TreeNode node={tree} depth={0} onSelect={setSelFile} selected={selFile?.path} /></div>
-              : <div className="loading-state" style={{ padding: 20 }}><div className="spinner" /></div>
-            }
-          </div>
-        </div>
+      <CuqaFunctionNav />
 
-        {/* AST Visualizer */}
-        <div className="card" style={{ display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-          <div className="card-header">
-            <span className="card-title">
-              🌲 AST Visualizer
-              {selFile && <span style={{ color: 'var(--accent)', marginLeft: 8, textTransform: 'none', fontWeight: 500, fontSize: 11 }}>{selFile.name}</span>}
-            </span>
-            <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-              {astSummary && (
-                <span style={{ fontSize: 11, color: 'var(--text-secondary)' }}>
-                  {astSummary.total_nodes} nodes · depth {astSummary.max_depth}
-                </span>
-              )}
-              <button className={`btn btn-sm ${rawJson ? 'btn-primary' : 'btn-ghost'}`}
-                onClick={() => setRawJson(v => !v)}>
-                {rawJson ? '🌲 Graph' : '{ } JSON'}
-              </button>
+      {/* ── F1 Repository understanding ─────────────────────── */}
+      <CuqaSection fn="F1">
+        <RepositoryUnderstandingSection
+          repoLoaded={repoLoaded}
+          onFileSelect={showFile}
+          embedded
+        />
+      </CuqaSection>
+
+      {/* ── F2 Explorer + AST ───────────────────────────────── */}
+      <CuqaSection
+        fn="F2"
+        tools={selFile
+          ? <span className="cuqa-chip accent">Selected file: <b>{selFile.name}</b></span>
+          : <span className="cuqa-chip">Pick a file in the explorer, or click any file further down the page</span>}
+      >
+        <div className="rg-nav-220 cuqa-explorer" style={{ gap: 16 }}>
+
+          {/* File Explorer */}
+          <div className="card" style={{ display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+            <div className="card-header">
+              <span className="card-title">📁 File Explorer</span>
+            </div>
+            <div style={{ flex: 1, overflowY: 'auto', padding: '8px 4px' }}>
+              {tree
+                ? <div className="file-tree"><TreeNode node={tree} depth={0} onSelect={setSelFile} selected={selFile?.path} /></div>
+                : spinner
+              }
             </div>
           </div>
-          <div style={{ flex: 1, overflow: 'hidden' }}>
-            {loadingAst && <div className="loading-state"><div className="spinner" /><span>Parsing AST…</span></div>}
-            {err        && <div className="alert alert-error" style={{ margin: 16 }}>⚠ {err}</div>}
-            {!selFile && !loadingAst && (
-              <div className="empty-state">
-                <span className="empty-icon">🌲</span>
-                <p>Click a <code>.py</code>, <code>.java</code>, <code>.c</code>, or <code>.h</code> file in the explorer to visualise its AST.</p>
+
+          {/* AST Visualizer */}
+          <div className="card" style={{ display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+            <div className="card-header">
+              <span className="card-title">
+                🌲 AST Visualizer
+                {selFile && <span style={{ color: 'var(--color-cuqa)', marginLeft: 8, textTransform: 'none', fontWeight: 500, fontSize: 11 }}>{selFile.name}</span>}
+              </span>
+              <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                {astSummary && (
+                  <span style={{ fontSize: 11, color: 'var(--text-secondary)' }}>
+                    {astSummary.total_nodes} nodes · depth {astSummary.max_depth}
+                  </span>
+                )}
+                <button className={`btn btn-sm ${rawJson ? 'btn-primary' : 'btn-ghost'}`}
+                  onClick={() => setRawJson(v => !v)}>
+                  {rawJson ? '🌲 Graph' : '{ } JSON'}
+                </button>
               </div>
-            )}
-            {ast && !loadingAst && !rawJson && <ASTGraph ast={ast} />}
-            {ast && !loadingAst && rawJson && (
-              <div style={{ padding: 16, overflowY: 'auto', height: '100%' }}>
-                <div className="json-viewer">{JSON.stringify(astData?.parsed, null, 2)}</div>
-              </div>
-            )}
+            </div>
+            <div style={{ flex: 1, overflow: 'hidden', minHeight: 0 }}>
+              {loadingAst && <div className="loading-state"><div className="spinner" /><span>Parsing AST…</span></div>}
+              {err        && <div className="alert alert-error" style={{ margin: 16 }}>⚠ {err}</div>}
+              {!selFile && !loadingAst && (
+                <div className="empty-state">
+                  <span className="empty-icon">🌲</span>
+                  <p>Click a <code>.py</code>, <code>.java</code>, <code>.c</code>, or <code>.h</code> file in the explorer to visualise its AST.</p>
+                </div>
+              )}
+              {ast && !loadingAst && !rawJson && <ASTGraph ast={ast} />}
+              {ast && !loadingAst && rawJson && (
+                <div style={{ padding: 16, overflowY: 'auto', height: '100%' }}>
+                  <div className="json-viewer">{JSON.stringify(astData?.parsed, null, 2)}</div>
+                </div>
+              )}
+            </div>
           </div>
         </div>
-      </div>
+      </CuqaSection>
 
-      {/* ── Code Smell Statistics Dashboard ─────────────────── */}
-      <div>
-        <h3 style={{ margin: '24px 0 12px 0', fontSize: 14, fontWeight: 600 }}>🦨 Code Smell Analytics</h3>
-        {loadingRep ? (
-          <div className="loading-state"><div className="spinner" /></div>
-        ) : (
-          <CodeSmellStats report={report} filesWithSmells={filesWithSmells} />
-        )}
-      </div>
+      {/* ── F3 Code smell detection ─────────────────────────── */}
+      <CuqaSection fn="F3">
+        <DetectionEnginePanel
+          mode={effectiveMode}
+          onModeChange={changeDetector}
+          modelInfo={modelInfo}
+          report={report}
+          loading={loadingRep}
+        />
 
-      {/* ── Code Smell Category Overview ────────────────────── */}
-      <div>
-        <h3 style={{ margin: '16px 0 12px 0', fontSize: 14, fontWeight: 600 }}>🗂 Code Smell Category Overview</h3>
-        {loadingRep ? (
-          <div className="loading-state"><div className="spinner" /></div>
-        ) : report?.summary?.code_smell_overview ? (
+        <div className="cuqa-subhead"><h4>🦨 Smell statistics</h4></div>
+        {loadingRep ? spinner : <CodeSmellStats report={report} filesWithSmells={filesWithSmells} />}
+
+        <div className="cuqa-subhead"><h4>🗂 Smells by category</h4></div>
+        {loadingRep ? spinner : report?.summary?.code_smell_overview ? (
           <InlineCodeSmellOverview overview={report.summary.code_smell_overview} />
         ) : (
           <div className="card">
@@ -1017,13 +938,10 @@ export default function CUQAAgentPage({ repoLoaded, repoMeta, onSendToRdp, onRep
             </div>
           </div>
         )}
-      </div>
 
-      {/* ── Files with Code Smells ──────────────────────────── */}
-      <div>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-          <h3 style={{ margin: 0, fontSize: 14, fontWeight: 600 }}>📁 Affected Files ({filesWithSmells.length})</h3>
-          <div style={{ display: 'flex', gap: 8 }}>
+        <div className="cuqa-subhead">
+          <h4>📁 Affected files ({filesWithSmells.length})</h4>
+          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
             {[
               { id: 'all',      label: 'All Files' },
               { id: 'critical', label: '🔴 Critical' },
@@ -1041,9 +959,7 @@ export default function CUQAAgentPage({ repoLoaded, repoMeta, onSendToRdp, onRep
             ))}
           </div>
         </div>
-        {loadingRep ? (
-          <div className="loading-state"><div className="spinner" /></div>
-        ) : filesWithSmells.length === 0 ? (
+        {loadingRep ? spinner : filesWithSmells.length === 0 ? (
           <div className="card">
             <div className="empty-state" style={{ padding: 40 }}>
               <span className="empty-icon">✅</span>
@@ -1051,153 +967,166 @@ export default function CUQAAgentPage({ repoLoaded, repoMeta, onSendToRdp, onRep
             </div>
           </div>
         ) : (
-          <FilesWithSmells report={report} filter={smellFilter} />
+          <FilesWithSmells report={report} filter={smellFilter} onSelect={showFile} />
         )}
-      </div>
 
-      {/* ── Detailed Code Smells Table ──────────────────────── */}
-      <div className="card">
-        <div className="card-header">
-          <span className="card-title">🔍 Detailed Code Smells ({filteredSmells.length})</span>
-          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-            {/* Threshold indicator */}
-            {filesBelowThreshold.length > 0 && (
-              <span className="badge badge-critical" title={`${filesBelowThreshold.length} files below ${threshold}% threshold`}>
-                ⚠ {filesBelowThreshold.length} below {threshold}%
-              </span>
-            )}
-            {summary.smell_severity?.high   > 0 && <span className="badge badge-critical">● {summary.smell_severity.high} Critical</span>}
-            {summary.smell_severity?.medium > 0 && <span className="badge badge-medium">● {summary.smell_severity.medium} Medium</span>}
-            {summary.smell_severity?.low    > 0 && <span className="badge" style={{ background: '#22c55e40', color: '#22c55e' }}>● {summary.smell_severity.low} Low</span>}
+        {/* Detailed list */}
+        <div className="card">
+          <div className="card-header">
+            <span className="card-title">🔍 Detailed Code Smells ({filteredSmells.length})</span>
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+              {filesBelowThreshold.length > 0 && (
+                <span className="badge badge-critical" title={`${filesBelowThreshold.length} files below ${threshold}% threshold`}>
+                  ⚠ {filesBelowThreshold.length} below {threshold}%
+                </span>
+              )}
+              {summary.smell_severity?.high   > 0 && <span className="badge badge-critical">● {summary.smell_severity.high} Critical</span>}
+              {summary.smell_severity?.medium > 0 && <span className="badge badge-medium">● {summary.smell_severity.medium} Medium</span>}
+              {summary.smell_severity?.low    > 0 && <span className="badge badge-ok">● {summary.smell_severity.low} Low</span>}
+            </div>
+          </div>
+
+          {loadingRep ? spinner : smells.length === 0 ? (
+            <div className="empty-state" style={{ padding: 32 }}>
+              <span className="empty-icon">✅</span>
+              <p>No code smells detected.</p>
+            </div>
+          ) : (
+            <>
+              <div style={{ overflowX: 'auto' }}>
+                <table className="data-table">
+                  <thead>
+                    <tr>
+                      <th>Type</th>
+                      <th>Category</th>
+                      <th>Priority</th>
+                      <th>File</th>
+                      <th>Line</th>
+                      <th>Message</th>
+                      <th>Severity</th>
+                      <th style={{ width: 80 }}>Action</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {filteredSmells.slice(0, smellLimit).map((s, i) => {
+                      const catCfg = CATEGORY_CONFIG[s.category] || CATEGORY_CONFIG['Uncategorized'];
+                      return (
+                        <tr key={i}>
+                          <td>
+                            <span style={{ fontWeight: 600, fontSize: 12, color: 'var(--text-primary)' }}>{s.type}</span>
+                            {s.detected_by === 'ml' && (
+                              <span className="cuqa-ml-tag" title={s.confidence != null ? `Found by the ML model (confidence ${Math.round(s.confidence * 100)}%)` : 'Found by the ML model'}>ML</span>
+                            )}
+                          </td>
+                          <td>
+                            {s.category ? (
+                              <span style={{
+                                display: 'inline-flex', alignItems: 'center', gap: 4,
+                                padding: '2px 7px', borderRadius: 5, fontSize: 10, fontWeight: 600,
+                                background: `${catCfg.color}18`, color: catCfg.color,
+                                border: `1px solid ${catCfg.border}`,
+                              }}>
+                                {catCfg.icon} {s.category}
+                              </span>
+                            ) : <span style={{ color: 'var(--text-muted)', fontSize: 11 }}>—</span>}
+                          </td>
+                          <td>
+                            {s.category_priority
+                              ? <PriorityBadge priority={s.category_priority} />
+                              : <span style={{ color: 'var(--text-muted)', fontSize: 11 }}>—</span>}
+                          </td>
+                          <td><span style={{ fontSize: 11, color: 'var(--color-cuqa)' }} title={s.path}>{s.file}</span></td>
+                          <td><span style={{ fontSize: 11, color: 'var(--text-secondary)' }}>{s.line ? `L${s.line}` : '—'}</span></td>
+                          <td><span style={{ fontSize: 11, color: 'var(--text-secondary)' }} title={s.message}>{s.message?.slice(0, 60)}</span></td>
+                          <td>
+                            <span className={`badge badge-${s.severity === 'high' ? 'critical' : s.severity === 'medium' ? 'medium' : 'success'}`}>
+                              {(s.severity || '?').toUpperCase()}
+                            </span>
+                          </td>
+                          <td style={{ textAlign: 'center' }}>
+                            <button
+                              className="btn btn-ghost btn-sm"
+                              style={{ fontSize: 11 }}
+                              title="Open this file's AST in F2"
+                              onClick={() => showFile({ path: s.path, name: s.file })}
+                            >
+                              View
+                            </button>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+
+              {filteredSmells.length > smellLimit && (
+                <div style={{ padding: 14, textAlign: 'center', borderTop: '1px solid var(--border)', fontSize: 12, color: 'var(--text-secondary)' }}>
+                  Showing {smellLimit} of {filteredSmells.length} code smells —{' '}
+                  <button className="btn btn-ghost btn-sm" onClick={() => setSmellLimit(n => n + 30)}>Load 30 more</button>
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      </CuqaSection>
+
+      {/* ── F4 Quality assessment ───────────────────────────── */}
+      <CuqaSection fn="F4">
+        {loadingRep ? spinner : (
+          <QualityAssessmentPanel report={report} threshold={threshold} onSelectFile={showFile} />
+        )}
+      </CuqaSection>
+
+      {/* ── F5 Structured report + hand-off ─────────────────── */}
+      <CuqaSection fn="F5">
+        <div className="card">
+          <div className="card-header">
+            <span className="card-title">{'{ }'} Structured Quality Report (JSON)</span>
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+              <button className="btn btn-ghost btn-sm" onClick={copyReport} disabled={!report}>
+                {copied ? '✓ Copied' : '📋 Copy'}
+              </button>
+              <button className="btn btn-outline btn-sm" onClick={exportReport} disabled={!report}>
+                ↓ Download JSON
+              </button>
+            </div>
+          </div>
+          <div style={{ padding: 20, maxHeight: 300, overflowY: 'auto', background: 'var(--bg-base)' }}>
+            {report
+              ? <div className="json-viewer">{JSON.stringify(report, null, 2)}</div>
+              : spinner
+            }
           </div>
         </div>
-        
-        {loadingRep ? (
-          <div className="loading-state"><div className="spinner" /></div>
-        ) : smells.length === 0 ? (
-          <div className="empty-state" style={{ padding: 32 }}>
-            <span className="empty-icon">✅</span>
-            <p>No code smells detected.</p>
+
+        <HumanInTheLoopPanel
+          report={report}
+          onContinue={onSendToRdp}
+          onNavigate={onNavigate}
+          pipelineState={pipelineState}
+        />
+      </CuqaSection>
+
+      {/* ── Sticky next step: always one click from the developer review ── */}
+      {report && onNavigate && (
+        <div className={`cuqa-nextbar ${heroInView ? 'hidden' : ''}`} role="region" aria-label="Next step" aria-hidden={heroInView}>
+          <div className="msg">
+            <span className="ok">✓</span>
+            <b>Analysis ready</b> · {summary.total_code_smells ?? 0} smells in {filesWithSmells.length} files.
+            <span className="more"> Next: review them in DIWO.</span>
           </div>
-        ) : (
-          <>
-            <div style={{ overflowX: 'auto' }}>
-              <table className="data-table">
-                <thead>
-                  <tr>
-                    <th>Type</th>
-                    <th>Category</th>
-                    <th>Priority</th>
-                    <th>File</th>
-                    <th>Line</th>
-                    <th>Message</th>
-                    <th>Severity</th>
-                    <th style={{ width: 80 }}>Action</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {filteredSmells.slice(0, 30).map((s, i) => {
-                    const catCfg = CATEGORY_CONFIG[s.category] || CATEGORY_CONFIG['Uncategorized'];
-                    return (
-                      <tr key={i}>
-                        <td>
-                          <span style={{ fontWeight: 600, fontSize: 12, color: 'var(--text-primary)' }}>{s.type}</span>
-                        </td>
-                        <td>
-                          {s.category ? (
-                            <span style={{
-                              display: 'inline-flex', alignItems: 'center', gap: 4,
-                              padding: '2px 7px', borderRadius: 5, fontSize: 10, fontWeight: 600,
-                              background: `${catCfg.color}18`, color: catCfg.color,
-                              border: `1px solid ${catCfg.border}`,
-                            }}>
-                              {catCfg.icon} {s.category}
-                            </span>
-                          ) : <span style={{ color: 'var(--text-muted)', fontSize: 11 }}>—</span>}
-                        </td>
-                        <td>
-                          {s.category_priority
-                            ? <PriorityBadge priority={s.category_priority} />
-                            : <span style={{ color: 'var(--text-muted)', fontSize: 11 }}>—</span>}
-                        </td>
-                        <td><span style={{ fontSize: 11, color: 'var(--accent)' }}>{s.file}</span></td>
-                        <td><span style={{ fontSize: 11, color: 'var(--text-secondary)' }}>{s.line ? `L${s.line}` : '—'}</span></td>
-                        <td><span style={{ fontSize: 11, color: 'var(--text-secondary)', maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis' }}>{s.message?.slice(0, 60)}</span></td>
-                        <td>
-                          <span className={`badge badge-${s.severity === 'high' ? 'critical' : s.severity === 'medium' ? 'medium' : 'success'}`}>
-                            {(s.severity || '?').toUpperCase()}
-                          </span>
-                        </td>
-                        <td style={{ textAlign: 'center' }}>
-                          <button className="btn btn-ghost btn-sm" style={{ fontSize: 11 }}>View</button>
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-
-            {filteredSmells.length > 30 && (
-              <div style={{ padding: 14, textAlign: 'center', borderTop: '1px solid var(--border)', fontSize: 12, color: 'var(--text-secondary)' }}>
-                Showing 30 of {filteredSmells.length} code smells — <a href="#" style={{ color: 'var(--accent)' }}>Load More</a>
-              </div>
-            )}
-          </>
-        )}
-      </div>
-
-      {/* ── Structural Quality Report JSON ───────────────────── */}
-      <div className="card">
-        <div className="card-header">
-          <span className="card-title">{'{ }'} Structural Quality Report (JSON)</span>
-          <div style={{ display: 'flex', gap: 8 }}>
-            <button className="btn btn-ghost btn-sm" onClick={() => {
-              navigator.clipboard?.writeText(JSON.stringify(report, null, 2));
-            }}>
-              📋 Copy to Clipboard
-            </button>
-            {report && onSendToRdp && (
-              <button
-                className="btn btn-sm"
-                style={{
-                  background: 'linear-gradient(135deg, #8b5cf6, #a855f7)',
-                  color: 'white',
-                  border: 'none',
-                  borderRadius: '6px',
-                  padding: '4px 14px',
-                  fontWeight: 600,
-                  fontSize: 12,
-                  cursor: 'pointer',
-                  boxShadow: '0 0 12px rgba(139,92,246,0.35)',
-                }}
-                onClick={() => onSendToRdp(report)}
-              >
-                ⚡ Send to RDP Agent
+          <div className="acts">
+            {onSendToRdp && (
+              <button className="cuqa-btn ghost-rdp sm" onClick={() => onSendToRdp(report)} tabIndex={heroInView ? -1 : 0}
+                title="Skip the developer review and send the report straight to the RDP planning page">
+                RDP only
               </button>
             )}
+            <DeveloperReviewButton compact onClick={() => onNavigate('orchestrate')} />
           </div>
-          <button className="btn btn-ghost btn-sm" onClick={() => {
-            navigator.clipboard?.writeText(JSON.stringify(report, null, 2));
-          }}>
-            📋 Copy
-          </button>
         </div>
-        <div style={{ padding: 20, maxHeight: 300, overflowY: 'auto', background: 'var(--bg-base)' }}>
-          {report
-            ? <div className="json-viewer">{JSON.stringify(report, null, 2)}</div>
-            : <div className="loading-state"><div className="spinner" /></div>
-          }
-        </div>
-      </div>
-
-      {/* ── Human-in-the-Loop Handoff Panel ──────────────────── */}
-      <HumanInTheLoopPanel
-        report={report}
-        onContinue={onSendToRdp}
-        onNavigate={onNavigate}
-        pipelineState={pipelineState}
-      />
+      )}
 
     </div>
   );

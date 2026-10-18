@@ -1,0 +1,425 @@
+/* ================================================================
+   cuqa.css — CUQA agent identity and section layout
+   The page keeps one colour (--color-cuqa) and one structure: an identity
+   banner, a function bar (F1–F5), and one numbered section per function,
+   each saying what it does and what it outputs.
+   ================================================================ */
+
+.cuqa-page { --cuqa: var(--color-cuqa); --cuqa-tint: color-mix(in srgb, var(--color-cuqa) 10%, transparent); --cuqa-line: color-mix(in srgb, var(--color-cuqa) 35%, transparent); }
+
+/* ── Identity banner ────────────────────────────────────────── */
+.cuqa-hero {
+  position: relative;
+  border: 1px solid var(--cuqa-line);
+  border-radius: var(--r-lg);
+  background:
+    radial-gradient(120% 140% at 0% 0%, color-mix(in srgb, var(--cuqa) 16%, transparent) 0%, transparent 55%),
+    var(--bg-card);
+  padding: 22px 24px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  overflow: hidden;
+}
+.cuqa-hero::before {
+  content: '';
+  position: absolute; left: 0; top: 0; bottom: 0; width: 5px;
+  background: var(--cuqa);
+}
+
+.cuqa-hero-top { display: flex; gap: 18px; align-items: flex-start; flex-wrap: wrap; }
+.cuqa-mark {
+  width: 64px; height: 64px;
+  border-radius: 16px;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  background: var(--cuqa);
+  color: var(--text-on-accent);
+  box-shadow: 0 6px 24px color-mix(in srgb, var(--cuqa) 35%, transparent);
+  flex-shrink: 0;
+}
+.cuqa-mark b { font-size: 17px; font-weight: 900; letter-spacing: 1px; line-height: 1; }
+.cuqa-mark small { font-size: 10px; font-weight: 800; letter-spacing: 0.8px; margin-top: 4px; opacity: 0.85; }
+
+.cuqa-hero-text { flex: 1 1 320px; min-width: 0; }
+.cuqa-eyebrow {
+  display: inline-flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  font-size: 12px; font-weight: 800; letter-spacing: 1px; text-transform: uppercase;
+  color: var(--cuqa);
+}
+.cuqa-eyebrow .step-pill {
+  padding: 2px 9px; border-radius: var(--r-full);
+  background: var(--cuqa-tint); border: 1px solid var(--cuqa-line);
+}
+.cuqa-hero-title { font-size: 28px; font-weight: 800; color: var(--text-primary); line-height: 1.15; margin-top: 6px; }
+.cuqa-hero-title span { color: var(--cuqa); }
+.cuqa-hero-sub { font-size: 14.5px; color: var(--text-secondary); margin-top: 6px; max-width: 760px; line-height: 1.55; }
+
+.cuqa-hero-actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.cuqa-btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  padding: 9px 16px;
+  border-radius: var(--r-sm);
+  font-family: var(--font-body); font-size: 13.5px; font-weight: 700;
+  cursor: pointer;
+  border: 1px solid transparent;
+  white-space: nowrap;
+  transition: filter var(--transition-fast), border-color var(--transition-fast), background var(--transition-fast);
+}
+.cuqa-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.cuqa-btn.primary { background: var(--cuqa); color: var(--text-on-accent); }
+.cuqa-btn.primary:hover:not(:disabled) { filter: brightness(1.08); }
+.cuqa-btn.outline { background: transparent; color: var(--text-primary); border-color: var(--border-light); }
+.cuqa-btn.outline:hover:not(:disabled) { border-color: var(--cuqa); color: var(--cuqa); }
+.cuqa-btn.next-rdp { background: var(--color-rdp); color: #fff; }
+.cuqa-btn.next-diwo { background: var(--color-orchestrate); color: #fff; }
+.cuqa-btn.next-rdp:hover:not(:disabled), .cuqa-btn.next-diwo:hover:not(:disabled) { filter: brightness(1.1); }
+.cuqa-btn.sm { padding: 6px 12px; font-size: 12.5px; }
+
+/* Pipeline position */
+.cuqa-pipeline { display: flex; align-items: stretch; gap: 6px; flex-wrap: wrap; }
+.cuqa-pipe-step {
+  --c: var(--text-muted);
+  position: relative;
+  flex: 1 1 150px;
+  display: flex; align-items: center; gap: 10px;
+  padding: 9px 12px;
+  border-radius: var(--r-md);
+  border: 1px dashed var(--border-light);
+  background: var(--bg-base);
+  min-width: 0;
+}
+.cuqa-pipe-step .n {
+  width: 26px; height: 26px; border-radius: 7px; flex-shrink: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+  font-size: 13px; font-weight: 800;
+  color: var(--c); border: 1px solid color-mix(in srgb, var(--c) 50%, transparent);
+}
+.cuqa-pipe-step .t { display: flex; flex-direction: column; min-width: 0; line-height: 1.25; }
+.cuqa-pipe-step .t b { font-size: 13.5px; color: var(--text-primary); }
+.cuqa-pipe-step .t small { font-size: 12px; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cuqa-pipe-step.current {
+  border-style: solid; border-color: var(--cuqa);
+  background: var(--cuqa-tint);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--cuqa) 12%, transparent);
+}
+.cuqa-pipe-step.current .n { background: var(--cuqa); color: var(--text-on-accent); border-color: var(--cuqa); }
+.cuqa-pipe-step.current .here {
+  position: absolute; top: -9px; right: 10px;
+  padding: 1px 8px; border-radius: var(--r-full);
+  font-size: 10px; font-weight: 800; letter-spacing: 0.6px; text-transform: uppercase;
+  color: var(--text-on-accent); background: var(--cuqa);
+  white-space: nowrap;
+}
+.cuqa-pipeline { padding-top: 6px; }
+.cuqa-pipe-arrow { display: flex; align-items: center; color: var(--text-muted); font-size: 14px; }
+
+/* Input → CUQA → Output */
+.cuqa-io { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); gap: 10px; align-items: stretch; }
+.cuqa-io-box {
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  padding: 10px 14px;
+  background: var(--bg-base);
+}
+.cuqa-io-box .k { font-size: 11.5px; font-weight: 800; letter-spacing: 0.8px; text-transform: uppercase; color: var(--text-muted); }
+.cuqa-io-box .v { font-size: 13.5px; color: var(--text-primary); margin-top: 3px; line-height: 1.45; }
+.cuqa-io-box.out { border-color: var(--cuqa-line); background: var(--cuqa-tint); }
+.cuqa-io-box.out .k { color: var(--cuqa); }
+.cuqa-io-arrow { display: flex; align-items: center; justify-content: center; color: var(--cuqa); font-weight: 800; font-size: 13px; gap: 6px; }
+.cuqa-io-arrow i { font-style: normal; }
+
+/* Repository status chips */
+.cuqa-status { display: flex; gap: 8px; flex-wrap: wrap; }
+.cuqa-chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 5px 11px;
+  border-radius: var(--r-full);
+  border: 1px solid var(--border-light);
+  background: var(--bg-base);
+  font-size: 13px; color: var(--text-secondary);
+  max-width: 100%;
+}
+.cuqa-chip b { color: var(--text-primary); font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cuqa-chip.accent { border-color: var(--cuqa-line); background: var(--cuqa-tint); }
+.cuqa-chip.accent b { color: var(--cuqa); }
+
+/* ── Function bar (F1–F5) ───────────────────────────────────── */
+.cuqa-fnbar {
+  position: sticky; top: 0; z-index: 30;
+  display: flex; gap: 6px;
+  padding: 8px;
+  margin: 0 -2px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: color-mix(in srgb, var(--bg-base) 88%, transparent);
+  backdrop-filter: blur(8px);
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.cuqa-fnbar::-webkit-scrollbar { display: none; }
+.cuqa-fn {
+  flex: 1 0 auto;
+  display: flex; align-items: center; gap: 8px;
+  padding: 7px 12px;
+  border-radius: var(--r-sm);
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text-secondary);
+  font-family: var(--font-body); font-size: 13.5px; font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.cuqa-fn .fn-no {
+  font-size: 11.5px; font-weight: 800;
+  padding: 1px 6px; border-radius: 5px;
+  border: 1px solid var(--border-light);
+  color: var(--text-muted);
+}
+.cuqa-fn:hover { background: var(--bg-hover); color: var(--text-primary); }
+.cuqa-fn.active { background: var(--cuqa-tint); border-color: var(--cuqa-line); color: var(--cuqa); }
+.cuqa-fn.active .fn-no { background: var(--cuqa); border-color: var(--cuqa); color: var(--text-on-accent); }
+
+/* ── Function section ───────────────────────────────────────── */
+.cuqa-section { scroll-margin-top: 72px; display: flex; flex-direction: column; gap: 14px; }
+.cuqa-section-head {
+  display: flex; gap: 14px; align-items: flex-start; flex-wrap: wrap;
+  padding: 14px 16px;
+  border-radius: var(--r-md);
+  border: 1px solid var(--border);
+  border-left: 4px solid var(--cuqa);
+  background: var(--bg-card);
+}
+.cuqa-section-no {
+  width: 42px; height: 42px; border-radius: 11px; flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 15px; font-weight: 900;
+  color: var(--cuqa); background: var(--cuqa-tint); border: 1px solid var(--cuqa-line);
+}
+.cuqa-section-text { flex: 1 1 300px; min-width: 0; }
+.cuqa-section-kicker { font-size: 11.5px; font-weight: 800; letter-spacing: 0.9px; text-transform: uppercase; color: var(--cuqa); }
+.cuqa-section-title { font-size: 19px; font-weight: 800; color: var(--text-primary); line-height: 1.25; margin-top: 2px; }
+.cuqa-section-what { font-size: 14px; color: var(--text-secondary); margin-top: 4px; line-height: 1.5; }
+.cuqa-section-output {
+  display: flex; flex-direction: column; gap: 2px;
+  padding: 8px 12px;
+  border-radius: var(--r-sm);
+  border: 1px dashed var(--cuqa-line);
+  background: var(--cuqa-tint);
+  max-width: 320px;
+  flex: 0 1 280px;
+}
+.cuqa-section-output .k { font-size: 11px; font-weight: 800; letter-spacing: 0.8px; text-transform: uppercase; color: var(--cuqa); }
+.cuqa-section-output .v { font-size: 13px; color: var(--text-primary); line-height: 1.4; }
+.cuqa-section-tools { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+
+/* Sub-heading inside a section */
+.cuqa-subhead { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+.cuqa-subhead h4 { font-size: 15px; font-weight: 700; color: var(--text-primary); margin: 0; }
+
+/* Explorer + AST */
+.cuqa-explorer { height: 420px; }
+.cuqa-explorer > .card { min-height: 0; }
+
+/* ── Detection engine panel ─────────────────────────────────── */
+.cuqa-engine { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(0, 0.9fr); gap: 12px; }
+.cuqa-engine-card {
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--bg-card);
+  padding: 14px 16px;
+  display: flex; flex-direction: column; gap: 8px;
+  min-width: 0;
+}
+.cuqa-engine-card h5 { margin: 0; font-size: 14.5px; font-weight: 800; color: var(--text-primary); display: flex; align-items: center; gap: 8px; }
+.cuqa-engine-card p { margin: 0; font-size: 13px; color: var(--text-secondary); line-height: 1.5; }
+.cuqa-engine-card .tag {
+  font-size: 10.5px; font-weight: 800; letter-spacing: 0.6px; text-transform: uppercase;
+  padding: 1px 7px; border-radius: var(--r-full);
+  color: var(--cuqa); background: var(--cuqa-tint); border: 1px solid var(--cuqa-line);
+}
+.cuqa-kv { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 3px 12px; font-size: 13px; }
+.cuqa-kv dt { color: var(--text-muted); }
+.cuqa-kv dd { margin: 0; color: var(--text-primary); font-weight: 600; overflow: hidden; text-overflow: ellipsis; }
+.cuqa-modes { display: flex; flex-direction: column; gap: 6px; }
+.cuqa-mode {
+  display: flex; gap: 10px; align-items: flex-start; text-align: left;
+  padding: 8px 10px;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--border);
+  background: var(--bg-base);
+  cursor: pointer;
+  font-family: var(--font-body);
+  color: var(--text-secondary);
+}
+.cuqa-mode b { display: block; font-size: 13.5px; color: var(--text-primary); }
+.cuqa-mode small { display: block; font-size: 12px; color: var(--text-muted); line-height: 1.35; }
+.cuqa-mode .dot { width: 14px; height: 14px; border-radius: 50%; border: 2px solid var(--border-light); margin-top: 2px; flex-shrink: 0; }
+.cuqa-mode.on { border-color: var(--cuqa); background: var(--cuqa-tint); }
+.cuqa-mode.on .dot { border-color: var(--cuqa); background: radial-gradient(circle, var(--cuqa) 45%, transparent 50%); }
+.cuqa-mode:disabled { opacity: 0.55; cursor: not-allowed; }
+
+.cuqa-ml-tag {
+  display: inline-flex; align-items: center;
+  font-size: 10.5px; font-weight: 800; letter-spacing: 0.5px;
+  padding: 1px 6px; border-radius: 4px; margin-left: 6px;
+  color: var(--color-rdp); border: 1px solid color-mix(in srgb, var(--color-rdp) 45%, transparent);
+  background: color-mix(in srgb, var(--color-rdp) 12%, transparent);
+  vertical-align: middle;
+}
+
+/* ── Quality assessment ─────────────────────────────────────── */
+.cuqa-quality { display: grid; grid-template-columns: 260px minmax(0, 1fr); gap: 14px; }
+.cuqa-gauge-card {
+  border: 1px solid var(--border); border-radius: var(--r-md); background: var(--bg-card);
+  padding: 16px; display: flex; flex-direction: column; align-items: center; gap: 10px; text-align: center;
+}
+.cuqa-gauge { width: 150px; height: 150px; }
+.cuqa-gauge-label { font-size: 13px; color: var(--text-secondary); }
+.cuqa-bands { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; width: 100%; }
+.cuqa-band { border-radius: var(--r-sm); padding: 6px 4px; border: 1px solid var(--border); }
+.cuqa-band b { display: block; font-size: 18px; font-weight: 800; }
+.cuqa-band small { font-size: 11.5px; color: var(--text-muted); }
+
+.cuqa-scorelist { border: 1px solid var(--border); border-radius: var(--r-md); background: var(--bg-card); overflow: hidden; display: flex; flex-direction: column; }
+.cuqa-scorelist-head { padding: 12px 16px; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; background: var(--bg-elevated); }
+.cuqa-scorelist-head b { font-size: 14px; color: var(--text-primary); }
+.cuqa-scorelist-head span { font-size: 12.5px; color: var(--text-muted); }
+.cuqa-scorerow {
+  display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(90px, 1fr) 52px;
+  gap: 12px; align-items: center;
+  padding: 8px 16px; border-bottom: 1px solid var(--border);
+  font-size: 13px; cursor: pointer;
+}
+.cuqa-scorerow:last-child { border-bottom: none; }
+.cuqa-scorerow:hover { background: var(--bg-hover); }
+.cuqa-scorerow .name { color: var(--text-primary); font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cuqa-scorerow .name small { display: block; font-weight: 400; color: var(--text-muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; }
+.cuqa-scorebar { position: relative; height: 8px; border-radius: 4px; background: var(--bg-hover); overflow: visible; }
+.cuqa-scorebar i { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 4px; }
+.cuqa-scorebar .threshold { position: absolute; top: -4px; bottom: -4px; width: 2px; background: var(--text-muted); }
+.cuqa-scorerow .score { text-align: right; font-weight: 800; font-family: var(--font-mono); }
+
+/* ── Responsive ─────────────────────────────────────────────── */
+@media (max-width: 1100px) {
+  .cuqa-engine { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+  .cuqa-engine > :last-child { grid-column: 1 / -1; }
+}
+@media (max-width: 900px) {
+  .cuqa-quality { grid-template-columns: minmax(0, 1fr); }
+  .cuqa-io { grid-template-columns: minmax(0, 1fr); }
+  .cuqa-io-arrow { padding: 2px 0; }
+  .cuqa-io-arrow i { display: inline-block; transform: rotate(90deg); }
+}
+@media (max-width: 760px) {
+  .cuqa-explorer { height: auto; grid-template-columns: minmax(0, 1fr) !important; }
+  .cuqa-explorer > .card:first-child { max-height: 240px; }
+  .cuqa-explorer > .card:last-child { height: 380px; }
+  .cuqa-pipe-arrow { display: none; }
+  .cuqa-pipe-step { flex: 1 1 calc(50% - 6px); }
+}
+@media (max-width: 640px) {
+  .cuqa-hero { padding: 16px 14px 14px 18px; gap: 14px; }
+  .cuqa-mark { width: 52px; height: 52px; border-radius: 13px; }
+  .cuqa-mark b { font-size: 13.5px; letter-spacing: 0.5px; }
+  .cuqa-mark small { font-size: 8.5px; }
+  .cuqa-hero-title { font-size: 22px; }
+  .cuqa-hero-sub { font-size: 14px; }
+  .cuqa-hero-actions { width: 100%; }
+  .cuqa-hero-actions .cuqa-btn { flex: 1 1 calc(50% - 8px); }
+  .cuqa-engine { grid-template-columns: minmax(0, 1fr); }
+  .cuqa-section-head { padding: 12px; gap: 10px; }
+  .cuqa-section-no { width: 36px; height: 36px; font-size: 14px; }
+  .cuqa-section-title { font-size: 17px; }
+  .cuqa-section-output { max-width: none; flex: 1 1 100%; }
+  .cuqa-pipe-step .t small { white-space: normal; }
+  .cuqa-scorerow { grid-template-columns: minmax(0, 1fr) 70px 44px; padding: 8px 12px; }
+  .cuqa-fn { padding: 7px 10px; font-size: 13px; }
+}
+
+/* ── Developer review: the main next step ───────────────────── */
+.cuqa-review-btn {
+  --g: var(--color-orchestrate);
+  position: relative;
+  display: inline-flex; align-items: center; gap: 12px;
+  padding: 10px 16px 10px 10px;
+  border: none; border-radius: 12px;
+  background: var(--g); color: #fff;
+  font-family: var(--font-body); text-align: left;
+  cursor: pointer;
+  box-shadow: 0 6px 20px color-mix(in srgb, var(--g) 40%, transparent);
+  transition: filter 0.15s ease, transform 0.15s ease;
+}
+.cuqa-review-btn .ic {
+  width: 36px; height: 36px; border-radius: 10px; flex-shrink: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: rgba(255, 255, 255, 0.2); font-size: 18px;
+}
+.cuqa-review-btn b { display: block; font-size: 15px; font-weight: 800; line-height: 1.2; }
+.cuqa-review-btn small { display: block; font-size: 12px; opacity: 0.92; margin-top: 2px; line-height: 1.3; }
+.cuqa-review-btn .arrow { font-size: 20px; font-weight: 800; margin-left: auto; padding-left: 6px; transition: transform 0.15s ease; }
+.cuqa-review-btn:hover:not(:disabled) { filter: brightness(1.08); transform: translateY(-1px); }
+.cuqa-review-btn:hover:not(:disabled) .arrow { transform: translateX(3px); }
+.cuqa-review-btn:focus-visible { outline: 3px solid color-mix(in srgb, var(--g) 55%, white); outline-offset: 2px; }
+.cuqa-review-btn:disabled { background: var(--bg-hover); color: var(--text-muted); box-shadow: none; cursor: not-allowed; }
+.cuqa-review-btn:disabled .ic { background: var(--bg-elevated); }
+.cuqa-review-btn.ready::after {
+  content: ''; position: absolute; inset: -4px; border-radius: 15px;
+  border: 2px solid var(--g); opacity: 0;
+  animation: cuqa-review-ring 2.4s ease-out infinite;
+  pointer-events: none;
+}
+@keyframes cuqa-review-ring {
+  0%   { opacity: 0.55; transform: scale(0.98); }
+  70%  { opacity: 0;    transform: scale(1.06); }
+  100% { opacity: 0; }
+}
+.cuqa-review-btn.compact { padding: 7px 12px 7px 7px; gap: 8px; border-radius: 10px; }
+.cuqa-review-btn.compact .ic { width: 28px; height: 28px; border-radius: 8px; font-size: 15px; }
+.cuqa-review-btn.compact b { font-size: 14px; }
+.cuqa-review-btn.compact .arrow { font-size: 17px; }
+.cuqa-review-btn.compact .short { display: none; }
+@media (max-width: 420px) {
+  .cuqa-review-btn.compact .long { display: none; }
+  .cuqa-review-btn.compact .short { display: inline; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .cuqa-review-btn.ready::after { animation: none; }
+  .cuqa-review-btn, .cuqa-review-btn .arrow { transition: none; }
+}
+
+/* Secondary route straight to RDP */
+.cuqa-btn.ghost-rdp { background: transparent; color: var(--color-rdp); border-color: color-mix(in srgb, var(--color-rdp) 45%, transparent); }
+.cuqa-btn.ghost-rdp:hover:not(:disabled) { background: color-mix(in srgb, var(--color-rdp) 10%, transparent); }
+
+/* Hero: review button on top, smaller actions under it */
+.cuqa-hero-actions.has-review { flex-direction: column; align-items: stretch; gap: 8px; }
+.cuqa-hero-actions .row { display: flex; gap: 8px; flex-wrap: wrap; }
+.cuqa-hero-actions .row .cuqa-btn { flex: 1 1 auto; }
+
+/* Sticky "next step" bar at the bottom of the CUQA page */
+.cuqa-nextbar {
+  position: sticky; bottom: 12px; z-index: 40;
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  padding: 10px 12px 10px 16px;
+  border-radius: var(--r-lg);
+  border: 1px solid color-mix(in srgb, var(--color-orchestrate) 45%, transparent);
+  background: var(--bg-card);
+  box-shadow: var(--shadow-lg), 0 0 0 4px color-mix(in srgb, var(--bg-base) 70%, transparent);
+  transition: opacity 0.2s ease, transform 0.2s ease;
+}
+.cuqa-nextbar.hidden { opacity: 0; transform: translateY(16px); pointer-events: none; }
+.cuqa-nextbar .msg { flex: 1 1 240px; min-width: 0; font-size: 13.5px; color: var(--text-secondary); line-height: 1.4; }
+.cuqa-nextbar .msg b { color: var(--text-primary); }
+.cuqa-nextbar .msg .ok { color: var(--color-ok); font-weight: 800; margin-right: 4px; }
+.cuqa-nextbar .acts { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+
+@media (max-width: 640px) {
+  .cuqa-hero-actions.has-review .cuqa-review-btn { width: 100%; }
+  .cuqa-nextbar { bottom: 8px; padding: 8px 10px; gap: 6px; }
+  .cuqa-nextbar .msg { font-size: 13px; }
+  .cuqa-nextbar .msg .more { display: none; }
+  .cuqa-nextbar .acts { width: 100%; flex-wrap: nowrap; }
+  .cuqa-nextbar .acts .cuqa-review-btn { flex: 1 1 auto; min-width: 0; }
+  .cuqa-nextbar .acts .cuqa-review-btn b { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .cuqa-nextbar .acts .cuqa-btn { flex: 0 0 auto; }
+}

@@ -25,7 +25,7 @@ export default function RepositoryAtAGlance({ repository = {}, languageBreakdown
   const totalExtDeps = dependencySummary.external_dependencies || 0;
 
   return (
-    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 12 }}>
+    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(150px, 100%), 1fr))', gap: 12 }}>
       {/* Source Files Card */}
       <div className="metric-card">
         <div className="metric-label-text">📄 Source Files</div>
