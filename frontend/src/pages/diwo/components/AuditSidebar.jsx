@@ -112,7 +112,7 @@ export default function AuditSidebar({
   // ── Minimised: a rail with the count and a way back ──────────────────────
   if (collapsed) {
     return (
-      <div style={{
+      <div className="diwo-audit-sidebar collapsed" style={{
         width: 46, background: C.panel, borderLeft: `1px solid ${C.border}`,
         display: "flex", flexDirection: "column", alignItems: "center",
         padding: "12px 0", gap: 14, flexShrink: 0,
@@ -152,7 +152,7 @@ export default function AuditSidebar({
 
   // ── Expanded ─────────────────────────────────────────────────────────────
   return (
-    <div style={{
+    <div className="diwo-audit-sidebar" style={{
       width: 360, background: C.panel, borderLeft: `1px solid ${C.border}`,
       display: "flex", flexDirection: "column", flexShrink: 0,
     }}>

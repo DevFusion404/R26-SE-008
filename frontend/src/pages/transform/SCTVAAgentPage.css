@@ -1165,7 +1165,7 @@
 
 @media (max-width: 1180px) {
   .sctva-agent-grid {
-    grid-template-columns: 1fr 1fr;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
     grid-template-areas:
       'timeline timeline'
       'code code'
@@ -1194,7 +1194,7 @@
   }
 
   .sctva-agent-grid {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
     grid-template-areas:
       'timeline'
       'code'

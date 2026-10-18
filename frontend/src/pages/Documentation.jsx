@@ -44,7 +44,7 @@ export default function Documentation() {
       </div>
 
       {/* Main Grid */}
-      <div style={{ display: 'grid', gridTemplateColumns: '220px 1fr', gap: 16, alignItems: 'start' }}>
+      <div className="rg-nav-220" style={{ gap: 16, alignItems: 'start' }}>
         {/* Navigation Sidebar */}
         <div className="card" style={{ padding: 12 }}>
           <div style={{ marginBottom: 12, padding: '0 4px' }}>
@@ -96,7 +96,7 @@ export default function Documentation() {
                 <strong>RefactorIQ (R26-SE-008)</strong> is an autonomous, developer-in-the-loop multi-agent code modernisation platform designed for legacy Java, Python, and C/C++ codebases. It moves beyond traditional static analysis by pairing deep AST understanding with intelligent refactoring planning, safe code transformations, and interactive developer feedback loops.
               </p>
 
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14, marginBottom: 20 }}>
+              <div className="rg-2" style={{ gap: 14, marginBottom: 20 }}>
                 <div style={{ background: 'var(--bg-elevated)', padding: 14, borderRadius: 'var(--r-sm)', border: '1px solid var(--border)' }}>
                   <div style={{ fontWeight: 700, fontSize: 13, color: 'var(--accent)', marginBottom: 6 }}>Key Problem Addressed</div>
                   <p style={{ fontSize: 12, color: 'var(--text-secondary)', lineHeight: 1.6 }}>
