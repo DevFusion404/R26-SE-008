@@ -1,0 +1,152 @@
+{
+  "timestamp": "2026-10-08T20:28:53Z",
+  "total_samples": 120,
+  "table_a": {
+    "Measurement": [
+      "Top-1 recommendation accuracy",
+      "Plan executability",
+      "Dependency violations",
+      "Planning time",
+      "Post-refactoring smell reduction"
+    ],
+    "Direct mapping": [
+      "86.67%",
+      "90.83%",
+      "3 (75.0%)",
+      "0.01 ms",
+      "74.32%"
+    ],
+    "Rule + MCDA": [
+      "72.50%",
+      "86.67%",
+      "0 (0.0%)",
+      "0.89 ms",
+      "65.57%"
+    ],
+    "Full RDP": [
+      "72.50%",
+      "86.67%",
+      "0 (0.0%)",
+      "286.12 ms",
+      "65.57%"
+    ]
+  },
+  "systems": {
+    "direct_mapping": {
+      "total_samples": 120,
+      "top1_accuracy": 0.8667,
+      "top1_acceptable_accuracy": 0.9083,
+      "top3_accuracy": 0.8667,
+      "mrr": 0.8667,
+      "ndcg_at_3": 0.8667,
+      "plan_executability": 0.9083,
+      "mean_planning_time_ms": 0.01,
+      "median_planning_time_ms": 0.0,
+      "smell_reduction_rate": 0.7432,
+      "by_language": {
+        "java": {
+          "total": 40,
+          "accuracy": 0.85,
+          "acceptable_accuracy": 0.975
+        },
+        "python": {
+          "total": 40,
+          "accuracy": 0.75,
+          "acceptable_accuracy": 0.75
+        },
+        "c": {
+          "total": 40,
+          "accuracy": 1.0,
+          "acceptable_accuracy": 1.0
+        }
+      }
+    },
+    "rule_mcda": {
+      "total_samples": 120,
+      "top1_accuracy": 0.725,
+      "top1_acceptable_accuracy": 0.7833,
+      "top3_accuracy": 0.8417,
+      "mrr": 0.8236,
+      "ndcg_at_3": 0.8283,
+      "plan_executability": 0.8667,
+      "mean_planning_time_ms": 0.89,
+      "median_planning_time_ms": 0.52,
+      "smell_reduction_rate": 0.6557,
+      "by_language": {
+        "java": {
+          "total": 40,
+          "accuracy": 0.675,
+          "acceptable_accuracy": 0.825
+        },
+        "python": {
+          "total": 40,
+          "accuracy": 0.75,
+          "acceptable_accuracy": 0.75
+        },
+        "c": {
+          "total": 40,
+          "accuracy": 0.75,
+          "acceptable_accuracy": 0.775
+        }
+      }
+    },
+    "full_rdp": {
+      "total_samples": 120,
+      "top1_accuracy": 0.725,
+      "top1_acceptable_accuracy": 0.7833,
+      "top3_accuracy": 0.8417,
+      "mrr": 0.8236,
+      "ndcg_at_3": 0.8283,
+      "plan_executability": 0.8667,
+      "mean_planning_time_ms": 286.12,
+      "median_planning_time_ms": 307.02,
+      "smell_reduction_rate": 0.6557,
+      "by_language": {
+        "java": {
+          "total": 40,
+          "accuracy": 0.675,
+          "acceptable_accuracy": 0.825
+        },
+        "python": {
+          "total": 40,
+          "accuracy": 0.75,
+          "acceptable_accuracy": 0.75
+        },
+        "c": {
+          "total": 40,
+          "accuracy": 0.75,
+          "acceptable_accuracy": 0.775
+        }
+      }
+    }
+  },
+  "codebert_evaluation": {
+    "model_name": "microsoft/codebert-base",
+    "embedding_dimension": 768,
+    "total_evaluated_pairs": 77,
+    "mean_positive_suitability": 0.9963,
+    "mean_negative_suitability": 0.9959,
+    "discrimination_margin": 0.0004,
+    "mean_quality_improvement_projection": 0.4949,
+    "mean_behavioral_risk_projection": 0.5046,
+    "mean_model_confidence": 0.604,
+    "mean_inference_latency_ms": 170.36,
+    "device": "CPU (PyTorch 2.11.0+cpu)",
+    "confidence_calibration": {
+      "high_confidence_rate (conf >= 0.60)": 1.0,
+      "confidence_range": [
+        0.603,
+        0.604
+      ]
+    }
+  },
+  "dependency_scenarios": {
+    "total_dependency_plans_tested": 4,
+    "direct_violations": 3,
+    "direct_violation_rate": 0.75,
+    "mcda_violations": 0,
+    "mcda_violation_rate": 0.0,
+    "rdp_violations": 0,
+    "rdp_violation_rate": 0.0
+  }
+}
