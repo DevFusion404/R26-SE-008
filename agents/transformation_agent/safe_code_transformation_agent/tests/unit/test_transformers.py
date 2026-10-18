@@ -559,30 +559,26 @@ def test_c_introduce_constant_skips_unsupported_numeric_contexts():
         )
 
 
-def test_c_introduce_constant_skips_function_parameter_array_bound():
+def test_c_introduce_constant_rewrites_function_parameter_array_bound():
     source = "int extractYear(char userID[15]) { return userID[0]; }\n"
     transformed, count = c_transformers.apply_extract_constant(
         source, 15, "THRESHOLD_LIMIT_15"
     )
 
-    assert count == 0
-    assert transformed == source
-    assert c_transformers.analyze_extract_constant_target(source, 15)["reason"] == (
-        "TARGET_IN_C_TYPE_OR_SIGNATURE_CONTEXT"
-    )
+    assert count == 1
+    assert "#define THRESHOLD_LIMIT_15 15" in transformed
+    assert "char userID[THRESHOLD_LIMIT_15]" in transformed
 
 
-def test_c_introduce_constant_skips_local_array_declaration_bound():
+def test_c_introduce_constant_rewrites_local_array_declaration_bound():
     source = "void build_name(void) { char filename[20]; filename[0] = '\\0'; }\n"
     transformed, count = c_transformers.apply_extract_constant(
         source, 20, "THRESHOLD_LIMIT_20"
     )
 
-    assert count == 0
-    assert transformed == source
-    assert c_transformers.analyze_extract_constant_target(source, 20)["reason"] == (
-        "TARGET_IN_C_TYPE_OR_SIGNATURE_CONTEXT"
-    )
+    assert count == 1
+    assert "#define THRESHOLD_LIMIT_20 20" in transformed
+    assert "char filename[THRESHOLD_LIMIT_20]" in transformed
 
 
 def test_c_introduce_constant_replaces_only_code_when_code_and_string_share_value():

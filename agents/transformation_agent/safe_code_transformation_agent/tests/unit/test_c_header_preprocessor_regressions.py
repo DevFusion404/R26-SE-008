@@ -67,16 +67,68 @@ typedef struct {
     )
 
 
-def test_c_local_and_parameter_array_bounds_remain_conservative():
+def test_c_local_and_parameter_array_bounds_are_safe_constant_targets():
     parameter_source = "int f(char userID[15]) { return userID[0]; }\n"
     local_source = "void f(void) { char filename[20]; filename[0] = '\\0'; }\n"
 
-    assert c_transformers.analyze_extract_constant_target(parameter_source, 15)[
-        "reason"
-    ] == "TARGET_IN_C_TYPE_OR_SIGNATURE_CONTEXT"
-    assert c_transformers.analyze_extract_constant_target(local_source, 20)[
-        "reason"
-    ] == "TARGET_IN_C_TYPE_OR_SIGNATURE_CONTEXT"
+    parameter_analysis = c_transformers.analyze_extract_constant_target(
+        parameter_source, 15
+    )
+    local_analysis = c_transformers.analyze_extract_constant_target(local_source, 20)
+
+    assert parameter_analysis["eligible"] is True
+    assert parameter_analysis["reason"] == "C_ARRAY_EXTENT"
+    assert local_analysis["eligible"] is True
+    assert local_analysis["reason"] == "C_ARRAY_EXTENT"
+
+
+def test_c_header_function_array_bound_is_safely_rewritten():
+    source = '''#ifndef READER_H
+#define READER_H
+
+int read_value(char buffer[64]);
+
+#endif
+'''
+
+    transformed, replacements, metadata = c_transformers.apply_introduce_constant(
+        source,
+        64,
+        "READER_BUFFER_SIZE",
+        4,
+    )
+
+    assert replacements == 1
+    assert metadata["status"] == "success"
+    assert metadata["target_context"] == "C_ARRAY_EXTENT"
+    assert "#define READER_BUFFER_SIZE 64" in transformed
+    assert "int read_value(char buffer[READER_BUFFER_SIZE]);" in transformed
+
+
+def test_c_runtime_array_index_remains_ineligible_for_introduce_constant():
+    source = "int first(const int *values) { return values[15]; }\n"
+
+    analysis = c_transformers.analyze_extract_constant_target(source, 15)
+
+    assert analysis["eligible"] is False
+    assert analysis["reason"] == "TARGET_CONTEXT_UNSUPPORTED"
+
+
+def test_c_struct_bit_field_width_is_a_safe_constant_target():
+    source = "struct Flags { unsigned ready : 1; };\n"
+
+    transformed, replacements, metadata = c_transformers.apply_introduce_constant(
+        source,
+        1,
+        "READY_BIT_WIDTH",
+        1,
+    )
+
+    assert replacements == 1
+    assert metadata["status"] == "success"
+    assert metadata["target_context"] == "C_BIT_FIELD_WIDTH"
+    assert "#define READY_BIT_WIDTH 1" in transformed
+    assert "unsigned ready : READY_BIT_WIDTH;" in transformed
 
 
 def test_c_enum_numeric_initializer_is_already_symbolic_not_rewritten():

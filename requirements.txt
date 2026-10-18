@@ -5,6 +5,9 @@
 
 # ── Web Framework ────────────────────────────────────────────
 fastapi==0.115.6
+# FastAPI 0.115.x requires Starlette <0.42.  Pin this explicitly so an
+# unrelated upgrade cannot install Starlette 1.x and break app startup.
+starlette==0.41.3
 uvicorn[standard]==0.32.1
 
 # ── HTTP (GitHub repo download) ──────────────────────────────
