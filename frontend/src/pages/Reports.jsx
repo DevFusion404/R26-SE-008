@@ -1,11 +1,15 @@
 /**
  * Reports.jsx — Quality & Audit Reports Page
- * Displays generated quality reports from CUQA analysis runs, allowing preview,
- * filtering, and export (JSON/CSV).
+ * Shows the report of each finished refactoring session (opened here
+ * automatically after "Complete Workflow" in DIWO), then the history of CUQA
+ * quality reports and RDP plans, with preview and export (JSON/CSV).
  */
 
 import { useState, useEffect } from 'react';
 import { getEnv } from '../config/env';
+import SessionReportView from '../components/reports/SessionReportView';
+import { loadSessionReports, deleteSessionReport } from '../utils/sessionReports';
+import { measuredScore } from '../utils/analysisHistory';
 
 const API = getEnv('VITE_CUQA_AGENT_API_URL', getEnv('VITE_CUQA_API_URL', 'http://localhost:8080')).replace(/\/+$/, '');
 const HISTORY_KEY     = 'cuqa_analysis_history';
@@ -34,7 +38,9 @@ function scoreColor(s) {
   return '#ef4444';
 }
 
-export default function Reports() {
+export default function Reports({ focusSessionId = null }) {
+  const [sessions,      setSessions]      = useState(() => loadSessionReports());
+  const [sessionId,     setSessionId]     = useState(() => focusSessionId || loadSessionReports()[0]?.id || null);
   const [history,       setHistory]       = useState([]);
   const [rdpHistory,    setRdpHistory]    = useState([]);
   const [search,        setSearch]        = useState('');
@@ -50,6 +56,18 @@ export default function Reports() {
     setRdpHistory(loadRdpHistory());
     fetchLiveReport();
   }, []);
+
+  // A session just completed in DIWO opens straight away: this page mounts
+  // fresh after "Complete Workflow", so the initial state above picks it up.
+
+  function removeSession(id) {
+    if (!window.confirm('Remove this session report from this browser?')) return;
+    const next = deleteSessionReport(id);
+    setSessions(next);
+    setSessionId(next[0]?.id || null);
+  }
+
+  const activeSession = sessions.find(r => r.id === sessionId) || sessions[0] || null;
 
   async function fetchLiveReport() {
     try {
@@ -115,7 +133,7 @@ export default function Reports() {
     if (!history.length) return;
     const header = 'Repository,Language,Date,Files,Score,Threshold,Mode';
     const rows = history.map(r =>
-      `"${r.name}","${r.language}","${fmtDate(r.date)}","${r.files_found}","${r.score}%","${r.threshold}%","${r.mode}"`
+      `"${r.name}","${r.language}","${fmtDate(r.date)}","${r.files_found}","${measuredScore(r) ?? ''}","${r.threshold}%","${r.mode}"`
     );
     const csv = [header, ...rows].join('\n');
     const blob = new Blob([csv], { type: 'text/csv' });
@@ -128,7 +146,7 @@ export default function Reports() {
   }
 
   const avgScore = history.length
-    ? Math.round(history.reduce((a, b) => a + (b.score || 0), 0) / history.length)
+    ? Math.round(history.reduce((a, b) => a + (measuredScore(b) || 0), 0) / Math.max(1, history.filter(h => measuredScore(h) != null).length))
     : 0;
 
   return (
@@ -151,8 +169,48 @@ export default function Reports() {
         </div>
       </div>
 
+      {/* ── Refactoring session reports (whole repository, every agent) ── */}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+        <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 10, flexWrap: 'wrap' }}>
+          <h2 style={{ fontSize: 18, fontWeight: 800, color: 'var(--text-primary)' }}>
+            🧾 Refactoring session reports ({sessions.length})
+          </h2>
+          <span style={{ fontSize: 13, color: 'var(--text-muted)' }}>
+            Saved in this browser when a DIWO workflow is completed
+          </span>
+        </div>
+        {sessions.length === 0 ? (
+          <div className="card">
+            <div className="empty-state" style={{ padding: 32 }}>
+              <span className="empty-icon">🧾</span>
+              <p>No finished sessions yet. Run a repository through the agents and press <strong>Complete Workflow</strong> in the DIWO agent — the report of that whole session opens here.</p>
+            </div>
+          </div>
+        ) : (
+          <>
+            {sessions.length > 1 && (
+              <div className="srep-list" role="tablist" aria-label="Session reports">
+                {sessions.map(r => (
+                  <button
+                    key={r.id}
+                    role="tab"
+                    aria-selected={r.id === activeSession?.id}
+                    className={r.id === activeSession?.id ? 'on' : ''}
+                    onClick={() => setSessionId(r.id)}
+                  >
+                    <b>{r.repository?.name || r.analysis?.repo_name || r.target || 'Session'}</b>
+                    <small>{fmtDate(r.completed_at)}</small>
+                  </button>
+                ))}
+              </div>
+            )}
+            <SessionReportView report={activeSession} onDelete={removeSession} />
+          </>
+        )}
+      </div>
+
       {/* Top Metrics Cards */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 14 }}>
+      <div className="rg-5" style={{ gap: 14 }}>
         <div className="card card-body" style={{ padding: 18 }}>
           <div style={{ fontSize: 10, color: 'var(--text-muted)', textTransform: 'uppercase', fontWeight: 600 }}>CUQA Reports</div>
           <div style={{ fontSize: 26, fontWeight: 800, color: 'var(--accent)', marginTop: 4 }}>{history.length}</div>
@@ -190,14 +248,14 @@ export default function Reports() {
             onChange={e => setSearch(e.target.value)}
           />
         </div>
-        <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+        <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
           <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>Agent:</span>
           {['All', 'CUQA', 'RDP'].map(a => (
             <button key={a} className={`btn btn-sm ${agentFilter === a ? 'btn-primary' : 'btn-ghost'}`}
               onClick={() => setAgentFilter(a)}>{a}</button>
           ))}
         </div>
-        <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+        <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
           <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>Language:</span>
           {['All', 'Java', 'Python', 'C'].map(l => (
             <button key={l} className={`btn btn-sm ${langFilter === l ? 'btn-primary' : 'btn-ghost'}`}
@@ -241,7 +299,9 @@ export default function Reports() {
                     <td style={{ fontSize: 11, color: 'var(--text-secondary)' }}>{r.mode || 'Comprehensive'}</td>
                     <td style={{ fontSize: 11, color: 'var(--text-muted)' }}>{fmtDate(r.date)}</td>
                     <td style={{ fontSize: 11 }}>{r.files_found} files</td>
-                    <td><span style={{ fontWeight: 700, color: r.color }}>{r.score}%</span></td>
+                    <td>{measuredScore(r) == null
+                      ? <span style={{ color: 'var(--text-muted)' }}>not scored</span>
+                      : <span style={{ fontWeight: 700, color: scoreColor(measuredScore(r)) }}>{measuredScore(r)}%</span>}</td>
                     <td>
                       <div style={{ display: 'flex', gap: 6 }}>
                         <button className="btn btn-ghost btn-sm" onClick={() => setSelectedReport(r)}>👁️ View</button>
@@ -326,14 +386,14 @@ export default function Reports() {
               <button className="btn btn-ghost btn-sm" onClick={() => setSelectedReport(null)}>✕ Close</button>
             </div>
 
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 16 }}>
+            <div className="rg-2" style={{ gap: 12, marginBottom: 16 }}>
               <div style={{ background: 'var(--bg-elevated)', padding: 12, borderRadius: 'var(--r-sm)' }}>
                 <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>LANGUAGE CONTEXT</div>
                 <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)' }}>{selectedReport.language}</div>
               </div>
               <div style={{ background: 'var(--bg-elevated)', padding: 12, borderRadius: 'var(--r-sm)' }}>
                 <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>QUALITY SCORE</div>
-                <div style={{ fontSize: 13, fontWeight: 700, color: selectedReport.color }}>{selectedReport.score}%</div>
+                <div style={{ fontSize: 13, fontWeight: 700, color: scoreColor(measuredScore(selectedReport) ?? 0) }}>{measuredScore(selectedReport) == null ? 'not scored' : `${measuredScore(selectedReport)}%`}</div>
               </div>
               <div style={{ background: 'var(--bg-elevated)', padding: 12, borderRadius: 'var(--r-sm)' }}>
                 <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>ANALYSIS THRESHOLD</div>
@@ -347,7 +407,7 @@ export default function Reports() {
 
             <div style={{ marginBottom: 16 }}>
               <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', marginBottom: 6 }}>FILTERS APPLIED AT RUNTIME</div>
-              <div style={{ display: 'flex', gap: 8 }}>
+              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
                 <span className="badge badge-accent">Critical Issues: {selectedReport.filters?.critical ? 'ENABLED' : 'DISABLED'}</span>
                 <span className="badge badge-accent">Naming Violations: {selectedReport.filters?.naming ? 'ENABLED' : 'DISABLED'}</span>
               </div>
@@ -375,7 +435,7 @@ export default function Reports() {
               </h3>
               <button className="btn btn-ghost btn-sm" onClick={() => setSelectedRdpPlan(null)}>✕ Close</button>
             </div>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 12, marginBottom: 16 }}>
+            <div className="rg-3" style={{ gap: 12, marginBottom: 16 }}>
               <div style={{ background: 'var(--bg-elevated)', padding: 12, borderRadius: 'var(--r-sm)' }}>
                 <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>PLAN ID</div>
                 <div style={{ fontSize: 12, fontWeight: 600, color: '#a78bfa', fontFamily: 'var(--font-mono)' }}>{selectedRdpPlan.plan_id}</div>
