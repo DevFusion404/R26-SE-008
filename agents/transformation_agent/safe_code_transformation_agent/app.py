@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import socket
 
 from flask import Flask, jsonify, render_template, request, make_response
 
@@ -13,6 +14,17 @@ except ImportError:
     HAS_FLASK_CORS = False
 
 from sctva.integration.api import create_sctva_blueprint
+
+
+def _port_is_in_use(host: str, port: int) -> bool:
+    """Prevent a stale local SCTVA process from sharing the configured port."""
+
+    probe_host = "127.0.0.1" if host in {"0.0.0.0", "::"} else host
+    try:
+        with socket.create_connection((probe_host, port), timeout=0.25):
+            return True
+    except OSError:
+        return False
 
 def create_app() -> Flask:
     app = Flask(__name__)
@@ -52,6 +64,12 @@ def create_app() -> Flask:
 
 if __name__ == "__main__":
     port = int(os.getenv("SCTVA_PORT", "8002"))
+    host = "0.0.0.0"
+    if _port_is_in_use(host, port):
+        raise SystemExit(
+            f"SCTVA startup refused: port {port} is already in use. "
+            "Stop the existing SCTVA process before starting a new backend."
+        )
     app = create_app()
-    app.run(host="0.0.0.0", port=port, debug=False)
+    app.run(host=host, port=port, debug=False)
 

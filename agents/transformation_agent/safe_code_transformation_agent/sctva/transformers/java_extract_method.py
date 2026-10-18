@@ -146,6 +146,48 @@ def validate_java_extract_method_result(
     }
 
 
+def infer_extracted_method_name(
+    original_code: str,
+    transformed_code: str,
+    *,
+    source_class: str,
+    source_method: str,
+) -> dict[str, Any]:
+    """Infer a helper only when extraction leaves one clear structural trace."""
+
+    original_model = _parse_java_class(original_code, source_class)
+    transformed_model = _parse_java_class(transformed_code, source_class)
+    if original_model is None or transformed_model is None:
+        return {"status": "unresolved", "reason": "SOURCE_CLASS_NOT_FOUND"}
+    if not original_model.methods_by_name.get(source_method):
+        return {"status": "unresolved", "reason": "ORIGINAL_SOURCE_METHOD_NOT_FOUND"}
+
+    original_names = set(original_model.methods_by_name)
+    source_matches = transformed_model.methods_by_name.get(source_method, [])
+    if not source_matches:
+        return {"status": "unresolved", "reason": "SOURCE_METHOD_NOT_FOUND"}
+
+    candidates: list[str] = []
+    for name, methods in transformed_model.methods_by_name.items():
+        if name in original_names or len(methods) != 1:
+            continue
+        if any(re.search(rf"\b{re.escape(name)}\s*\(", item.body) for item in source_matches):
+            candidates.append(name)
+
+    if len(candidates) != 1:
+        return {
+            "status": "ambiguous" if candidates else "unresolved",
+            "reason": "EXTRACTED_HELPER_NOT_UNIQUE" if candidates else "EXTRACTED_HELPER_NOT_FOUND",
+            "candidate_methods": candidates,
+        }
+    return {
+        "status": "resolved",
+        "reason": "UNIQUE_NEW_HELPER_CALLED_BY_SOURCE_METHOD",
+        "method_name": candidates[0],
+        "source_method_count": len(source_matches),
+    }
+
+
 def apply_extract_method(
     source_code: str,
     *,
