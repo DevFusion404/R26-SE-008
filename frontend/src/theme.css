@@ -68,6 +68,27 @@
   --border-light:   #243851;
   --border-accent:  rgba(0, 212, 232, 0.4);
 
+  /* ── RDP Component Tokens (Dark) ───────────────────────── */
+  --rdp-card-bg:        rgba(15, 24, 40, 0.75);
+  --rdp-card-border:    rgba(139, 92, 246, 0.25);
+  --rdp-card-hover:     rgba(139, 92, 246, 0.4);
+  --rdp-badge-bg:       rgba(139, 92, 246, 0.22);
+  --rdp-badge-text:     #c4b5fd;
+  --rdp-badge-border:   rgba(139, 92, 246, 0.35);
+  --rdp-meta-bg:        rgba(10, 15, 26, 0.85);
+  --rdp-meta-border:    rgba(139, 92, 246, 0.2);
+  --rdp-target-color:   #38bdf8;
+  --rdp-pill-bg:        rgba(139, 92, 246, 0.12);
+  --rdp-pill-border:    rgba(139, 92, 246, 0.25);
+  --rdp-pill-key:       #d8b4fe;
+  --rdp-table-head:     rgba(139, 92, 246, 0.14);
+  --rdp-table-zebra:    rgba(139, 92, 246, 0.04);
+  --rdp-winner-bg:      rgba(34, 197, 94, 0.15);
+  --rdp-winner-border:  #22c55e;
+  --rdp-winner-text:    #4ade80;
+  --rdp-success-text:   #4ade80;
+  --rdp-danger-text:    #f87171;
+
   /* ── Shadows ───────────────────────────────────────────── */
   --shadow-sm:   0 1px 4px rgba(0, 0, 0, 0.5);
   --shadow-md:   0 4px 20px rgba(0, 0, 0, 0.6);
@@ -167,9 +188,9 @@
 
   /* ── Text ──────────────────────────────────────────────── */
   --text-primary:   #0f172a;
-  --text-secondary: #475569;
-  --text-muted:     #94a3b8;
-  --text-accent:    #0099b5;
+  --text-secondary: #334155;   /* High contrast slate-700 (9.6:1 on white) */
+  --text-muted:     #475569;   /* High contrast slate-600 (7.0:1 on white) */
+  --text-accent:    #0284c7;   /* Sky-600 for sharp accent in light mode */
   --text-code:      #1d4ed8;
   --text-on-accent: #ffffff;
   --text-success:   #15803d;
@@ -178,16 +199,37 @@
   --text-info:      #1d4ed8;
   --metric-green:   #15803d;
   --metric-blue:    #2563eb;
-  --metric-purple:  #7e22ce;
+  --metric-purple:  #6b21a8;
   --metric-orange:  #c2410c;
   --diagram-node:   #ffffff;
   --diagram-danger: #fef2f2;
-  --diagram-edge:   #94a3b8;
+  --diagram-edge:   #64748b;
 
   /* ── Borders ───────────────────────────────────────────── */
   --border:         #cbd5e1;
   --border-light:   #e2e8f0;
   --border-accent:  rgba(0, 153, 181, 0.4);
+
+  /* ── RDP Component Tokens (Light) ──────────────────────── */
+  --rdp-card-bg:        #ffffff;
+  --rdp-card-border:    #cbd5e1;
+  --rdp-card-hover:     #7c3aed;
+  --rdp-badge-bg:       #7c3aed;
+  --rdp-badge-text:     #ffffff;
+  --rdp-badge-border:   #6d28d9;
+  --rdp-meta-bg:        #f8fafc;
+  --rdp-meta-border:    #e2e8f0;
+  --rdp-target-color:   #0369a1;
+  --rdp-pill-bg:        #f5f3ff;
+  --rdp-pill-border:    #ddd6fe;
+  --rdp-pill-key:       #581c87;
+  --rdp-table-head:     #f5f3ff;
+  --rdp-table-zebra:    #f8fafc;
+  --rdp-winner-bg:      #f0fdf4;
+  --rdp-winner-border:  #16a34a;
+  --rdp-winner-text:    #15803d;
+  --rdp-success-text:   #15803d;
+  --rdp-danger-text:    #b91c1c;
 
   /* ── Shadows (lighter & softer) ─────────────────────────── */
   --shadow-sm:   0 1px 4px rgba(0, 0, 0, 0.08);
