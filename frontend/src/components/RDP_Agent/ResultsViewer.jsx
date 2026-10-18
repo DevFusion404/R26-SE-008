@@ -1,9 +1,11 @@
 /**
  * ResultsViewer.jsx — Refactoring Plan Display
  * Displays the generated refactoring plan with categorization, filtering, search, and export options.
+ * Optimized for high-contrast light mode, scaled typography, and clear visual hierarchy for viva presentations.
  */
 
 import { useState, useMemo } from 'react';
+import './rdpAgent.css';
 
 // ── C language & Security helpers ──────────────────────────────────────────
 const C_EXTENSIONS = ['.c', '.h'];
@@ -18,28 +20,12 @@ function isCFile(step) {
 
 function LangBadge({ step }) {
   if (!isCFile(step)) return null;
-  return (
-    <span style={{
-      display: 'inline-flex', alignItems: 'center', gap: 3,
-      padding: '2px 8px', borderRadius: 99,
-      background: 'rgba(249,115,22,0.12)', border: '1px solid rgba(249,115,22,0.3)',
-      fontSize: 10, fontWeight: 700, color: '#f97316',
-      marginLeft: 6, verticalAlign: 'middle',
-    }}>C</span>
-  );
+  return <span className="rdp-tag-c">C</span>;
 }
 
 function SecurityBadge({ step }) {
   if (!UNSAFE_SMELL_REFACTORINGS.has(step.refactoring)) return null;
-  return (
-    <span style={{
-      display: 'inline-flex', alignItems: 'center', gap: 3,
-      padding: '2px 8px', borderRadius: 99,
-      background: 'rgba(239,68,68,0.12)', border: '1px solid rgba(239,68,68,0.30)',
-      fontSize: 10, fontWeight: 700, color: '#ef4444',
-      marginLeft: 6, verticalAlign: 'middle',
-    }}>⚠ Security</span>
-  );
+  return <span className="rdp-tag-security">⚠ Security</span>;
 }
 
 export default function ResultsViewer({ plan, stats, onDownload, onCopy }) {
@@ -139,112 +125,64 @@ export default function ResultsViewer({ plan, stats, onDownload, onCopy }) {
     }));
   }
 
-  // Render an individual step card cleanly
+  // Render an individual step card cleanly with strong visual hierarchy
   function renderStepCard(step, originalIndex) {
     const stepNumber = originalIndex !== undefined ? originalIndex + 1 : (step.step_id || '•');
     return (
-      <div
-        key={step.step_id || originalIndex}
-        style={{
-          padding: '14px 16px',
-          background: 'rgba(139,92,246,0.03)',
-          border: '1px solid rgba(139,92,246,0.15)',
-          borderRadius: '8px',
-          display: 'grid',
-          gridTemplateColumns: '36px 1fr',
-          gap: '14px',
-          alignItems: 'start',
-          transition: 'all 0.15s ease-in-out',
-        }}
-      >
+      <div key={step.step_id || originalIndex} className="rdp-step-card">
         {/* Step number badge */}
-        <div
-          style={{
-            width: '34px',
-            height: '34px',
-            borderRadius: '50%',
-            background: 'rgba(139,92,246,0.18)',
-            border: '1px solid rgba(139,92,246,0.3)',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            fontSize: '12px',
-            fontWeight: '700',
-            color: '#a855f7',
-            flexShrink: 0,
-            marginTop: '2px',
-          }}
-        >
+        <div className="rdp-step-badge">
           {stepNumber}
         </div>
 
         {/* Step details */}
-        <div>
-          <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: '6px', marginBottom: '6px' }}>
-            <span style={{ fontSize: '14px', fontWeight: '700', color: 'var(--text-primary)' }}>
+        <div className="rdp-step-main">
+          {/* Header: Name + Badges */}
+          <div className="rdp-step-header">
+            <span className="rdp-step-name">
               {step.refactoring || 'Unnamed Refactoring'}
             </span>
             <LangBadge step={step} />
             <SecurityBadge step={step} />
           </div>
 
-          <div style={{ fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '10px', lineHeight: '1.5' }}>
+          {/* Explanation */}
+          <div className="rdp-step-explanation">
             {step.explanation || 'No explanation provided'}
           </div>
 
-          {/* Target & Smell ID metadata grid */}
-          <div style={{
-            display: 'flex',
-            flexWrap: 'wrap',
-            gap: '12px',
-            fontSize: '11px',
-            background: 'rgba(0,0,0,0.15)',
-            padding: '8px 12px',
-            borderRadius: '6px',
-            border: '1px solid rgba(255,255,255,0.05)',
-            alignItems: 'center',
-          }}>
-            <div>
-              <span style={{ color: 'var(--text-muted)' }}>Target: </span>
-              <strong style={{ color: '#00d4e8' }}>
+          {/* Target & Smell ID metadata box */}
+          <div className="rdp-meta-box">
+            <div className="rdp-meta-item">
+              <span className="rdp-meta-label">Target:</span>
+              <span className="rdp-meta-target-val">
                 {step.target?.class || step.target?.method
                   ? `${step.target.class || ''}${step.target.method ? `.${step.target.method}` : ''}`
                   : (step.target?.file || '(module scope)')}
-                {step.target?.lines && step.target.lines.length > 0 ? ` (Lines: ${step.target.lines.join('-')})` : ''}
-              </strong>
+                {step.target?.lines && step.target.lines.length > 0 ? ` [Lines ${step.target.lines.join('–')}]` : ''}
+              </span>
             </div>
 
             {step.target?.file && (
-              <div>
-                <span style={{ color: 'var(--text-muted)' }}>File: </span>
-                <span style={{ color: 'var(--text-secondary)' }}>{step.target.file}</span>
+              <div className="rdp-meta-item">
+                <span className="rdp-meta-label">File:</span>
+                <span className="rdp-meta-file-val">{step.target.file}</span>
               </div>
             )}
 
-            <div>
-              <span style={{ color: 'var(--text-muted)' }}>Smell ID: </span>
-              <span style={{ color: 'var(--text-secondary)', fontFamily: 'var(--font-mono)' }}>{step.smell_id || '—'}</span>
+            <div className="rdp-meta-item">
+              <span className="rdp-meta-label">Smell ID:</span>
+              <span className="rdp-meta-smell-val">{step.smell_id || '—'}</span>
             </div>
           </div>
 
-          {/* Parameters display as styled pills */}
+          {/* Parameters display as styled chips */}
           {step.parameters && Object.keys(step.parameters).length > 0 && (
-            <div style={{ marginTop: '10px', display: 'flex', flexWrap: 'wrap', gap: '6px', alignItems: 'center' }}>
-              <span style={{ fontSize: '11px', color: 'var(--text-muted)', fontWeight: 600 }}>Parameters:</span>
+            <div className="rdp-params-row">
+              <span className="rdp-params-label">Parameters:</span>
               {Object.entries(step.parameters).map(([k, v]) => (
-                <span
-                  key={k}
-                  style={{
-                    fontSize: '11px',
-                    padding: '2px 8px',
-                    borderRadius: '4px',
-                    background: 'rgba(139,92,246,0.1)',
-                    border: '1px solid rgba(139,92,246,0.2)',
-                    color: 'var(--text-secondary)',
-                    fontFamily: 'var(--font-mono)',
-                  }}
-                >
-                  <strong style={{ color: '#c4b5fd' }}>{k}:</strong> {Array.isArray(v) ? v.join('-') : String(v)}
+                <span key={k} className="rdp-param-chip">
+                  <strong>{k}:</strong> {Array.isArray(v) ? v.join('–') : String(v)}
                 </span>
               ))}
             </div>
@@ -252,28 +190,17 @@ export default function ResultsViewer({ plan, stats, onDownload, onCopy }) {
 
           {/* C Unsafe Function security hint */}
           {UNSAFE_SMELL_REFACTORINGS.has(step.refactoring) && step.parameters?.safe_alternative && (
-            <div style={{
-              marginTop: 10, padding: '8px 12px',
-              background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.25)',
-              borderRadius: 6, fontSize: 11,
-            }}>
-              <span style={{ color: '#ef4444', fontWeight: 700 }}>Security Fix: </span>
-              <span style={{ color: 'var(--text-secondary)' }}>Replace unsafe buffer call with </span>
-              <code style={{ color: '#fca5a5', fontWeight: 700 }}>{step.parameters.safe_alternative}()</code>
+            <div className="rdp-alert-callout rdp-alert-security">
+              <strong>Security Fix: </strong>
+              Replace unsafe buffer call with <code>{step.parameters.safe_alternative}()</code>
             </div>
           )}
 
           {/* C Global Variable encapsulation plan */}
           {GLOBAL_VAR_REFACTORINGS.has(step.refactoring) && step.parameters?.variable_name && (
-            <div style={{
-              marginTop: 10, padding: '8px 12px',
-              background: 'rgba(249,115,22,0.08)', border: '1px solid rgba(249,115,22,0.25)',
-              borderRadius: 6, fontSize: 11,
-            }}>
-              <span style={{ color: '#f97316', fontWeight: 700 }}>Encapsulation Plan: </span>
-              <span style={{ color: 'var(--text-secondary)' }}>
-                Create <code style={{ color: '#fb923c' }}>{step.parameters.getter_name}()</code> and <code style={{ color: '#fb923c' }}>{step.parameters.setter_name}()</code> for global variable <code style={{ color: '#fb923c' }}>{step.parameters.variable_name}</code>
-              </span>
+            <div className="rdp-alert-callout rdp-alert-encapsulate">
+              <strong>Encapsulation Plan: </strong>
+              Create <code>{step.parameters.getter_name}()</code> and <code>{step.parameters.setter_name}()</code> for global variable <code>{step.parameters.variable_name}</code>
             </div>
           )}
         </div>
@@ -284,40 +211,21 @@ export default function ResultsViewer({ plan, stats, onDownload, onCopy }) {
   if (!plan) return null;
 
   return (
-    <section
-      className="card"
-      style={{
-        marginTop: '24px',
-        background: 'linear-gradient(135deg, rgba(34,197,94,0.02) 0%, rgba(74,222,128,0.02) 100%)',
-        borderColor: 'rgba(34,197,94,0.18)',
-        borderRadius: '12px',
-        padding: '24px',
-      }}
-    >
+    <section className="rdp-plan-card">
       {/* Header */}
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px', flexWrap: 'wrap', gap: '12px' }}>
+      <div className="rdp-plan-header">
         <div>
-          <h2 style={{ fontSize: '18px', fontWeight: '700', color: 'var(--text-primary)' }}>Refactoring Plan</h2>
-          <div style={{ fontSize: '12px', color: 'var(--text-secondary)', marginTop: '2px' }}>
-            Target: <strong style={{ color: '#4ade80' }}>{plan.target || 'Project Source'}</strong>
+          <h2 className="rdp-plan-title">Refactoring Plan</h2>
+          <div className="rdp-plan-target-subtitle">
+            Target Scope: <span className="rdp-plan-target-highlight">{plan.target || 'Project Source'}</span>
           </div>
         </div>
-        <div style={{ display: 'flex', gap: '8px' }}>
+        <div className="rdp-header-actions">
           <button
             id="copy-btn"
             onClick={onCopy}
             title="Copy plan to clipboard"
-            style={{
-              padding: '8px 14px',
-              background: 'rgba(59,130,246,0.1)',
-              border: '1px solid rgba(59,130,246,0.25)',
-              borderRadius: '6px',
-              fontSize: '12px',
-              fontWeight: '600',
-              color: '#60a5fa',
-              cursor: 'pointer',
-              transition: 'all 0.2s',
-            }}
+            className="rdp-btn-action rdp-btn-copy"
           >
             📋 Copy JSON
           </button>
@@ -325,17 +233,7 @@ export default function ResultsViewer({ plan, stats, onDownload, onCopy }) {
             id="download-btn"
             onClick={onDownload}
             title="Download plan as JSON file"
-            style={{
-              padding: '8px 14px',
-              background: 'rgba(34,197,94,0.15)',
-              border: '1px solid rgba(34,197,94,0.3)',
-              borderRadius: '6px',
-              fontSize: '12px',
-              fontWeight: '600',
-              color: '#4ade80',
-              cursor: 'pointer',
-              transition: 'all 0.2s',
-            }}
+            className="rdp-btn-action rdp-btn-download"
           >
             ⬇ Download Plan
           </button>
@@ -344,47 +242,28 @@ export default function ResultsViewer({ plan, stats, onDownload, onCopy }) {
 
       {/* Summary Metrics Grid */}
       {stats && (
-        <div
-          style={{
-            padding: '16px 20px',
-            background: 'rgba(34,197,94,0.04)',
-            borderRadius: '10px',
-            border: '1px solid rgba(34,197,94,0.15)',
-            marginBottom: '24px',
-            display: 'grid',
-            gridTemplateColumns: 'repeat(auto-fit, minmax(130px, 1fr))',
-            gap: '16px',
-          }}
-        >
-          <div>
-            <div style={{ fontSize: '11px', color: 'var(--text-muted)', marginBottom: '4px', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
-              Total Steps
-            </div>
-            <div style={{ fontSize: '22px', fontWeight: '700', color: '#4ade80' }}>
+        <div className="rdp-metrics-grid">
+          <div className="rdp-metric-item">
+            <div className="rdp-metric-label">Total Steps</div>
+            <div className="rdp-metric-val" style={{ color: 'var(--metric-green)' }}>
               {stats.totalSteps || allSteps.length || 0}
             </div>
           </div>
-          <div>
-            <div style={{ fontSize: '11px', color: 'var(--text-muted)', marginBottom: '4px', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
-              Refactoring Types
-            </div>
-            <div style={{ fontSize: '22px', fontWeight: '700', color: '#a855f7' }}>
+          <div className="rdp-metric-item">
+            <div className="rdp-metric-label">Refactoring Types</div>
+            <div className="rdp-metric-val" style={{ color: 'var(--metric-purple)' }}>
               {Object.keys(stats.refactoringTypes || {}).length}
             </div>
           </div>
-          <div>
-            <div style={{ fontSize: '11px', color: 'var(--text-muted)', marginBottom: '4px', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
-              Classes / Modules
-            </div>
-            <div style={{ fontSize: '22px', fontWeight: '700', color: '#00d4e8' }}>
+          <div className="rdp-metric-item">
+            <div className="rdp-metric-label">Classes / Modules</div>
+            <div className="rdp-metric-val" style={{ color: 'var(--metric-blue)' }}>
               {stats.uniqueClasses || 0}
             </div>
           </div>
-          <div>
-            <div style={{ fontSize: '11px', color: 'var(--text-muted)', marginBottom: '4px', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
-              Methods Affected
-            </div>
-            <div style={{ fontSize: '22px', fontWeight: '700', color: '#fb923c' }}>
+          <div className="rdp-metric-item">
+            <div className="rdp-metric-label">Methods Affected</div>
+            <div className="rdp-metric-val" style={{ color: 'var(--metric-orange)' }}>
               {stats.uniqueMethods || 0}
             </div>
           </div>
@@ -393,96 +272,44 @@ export default function ResultsViewer({ plan, stats, onDownload, onCopy }) {
 
       {/* Plan Summary Banner */}
       {plan.summary && (
-        <div
-          style={{
-            padding: '14px 18px',
-            background: 'rgba(139,92,246,0.06)',
-            borderLeft: '4px solid #a855f7',
-            borderRadius: '6px',
-            marginBottom: '24px',
-            fontSize: '13px',
-            color: 'var(--text-primary)',
-            lineHeight: '1.6',
-          }}
-        >
+        <div className="rdp-summary-banner">
           {plan.summary}
         </div>
       )}
 
       {/* Categorization, Search & Filter Toolbar */}
-      <div
-        style={{
-          background: 'rgba(0,0,0,0.2)',
-          border: '1px solid rgba(139,92,246,0.15)',
-          borderRadius: '10px',
-          padding: '16px',
-          marginBottom: '24px',
-          display: 'flex',
-          flexDirection: 'column',
-          gap: '12px',
-        }}
-      >
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '12px' }}>
-          <div style={{ fontSize: '13px', fontWeight: 700, color: 'var(--text-primary)', display: 'flex', alignItems: 'center', gap: '8px' }}>
+      <div className="rdp-filter-toolbar">
+        <div className="rdp-filter-toolbar-header">
+          <div className="rdp-filter-title">
             <span>🛠 Categorization &amp; Filtering</span>
-            <span style={{ fontSize: '11px', color: 'var(--text-muted)', fontWeight: 400 }}>
+            <span className="rdp-filter-count">
               (Showing {filteredSteps.length} of {allSteps.length} steps)
             </span>
           </div>
 
           {isFiltered && (
-            <button
-              onClick={resetFilters}
-              style={{
-                fontSize: '11px',
-                padding: '4px 10px',
-                borderRadius: '4px',
-                background: 'rgba(239,68,68,0.12)',
-                border: '1px solid rgba(239,68,68,0.3)',
-                color: '#ef4444',
-                cursor: 'pointer',
-                fontWeight: 600,
-              }}
-            >
+            <button onClick={resetFilters} className="rdp-btn-reset-filter">
               ✕ Reset Filters
             </button>
           )}
         </div>
 
         {/* Search input + Dropdowns row */}
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '10px' }}>
+        <div className="rdp-filter-controls">
           {/* Search box */}
           <input
             type="text"
+            className="rdp-input"
             placeholder="🔍 Search steps, files, methods..."
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
-            style={{
-              padding: '8px 12px',
-              borderRadius: '6px',
-              border: '1px solid rgba(139,92,246,0.35)',
-              background: 'var(--bg-input)',
-              color: 'var(--text-primary)',
-              fontSize: '12px',
-              outline: 'none',
-            }}
           />
 
           {/* Group By selector */}
           <select
             value={groupBy}
             onChange={(e) => setGroupBy(e.target.value)}
-            style={{
-              padding: '8px 12px',
-              borderRadius: '6px',
-              border: '1px solid rgba(139,92,246,0.35)',
-              background: 'var(--bg-input)',
-              color: 'var(--text-primary)',
-              fontSize: '12px',
-              outline: 'none',
-              cursor: 'pointer',
-              colorScheme: 'inherit',
-            }}
+            className="rdp-select"
           >
             <option value="none">Group By: None (Sequential)</option>
             <option value="refactoring">Group By: Refactoring Type</option>
@@ -494,17 +321,7 @@ export default function ResultsViewer({ plan, stats, onDownload, onCopy }) {
           <select
             value={selectedRefactoring}
             onChange={(e) => setSelectedRefactoring(e.target.value)}
-            style={{
-              padding: '8px 12px',
-              borderRadius: '6px',
-              border: '1px solid rgba(139,92,246,0.35)',
-              background: 'var(--bg-input)',
-              color: 'var(--text-primary)',
-              fontSize: '12px',
-              outline: 'none',
-              cursor: 'pointer',
-              colorScheme: 'inherit',
-            }}
+            className="rdp-select"
           >
             {refactoringTypes.map(type => (
               <option key={type} value={type}>
@@ -517,17 +334,7 @@ export default function ResultsViewer({ plan, stats, onDownload, onCopy }) {
           <select
             value={selectedFile}
             onChange={(e) => setSelectedFile(e.target.value)}
-            style={{
-              padding: '8px 12px',
-              borderRadius: '6px',
-              border: '1px solid rgba(139,92,246,0.35)',
-              background: 'var(--bg-input)',
-              color: 'var(--text-primary)',
-              fontSize: '12px',
-              outline: 'none',
-              cursor: 'pointer',
-              colorScheme: 'inherit',
-            }}
+            className="rdp-select"
           >
             {fileList.map(f => (
               <option key={f} value={f}>
@@ -539,30 +346,20 @@ export default function ResultsViewer({ plan, stats, onDownload, onCopy }) {
       </div>
 
       {/* Refactoring Steps List (Grouped or Flat) */}
-      <div style={{ marginBottom: '24px' }}>
+      <div className="rdp-steps-container">
         {filteredSteps.length === 0 ? (
           <div style={{
-            padding: '32px',
+            padding: '36px',
             textAlign: 'center',
-            background: 'rgba(0,0,0,0.1)',
-            borderRadius: '8px',
-            border: '1px border-dashed rgba(139,92,246,0.2)',
+            background: 'var(--rdp-meta-bg)',
+            borderRadius: '10px',
+            border: '1px dashed var(--border)',
             color: 'var(--text-secondary)',
           }}>
-            <p style={{ fontSize: '14px', marginBottom: '8px' }}>🔍 No refactoring steps match your selected filters.</p>
-            <button
-              onClick={resetFilters}
-              style={{
-                fontSize: '12px',
-                padding: '6px 14px',
-                borderRadius: '6px',
-                background: 'rgba(139,92,246,0.2)',
-                border: '1px solid rgba(139,92,246,0.4)',
-                color: '#c4b5fd',
-                cursor: 'pointer',
-                fontWeight: '600',
-              }}
-            >
+            <p style={{ fontSize: '15px', fontWeight: 600, marginBottom: '10px' }}>
+              🔍 No refactoring steps match your selected filters.
+            </p>
+            <button onClick={resetFilters} className="rdp-btn-reset-filter" style={{ padding: '7px 16px', fontSize: '13px' }}>
               Reset Filters
             </button>
           </div>
@@ -572,48 +369,21 @@ export default function ResultsViewer({ plan, stats, onDownload, onCopy }) {
             {Object.entries(groupedSteps).map(([groupName, groupSteps]) => {
               const isCollapsed = !!collapsedGroups[groupName];
               return (
-                <div
-                  key={groupName}
-                  style={{
-                    background: 'rgba(0,0,0,0.15)',
-                    border: '1px solid rgba(139,92,246,0.2)',
-                    borderRadius: '10px',
-                    overflow: 'hidden',
-                  }}
-                >
+                <div key={groupName} className="rdp-group-container">
                   {/* Group Header */}
-                  <div
-                    onClick={() => toggleGroup(groupName)}
-                    style={{
-                      padding: '12px 18px',
-                      background: 'rgba(139,92,246,0.08)',
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'space-between',
-                      cursor: 'pointer',
-                      userSelect: 'none',
-                      borderBottom: isCollapsed ? 'none' : '1px solid rgba(139,92,246,0.15)',
-                    }}
-                  >
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-                      <span style={{ fontSize: '12px', color: '#a855f7' }}>{isCollapsed ? '▶' : '▼'}</span>
-                      <strong style={{ fontSize: '14px', color: 'var(--text-primary)' }}>{groupName}</strong>
+                  <div onClick={() => toggleGroup(groupName)} className="rdp-group-header">
+                    <div className="rdp-group-header-left">
+                      <span style={{ fontSize: '13px', color: 'var(--color-rdp)' }}>{isCollapsed ? '▶' : '▼'}</span>
+                      <strong className="rdp-group-title">{groupName}</strong>
                     </div>
-                    <span style={{
-                      fontSize: '11px',
-                      fontWeight: 700,
-                      padding: '2px 10px',
-                      borderRadius: 99,
-                      background: 'rgba(139,92,246,0.18)',
-                      color: '#c4b5fd',
-                    }}>
+                    <span className="rdp-group-badge">
                       {groupSteps.length} {groupSteps.length === 1 ? 'step' : 'steps'}
                     </span>
                   </div>
 
                   {/* Group Step List */}
                   {!isCollapsed && (
-                    <div style={{ padding: '16px', display: 'grid', gap: '12px' }}>
+                    <div className="rdp-group-body">
                       {groupSteps.map((step) => {
                         const originalIndex = allSteps.indexOf(step);
                         return renderStepCard(step, originalIndex >= 0 ? originalIndex : undefined);
@@ -626,7 +396,7 @@ export default function ResultsViewer({ plan, stats, onDownload, onCopy }) {
           </div>
         ) : (
           /* FLAT SEQUENTIAL LIST VIEW */
-          <div style={{ display: 'grid', gap: '12px' }}>
+          <div style={{ display: 'grid', gap: '14px' }}>
             {filteredSteps.map((step) => {
               const originalIndex = allSteps.indexOf(step);
               return renderStepCard(step, originalIndex >= 0 ? originalIndex : undefined);
@@ -638,7 +408,7 @@ export default function ResultsViewer({ plan, stats, onDownload, onCopy }) {
       {/* Raw JSON Accordion */}
       <details
         style={{
-          borderTop: '1px solid rgba(139,92,246,0.15)',
+          borderTop: '1px solid var(--border)',
           paddingTop: '16px',
         }}
       >
@@ -648,9 +418,9 @@ export default function ResultsViewer({ plan, stats, onDownload, onCopy }) {
             cursor: 'pointer',
             fontSize: '13px',
             fontWeight: '600',
-            color: '#a855f7',
+            color: 'var(--color-rdp)',
             padding: '10px 14px',
-            background: 'rgba(139,92,246,0.06)',
+            background: 'var(--rdp-pill-bg)',
             borderRadius: '6px',
             userSelect: 'none',
             transition: 'all 0.2s',
@@ -663,16 +433,16 @@ export default function ResultsViewer({ plan, stats, onDownload, onCopy }) {
             id="json-output"
             style={{
               marginTop: '12px',
-              padding: '14px',
-              background: 'var(--bg-secondary)',
-              borderRadius: '6px',
-              fontSize: '11px',
+              padding: '16px',
+              background: 'var(--bg-code)',
+              borderRadius: '8px',
+              fontSize: '12px',
               fontFamily: 'var(--font-mono)',
               overflow: 'auto',
               maxHeight: '400px',
-              lineHeight: '1.4',
-              color: 'var(--text-secondary)',
-              border: '1px solid rgba(139,92,246,0.15)',
+              lineHeight: '1.5',
+              color: 'var(--text-code)',
+              border: '1px solid var(--border)',
             }}
           >
             {JSON.stringify(plan, null, 2)}

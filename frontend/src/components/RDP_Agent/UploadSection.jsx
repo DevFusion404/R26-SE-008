@@ -84,16 +84,19 @@ export default function UploadSection({
     <section
       className="card"
       style={{
-        marginTop: '16px',
-        background: 'linear-gradient(135deg, rgba(139,92,246,0.04) 0%, rgba(168,85,247,0.04) 100%)',
-        borderColor: 'rgba(139,92,246,0.15)',
+        marginTop: '20px',
+        background: 'var(--rdp-card-bg)',
+        border: '1px solid var(--rdp-card-border)',
+        borderRadius: '12px',
+        padding: '24px',
+        boxShadow: 'var(--shadow-card)',
       }}
     >
       <form onSubmit={handleSubmit} encType="multipart/form-data">
         <div
           style={{
             display: 'grid',
-            gridTemplateColumns: '1fr 1fr',
+            gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))',
             gap: '24px',
             alignItems: 'center',
           }}
@@ -107,13 +110,13 @@ export default function UploadSection({
             onDrop={handleDrop}
             style={{
               position: 'relative',
-              border: '2px dashed rgba(139,92,246,0.3)',
-              borderRadius: '8px',
-              padding: '32px 24px',
+              border: '2px dashed var(--color-rdp)',
+              borderRadius: '10px',
+              padding: '36px 24px',
               textAlign: 'center',
               cursor: 'pointer',
               transition: 'all 0.2s',
-              background: 'rgba(139,92,246,0.02)',
+              background: 'var(--rdp-meta-bg)',
             }}
             className="drop-zone"
           >
@@ -125,24 +128,25 @@ export default function UploadSection({
               style={{ display: 'none' }}
             />
 
-            <div style={{ fontSize: '32px', marginBottom: '12px' }}>📄</div>
-            <div style={{ fontSize: '14px', fontWeight: '500', color: 'var(--text-primary)' }}>
-              Drag & drop quality report
+            <div style={{ fontSize: '36px', marginBottom: '12px' }}>📄</div>
+            <div style={{ fontSize: '16px', fontWeight: '700', color: 'var(--text-primary)' }}>
+              Drag &amp; drop quality report
             </div>
-            <div style={{ fontSize: '12px', color: 'var(--text-secondary)', marginTop: '4px' }}>
-              or click to browse
+            <div style={{ fontSize: '13px', color: 'var(--text-muted)', marginTop: '6px' }}>
+              or click to browse (.json file)
             </div>
 
             {selectedFile && (
               <div
                 style={{
-                  marginTop: '12px',
-                  padding: '8px 12px',
-                  background: 'rgba(34,197,94,0.1)',
-                  borderRadius: '4px',
-                  fontSize: '12px',
-                  color: 'var(--color-ok)',
-                  fontWeight: '500',
+                  marginTop: '14px',
+                  padding: '10px 14px',
+                  background: 'var(--rdp-winner-bg)',
+                  border: '1px solid var(--rdp-winner-border)',
+                  borderRadius: '6px',
+                  fontSize: '13px',
+                  color: 'var(--rdp-winner-text)',
+                  fontWeight: '700',
                 }}
               >
                 ✓ {selectedFile.name}
@@ -152,19 +156,19 @@ export default function UploadSection({
 
           {/* Right: Instructions & Button */}
           <div>
-            <h3 style={{ fontSize: '16px', fontWeight: '600', marginBottom: '12px' }}>
+            <h3 style={{ fontSize: '18px', fontWeight: '700', color: 'var(--text-primary)', marginBottom: '12px' }}>
               Generate Refactoring Plan
             </h3>
-            <p style={{ fontSize: '13px', color: 'var(--text-secondary)', lineHeight: '1.5', marginBottom: '16px' }}>
+            <p style={{ fontSize: '14px', color: 'var(--text-secondary)', lineHeight: '1.6', marginBottom: '16px' }}>
               Upload a quality report from the Code Understanding Agent. The RDP Agent will:
             </p>
             <ul
               style={{
-                fontSize: '13px',
+                fontSize: '14px',
                 color: 'var(--text-secondary)',
-                lineHeight: '1.6',
+                lineHeight: '1.7',
                 marginBottom: '20px',
-                paddingLeft: '20px',
+                paddingLeft: '22px',
               }}
             >
               <li>Analyze code smells and quality metrics</li>
@@ -177,15 +181,16 @@ export default function UploadSection({
               type="submit"
               disabled={!selectedFile || loading}
               style={{
-                padding: '10px 20px',
-                background: loading ? 'rgba(139,92,246,0.5)' : 'rgba(139,92,246,1)',
-                color: 'white',
+                padding: '12px 24px',
+                background: loading ? 'rgba(124, 58, 237, 0.5)' : 'var(--color-rdp)',
+                color: '#ffffff',
                 border: 'none',
-                borderRadius: '6px',
+                borderRadius: '8px',
                 fontSize: '14px',
-                fontWeight: '600',
+                fontWeight: '700',
                 cursor: loading ? 'not-allowed' : 'pointer',
                 opacity: loading ? 0.6 : 1,
+                boxShadow: '0 2px 10px rgba(124, 58, 237, 0.3)',
                 transition: 'all 0.2s',
               }}
             >
