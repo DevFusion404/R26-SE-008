@@ -93,8 +93,9 @@ import SmellSelectionSection from "../components/SmellSelectionSection.jsx";
 import { DEFAULT_BUDGET_MINUTES, PRESETS } from "../utils/impactPresets";
 import { qualityBaseline, summariseSelection } from "../utils/impactSummary";
 import { selectionSummary, severitySpread } from "../utils/smellGrouping";
+import { sharedSelection } from "../utils/githubReview";
 import {
-  analyseSelectionImpact, fetchProjectStructure, fetchQualityReport,
+  analyseSelectionImpact, fetchGithubFileSource, fetchProjectStructure, fetchQualityReport,
   fetchSmellCategories, fetchSmellImpacts, optimiseSelection,
   previewSmellSelection,
 } from "../services/diwoApi";
@@ -122,6 +123,16 @@ export default function CodeSmellApprovalPage({
   reportData,
   onReportLoaded,
   onReloadWorkspace,
+  // Set for a workflow created from a GitHub pull request: { repository,
+  // pr_number, head_sha, ... }. Its findings describe that commit, not the
+  // repository CUQA's shared workspace holds, so the workspace comparison is
+  // skipped and source is read from the commit.
+  githubContext = null,
+  // GitHub-linked only: { internal smell id: "S001" } — the ids PR commands
+  // use — and the selection made on GitHub, pre-selected here so both
+  // interfaces show one selection.
+  smellDisplayIds = null,
+  initialSelectedIds = null,
 }) {
   // ── Review arrangement ─────────────────────────────────────────────────────
   // Opens on Smell wise, with every card collapsed, so the first view is a
@@ -325,7 +336,7 @@ export default function CodeSmellApprovalPage({
   const shownRepo = sourceReport?.repo_name || null;
   const liveRepo = workspace?.repo_name || null;
   const staleWorkspace =
-    origin !== "sample" && shownRepo && liveRepo && shownRepo !== liveRepo
+    !githubContext && origin !== "sample" && shownRepo && liveRepo && shownRepo !== liveRepo
       ? { shown: shownRepo, live: liveRepo, files: workspace?.total_source_files }
       : null;
 
@@ -373,7 +384,16 @@ export default function CodeSmellApprovalPage({
     ...row,
     category: categoryOf(row),
     suggested: Boolean(optimised?.ids.has(row.id)),
-  })), [smellRows, categoryOf, optimised]);
+    displayId: smellDisplayIds?.[row.id] || null,
+  })), [smellRows, categoryOf, optimised, smellDisplayIds]);
+
+  // The selection made with /refactoriq commands, applied once per change of
+  // it. Adjusted during render, like the report reset above.
+  const [prevInitialSelection, setPrevInitialSelection] = useState(null);
+  if (initialSelectedIds && initialSelectedIds !== prevInitialSelection && smellRows.length) {
+    setPrevInitialSelection(initialSelectedIds);
+    setSelectedIds(new Set(sharedSelection(initialSelectedIds, smellRows)));
+  }
 
   // ── Filtering pipeline ─────────────────────────────────────────────────────
   // search -> severity -> category -> smell type. Filters change what is
@@ -807,6 +827,9 @@ export default function CodeSmellApprovalPage({
           selectedIds={selectedIds}
           onToggleSmell={toggleSmell}
           onClose={() => setViewing(null)}
+          {...(githubContext && workflowId
+            ? { loadSource: (path, opts) => fetchGithubFileSource(workflowId, path, opts) }
+            : {})}
         />
       )}
     </div>
