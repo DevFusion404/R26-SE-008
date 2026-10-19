@@ -532,7 +532,8 @@ def quality_report(payload: dict = None): # type: ignore
         report = generate_file_report(source, os.path.basename(full_path), detector=detector)
         return {"type": "file", "report": report}
 
-    repo_report = _build_repo_report(_workspace["root"], _workspace["files"], _workspace["repo_name"])
+    repo_report = _build_repo_report(_workspace["root"], _workspace["files"], _workspace["repo_name"],
+                                     detector=detector)
     return {"type": "repository", "report": repo_report}
 
 
@@ -541,7 +542,8 @@ def quality_report(payload: dict = None): # type: ignore
 MAX_REPORT_FILES = 50
 
 
-def _build_repo_report(root: str, files: list[str], repo_name: Optional[str]) -> dict:
+def _build_repo_report(root: str, files: list[str], repo_name: Optional[str],
+                       detector: Optional[str] = None) -> dict:
     """Repository quality report for `files` under `root` (first 50 files).
 
     Shared by /api/quality-report (the global workspace) and
