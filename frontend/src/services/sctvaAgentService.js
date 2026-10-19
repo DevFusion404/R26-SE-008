@@ -1,7 +1,7 @@
 import API_CONFIG, { buildApiUrl } from '../config/api.config';
 
 const DEFAULT_OPTIONS = {
-  codet5_runtime_profile: 'openvino-throughput-v2',
+  codet5_runtime_profile: 'openvino-fp32-accuracy-v3',
   strict_mode: true,
   enable_behavior_tests: true,
   timeout_seconds: 10,
@@ -26,11 +26,11 @@ const DEFAULT_OPTIONS = {
   // ceiling aligned with the request ceiling so a complete RDP plan can run.
   codet5_max_actions_per_request: 100,
   codet5_max_actions_per_file: 100,
-  // Independent target batching is faster and more accurate for the local
-  // OpenVINO Qwen profile than asking the model to rewrite a long bundle.
+  // SCTVA uses one model candidate per RDP action. Grouped prompts and
+  // tensor batches are disabled because they reduced candidate acceptance.
   codet5_enable_file_bundling: false,
-  // Keep mixed-action bundles opt-in: reversible constant bundles stay active,
-  // while unrelated refactoring kinds retain their stronger single-action prompts.
+  // Retained for legacy request compatibility; the backend keeps grouped
+  // generation disabled even if an old browser session changes this value.
   codet5_enable_generic_bundling: false,
   codet5_max_actions_per_bundle: 5,
   codet5_max_generic_actions_per_bundle: 2,

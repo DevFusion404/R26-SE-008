@@ -286,7 +286,7 @@ class SafeCodeTransformationValidationAgent:
                 return index, file_result
 
             model_usage_before = (
-                model_assistant.usage_snapshot()
+                model_assistant.usage_snapshot(file_entry.file_name)
                 if model_assistant is not None
                 else None
             )
@@ -298,12 +298,12 @@ class SafeCodeTransformationValidationAgent:
                 model_assistant=model_assistant,
             )
             if model_assistant is not None and model_usage_before is not None:
-                model_usage_after = model_assistant.usage_snapshot()
+                model_usage_after = model_assistant.usage_snapshot(file_entry.file_name)
                 file_result["model_generation_seconds"] = round(
                     max(
                         0.0,
-                        float(model_usage_after["generation_seconds"])
-                        - float(model_usage_before["generation_seconds"]),
+                        float(model_usage_after["file_generation_seconds"])
+                        - float(model_usage_before["file_generation_seconds"]),
                     ),
                     3,
                 )
@@ -313,8 +313,8 @@ class SafeCodeTransformationValidationAgent:
                 )
                 file_result["model_file_attempts_consumed"] = max(
                     0,
-                    int(model_usage_after["attempt_count"])
-                    - int(model_usage_before["attempt_count"]),
+                    int(model_usage_after["file_attempt_count"])
+                    - int(model_usage_before["file_attempt_count"]),
                 )
             return index, file_result
 
@@ -322,11 +322,10 @@ class SafeCodeTransformationValidationAgent:
         # A coordinated Java Parameter Object edit shares a repository-wide
         # caller set.  Execute its file actions deterministically so its audit
         # trail and transaction decision cannot race other file workers.
-        max_workers = 1 if (
-            coordinated_parameter_transactions or model_assistant is not None
-        ) else self._parallel_file_workers(
+        max_workers = 1 if coordinated_parameter_transactions else self._parallel_file_workers(
             request,
             len(file_entries),
+            model_assisted=model_assistant is not None,
         )
 
         if max_workers <= 1:
@@ -1760,6 +1759,8 @@ class SafeCodeTransformationValidationAgent:
                         candidate_code=candidate,
                         actions=bundle_actions,
                         timeout_seconds=request.execution_options.timeout_seconds,
+                        enable_behavior_tests=request.execution_options.enable_behavior_tests,
+                        strict_mode=request.execution_options.strict_mode,
                     )
                     if model_assistant is not None
                     else None
@@ -2174,7 +2175,8 @@ class SafeCodeTransformationValidationAgent:
         )
 
         safety_report.human_messages.append(
-            "Confidence formula: syntax_w*syntax + structural_w*structural + behavioral_w*behavioral"
+            "Confidence formula: "
+            + str(confidence_details.get("formula") or "validation components")
         )
         if model_usage["model_used"]:
             safety_report.human_messages.append(
@@ -2224,12 +2226,6 @@ class SafeCodeTransformationValidationAgent:
             for log_entry in transformation_log
             if log_entry.action_type == ACTION_MOVE_PYTHON_METHOD
             and str(log_entry.metadata.get("status") or "").lower() == "not_applicable"
-        )
-        review_move_count = sum(
-            1
-            for log_entry in transformation_log
-            if log_entry.action_type == ACTION_MOVE_PYTHON_METHOD
-            and str(log_entry.metadata.get("status") or "").lower() == "review_required"
         )
         move_method_plan_complete = (
             requested_move_count == 0
@@ -2281,12 +2277,6 @@ class SafeCodeTransformationValidationAgent:
             == "already_handled"
             and str(log_entry.metadata.get("reason") or "")
             == "ALREADY_HANDLED_BY_PRIOR_INLINE_CLASS"
-        )
-        review_inline_count = sum(
-            1
-            for log_entry in transformation_log
-            if log_entry.action_type == ACTION_INLINE_PYTHON_CLASS
-            and str(log_entry.metadata.get("status") or "").lower() == "review_required"
         )
         inline_class_plan_complete = (
             requested_inline_count == 0
@@ -2375,12 +2365,6 @@ class SafeCodeTransformationValidationAgent:
             if log_entry.action_type == ACTION_HIDE_DELEGATE
             and str(log_entry.metadata.get("status") or "").lower() == "not_applicable"
         )
-        review_hide_delegate_count = sum(
-            1
-            for log_entry in transformation_log
-            if log_entry.action_type == ACTION_HIDE_DELEGATE
-            and str(log_entry.metadata.get("status") or "").lower() == "review_required"
-        )
         hide_delegate_plan_complete = (
             requested_hide_delegate_count == 0
             or successful_hide_delegate_count + unresolved_hide_delegate_count
@@ -2412,12 +2396,6 @@ class SafeCodeTransformationValidationAgent:
             for log_entry in transformation_log
             if log_entry.action_type == ACTION_REPLACE_CONDITIONAL_WITH_POLYMORPHISM
             and str(log_entry.metadata.get("status") or "").lower() == "not_applicable"
-        )
-        review_polymorphism_count = sum(
-            1
-            for log_entry in transformation_log
-            if log_entry.action_type == ACTION_REPLACE_CONDITIONAL_WITH_POLYMORPHISM
-            and str(log_entry.metadata.get("status") or "").lower() == "review_required"
         )
         polymorphism_plan_complete = (
             requested_polymorphism_count == 0
@@ -2650,6 +2628,23 @@ class SafeCodeTransformationValidationAgent:
                 )
                 structural.details["model_helper_resolution"] = helper_resolution
 
+        if syntax.passed and structural.passed and not extra_steps:
+            behavioral = self.behavioral_validator.validate_model_checkpoint(
+                language=language,
+                original_code=original_code,
+                transformed_code=candidate_code,
+                enable_behavior_tests=enable_behavior_tests,
+                actions=[validation_action],
+                structural_validation_passed=True,
+            )
+            invariant = self.invariant_miner.mine(
+                language=language,
+                behavioral_step=behavioral,
+                actions=[validation_action],
+                strict_mode=strict_mode,
+            )
+            extra_steps.extend((behavioral, invariant))
+
         steps = (syntax, structural, *extra_steps)
         validation = [
             {
@@ -2682,6 +2677,8 @@ class SafeCodeTransformationValidationAgent:
         candidate_code: str,
         actions: Sequence[RefactoringAction],
         timeout_seconds: int,
+        enable_behavior_tests: bool = True,
+        strict_mode: bool = True,
     ) -> Dict[str, Any]:
         """Validate one combined model edit against its complete action bundle."""
 
@@ -2697,7 +2694,24 @@ class SafeCodeTransformationValidationAgent:
             transformed_code=candidate_code,
             actions=list(actions),
         )
-        steps = (syntax, structural)
+        extra_steps: List[ValidationStepResult] = []
+        if syntax.passed and structural.passed:
+            behavioral = self.behavioral_validator.validate_model_checkpoint(
+                language=language,
+                original_code=original_code,
+                transformed_code=candidate_code,
+                enable_behavior_tests=enable_behavior_tests,
+                actions=list(actions),
+                structural_validation_passed=True,
+            )
+            invariant = self.invariant_miner.mine(
+                language=language,
+                behavioral_step=behavioral,
+                actions=list(actions),
+                strict_mode=strict_mode,
+            )
+            extra_steps.extend((behavioral, invariant))
+        steps = (syntax, structural, *extra_steps)
         validation = [
             {
                 "name": step.name,
@@ -3459,7 +3473,6 @@ class SafeCodeTransformationValidationAgent:
     ) -> None:
         """Resolve explicit Inline Class targets before semantic fallback."""
 
-        import ast
         from .transformers import python_transformers
 
         for action in actions:
@@ -5301,12 +5314,21 @@ class SafeCodeTransformationValidationAgent:
             for entry in attempted_entries
             if str((entry.metadata.get("model_assistance") or {}).get("context_mode") or "").strip()
         })
+        def final_attempt_reason(entry: TransformationLogEntry) -> str:
+            assistance = (entry.metadata.get("model_assistance") or {})
+            repair = assistance.get("repair_attempt")
+            if (
+                assistance.get("status") == "candidate_rejected"
+                and isinstance(repair, dict)
+                and str(repair.get("reason") or "").strip()
+            ):
+                return str(repair["reason"]).strip()
+            return str(assistance.get("reason") or "").strip()
+
         attempt_reasons = sorted({
-            str((entry.metadata.get("model_assistance") or {}).get("reason"))
+            reason
             for entry in attempted_entries
-            if str(
-                (entry.metadata.get("model_assistance") or {}).get("reason") or ""
-            ).strip()
+            if (reason := final_attempt_reason(entry))
         })
         model_backends = sorted({
             str((entry.metadata.get("model_assistance") or {}).get("backend") or "").strip()
@@ -5391,6 +5413,12 @@ class SafeCodeTransformationValidationAgent:
             candidate_model_info = candidate_model_info if isinstance(candidate_model_info, dict) else {}
             candidate_gate_failed = candidate_model_info.get("status") == "candidate_rejected"
             action_validation = list(candidate_model_info.get("action_validation") or [])
+            repair = candidate_model_info.get("repair_attempt")
+            repair_failure = (
+                str(repair.get("reason") or "").strip()
+                if isinstance(repair, dict)
+                else ""
+            )
             candidate_failures = (
                 [{
                     "name": "model_candidate_gate",
@@ -5402,6 +5430,11 @@ class SafeCodeTransformationValidationAgent:
                         or "Model candidate failed the immediate SCTVA checkpoint."
                     ),
                 }]
+                + ([{
+                    "name": "model_candidate_repair",
+                    "passed": False,
+                    "message": repair_failure,
+                }] if repair_failure else [])
                 if candidate_gate_failed
                 else [*action_validation, *candidate_validation]
             )
@@ -6017,20 +6050,31 @@ class SafeCodeTransformationValidationAgent:
     def _parallel_file_workers(
         request: SCTVARequestContract,
         file_count: int,
+        *,
+        model_assisted: bool = False,
     ) -> int:
         if file_count <= 1:
             return 1
 
         configured = request.execution_options.max_parallel_files
         if configured > 0:
-            return max(1, min(configured, file_count))
+            workers = configured
+        else:
+            env_value = os.getenv("SCTVA_MAX_PARALLEL_FILES", "").strip()
+            if env_value.isdigit():
+                workers = int(env_value)
+            else:
+                cpu_count = os.cpu_count() or 2
+                # A model-enabled request keeps inference serialized by the
+                # shared runtime lock. Three file workers let validation for
+                # one file overlap generation for the next without creating
+                # competing CPU model instances on a laptop-class machine.
+                workers = min(3, cpu_count) if model_assisted else min(4, cpu_count)
 
-        env_value = os.getenv("SCTVA_MAX_PARALLEL_FILES", "").strip()
-        if env_value.isdigit():
-            return max(1, min(int(env_value), file_count))
+        if model_assisted:
+            workers = min(workers, 3)
 
-        cpu_count = os.cpu_count() or 2
-        return max(1, min(4, cpu_count, file_count))
+        return max(1, min(workers, file_count))
 
     @classmethod
     def _build_action_scope_index(

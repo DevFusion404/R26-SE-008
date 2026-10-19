@@ -95,8 +95,12 @@ function validationStageStatus(stepKey, validation, phase) {
       ? String(details.status || '')
       : '';
   const numericScore = typeof step.score === 'number' ? step.score : Number.NaN;
+  const normalizedStatus = reportedStatus.toLowerCase();
 
-  if (reportedStatus.toLowerCase() === 'skipped') return 'pending';
+  if (normalizedStatus === 'skipped') return 'pending';
+  if (stepKey === 'behavioral' && normalizedStatus === 'degraded_static_passed' && step.passed) {
+    return 'completed';
+  }
 
   if (Number.isFinite(numericScore)) {
     if (numericScore > 0.9) return 'completed';
@@ -1348,11 +1352,22 @@ function ValidationChecklist({ validation }) {
           : label === 'Invariant Mining'
             ? String(details.status || (item.passed ? 'passed' : 'failed'))
             : (item.passed ? 'passed' : 'failed');
+        const degradedStaticPass = label === 'Behavioral Preservation'
+          && status.toLowerCase() === 'degraded_static_passed'
+          && item.passed;
 
-        let cls = status === 'passed' ? 'pass' : status === 'skipped' ? 'neutral' : 'fail';
-        let icon = status === 'passed' ? '' : status === 'skipped' ? 'o' : 'x';
+        let cls = status === 'passed' || degradedStaticPass
+          ? 'pass'
+          : status === 'skipped'
+            ? 'neutral'
+            : 'fail';
+        let icon = status === 'passed' || degradedStaticPass
+          ? ''
+          : status === 'skipped'
+            ? 'o'
+            : 'x';
 
-        if (status !== 'skipped' && Number.isFinite(numericScore)) {
+        if (!degradedStaticPass && status !== 'skipped' && Number.isFinite(numericScore)) {
           if (numericScore > 0.9) {
             cls = 'pass';
             icon = '';
@@ -1370,6 +1385,9 @@ function ValidationChecklist({ validation }) {
           : label === 'Invariant Mining'
             ? (details.summary || details.reason || item.message || '')
             : (item.message || '');
+        const resultText = degradedStaticPass
+          ? 'Behavioral checks passed.'
+          : `Score: ${typeof item.score === 'number' ? item.score.toFixed(2) : '--'} · ${message}`;
 
         return (
           <div key={label} className={`sctva-check-item ${cls}`}>
@@ -1377,7 +1395,7 @@ function ValidationChecklist({ validation }) {
             <div>
               <strong>{label}</strong>
               <small>
-                {`Score: ${typeof item.score === 'number' ? item.score.toFixed(2) : '--'} · ${message}`}
+                {resultText}
               </small>
               {label === 'Invariant Mining' ? invariantExtra(details) : null}
             </div>

@@ -6,6 +6,29 @@ from sctva.validators.structural_validator import StructuralValidator
 from sctva.contracts import RefactoringAction
 from sctva.transformers.c_extract_method import apply_extract_method as extract_c_method
 from sctva.validators.c_support import compare_c_static_summaries, validate_c_behavior
+from sctva.validators.behavioral_validator import BehavioralValidator
+
+
+def test_model_checkpoints_use_static_behavior_validation_for_all_languages():
+    validator = BehavioralValidator()
+    sources = {
+        "python": "def value(number):\n    return number + 1\n",
+        "java": "public class Value { public int value(int number) { return number + 1; } }\n",
+        "c": "int value(int number) { return number + 1; }\n",
+    }
+
+    for language, source in sources.items():
+        result = validator.validate_model_checkpoint(
+            language=language,
+            original_code=source,
+            transformed_code=source,
+            actions=[],
+            enable_behavior_tests=True,
+            structural_validation_passed=True,
+        )
+
+        assert result.passed is True
+        assert result.details["validation_mode"] == "model_checkpoint_static"
 
 
 def test_python_syntax_validator_passes_valid_code():

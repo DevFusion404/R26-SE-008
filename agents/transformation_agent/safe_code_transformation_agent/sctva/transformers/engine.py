@@ -81,6 +81,21 @@ def _parse_literal_values_from_hint(hint: str) -> List[Any]:
     return values
 
 
+def _java_planned_constant_declaration_pattern(
+    constant_name: str,
+) -> re.Pattern[str]:
+    """Match a bounded Java constant declaration across legal line breaks."""
+
+    return re.compile(
+        rf"(?m)^[ \t]*(?P<modifiers>"
+        rf"(?:(?:public|protected|private|static|final)\s+)*)"
+        rf"(?P<type>[A-Za-z_$][A-Za-z0-9_$<>\[\].?]*)\s+"
+        rf"{re.escape(constant_name)}\s*=\s*"
+        rf"(?P<initializer>[^;{{}}]+?);"
+        rf"[ \t]*(?://[^\r\n]*)?(?:\r?\n)?"
+    )
+
+
 def _java_constant_action_key(
     language: str,
     action: RefactoringAction,
@@ -166,6 +181,123 @@ def _model_candidate_intent_issue(
 ) -> str:
     """Check cheap action-specific facts before accepting a model candidate."""
 
+    java_semantic_actions = {
+        "extract_subclass",
+        "introduce_facade",
+        "replace_temp_with_query",
+        "move_java_method",
+        "pull_up_method",
+        "replace_data_value_with_object",
+        "inline_java_class",
+        "collapse_hierarchy",
+        "replace_parameter_with_method_call",
+        "replace_conditional_with_polymorphism",
+        "hide_delegate",
+    }
+    if language == "java" and action.action_type in java_semantic_actions:
+        if re.sub(r"\s+", "", original_source) == re.sub(r"\s+", "", candidate_source):
+            return "JAVA_MODEL_ACTION_DID_NOT_CHANGE_TARGET"
+
+        parameters = action.parameters or {}
+        source_class = str(parameters.get("source_class") or "").strip()
+        method_name = str(
+            parameters.get("source_method") or parameters.get("method") or ""
+        ).strip()
+
+        def class_model(source: str, name: str) -> Any:
+            return java_extract_class._parse_java_class(source, name) if name else None
+
+        def method_count(model: Any, name: str) -> int:
+            return sum(1 for method in (model.methods if model else []) if method.name == name)
+
+        if action.action_type == "extract_subclass":
+            subclass_name = str(parameters.get("new_subclass_name") or "").strip()
+            declaration = re.search(
+                rf"\bclass\s+{re.escape(subclass_name)}\s+extends\s+{re.escape(source_class)}\b",
+                candidate_source,
+            )
+            if not subclass_name or declaration is None:
+                return "JAVA_EXTRACT_SUBCLASS_DECLARATION_MISSING"
+            before_source = class_model(original_source, source_class)
+            after_source = class_model(candidate_source, source_class)
+            subclass = class_model(candidate_source, subclass_name)
+            if (
+                subclass is None
+                or not subclass.methods
+                or len(after_source.methods if after_source else [])
+                >= len(before_source.methods if before_source else [])
+            ):
+                return "JAVA_EXTRACT_SUBCLASS_MEMBER_MIGRATION_MISSING"
+        elif action.action_type == "introduce_facade":
+            facade_name = str(parameters.get("facade_class_name") or "").strip()
+            if not facade_name or not re.search(
+                rf"\bclass\s+{re.escape(facade_name)}\b", candidate_source
+            ):
+                return "JAVA_INTRODUCE_FACADE_DECLARATION_MISSING"
+            facade = class_model(candidate_source, facade_name)
+            if facade is None or not facade.methods:
+                return "JAVA_INTRODUCE_FACADE_DELEGATION_MISSING"
+        elif action.action_type == "replace_temp_with_query":
+            before_owner = class_model(original_source, source_class)
+            after_owner = class_model(candidate_source, source_class)
+            if (
+                method_count(after_owner, method_name) != 1
+                or len(after_owner.methods if after_owner else [])
+                <= len(before_owner.methods if before_owner else [])
+            ):
+                return "JAVA_REPLACE_TEMP_QUERY_METHOD_MISSING"
+        elif action.action_type in {"move_java_method", "pull_up_method"}:
+            destination_class = str(
+                parameters.get("destination_class")
+                or parameters.get("target_class")
+                or ""
+            ).strip()
+            after_source = class_model(candidate_source, source_class)
+            after_destination = class_model(candidate_source, destination_class)
+            if method_count(after_source, method_name) != 0:
+                return "JAVA_METHOD_MOVE_SOURCE_DECLARATION_REMAINS"
+            if method_count(after_destination, method_name) != 1:
+                return "JAVA_METHOD_MOVE_DESTINATION_DECLARATION_MISSING"
+        elif action.action_type == "replace_data_value_with_object":
+            before_classes = set(re.findall(r"\bclass\s+([A-Za-z_$][A-Za-z0-9_$]*)", original_source))
+            after_classes = set(re.findall(r"\bclass\s+([A-Za-z_$][A-Za-z0-9_$]*)", candidate_source))
+            if not (after_classes - before_classes):
+                return "JAVA_VALUE_OBJECT_DECLARATION_MISSING"
+        elif action.action_type == "inline_java_class":
+            inline_name = str(
+                parameters.get("class_to_inline") or parameters.get("target_class") or ""
+            ).strip()
+            if class_model(candidate_source, inline_name) is not None:
+                return "JAVA_INLINE_CLASS_DECLARATION_REMAINS"
+        elif action.action_type == "collapse_hierarchy":
+            parent_class = str(parameters.get("parent_class") or "").strip()
+            if class_model(candidate_source, source_class) is not None:
+                return "JAVA_COLLAPSE_HIERARCHY_SOURCE_REMAINS"
+            if class_model(candidate_source, parent_class) is None:
+                return "JAVA_COLLAPSE_HIERARCHY_PARENT_MISSING"
+        elif action.action_type == "replace_parameter_with_method_call":
+            before_owner = class_model(original_source, source_class)
+            after_owner = class_model(candidate_source, source_class)
+            before_methods = [
+                method for method in (before_owner.methods if before_owner else [])
+                if method.name == method_name
+            ]
+            after_methods = [
+                method for method in (after_owner.methods if after_owner else [])
+                if method.name == method_name
+            ]
+            if (
+                len(before_methods) != 1
+                or len(after_methods) != 1
+                or len(after_methods[0].parameters) >= len(before_methods[0].parameters)
+            ):
+                return "JAVA_REPLACE_PARAMETER_SIGNATURE_UNCHANGED"
+        elif action.action_type == "replace_conditional_with_polymorphism":
+            before_classes = set(re.findall(r"\bclass\s+([A-Za-z_$][A-Za-z0-9_$]*)", original_source))
+            after_classes = set(re.findall(r"\bclass\s+([A-Za-z_$][A-Za-z0-9_$]*)", candidate_source))
+            if not (after_classes - before_classes):
+                return "JAVA_POLYMORPHIC_DISPATCH_TYPES_MISSING"
+
     if action.action_type not in {ACTION_INTRODUCE_CONSTANT, ACTION_EXTRACT_CONSTANT}:
         return ""
     parameters = action.parameters or {}
@@ -182,12 +314,7 @@ def _model_candidate_intent_issue(
     if language == "java":
         literal_text = java_transformers._to_java_literal(literal_values[0])
         expected_type = java_transformers._java_type_for_literal(literal_values[0])
-        declaration_pattern = re.compile(
-            rf"(?m)^[ \t]*private\s+static\s+final\s+"
-            rf"(?P<type>[A-Za-z_$][A-Za-z0-9_$<>\[\].?]*)\s+"
-            rf"{re.escape(name)}\s*=\s*(?P<initializer>[^;\r\n]+);"
-            rf"[ \t]*(?:\r?\n)?"
-        )
+        declaration_pattern = _java_planned_constant_declaration_pattern(name)
         declarations = list(declaration_pattern.finditer(candidate_source))
         if len(declarations) != 1:
             # Statement-level model output is merged without placing a class
@@ -209,6 +336,9 @@ def _model_candidate_intent_issue(
                     r"\s+", "", restored_original
                 ):
                     return "JAVA_INTRODUCE_CONSTANT_UNRELATED_SOURCE_CHANGE"
+            return "JAVA_INTRODUCE_CONSTANT_DECLARATION_MISSING_OR_AMBIGUOUS"
+        modifiers = set(declarations[0].group("modifiers").split())
+        if not {"static", "final"}.issubset(modifiers):
             return "JAVA_INTRODUCE_CONSTANT_DECLARATION_MISSING_OR_AMBIGUOUS"
         if declarations[0].group("type") != expected_type:
             return "JAVA_INTRODUCE_CONSTANT_VALUE_OR_TYPE_INCORRECT"
@@ -507,19 +637,14 @@ def _project_java_constant_contract(
     )
     exact_declaration = re.compile(
         rf"(?m)^[ \t]*private\s+static\s+final\s+{re.escape(expected_type)}\s+"
-        rf"{re.escape(name)}\s*=\s*{re.escape(literal_text)}\s*;[ \t]*(?:\r?\n)?"
+        rf"{re.escape(name)}\s*=\s*{re.escape(literal_text)}\s*;"
+        rf"[ \t]*(?://[^\r\n]*)?(?:\r?\n)?"
     )
     exact_candidate_declarations = list(exact_declaration.finditer(candidate_source))
 
     # Match only a single-line declaration for the planned identifier. Its
     # type and initializer are checked separately before it can be removed.
-    declaration_pattern = re.compile(
-        rf"(?m)^(?P<indent>[ \t]*)(?P<modifiers>"
-        rf"(?:(?:public|protected|private|static|final)\s+)*)"
-        rf"(?P<type>[A-Za-z_$][A-Za-z0-9_$<>\[\].?]*)\s+"
-        rf"{re.escape(name)}\s*=\s*(?P<initializer>[^;\r\n]+);"
-        rf"[ \t]*(?:\r?\n)?"
-    )
+    declaration_pattern = _java_planned_constant_declaration_pattern(name)
     declarations = list(declaration_pattern.finditer(candidate_source))
     # Do not return merely because one declaration is exact. A previous
     # action may already have added that declaration while the model emits a
@@ -1213,15 +1338,15 @@ class TransformationEngine:
                 cursor += 1
             execution_actions = reordered
 
-        # Plan bounded bundles in RDP order. Constant bundles use a reversible
-        # contract; other local bundles additionally require the agent's
-        # multi-action structural checkpoint. Repository-wide and conflicting
-        # operations remain on the established single-action path.
+        # Retained compatibility maps for historical bundle reports. The
+        # current production profile keeps them empty: each model candidate
+        # represents exactly one RDP action.
         model_bundle_groups: Dict[int, list[tuple[int, RefactoringAction]]] = {}
         model_bundle_member_to_first: Dict[int, int] = {}
         if (
             model_assistant is not None
             and model_assistant.settings.mode == "primary"
+            and model_assistant.grouped_generation_enabled
             and model_assistant.settings.enable_file_bundling
             and language in {"python", "java", "c"}
         ):
@@ -1240,16 +1365,16 @@ class TransformationEngine:
                 for member_index, _member_action in planned_bundle:
                     model_bundle_member_to_first[member_index] = first_index
 
-        # Prefetch independent model candidates with one tensor-batched
-        # generation call. The adapter only accepts actions whose original
-        # target ranges do not overlap; all others retain the established
-        # sequential model-first path below.
+        # Tensor-batched candidates are likewise disabled in the production
+        # profile. The normal loop below generates and validates one action at
+        # a time against the latest accepted source snapshot.
         batched_model_candidates: Dict[int, Any] = {}
         batched_model_actions: Dict[int, RefactoringAction] = {}
         batched_model_preparations: Dict[int, Dict[str, Any]] = {}
         if (
             model_assistant is not None
             and model_assistant.settings.mode == "primary"
+            and model_assistant.grouped_generation_enabled
             and not model_validation_feedback
         ):
             batch_requests: list[tuple[int, RefactoringAction]] = []
@@ -1866,20 +1991,22 @@ class TransformationEngine:
                                 "action_validation": checkpoint.get("validation", []),
                             })
                             initial_candidate_code = primary_candidate.source_code
-                            redundant_constant_repair = bool(
+                            unsafe_constant_intent_failure = bool(
                                 language == "java"
                                 and model_action.action_type
                                 in {ACTION_INTRODUCE_CONSTANT, ACTION_EXTRACT_CONSTANT}
                                 and candidate_intent_issue
+                                and "UNRELATED_SOURCE_CHANGE"
+                                in candidate_intent_issue
                             )
-                            if redundant_constant_repair:
+                            if unsafe_constant_intent_failure:
                                 primary_metadata["repair_skipped"] = {
                                     "reason": "JAVA_CONSTANT_INTENT_FAILURE_USES_SAFE_RULE_FALLBACK",
                                     "issue": rejection_issue,
                                 }
                             if (
                                 not planned_validation_feedback
-                                and not redundant_constant_repair
+                                and not unsafe_constant_intent_failure
                                 and model_assistant.can_attempt(current_file_name)
                             ):
                                 repaired_candidate = model_assistant.propose(

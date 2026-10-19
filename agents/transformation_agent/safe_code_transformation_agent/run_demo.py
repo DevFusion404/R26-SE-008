@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Dict
 
 from sctva.agent import SafeCodeTransformationValidationAgent
 from sctva.integration.planner_adapter import PlannerAdapter

@@ -607,7 +607,7 @@ class ExecutionOptions:
     codet5_max_new_tokens: int = 256
     codet5_max_bundle_output_tokens: int = 192
     codet5_max_input_tokens: int = 512
-    codet5_cpu_threads: int = 4
+    codet5_cpu_threads: int = 6
     codet5_max_actions_per_request: int = 100
     codet5_max_actions_per_file: int = 100
     codet5_enable_file_bundling: bool = False
@@ -676,7 +676,7 @@ class ExecutionOptions:
                 ) from exc
 
         codet5_cpu_threads = _integer_option(
-            "codet5_cpu_threads", "SCTVA_CODET5_CPU_THREADS", 4
+            "codet5_cpu_threads", "SCTVA_CODET5_CPU_THREADS", 6
         )
         codet5_max_bundle_output_tokens = _integer_option(
             "codet5_max_bundle_output_tokens",

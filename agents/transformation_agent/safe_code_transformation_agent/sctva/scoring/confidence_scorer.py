@@ -24,28 +24,62 @@ class ConfidenceScorer:
         structural: ValidationStepResult,
         behavioral: ValidationStepResult,
         invariant: ValidationStepResult | None = None,
-    ) -> Tuple[float, Dict[str, float]]:
+    ) -> Tuple[float, Dict[str, Any]]:
         syntax_component = bounded(syntax.score)
         structural_component = bounded(structural.score)
         behavioral_component = bounded(behavioral.score)
 
-        base_score = (
-            self.weights["syntax"] * syntax_component
-            + self.weights["structural"] * structural_component
-            + self.weights["behavioral"] * behavioral_component
+        behavioral_applicable = (
+            (behavioral.details or {}).get("score_applicable") is not False
         )
+        active_components = {
+            "syntax": syntax_component,
+            "structural": structural_component,
+        }
+        if behavioral_applicable:
+            active_components["behavioral"] = behavioral_component
+
+        active_weight_total = sum(
+            self.weights[name] for name in active_components
+        )
+        # A passed static fallback carries useful evidence but is not a
+        # runtime measurement. Exclude it from confidence rather than letting
+        # the 0.75 safety cap look like a failed behavioral test. Renormalize
+        # the remaining weights so their confidence scale remains 0..1.
+        base_score = (
+            sum(
+                self.weights[name] * component
+                for name, component in active_components.items()
+            )
+            / active_weight_total
+            if active_weight_total > 0
+            else 0.0
+        )
+        effective_weights = {
+            name: round(self.weights[name] / active_weight_total, 4)
+            for name in active_components
+        } if active_weight_total > 0 else {}
 
         details: Dict[str, Any] = {
             "syntax_component": round(syntax_component, 4),
             "structural_component": round(structural_component, 4),
-            "behavioral_component": round(behavioral_component, 4),
-            "weights": self.weights,
+            "weights": effective_weights,
+            "configured_weights": self.weights,
+            "behavioral_included": behavioral_applicable,
         }
+        if behavioral_applicable:
+            details["behavioral_component"] = round(behavioral_component, 4)
+        else:
+            details["excluded_components"] = ["behavioral"]
 
         if invariant is None:
             return bounded(base_score), {
                 **details,
-                "formula": "syntax_w*syntax + structural_w*structural + behavioral_w*behavioral",
+                "formula": (
+                    "normalized(syntax_w*syntax + structural_w*structural"
+                    + (" + behavioral_w*behavioral" if behavioral_applicable else "")
+                    + ")"
+                ),
             }
 
         invariant_component = bounded(invariant.score)
@@ -55,5 +89,9 @@ class ConfidenceScorer:
             **details,
             "invariant_component": round(invariant_component, 4),
             "invariant_weight": DEFAULT_INVARIANT_WEIGHT,
-            "formula": "(1-invariant_w)*(syntax_w*syntax + structural_w*structural + behavioral_w*behavioral) + invariant_w*invariant",
+            "formula": (
+                "(1-invariant_w)*normalized(syntax_w*syntax + structural_w*structural"
+                + (" + behavioral_w*behavioral" if behavioral_applicable else "")
+                + ") + invariant_w*invariant"
+            ),
         }

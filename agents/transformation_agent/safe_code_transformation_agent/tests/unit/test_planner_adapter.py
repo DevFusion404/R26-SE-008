@@ -26,6 +26,48 @@ def test_planner_adapter_maps_extract_method_to_extract_action_when_range_exists
     assert normalized["actions"][0]["parameters"]["end_line"] == 5
 
 
+def test_comprehensive_java_refactorings_remain_executable_for_model_first_mode():
+    cases = [
+        ("Extract Method", "extract_method", {"method": "work", "new_method_name": "workCore"}),
+        ("Extract Class", "extract_java_class", {"source_class": "Source", "new_class_name": "SourceHelper"}),
+        ("Extract Subclass", "extract_subclass", {"source_class": "Source", "new_subclass_name": "SourceSubtype"}),
+        ("Replace Conditional with Polymorphism", "replace_conditional_with_polymorphism", {"source_class": "Source", "method": "work"}),
+        ("Introduce Facade", "introduce_facade", {"source_class": "Source", "facade_class_name": "SourceFacade"}),
+        ("Replace Temp with Query", "replace_temp_with_query", {"method": "work"}),
+        ("Introduce Parameter Object", "introduce_java_parameter_object", {"method": "work", "parameter_object_name": "WorkParams"}),
+        ("Move Method", "move_java_method", {"source_class": "Source", "method": "work", "destination_class": "Destination"}),
+        ("Pull Up Method", "pull_up_method", {"source_class": "Source", "method": "work", "target_class": "Destination"}),
+        ("Replace Data Value with Object", "replace_data_value_with_object", {"source_class": "Source"}),
+        ("Hide Delegate", "hide_delegate", {"source_class": "Source", "method": "work"}),
+        ("Introduce Constant", "introduce_constant", {"constant_name": "LIMIT", "hint": "literal 5"}),
+        ("Inline Class", "inline_java_class", {"class_to_inline": "Source"}),
+        ("Collapse Hierarchy", "collapse_hierarchy", {"source_class": "Source", "parent_class": "Destination"}),
+        ("Remove Dead Code", "remove_dead_code", {"method": "work"}),
+        ("Replace Parameter with Method Call", "replace_parameter_with_method_call", {"method": "work"}),
+        ("Rename Method", "rename_method", {"method": "work", "new_name": "performWork"}),
+    ]
+    steps = []
+    for index, (refactoring, _expected, parameters) in enumerate(cases, start=1):
+        steps.append({
+            "step_id": index,
+            "refactoring": refactoring,
+            "target": {
+                "file": "Source.java",
+                "class": "Source",
+                "method": parameters.get("method", "work"),
+                "lines": [2, 4],
+            },
+            "parameters": {"source_file": "Source.java", **parameters},
+        })
+
+    normalized = PlannerAdapter().normalize_plan({"plan_id": "java-all", "steps": steps})
+
+    actual = [action["action_type"] for action in normalized["actions"]]
+    assert actual == [expected for _name, expected, _params in cases]
+    assert all(action["action_type"] != "noop" for action in normalized["actions"])
+    assert all(not action.get("warnings") for action in normalized["actions"])
+
+
 def test_planner_adapter_maps_move_method_to_python_move_action():
     adapter = PlannerAdapter()
     planner_output = {

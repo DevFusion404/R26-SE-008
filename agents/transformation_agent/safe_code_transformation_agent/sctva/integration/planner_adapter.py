@@ -10,11 +10,11 @@ from typing import Any, Dict, List, Optional
 from ..contracts import normalize_move_method_parameters
 from ..constants import (
     ACTION_ENCAPSULATE_C_VARIABLE,
-    ACTION_ENCAPSULATE_VARIABLE,
     ACTION_EXTRACT_C_COMPONENT,
     ACTION_EXTRACT_CLASS,
     ACTION_EXTRACT_JAVA_CLASS,
     ACTION_EXTRACT_METHOD,
+    ACTION_EXTRACT_SUBCLASS,
     ACTION_EXTRACT_PYTHON_CLASS,
     ACTION_FAULT_INJECTION,
     ACTION_INTRODUCE_C_PARAMETER_OBJECT,
@@ -22,12 +22,20 @@ from ..constants import (
     ACTION_INTRODUCE_PARAMETER_OBJECT,
     ACTION_INTRODUCE_PYTHON_PARAMETER_OBJECT,
     ACTION_INLINE_PYTHON_CLASS,
+    ACTION_INLINE_JAVA_CLASS,
     ACTION_HIDE_DELEGATE,
+    ACTION_INTRODUCE_FACADE,
+    ACTION_MOVE_JAVA_METHOD,
     ACTION_MOVE_PYTHON_METHOD,
     ACTION_MOVE_C_FUNCTION,
     ACTION_NOOP,
     ACTION_NARROW_EXCEPTION_HANDLER,
     ACTION_REMOVE_DEAD_CODE,
+    ACTION_REPLACE_DATA_VALUE_WITH_OBJECT,
+    ACTION_REPLACE_PARAMETER_WITH_METHOD_CALL,
+    ACTION_REPLACE_TEMP_WITH_QUERY,
+    ACTION_PULL_UP_METHOD,
+    ACTION_COLLAPSE_HIERARCHY,
     ACTION_REPLACE_UNSAFE_FUNCTION,
     ACTION_REPLACE_CONDITIONAL_WITH_POLYMORPHISM,
     ACTION_REPLACE_NESTED_CONDITIONAL_WITH_GUARD_CLAUSES,
@@ -739,6 +747,65 @@ class PlannerAdapter:
                 },
             }
 
+        elif ref_key == "extract subclass":
+            source_file = self._source_file_from_step(step, params=params, target=target)
+            source_class = str(
+                params.get("source_class") or target.get("class") or ""
+            ).strip()
+            subclass_name = str(
+                params.get("new_subclass_name")
+                or params.get("subclass_name")
+                or params.get("new_class_name")
+                or ""
+            ).strip()
+            if not source_class or not subclass_name:
+                raise PlannerAdapterError(
+                    "extract subclass requires source_class and new_subclass_name"
+                )
+            action = {
+                "action_type": ACTION_EXTRACT_SUBCLASS,
+                "parameters": {
+                    "source_file": source_file,
+                    "source_class": source_class,
+                    "new_subclass_name": self._safe_identifier(subclass_name),
+                    "source_line": self._source_line_from_step(
+                        step, params=params, target=target
+                    ),
+                    "smell": step.get("smell") or step.get("smell_type") or "God Class",
+                },
+            }
+
+        elif ref_key == "introduce facade":
+            source_file = self._source_file_from_step(step, params=params, target=target)
+            source_class = str(
+                params.get("source_class") or target.get("class") or ""
+            ).strip()
+            facade_name = str(
+                params.get("facade_class_name")
+                or params.get("new_class_name")
+                or ""
+            ).strip()
+            if not source_class or not facade_name:
+                raise PlannerAdapterError(
+                    "introduce facade requires source_class and facade_class_name"
+                )
+            action = {
+                "action_type": ACTION_INTRODUCE_FACADE,
+                "parameters": {
+                    "source_file": source_file,
+                    "source_class": source_class,
+                    "facade_class_name": self._safe_identifier(facade_name),
+                    "source_line": self._source_line_from_step(
+                        step, params=params, target=target
+                    ),
+                    "smell": (
+                        step.get("smell")
+                        or step.get("smell_type")
+                        or "Inappropriate Intimacy"
+                    ),
+                },
+            }
+
         elif ref_key in {"move method", "feature envy"}:
             # Feature-Envy plans from RDP can contain filename-derived placeholders
             # instead of real Python symbols.  Example:
@@ -799,9 +866,34 @@ class PlannerAdapter:
                         "header_file": str(params.get("header_file") or ""),
                     },
                 }
+            elif normalized_source_file.endswith(".java"):
+                if not method or not source_class or not destination_class:
+                    raise PlannerAdapterError(
+                        "Java Move Method requires method, source_class, and destination_class"
+                    )
+                action = {
+                    "action_type": ACTION_MOVE_JAVA_METHOD,
+                    "parameters": {
+                        "method": str(method),
+                        "source_method": str(method),
+                        "source_class": str(source_class),
+                        "destination_class": str(destination_class),
+                        "destination_parameter": str(
+                            params.get("destination_parameter") or ""
+                        ),
+                        "source_file": source_file,
+                        "source_line": source_line,
+                        "target_lines": target_lines,
+                        "smell": (
+                            step.get("smell")
+                            or step.get("smell_type")
+                            or "Feature Envy"
+                        ),
+                    },
+                }
             elif source_file and not normalized_source_file.endswith(".py"):
                 raise PlannerAdapterError(
-                    "move method is currently implemented for Python source files only"
+                    "move method is supported for Python, Java, and C source files"
                 )
 
             # A source file/line is enough for semantic recovery.  Do not reject a
@@ -869,9 +961,9 @@ class PlannerAdapter:
                 params=params,
                 target=target,
             )
-            if source_file and not source_file.replace("\\", "/").lower().endswith(".py"):
+            if source_file and not source_file.replace("\\", "/").lower().endswith((".py", ".java")):
                 raise PlannerAdapterError(
-                    "replace conditional with polymorphism is currently implemented for Python source files only"
+                    "replace conditional with polymorphism is supported for Python and Java source files"
                 )
             if not any((method, source_class, source_file, source_line, start_line, end_line)):
                 raise PlannerAdapterError(
@@ -964,12 +1056,17 @@ class PlannerAdapter:
                 )
             if self._safe_identifier(str(class_to_inline)) != str(class_to_inline):
                 raise PlannerAdapterError("inline class requires a valid class identifier")
-            if source_file and not source_file.replace("\\", "/").lower().endswith(".py"):
+            normalized_file = source_file.replace("\\", "/").lower()
+            if source_file and not normalized_file.endswith((".py", ".java")):
                 raise PlannerAdapterError(
-                    "inline class is currently implemented for Python source files only"
+                    "inline class is supported for Python and Java source files"
                 )
             action = {
-                "action_type": ACTION_INLINE_PYTHON_CLASS,
+                "action_type": (
+                    ACTION_INLINE_JAVA_CLASS
+                    if normalized_file.endswith(".java")
+                    else ACTION_INLINE_PYTHON_CLASS
+                ),
                 "parameters": {
                     "class_to_inline": str(class_to_inline),
                     "target_class": str(class_to_inline),
@@ -997,16 +1094,28 @@ class PlannerAdapter:
                 params.get("new_method_name") or params.get("delegate_method_name") or ""
             ).strip()
             source_file = self._source_file_from_step(step, params=params, target=target)
-            if not all((source_class, delegate_member, delegated_member)):
+            target_method = str(
+                target.get("method")
+                or params.get("method")
+                or params.get("source_method")
+                or ""
+            ).strip()
+            normalized_file = source_file.replace("\\", "/").lower()
+            java_semantic_recovery = bool(
+                normalized_file.endswith(".java")
+                and source_class
+                and (target_method or self._source_line_from_step(step, params=params, target=target))
+            )
+            if not all((source_class, delegate_member, delegated_member)) and not java_semantic_recovery:
                 raise PlannerAdapterError(
                     "hide delegate requires source_class, delegate_member, and delegated_member"
                 )
             if any(
                 self._safe_identifier(value) != value
                 for value in (source_class, delegate_member, delegated_member)
+                if value
             ):
                 raise PlannerAdapterError("hide delegate requires valid identifiers")
-            normalized_file = source_file.replace("\\", "/").lower()
             if source_file and not normalized_file.endswith((".py", ".java")):
                 raise PlannerAdapterError("hide delegate is currently supported for Python and Java source files only")
             action = {
@@ -1016,21 +1125,51 @@ class PlannerAdapter:
                     "delegate_member": delegate_member,
                     "delegated_member": delegated_member,
                     "new_method_name": new_method_name,
+                    "method": target_method,
+                    "source_method": target_method,
                     "source_file": source_file,
                     "source_line": self._source_line_from_step(step, params=params, target=target),
                     "smell": step.get("smell") or step.get("smell_type") or "Message Chains",
+                    "semantic_recovery_required": not all(
+                        (delegate_member, delegated_member)
+                    ),
                 },
             }
 
-        elif ref_key in {
-            "replace data value with object",
-            "collapse hierarchy",
-            "pull up method",
-            "replace parameter with method call",
-        }:
-            raise PlannerAdapterError(
-                f"{refactoring} requires semantic multi-location edits; "
-                "SCTVA will not simulate it with a rename"
+        elif ref_key == "pull up method":
+            action = self._java_model_action(
+                action_type=ACTION_PULL_UP_METHOD,
+                step=step,
+                params=params,
+                target=target,
+                required=("source_class", "method", "target_class"),
+            )
+
+        elif ref_key == "replace data value with object":
+            action = self._java_model_action(
+                action_type=ACTION_REPLACE_DATA_VALUE_WITH_OBJECT,
+                step=step,
+                params=params,
+                target=target,
+                required=("source_class",),
+            )
+
+        elif ref_key == "collapse hierarchy":
+            action = self._java_model_action(
+                action_type=ACTION_COLLAPSE_HIERARCHY,
+                step=step,
+                params=params,
+                target=target,
+                required=("source_class", "parent_class"),
+            )
+
+        elif ref_key == "replace parameter with method call":
+            action = self._java_model_action(
+                action_type=ACTION_REPLACE_PARAMETER_WITH_METHOD_CALL,
+                step=step,
+                params=params,
+                target=target,
+                required=("method",),
             )
 
         elif ref_key in {
@@ -1383,10 +1522,16 @@ class PlannerAdapter:
                 },
             }
 
-        elif ref_key in {
-            "replace literal",
-            "replace temp with query",
-        }:
+        elif ref_key == "replace temp with query":
+            action = self._java_model_action(
+                action_type=ACTION_REPLACE_TEMP_WITH_QUERY,
+                step=step,
+                params=params,
+                target=target,
+                required=("method",),
+            )
+
+        elif ref_key == "replace literal":
             if "old_literal" not in params or "new_literal" not in params:
                 raise PlannerAdapterError(
                     "replace_literal mapping requires old_literal/new_literal"
@@ -1472,6 +1617,91 @@ class PlannerAdapter:
             action["warnings"] = []
 
         return action
+
+    def _java_model_action(
+        self,
+        *,
+        action_type: str,
+        step: Dict[str, Any],
+        params: Dict[str, Any],
+        target: Dict[str, Any],
+        required: tuple[str, ...] = (),
+    ) -> Dict[str, Any]:
+        """Preserve a semantic Java intent for model-first execution.
+
+        These refactorings do not yet have deterministic Java transformers.
+        Mapping them to ``noop`` prevented the configured model from ever
+        seeing the RDP action.  Keep a bounded, typed action instead; the normal
+        syntax, structural, behavioral, and invariant gates still decide
+        whether a generated candidate can be accepted.
+        """
+
+        source_file = self._source_file_from_step(step, params=params, target=target)
+        if source_file and not source_file.replace("\\", "/").lower().endswith(".java"):
+            raise PlannerAdapterError(
+                f"{step.get('refactoring') or action_type} model action requires Java source"
+            )
+        source_class = str(
+            params.get("source_class")
+            or params.get("class_name")
+            or target.get("class")
+            or ""
+        ).strip()
+        method = str(
+            params.get("source_method")
+            or params.get("method")
+            or params.get("method_name")
+            or target.get("method")
+            or target.get("function")
+            or ""
+        ).strip()
+        target_class = str(
+            params.get("target_class")
+            or params.get("destination_class")
+            or target.get("target_class")
+            or ""
+        ).strip()
+        parent_class = str(
+            params.get("parent_class") or target.get("parent_class") or ""
+        ).strip()
+        start_line, end_line = self._source_range_from_step(
+            step, params=params, target=target
+        )
+        semantic = {
+            "source_file": source_file,
+            "source_class": source_class,
+            "method": method,
+            "source_method": method,
+            "target_class": target_class,
+            "destination_class": target_class,
+            "parent_class": parent_class,
+            "source_line": self._source_line_from_step(
+                step, params=params, target=target
+            ),
+            "start_line": start_line,
+            "end_line": end_line,
+            "smell": step.get("smell") or step.get("smell_type") or "",
+            "semantic_recovery_required": True,
+        }
+        for key in (
+            "value_object_name",
+            "new_class_name",
+            "field_name",
+            "parameter_name",
+            "query_method_name",
+            "replacement_method",
+        ):
+            value = params.get(key) or target.get(key)
+            if value not in (None, ""):
+                semantic[key] = value
+
+        missing = [key for key in required if not str(semantic.get(key) or "").strip()]
+        if missing:
+            raise PlannerAdapterError(
+                f"{step.get('refactoring') or action_type} requires "
+                + ", ".join(missing)
+            )
+        return {"action_type": action_type, "parameters": semantic}
 
     @staticmethod
     def _extract_class_action_type(*, source_file: str, refactoring_key: str) -> str:

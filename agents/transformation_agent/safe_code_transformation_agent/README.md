@@ -34,6 +34,24 @@ context. Model output is merged back into that exact source span; unrelated
 source is never regenerated. Ambiguous targets and target spans that still do
 not fit are skipped safely so the rule-based transformer can run.
 
+For Java, the model-first adapter preserves every refactoring name in the
+comprehensive RDP vocabulary as an executable semantic action: Extract Method,
+Extract Class, Extract Subclass, Replace Conditional with Polymorphism,
+Introduce Facade, Replace Temp with Query, Introduce Parameter Object, Move
+Method, Pull Up Method, Replace Data Value with Object, Hide Delegate,
+Introduce Constant, Inline Class, Collapse Hierarchy, Remove Dead Code, Replace
+Parameter with Method Call, and Rename Method. These actions are not reported
+as rule support merely because the model can attempt them.
+
+The deterministic Java fallback currently implements Extract Method, Extract
+Class, Introduce Parameter Object, Introduce/Extract Constant, Remove Dead Code,
+Rename Method, and Hide Delegate when the plan supplies an unambiguous delegate
+field/member. The remaining Java actions are model-first and are accepted only
+after their action contract and all SCTVA validators pass. Cross-file class
+moves also require both participating declarations to be available to the
+resolved candidate span; otherwise SCTVA rejects the candidate instead of
+claiming a partial refactoring succeeded.
+
 The SCTVA web client enables the local model in `primary` mode by default. Bare library
 callers can still omit or disable it explicitly. For a local CPU run, install
 the model dependencies into the same Python environment that starts SCTVA:
@@ -69,6 +87,7 @@ Enable it per request; the RDP plan format is not changed:
     "codet5_max_generation_seconds_per_request": 0,
     "codet5_runtime_cache": true,
     "codet5_allow_unsupported_actions": false,
+    "max_parallel_files": 3,
     "codet5_mode": "primary"
   }
 }
@@ -86,34 +105,23 @@ syntax-safe candidate. Set it to `fallback` to preserve the earlier behavior
 where deterministic transformations are attempted first.
 
 In primary mode SCTVA resolves the current RDP file, symbol, and line metadata
-before inference. Independent Java Introduce or Extract Constant targets use
-one tensor-batched OpenVINO call (up to eight prompts per micro-batch), then
-each generated target replacement is validated separately. This is the
-default because it is both faster and more accurate on the local Qwen CPU
-profile than regenerating a long combined source span. Optional compatible
-consecutive Java/C actions can still be grouped into ordered, dependency-aware
-file bundles by enabling `codet5_enable_file_bundling`; those bundles contain
-at most `codet5_max_actions_per_bundle` actions.
-Every original RDP action index, type, order, and safe target
-parameter is retained in the bundle prompt. Generic bundles are limited to two
-actions while reversible constant bundles may contain five. Generic bundles
-are disabled by default because mixed prompts can reduce acceptance quality;
-set `codet5_enable_generic_bundling` to `true` only after benchmarking the
-target model and project. When enabled, their resolved owner scope must be
-identical. One model
-generation applies the whole bundle and one multi-action checkpoint verifies
-every action. A second candidate is generated only for bounded syntax or
-incomplete-intent feedback. Out-of-scope, unrelated, structural, behavioral,
-and invariant failures immediately use the deterministic rule transformer.
-Repository-wide operations, API-changing structural operations, unresolved
-targets, partially overlapping scopes, inferred read/write conflicts, and
-oversized bundles retain the established single-action model path.
+before inference. It generates one model candidate for one RDP action at a
+time, using that action's exact target span. This avoids mixing independent
+refactoring contracts into one prompt, which reduced local-model candidate
+acceptance. Legacy bundle options remain in the request format for backwards
+compatibility but are ignored by the SCTVA model-generation engine. A bounded
+second candidate is permitted only for validator-guided repair of the same
+single action. Syntax, structural, behavioral, and invariant failures
+immediately use the deterministic rule transformer.
 
 Every bundle still receives syntax and structural checks, and the complete
 file still has to pass SCTVA syntax, structural, behavioral, invariant, and
-compiler checks. Model generation remains serialized on CPU; target resolution
-and normal validation do not create competing model instances. Validators are
-never bypassed.
+compiler checks. On CPU, SCTVA runs one model inference at a time but uses up
+to three file workers: while Qwen generates one file, other workers may safely
+perform planning, candidate validation, and reporting for other files. This
+avoids competing model instances while reducing end-to-end project latency.
+Set `max_parallel_files` to `1`, `2`, or `3`; model-assisted CPU requests are
+capped at three workers. Validators are never bypassed.
 
 The model/tokenizer runtime is cached at process scope, so later SCTVA requests
 reuse the loaded checkpoint. For faster CPU inference without weight
@@ -128,10 +136,11 @@ optimum-cli export openvino --model Qwen/Qwen2.5-Coder-0.5B-Instruct --task text
 Then configure `codet5_backend` as `openvino` and set
 `codet5_openvino_model_path` to that directory. With `auto`, SCTVA selects
 OpenVINO only when the configured path exists and otherwise retains PyTorch.
-The exported FP32 weights remain unchanged. On OpenVINO CPU, SCTVA uses BF16
-activation execution, dynamic activation quantization, a U8 KV cache, and an
-eight-item generation micro-batch. These runtime settings reduce decoding time
-without changing the RDP action set or bypassing candidate validation.
+OpenVINO inference uses FP32 activation precision and a four-item CPU
+micro-batch. The earlier BF16 activation and U8 KV-cache throughput profile was
+removed because numerical output stability is more important than its modest
+speed improvement for source transformation. This does not change the RDP
+action set or bypass candidate validation.
 The web client uses a 30-second per-generation timeout and no request-level
 generation cutoff. Therefore a slow first file does not prevent later eligible
 RDP actions from reaching the model. To reduce CPU latency without dropping
@@ -320,7 +329,9 @@ pytest tests -q
 
 - Java behavioral validation uses conservative mock checks unless external test harness is integrated.
 - Java compile checks depend on local `javac` availability.
-- Adapter maps unsupported RDP refactorings to `noop` actions to keep execution auditable and non-destructive.
+- Refactorings outside the recognized language vocabularies are mapped to
+  auditable `noop` actions; recognized Java model actions retain their semantic
+  action type even when no deterministic fallback exists.
 
 ## Next Upgrades
 
