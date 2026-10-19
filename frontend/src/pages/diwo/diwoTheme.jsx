@@ -29,7 +29,7 @@ export const STEPS = ["Code Smell Review", "Refactoring Plan", "Transformation",
 
 export function StepBar({ current }) {
   return (
-    <div style={{ display: "flex", alignItems: "center", gap: 0, marginBottom: 32 }}>
+    <div className="diwo-stepbar" style={{ display: "flex", alignItems: "center", gap: 0, marginBottom: 32 }}>
       {STEPS.map((s, i) => {
         const done = i < current;
         const active = i === current;

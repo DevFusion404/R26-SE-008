@@ -112,10 +112,11 @@ function buildBackendSmells() {
 }
 
 // ─── Component ────────────────────────────────────────────────────────────────
-export default function DIWOAgentPage() {
+export default function DIWOAgentPage({ onWorkflowComplete } = {}) {
   const [phase, setPhase]         = useState(0);
   const [workflowId, setWorkflowId]           = useState(null);
   const [workflowLanguage, setWorkflowLanguage] = useState("java");
+  const [workflowTarget, setWorkflowTarget]   = useState(null);
   const [cuqaReport, setCuqaReport]           = useState(null);   // live Agent 1 report
   const [planData, setPlanData]               = useState(null);
   // Which agent produced planData, where, and why — straight from the
@@ -123,6 +124,9 @@ export default function DIWOAgentPage() {
   const [planMeta, setPlanMeta]               = useState(null);
   // Only the steps the developer approved — this is what Stage 3 sends to SCTVA.
   const [approvedPlan, setApprovedPlan]       = useState(null);
+  // The developer's per-step verdicts at approval, kept for the session report.
+  const [planDecisions, setPlanDecisions]     = useState(null);
+  const [completing, setCompleting]           = useState(false);
   // The plan as Stage 2 rendered it, kept so a rollback from Stage 3 can offer
   // every step again — approval trims planData down to the approved ones.
   const [preApprovalPlan, setPreApprovalPlan] = useState(null);
@@ -241,6 +245,7 @@ export default function DIWOAgentPage() {
         const res = await api.post("/workflows/from-cuqa", {});
         setWorkflowId(res.workflow_id);
         setWorkflowLanguage(res.language || "java");
+        setWorkflowTarget(res.target || null);
         setMetricsBeforeApi(res.metrics_before || null);
         setCuqaReport(res.report || null);
         addLog(
@@ -272,6 +277,7 @@ export default function DIWOAgentPage() {
       });
       setWorkflowId(res.workflow_id);
       setWorkflowLanguage("java");
+      setWorkflowTarget("ECommerceSystem.java");
       setMetricsBeforeApi(res.metrics_before || null);
       addLog(`Backend workflow created from sample report: ${res.workflow_id}`, "warn");
       return res;
@@ -677,6 +683,7 @@ export default function DIWOAgentPage() {
       // plan as reviewed: rolling back from Stage 3 restores it and the
       // developer can re-approve a step they rejected on the first pass.
       setPreApprovalPlan(activePlan);
+      setPlanDecisions(decisions || null);
 
       // The backend derives the approved-only plan from the decisions and
       // persists it, so the report Stage 3 posts to /sctva/execute is the same
@@ -1064,6 +1071,55 @@ export default function DIWOAgentPage() {
     [cuqaReport, workflow?.updated_report, preApprovalPlan, planData, approvedPlan]
   );
 
+  // ── Stage 4: Complete → session report ───────────────────────────────────
+  /**
+   * Close the workflow on the backend, re-read the trail so the report carries
+   * the completion event, then hand the whole session to the Reports page.
+   * The report is still produced when the backend refuses (stage guard, offline),
+   * and records why.
+   */
+  const handleComplete = async (notes) => {
+    if (completing) return;
+    setCompleting(true);
+    let completedOnBackend = false;
+    let completeError = null;
+
+    if (workflowId) {
+      try {
+        await api.post(`/workflows/${workflowId}/complete`, { notes: notes || "" });
+        completedOnBackend = true;
+      } catch (e) {
+        completeError = e.message;
+        addLog(`Complete workflow failed: ${e.message}`, "warn");
+      }
+    }
+    const rows = workflowId ? await refreshAuditTrail(workflowId) : [];
+    addLog("Comparison completed. Session closed.", "success");
+
+    const report = buildSessionReport({
+      workflowId,
+      language: workflowLanguage,
+      target: workflowTarget,
+      cuqaReport,
+      workflow,
+      plan: preApprovalPlan || planData,
+      planMeta,
+      decisions: planDecisions,
+      // The backend's own figures only — not the display fallback above.
+      metricsBefore: metricsBeforeApi,
+      metricsAfter: metricsAfterApi,
+      auditRows: rows.length ? rows : backendLog,
+      sessionLog: auditLog,
+      notes,
+      completedOnBackend,
+      completeError,
+    });
+    setCompleting(false);
+
+    if (onWorkflowComplete) onWorkflowComplete(report);
+    else setPhase(0);
+  };
+
   // ── Restart ───────────────────────────────────────────────────────────────
   const handleRestart = () => {
     addLog("New refactoring session initiated.", "info");
@@ -1076,8 +1132,8 @@ export default function DIWOAgentPage() {
   return (
     <div style={{ background: C.bg, minHeight: "100vh", color: C.text, fontFamily: "'DM Sans', 'Segoe UI', sans-serif" }}>
       {/* Header */}
-      <div style={{ background: C.panel, borderBottom: `1px solid ${C.border}`, padding: "0 32px", display: "flex", alignItems: "center", justifyContent: "space-between", height: 56 }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+      <div className="diwo-header" style={{ background: C.panel, borderBottom: `1px solid ${C.border}`, padding: "0 32px", display: "flex", alignItems: "center", justifyContent: "space-between", height: 56 }}>
+        <div className="diwo-header-title" style={{ display: "flex", alignItems: "center", gap: 12 }}>
           <div style={{ width: 28, height: 28, borderRadius: 6, background: C.gradient, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 14, fontWeight: 900, color: "#000" }}>D</div>
           <span style={{ fontSize: 14, fontWeight: 700, letterSpacing: 0.3 }}>DIWO Agent</span>
           <span style={{ fontSize: 11, color: C.textMuted, padding: "2px 8px", background: C.bg, borderRadius: 4, border: `1px solid ${C.border}` }}>Developer Interaction & Workflow Orchestration</span>
@@ -1096,8 +1152,8 @@ export default function DIWOAgentPage() {
         </div>
       </div>
 
-      <div style={{ display: "flex", height: "calc(100vh - 56px)" }}>
-        <div style={{ flex: 1, overflow: "auto", padding: "28px 32px" }}>
+      <div className="diwo-body" style={{ display: "flex", height: "calc(100vh - 56px)" }}>
+        <div className="diwo-main" style={{ flex: 1, overflow: "auto", padding: "28px 32px" }}>
           <StepBar current={phase} />
 
           {(githubContext || githubError) && (
@@ -1187,17 +1243,7 @@ export default function DIWOAgentPage() {
               // Comparison is a read-only view of a finished run, so stepping
               // back to Results costs nothing and decides nothing.
               onBack={() => setPhase(3)}
-              onComplete={async (notes) => {
-                if (workflowId) {
-                  try {
-                    await api.post(`/workflows/${workflowId}/complete`, { notes: notes || "" });
-                  } catch (e) {
-                    addLog(`Complete workflow failed: ${e.message}`, "warn");
-                  }
-                }
-                addLog("Comparison completed. Session closed.", "success");
-                setPhase(0);
-              }}
+              onComplete={handleComplete}
               onLoadLogs={async () => {
                 // Loads the structured rows as they are. The previous version
                 // flattened each one to "[stage] action (actor)" and appended
@@ -1211,7 +1257,7 @@ export default function DIWOAgentPage() {
                   rows.length ? "success" : "warn",
                 );
               }}
-              loading={false}
+              loading={completing}
             />
           )}
         </div>

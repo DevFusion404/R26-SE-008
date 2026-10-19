@@ -30,7 +30,7 @@ import DependencyOverview from './DependencyOverview';
 import ArchitecturalClues from './ArchitecturalClues';
 import BeginnerGlossary from './BeginnerGlossary';
 
-export default function RepositoryUnderstandingSection({ repoLoaded, onFileSelect }) {
+export default function RepositoryUnderstandingSection({ repoLoaded, onFileSelect, embedded = false }) {
   const [overview, setOverview] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
@@ -112,9 +112,11 @@ export default function RepositoryUnderstandingSection({ repoLoaded, onFileSelec
   } = overview;
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 20, marginBottom: 28 }}>
-      {/* Section Header & Beginner Toggle */}
-      <div style={{
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 20, marginBottom: embedded ? 0 : 28 }}>
+      {/* Section Header & Beginner Toggle (inside the CUQA F1 frame only the tools are shown) */}
+      <div style={embedded ? {
+        display: 'flex', justifyContent: 'flex-end', alignItems: 'center', flexWrap: 'wrap', gap: 12,
+      } : {
         display: 'flex', justifyContent: 'space-between', alignItems: 'center',
         padding: '14px 20px',
         background: 'linear-gradient(135deg, rgba(0,212,232,0.08) 0%, rgba(59,130,246,0.04) 100%)',
@@ -122,7 +124,7 @@ export default function RepositoryUnderstandingSection({ repoLoaded, onFileSelec
         borderRadius: 12,
         flexWrap: 'wrap', gap: 12,
       }}>
-        <div>
+        {!embedded && <div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             <span style={{ fontSize: 18 }}>🧭</span>
             <span style={{ fontSize: 15, fontWeight: 800, color: 'var(--text-primary)', letterSpacing: '0.3px' }}>
@@ -139,9 +141,9 @@ export default function RepositoryUnderstandingSection({ repoLoaded, onFileSelec
           <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginTop: 3 }}>
             Orientation guide for developers unfamiliar with this legacy repository.
           </div>
-        </div>
+        </div>}
 
-        <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 14, flexWrap: 'wrap' }}>
           {/* Search Box */}
           <input
             type="text"
@@ -156,6 +158,7 @@ export default function RepositoryUnderstandingSection({ repoLoaded, onFileSelec
               fontSize: 11,
               color: 'var(--text-primary)',
               width: 180,
+              maxWidth: '100%',
               outline: 'none',
             }}
           />
@@ -211,7 +214,7 @@ export default function RepositoryUnderstandingSection({ repoLoaded, onFileSelec
       />
 
       {/* Tab Navigation */}
-      <div style={{ display: 'flex', borderBottom: '1px solid var(--border)', gap: 4 }}>
+      <div style={{ display: 'flex', borderBottom: '1px solid var(--border)', gap: 4, overflowX: 'auto' }}>
         {[
           { id: 'overview', label: '📊 Overview & Entry Points' },
           { id: 'reading_path', label: '🚀 Recommended Reading Path' },
@@ -232,6 +235,8 @@ export default function RepositoryUnderstandingSection({ repoLoaded, onFileSelec
               cursor: 'pointer',
               borderRadius: '6px 6px 0 0',
               transition: 'all 0.15s ease',
+              whiteSpace: 'nowrap',
+              flexShrink: 0,
             }}
           >
             {tab.label}
@@ -241,7 +246,7 @@ export default function RepositoryUnderstandingSection({ repoLoaded, onFileSelec
 
       {/* Tab 1: Overview & Entry Points */}
       {activeTab === 'overview' && (
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: 16 }}>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(320px, 100%), 1fr))', gap: 16 }}>
           {/* Entry Points & Architectural Clues */}
           <div className="card" style={{ padding: 18, display: 'flex', flexDirection: 'column', gap: 16 }}>
             <div className="card-header" style={{ padding: 0, marginBottom: 8, border: 'none' }}>
@@ -308,7 +313,7 @@ export default function RepositoryUnderstandingSection({ repoLoaded, onFileSelec
 
       {/* Tab 4: Folder & File Roles */}
       {activeTab === 'structure' && (
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(340px, 1fr))', gap: 16 }}>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(340px, 100%), 1fr))', gap: 16 }}>
           {/* Key Files to Know */}
           <div className="card" style={{ padding: 18 }}>
             <div className="card-header" style={{ padding: 0, marginBottom: 12, border: 'none' }}>

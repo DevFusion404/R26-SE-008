@@ -286,16 +286,16 @@ export default function RDPAgentPage({ repoLoaded, repoMeta, preloadedReport, on
           {/* Banner header */}
           <div style={{
             padding: '12px 18px',
-            display: 'flex', alignItems: 'center', gap: 12,
+            display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap',
             borderBottom: '1px solid rgba(139,92,246,0.15)',
           }}>
             <span style={{ fontSize: 18 }}>
               {plan ? '✅' : loading ? '⚡' : '🔗'}
             </span>
-            <div style={{ flex: 1 }}>
+            <div style={{ flex: '1 1 220px', minWidth: 0 }}>
               <div style={{
-                fontSize: 13, fontWeight: 700,
-                color: plan ? '#4ade80' : loading ? '#c4b5fd' : '#00d4e8',
+                fontSize: 14, fontWeight: 700,
+                color: plan ? 'var(--text-success)' : loading ? 'var(--color-rdp)' : 'var(--text-accent)',
               }}>
                 {plan
                   ? 'Refactoring Plan Generated Successfully'
@@ -303,7 +303,7 @@ export default function RDPAgentPage({ repoLoaded, repoMeta, preloadedReport, on
                   ? 'Automated Pipeline Active — Generating Plan…'
                   : 'Quality Report Received from CUQA Agent'}
               </div>
-              <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginTop: 2 }}>
+              <div style={{ fontSize: 13, color: 'var(--text-secondary)', marginTop: 2 }}>
                 {plan
                   ? 'The RDP Agent has completed its analysis. Review the results below.'
                   : loading
@@ -312,20 +312,20 @@ export default function RDPAgentPage({ repoLoaded, repoMeta, preloadedReport, on
               </div>
             </div>
             {/* Pipeline stage indicator */}
-            <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexShrink: 0 }}>
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexShrink: 0 }}>
               <span style={{
-                padding: '3px 10px', borderRadius: 'var(--r-full)', fontSize: 10, fontWeight: 700,
-                background: 'rgba(0,212,232,0.15)', color: '#00d4e8', border: '1px solid rgba(0,212,232,0.3)',
+                padding: '4px 12px', borderRadius: 'var(--r-full)', fontSize: 12, fontWeight: 700,
+                background: 'rgba(0,212,232,0.15)', color: 'var(--text-accent)', border: '1px solid rgba(0,212,232,0.4)',
               }}>① CUQA ✓</span>
-              <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>→</span>
+              <span style={{ fontSize: 13, color: 'var(--text-muted)' }}>→</span>
               <span style={{
-                padding: '3px 10px', borderRadius: 'var(--r-full)', fontSize: 10, fontWeight: 700,
+                padding: '4px 12px', borderRadius: 'var(--r-full)', fontSize: 12, fontWeight: 700,
                 background: plan
                   ? 'rgba(34,197,94,0.2)'
                   : loading
                   ? 'rgba(139,92,246,0.25)'
                   : 'rgba(139,92,246,0.10)',
-                color: plan ? '#4ade80' : loading ? '#c4b5fd' : '#7c6aaa',
+                color: plan ? 'var(--text-success)' : loading ? 'var(--color-rdp)' : 'var(--text-muted)',
                 border: `1px solid ${plan ? 'rgba(34,197,94,0.4)' : loading ? 'rgba(139,92,246,0.5)' : 'rgba(139,92,246,0.2)'}`,
                 animation: loading ? 'pulse 1.2s infinite' : 'none',
               }}>② RDP {plan ? '✓' : loading ? '…' : '—'}</span>
@@ -368,14 +368,14 @@ export default function RDPAgentPage({ repoLoaded, repoMeta, preloadedReport, on
       {plan && sessionRestored && !loading && (
         <div style={{
           display: 'flex', alignItems: 'center', gap: 12,
-          padding: '10px 18px', marginTop: 12,
-          background: 'linear-gradient(135deg, rgba(34,197,94,0.08), rgba(74,222,128,0.04))',
-          border: '1px solid rgba(34,197,94,0.25)',
-          borderRadius: 8, fontSize: 12,
+          padding: '12px 18px', marginTop: 12,
+          background: 'var(--rdp-winner-bg)',
+          border: '1px solid var(--rdp-winner-border)',
+          borderRadius: 8, fontSize: 13,
         }}>
-          <span style={{ fontSize: 16 }}>💾</span>
+          <span style={{ fontSize: 18 }}>💾</span>
           <div style={{ flex: 1, color: 'var(--text-secondary)' }}>
-            <strong style={{ color: '#22c55e' }}>Session restored</strong>
+            <strong style={{ color: 'var(--rdp-winner-text)' }}>Session restored</strong>
             {' '}— showing your last generated plan. Upload a new report to replace it.
           </div>
           <button
@@ -386,9 +386,9 @@ export default function RDPAgentPage({ repoLoaded, repoMeta, preloadedReport, on
               setSessionRestored(false);
             }}
             style={{
-              background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.25)',
-              borderRadius: 4, color: '#ef4444', fontSize: 11,
-              padding: '4px 10px', cursor: 'pointer',
+              background: 'rgba(239,68,68,0.1)', border: '1px solid rgba(239,68,68,0.3)',
+              borderRadius: 6, color: 'var(--color-critical)', fontSize: 12, fontWeight: 600,
+              padding: '5px 12px', cursor: 'pointer',
             }}
           >
             ✕ Clear

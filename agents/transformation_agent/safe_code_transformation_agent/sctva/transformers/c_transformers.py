@@ -449,14 +449,12 @@ def _c_numeric_context(
         return "TARGET_CONTEXT_UNSUPPORTED"
 
     # A fixed-size array declaration is a constant-expression context and can
-    # safely use a macro with the exact same numeric value.  This is especially
-    # useful in headers such as ``char version_number[32]``.  Runtime indexing
-    # expressions remain out of scope.
+    # safely use an object-like macro with the exact same numeric value. This
+    # applies to struct fields, local arrays, parameters, and header prototypes.
+    # Runtime indexing expressions such as ``values[15]`` remain out of scope.
     if _inside_square_brackets(masked_source, start):
         if _is_c_type_or_signature_context(masked_source, start):
-            if _inside_c_struct_or_union_body(masked_source, start):
-                return "C_ARRAY_EXTENT"
-            return "TARGET_IN_C_TYPE_OR_SIGNATURE_CONTEXT"
+            return "C_ARRAY_EXTENT"
         return "TARGET_CONTEXT_UNSUPPORTED"
 
     previous = start - 1
@@ -466,15 +464,17 @@ def _c_numeric_context(
     while following < line_end and masked_source[following].isspace():
         following += 1
 
-    # Bit-field widths and similar declaration-only contexts are not rewritten
-    # without a full type-layout validator.
+    # A numeric bit-field width is another integer constant-expression context.
+    # Replacing only that token with an object-like macro whose value is
+    # identical preserves the field layout. The model intent gate additionally
+    # proves reversibility by expanding the macro back to the original token.
     if previous >= line_start and masked_source[previous] == ":":
         if _is_c_type_or_signature_context(masked_source, start):
-            return "TARGET_IN_C_TYPE_OR_SIGNATURE_CONTEXT"
+            return "C_BIT_FIELD_WIDTH"
         return "TARGET_CONTEXT_UNSUPPORTED"
     if following < line_end and masked_source[following] == ":":
         if _is_c_type_or_signature_context(masked_source, start):
-            return "TARGET_IN_C_TYPE_OR_SIGNATURE_CONTEXT"
+            return "C_BIT_FIELD_WIDTH"
         return "TARGET_CONTEXT_UNSUPPORTED"
 
     return "C_NUMERIC_EXPRESSION"
@@ -620,7 +620,11 @@ def _find_c_numeric_literals(
         if source_line is not None and line != source_line:
             continue
         context = _c_numeric_context(source_code, masked, start, end)
-        if context not in {"C_NUMERIC_EXPRESSION", "C_ARRAY_EXTENT"}:
+        if context not in {
+            "C_NUMERIC_EXPRESSION",
+            "C_ARRAY_EXTENT",
+            "C_BIT_FIELD_WIDTH",
+        }:
             rejection_reason = rejection_reason or context
             continue
         spans.append((start, end))

@@ -200,6 +200,131 @@ function fileResultStatus(result) {
   };
 }
 
+const EMPTY_MODEL_METRICS = {
+  enabled: false,
+  used: false,
+  attempted: false,
+  retained: false,
+  accuracy: 0,
+  engine: 'RULE BASED',
+  status: 'MODEL NOT USED',
+  actionCount: 0,
+  attemptCount: 0,
+  backend: 'N/A',
+  device: 'N/A',
+  runtimeCacheHit: false,
+  modelLoadSeconds: 0,
+  modelGenerationSeconds: 0,
+  candidates: [],
+  context: 'N/A',
+  strategy: 'RULE ONLY',
+  acceptedOutput: 'NO CHANGE',
+  ruleFallbackUsed: false,
+  validationFailures: [],
+  reasons: [],
+};
+
+function modelMetricsFromResult(result) {
+  const enabled = result?.model_enabled === true;
+  const used = result?.model_used === true;
+  const attempted = result?.model_attempted === true;
+  const reportedAccuracy = Number(result?.model_validated_accuracy);
+  const accuracy = used && Number.isFinite(reportedAccuracy)
+    ? Math.max(1, Math.min(100, reportedAccuracy))
+    : 0;
+  const rawEngine = String(result?.transformation_engine || (used ? 'CODET5_PLUS' : 'RULE_BASED'));
+  const rawStatus = String(
+    result?.model_status
+    || (used ? 'MODEL_OUTPUT_RETAINED' : attempted ? 'MODEL_ATTEMPT_REJECTED_RULE_FALLBACK' : 'MODEL_NOT_USED')
+  );
+  const rawStrategy = String(
+    result?.hybrid_strategy
+    || (enabled ? 'MODEL_FIRST_RULE_FALLBACK' : 'RULE_ONLY')
+  );
+  const rawAcceptedOutput = String(
+    result?.accepted_output_engine
+    || (used ? result?.model_provider || 'LOCAL_MODEL' : 'RULE_BASED')
+  );
+  const modes = Array.isArray(result?.model_context_modes)
+    ? result.model_context_modes.filter(Boolean)
+    : [];
+  const reasons = Array.isArray(result?.model_attempt_reasons)
+    ? result.model_attempt_reasons.filter(Boolean)
+    : [];
+  const ineligibleReasons = Array.isArray(result?.model_ineligible_reasons)
+    ? result.model_ineligible_reasons.filter(Boolean)
+    : [];
+  const budgetReasons = Array.isArray(result?.model_budget_reasons)
+    ? result.model_budget_reasons.filter(Boolean)
+    : [];
+  const budgetDetails = Array.isArray(result?.model_budget_details)
+    ? result.model_budget_details.filter(item => item && typeof item === 'object')
+    : [];
+  const budgetSummaryParts = budgetDetails.map(item => {
+    const request = Number.isFinite(Number(item.request_attempt_limit))
+      ? `request ${item.request_attempts_used}/${item.request_attempt_limit}`
+      : '';
+    const file = Number.isFinite(Number(item.file_attempt_limit))
+      ? `file ${item.file_attempts_used}/${item.file_attempt_limit}`
+      : '';
+    const time = Number(item.generation_seconds_limit) > 0
+      ? `generation ${Number(item.generation_seconds_used || 0).toFixed(1)}/${Number(item.generation_seconds_limit).toFixed(0)}s`
+      : '';
+    return [request, file, time].filter(Boolean).join(', ');
+  }).filter(Boolean);
+  const budgetSummary = [...new Set(budgetSummaryParts)].join('; ');
+  const candidates = Array.isArray(result?.model_candidates)
+    ? result.model_candidates.filter(item => typeof item?.candidate_code === 'string' && item.candidate_code)
+    : [];
+  const fallbackSummary = Array.isArray(result?.model_fallback_details?.failed_validation_summary)
+    ? result.model_fallback_details.failed_validation_summary
+    : [];
+  const groupedFallbackSummary = Array.isArray(result?.model_final_validation_failures)
+    ? result.model_final_validation_failures.flatMap(item => (
+      Array.isArray(item?.failed_validation_summary)
+        ? item.failed_validation_summary.map(message => (
+          item.file_name ? `${item.file_name}: ${message}` : message
+        ))
+        : []
+    ))
+    : [];
+  const directValidationDetails = Array.isArray(result?.model_final_validation_details)
+    ? result.model_final_validation_details
+        .filter(item => item?.name && item?.message)
+        .map(item => `${item.name}: ${item.message}`)
+    : [];
+
+  return {
+    enabled,
+    used,
+    attempted,
+    retained: result?.model_output_retained === true,
+    accuracy,
+    engine: rawEngine.replaceAll('_', ' '),
+    status: rawStatus.replaceAll('_', ' '),
+    actionCount: Math.max(0, Number(result?.model_action_count) || 0),
+    attemptCount: Math.max(0, Number(result?.model_attempt_count) || 0),
+    backend: String(result?.model_backend || 'N/A').replaceAll('_', ' ').toUpperCase(),
+    device: String(result?.model_device || 'N/A').toUpperCase(),
+    runtimeCacheHit: result?.model_runtime_cache_hit === true,
+    modelLoadSeconds: Math.max(0, Number(result?.model_load_seconds) || 0),
+    modelGenerationSeconds: Math.max(0, Number(result?.model_generation_seconds) || 0),
+    candidates,
+    budgetSummary,
+    context: modes.length ? modes.join(', ').replaceAll('_', ' ') : 'N/A',
+    strategy: rawStrategy.replaceAll('_', ' '),
+    acceptedOutput: rawAcceptedOutput.replaceAll('_', ' '),
+    modelProvider: String(result?.model_provider || '').replaceAll('_', ' ').toUpperCase(),
+    ruleFallbackUsed: result?.rule_fallback_used === true,
+    validationFailures: [...new Set([
+      ...fallbackSummary,
+      ...groupedFallbackSummary,
+      ...directValidationDetails,
+    ])],
+    reasons: [...new Set([...reasons, ...ineligibleReasons, ...budgetReasons])],
+  };
+}
+
 const DEFAULT_TIMELINE = buildPipelineTimeline({
   phase: 'idle',
   planLoaded: false,
@@ -2195,6 +2320,29 @@ function buildStoredFileArtifact({ result, source, index }) {
     confidence_score: typeof result?.confidence_score === 'number' ? result.confidence_score : null,
     validation_score: typeof result?.validation_score === 'number' ? result.validation_score : null,
     confidence_applicable: result?.confidence_applicable !== false,
+    model_enabled: result?.model_enabled === true,
+    model_used: result?.model_used === true,
+    model_attempted: result?.model_attempted === true,
+    model_provider: result?.model_provider || '',
+    model_validated_accuracy: Number(result?.model_validated_accuracy) || 0,
+    model_action_count: Number(result?.model_action_count) || 0,
+    model_attempt_count: Number(result?.model_attempt_count) || 0,
+    model_candidate_count: Number(result?.model_candidate_count) || 0,
+    model_candidates: Array.isArray(result?.model_candidates) ? result.model_candidates : [],
+    model_budget_reasons: Array.isArray(result?.model_budget_reasons) ? result.model_budget_reasons : [],
+    model_budget_details: Array.isArray(result?.model_budget_details) ? result.model_budget_details : [],
+    rule_action_count: Number(result?.rule_action_count) || 0,
+    model_context_modes: Array.isArray(result?.model_context_modes) ? result.model_context_modes : [],
+    model_attempt_reasons: Array.isArray(result?.model_attempt_reasons) ? result.model_attempt_reasons : [],
+    model_ineligible_reasons: Array.isArray(result?.model_ineligible_reasons) ? result.model_ineligible_reasons : [],
+    model_output_retained: result?.model_output_retained === true,
+    model_status: result?.model_status || 'MODEL_NOT_USED',
+    transformation_engine: result?.transformation_engine || 'RULE_BASED',
+    hybrid_strategy: result?.hybrid_strategy || 'RULE_ONLY',
+    accepted_output_engine: result?.accepted_output_engine || 'NO_CHANGE',
+    rule_fallback_used: result?.rule_fallback_used === true,
+    model_fallback_details: result?.model_fallback_details || null,
+    model_final_validation_details: result?.model_final_validation_details || [],
     validation: result?.validation || {},
     safety_report: result?.safety_report || {},
   };
@@ -2239,6 +2387,25 @@ function buildSctvaStorageArtifact({
         application_status: file.application_status,
         confidence_score: file.confidence_score,
         validation_score: file.validation_score,
+        model_enabled: file.model_enabled,
+        model_used: file.model_used,
+        model_attempted: file.model_attempted,
+        model_validated_accuracy: file.model_validated_accuracy,
+        model_action_count: file.model_action_count,
+        model_attempt_count: file.model_attempt_count,
+        model_candidate_count: file.model_candidate_count,
+        model_candidates: file.model_candidates,
+        model_attempt_reasons: file.model_attempt_reasons,
+        model_ineligible_reasons: file.model_ineligible_reasons,
+        model_budget_reasons: file.model_budget_reasons,
+        model_budget_details: file.model_budget_details,
+        model_status: file.model_status,
+        transformation_engine: file.transformation_engine,
+        hybrid_strategy: file.hybrid_strategy,
+        accepted_output_engine: file.accepted_output_engine,
+        rule_fallback_used: file.rule_fallback_used,
+        model_fallback_details: file.model_fallback_details,
+        model_final_validation_details: file.model_final_validation_details,
         report: file.safety_report,
         validation: file.validation,
       })),
@@ -2333,6 +2500,19 @@ export default function SCTVAAgentPage() {
   const autoRdpPlanAttemptedRef = useRef(false);
   const autoCuqaImportAttemptedRef = useRef(false);
   const savedState = useMemo(() => readSctvaSessionState() || {}, []);
+  const initialExecutionOptionsText = useMemo(() => {
+    const savedOptions = savedState.executionOptionsText;
+    if (!savedOptions) return SCTVAAgentService.defaultExecutionOptionsJson;
+    try {
+      return JSON.stringify(
+        SCTVAAgentService.parseExecutionOptions(savedOptions),
+        null,
+        2
+      );
+    } catch {
+      return savedOptions;
+    }
+  }, [savedState]);
 
   const [requestId, setRequestId] = useState(savedState.requestId || '');
   const [language, setLanguage] = useState(savedState.language || 'java');
@@ -2340,7 +2520,7 @@ export default function SCTVAAgentPage() {
   const [activeFileName, setActiveFileName] = useState(savedState.activeFileName || '');
   const [fileResults, setFileResults] = useState(Array.isArray(savedState.fileResults) ? savedState.fileResults : []);
   const [refactoringPlanText, setRefactoringPlanText] = useState(savedState.refactoringPlanText || '');
-  const [executionOptionsText, setExecutionOptionsText] = useState(savedState.executionOptionsText || SCTVAAgentService.defaultExecutionOptionsJson);
+  const [executionOptionsText, setExecutionOptionsText] = useState(initialExecutionOptionsText);
 
   const [sourceFileName, setSourceFileName] = useState(savedState.sourceFileName || 'No source files selected.');
   const [planFileName, setPlanFileName] = useState(savedState.planFileName || 'No plan file selected.');
@@ -2368,6 +2548,11 @@ export default function SCTVAAgentPage() {
   const [confidenceCopy, setConfidenceCopy] = useState(savedState.confidenceCopy || 'Model analysis will appear after execution.');
   const [confidenceScore, setConfidenceScore] = useState(savedState.confidenceScore || 0);
   const [confidenceApplicable, setConfidenceApplicable] = useState(savedState.confidenceApplicable !== false);
+  const [modelMetrics, setModelMetrics] = useState(
+    savedState.modelMetrics && typeof savedState.modelMetrics === 'object'
+      ? { ...EMPTY_MODEL_METRICS, ...savedState.modelMetrics }
+      : EMPTY_MODEL_METRICS
+  );
 
   const [additions, setAdditions] = useState(savedState.additions || 0);
   const [deletions, setDeletions] = useState(savedState.deletions || 0);
@@ -2385,6 +2570,7 @@ export default function SCTVAAgentPage() {
 
   const [diffRows, setDiffRows] = useState(Array.isArray(savedState.diffRows) ? savedState.diffRows : []);
   const [finalCode, setFinalCode] = useState(savedState.finalCode || '');
+  const [codeView, setCodeView] = useState('accepted');
   const [artifactStorageInfo, setArtifactStorageInfo] = useState(savedState.artifactStorageInfo || null);
 
   useEffect(() => {
@@ -2428,6 +2614,7 @@ export default function SCTVAAgentPage() {
       confidenceCopy,
       confidenceScore,
       confidenceApplicable,
+      modelMetrics,
       additions,
       deletions,
       logs,
@@ -2463,6 +2650,7 @@ export default function SCTVAAgentPage() {
     confidenceCopy,
     confidenceScore,
     confidenceApplicable,
+    modelMetrics,
     additions,
     deletions,
     logs,
@@ -2494,6 +2682,13 @@ export default function SCTVAAgentPage() {
   const activeSource = sourceFiles.find(file => file.name === activeFileName) || sourceFiles[0];
   const activeSourceName = activeSource ? activeSource.name : '';
   const activeSourceCode = activeSource ? activeSource.code : '';
+  const activeModelCandidates = Array.isArray(activeFileResult?.model_candidates)
+    ? activeFileResult.model_candidates.filter(item => typeof item?.candidate_code === 'string' && item.candidate_code)
+    : [];
+  const selectedCandidateIndex = codeView.startsWith('candidate:')
+    ? Number(codeView.slice('candidate:'.length))
+    : -1;
+  const selectedModelCandidate = activeModelCandidates[selectedCandidateIndex] || null;
   const activeFileDisplay = fileResults.length
     ? activeFileResult?.file_name || activeFileName || 'No file selected'
     : activeFileName || activeSourceName || 'No file selected';
@@ -2879,7 +3074,7 @@ export default function SCTVAAgentPage() {
       executionOptions = {
         enable_sctva_auto_refactoring: true,
         max_parallel_files: inferParallelFileWorkers(selectedExecutableFiles.length),
-        ...SCTVAAgentService.parseJson(executionOptionsText || '{}'),
+        ...SCTVAAgentService.parseExecutionOptions(executionOptionsText || '{}'),
       };
     } catch (error) {
       throw new Error(`Execution options JSON is invalid: ${error.message}`);
@@ -2931,8 +3126,23 @@ export default function SCTVAAgentPage() {
     setSafetyMessages(buildSafetyMessages(report || {}));
   }
 
+  function showAcceptedCode() {
+    setCodeView('accepted');
+    setFinalCode(String(activeFileResult?.refactored_code || ''));
+    renderDiff(activeSourceCode, String(activeFileResult?.refactored_code || ''));
+  }
+
+  function showModelCandidate(index) {
+    const candidate = activeModelCandidates[index];
+    if (!candidate) return;
+    setCodeView(`candidate:${index}`);
+    setFinalCode(String(candidate.candidate_code));
+    renderDiff(activeSourceCode, String(candidate.candidate_code));
+  }
+
   function applyActiveResult(result, originalSource) {
     if (!result) {
+      setCodeView('accepted');
       setMetricSuccess('--');
       setMetricRollback('--');
       setMetricLanguage('--');
@@ -2941,6 +3151,7 @@ export default function SCTVAAgentPage() {
       setConfidenceApplicable(true);
       setConfidenceLabel('Idle');
       setConfidenceCopy('Model analysis will appear after execution.');
+      setModelMetrics(EMPTY_MODEL_METRICS);
       renderValidation(null);
       renderSafetyReport(null);
       setFinalCode('');
@@ -2948,6 +3159,8 @@ export default function SCTVAAgentPage() {
       renderPipelineTimeline({ phase: 'idle' });
       return;
     }
+
+    setCodeView('accepted');
 
     const notApplied = result.transformation_applied === false && !result.rollback_occurred;
     setMetricSuccess(notApplied ? 'NO CHANGE' : result.success ? 'YES' : 'NO');
@@ -2983,8 +3196,13 @@ export default function SCTVAAgentPage() {
           ? scoreApplicable
             ? 'Validation passed, but no source-code change was applied. This is a validation score, not a transformation acceptance score.'
             : 'No source-code change was applied, so transformation confidence is not available.'
-          : 'Model analysis shows structural and behavioral validation results.'
+          : result.rule_fallback_used
+            ? 'This confidence score reflects SCTVA validation of the retained rule-based fallback; the model candidate was rejected.'
+            : result.model_used
+              ? 'This confidence score reflects SCTVA validation of the retained model-generated transformation.'
+              : 'This confidence score reflects SCTVA syntax, structural, behavioral, and invariant validation.'
     );
+    setModelMetrics(modelMetricsFromResult(result));
 
     renderValidation(result.validation || {});
     renderSafetyReport(result.safety_report || {});
@@ -3012,6 +3230,30 @@ export default function SCTVAAgentPage() {
       confidence_applicable: data.confidence_applicable,
       confidence_score: data.confidence_score,
       validation_score: data.validation_score,
+      model_enabled: data.model_enabled,
+      model_used: data.model_used,
+      model_attempted: data.model_attempted,
+      model_provider: data.model_provider,
+      model_validated_accuracy: data.model_validated_accuracy,
+      model_action_count: data.model_action_count,
+      model_attempt_count: data.model_attempt_count,
+      model_candidate_count: data.model_candidate_count,
+      model_candidates: data.model_candidates,
+      model_budget_reasons: data.model_budget_reasons,
+      model_budget_details: data.model_budget_details,
+      rule_action_count: data.rule_action_count,
+      model_context_modes: data.model_context_modes,
+      model_attempt_reasons: data.model_attempt_reasons,
+      model_ineligible_reasons: data.model_ineligible_reasons,
+      model_output_retained: data.model_output_retained,
+      model_status: data.model_status,
+      transformation_engine: data.transformation_engine,
+      hybrid_strategy: data.hybrid_strategy,
+      accepted_output_engine: data.accepted_output_engine,
+      rule_fallback_used: data.rule_fallback_used,
+      model_fallback_details: data.model_fallback_details,
+      model_final_validation_details: data.model_final_validation_details,
+      model_final_validation_failures: data.model_final_validation_failures,
       source_mode: data.source_mode,
       origin: data.origin,
       refactored_code: data.refactored_code,
@@ -3244,6 +3486,7 @@ export default function SCTVAAgentPage() {
     setConfidenceCopy('Model analysis will appear after execution.');
     setConfidenceScore(0);
     setConfidenceApplicable(true);
+    setModelMetrics(EMPTY_MODEL_METRICS);
     setAdditions(0);
     setDeletions(0);
     setValidation(null);
@@ -3556,6 +3799,55 @@ export default function SCTVAAgentPage() {
             </div>
           ) : null}
 
+          {activeModelCandidates.length > 0 ? (
+            <div className="sctva-file-tabs sctva-code-source-tabs" aria-label="Code version">
+              <button
+                type="button"
+                className={`sctva-file-tab ${codeView === 'accepted' ? 'active' : ''}`}
+                onClick={showAcceptedCode}
+              >
+                <span>Accepted output</span>
+              </button>
+              {activeModelCandidates.map((candidate, index) => (
+                <button
+                  key={`${candidate.action_index || index}-${candidate.candidate_sha256 || index}`}
+                  type="button"
+                  className={`sctva-file-tab ${codeView === `candidate:${index}` ? 'active' : ''} ${String(candidate.status).toLowerCase().includes('rejected') ? 'not-applied' : ''}`}
+                  onClick={() => showModelCandidate(index)}
+                  title={`Model candidate ${candidate.status || 'generated'}; compare against the accepted output`}
+                >
+                  <span>{`Model candidate ${index + 1}`}</span>
+                  <em>{String(candidate.status || 'generated').replaceAll('_', ' ')}</em>
+                </button>
+              ))}
+            </div>
+          ) : null}
+
+          {selectedModelCandidate ? (
+            <div className={`sctva-model-candidate-note ${String(selectedModelCandidate.status).toLowerCase()}`}>
+              <strong>{`Model candidate · ${String(selectedModelCandidate.status || 'generated').replaceAll('_', ' ')}`}</strong>
+              {String(selectedModelCandidate.status).toLowerCase() !== 'accepted' ? (
+                <span>This candidate is shown for inspection only; it was not applied to the accepted output.</span>
+              ) : null}
+              <span>{`Action: ${String(selectedModelCandidate.action_type || 'refactoring').replaceAll('_', ' ')}`}</span>
+              {selectedModelCandidate.repair_attempted ? (
+                <span>Validator feedback was used for one bounded repair attempt.</span>
+              ) : null}
+              {Array.isArray(selectedModelCandidate.validation) && selectedModelCandidate.validation.length > 0 ? (
+                <ul>
+                  {selectedModelCandidate.validation.map((item, index) => (
+                    <li key={`${item.name || 'validation'}-${index}`}>
+                      <b>{`${item.name || 'Validation'} (${item.scope === 'single_rdp_action' ? 'action check' : item.scope === 'final_combined_file' ? 'final file check' : 'check'}): `}</b>
+                      {item.message || (item.passed ? 'PASS' : 'FAIL')}
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <span>Candidate validation details are not available for this result.</span>
+              )}
+            </div>
+          ) : null}
+
           <div className="sctva-code-diff">
             {diffRows.length ? (
               diffRows.map(row => (
@@ -3594,6 +3886,71 @@ export default function SCTVAAgentPage() {
           </div>
 
           <p className="sctva-confidence-copy">{confidenceCopy}</p>
+
+          <div className={`sctva-model-metric ${modelMetrics.used ? modelMetrics.retained ? 'used' : 'rolled-back' : modelMetrics.attempted ? 'rejected' : 'rule-based'}`}>
+            <div className="sctva-model-metric-head">
+              <span>Model Validated Accuracy</span>
+              <strong>{`${Math.round(modelMetrics.accuracy)}%`}</strong>
+            </div>
+            <div
+              className="sctva-model-progress"
+              role="progressbar"
+              aria-label="Local code model validated accuracy"
+              aria-valuemin="0"
+              aria-valuemax="100"
+              aria-valuenow={Math.round(modelMetrics.accuracy)}
+            >
+              <span style={{ width: `${modelMetrics.accuracy}%` }} />
+            </div>
+            <strong className="sctva-model-status">{modelMetrics.status}</strong>
+            <p>
+              {modelMetrics.used && modelMetrics.retained
+                ? 'Local code-model output was retained after SCTVA validation.'
+                : modelMetrics.used
+                  ? 'The local code model produced the candidate, but final validation rolled the output back.'
+                : modelMetrics.status === 'MODEL ACTION BUDGET EXHAUSTED'
+                  ? 'Generation was skipped because the configured model action budget was reached.'
+                : modelMetrics.ruleFallbackUsed
+                  ? 'The model could not provide an accepted candidate, so SCTVA restarted from the original source and used the validated rule-based result.'
+                : modelMetrics.attempted
+                  ? 'The local code model was attempted, but its output was rejected and rule-based output was used.'
+                  : modelMetrics.status === 'MODEL SKIPPED SAFETY PRECONDITION'
+                    ? 'Model inference was skipped because SCTVA proved this planned target unsafe or ambiguous before generation.'
+                  : modelMetrics.enabled
+                    ? 'The local code model was enabled, but no eligible model action was executed for this file.'
+                    : 'The local code model was disabled for this request.'}
+            </p>
+            {modelMetrics.reasons.length > 0 && (
+              <p className="sctva-model-reason">
+                {`Reason: ${modelMetrics.reasons.join(', ').replaceAll('_', ' ')}`}
+              </p>
+            )}
+            {modelMetrics.validationFailures.length > 0 && (
+              <p className="sctva-model-reason">
+                {`Rejected by: ${modelMetrics.validationFailures.join(' | ')}`}
+              </p>
+            )}
+            <dl className="sctva-model-details">
+              <div><dt>Engine</dt><dd>{modelMetrics.engine}</dd></div>
+              {modelMetrics.modelProvider && (
+                <div><dt>Configured model</dt><dd>{modelMetrics.modelProvider}</dd></div>
+              )}
+              <div><dt>Strategy</dt><dd>{modelMetrics.strategy}</dd></div>
+              <div><dt>Accepted output</dt><dd>{modelMetrics.acceptedOutput}</dd></div>
+              <div><dt>Model attempts</dt><dd>{modelMetrics.attemptCount}</dd></div>
+              <div><dt>Candidates generated</dt><dd>{modelMetrics.candidates.length}</dd></div>
+              <div><dt>Accepted model actions</dt><dd>{modelMetrics.actionCount}</dd></div>
+              <div><dt>Backend</dt><dd>{modelMetrics.backend}</dd></div>
+              <div><dt>Device</dt><dd>{modelMetrics.device}</dd></div>
+              <div><dt>Runtime cache</dt><dd>{modelMetrics.runtimeCacheHit ? 'HIT' : 'MISS'}</dd></div>
+              <div><dt>Model load</dt><dd>{modelMetrics.modelLoadSeconds.toFixed(2)}s</dd></div>
+              <div><dt>Model generation</dt><dd>{modelMetrics.modelGenerationSeconds.toFixed(2)}s</dd></div>
+              {modelMetrics.budgetSummary && (
+                <div><dt>Budget used</dt><dd>{modelMetrics.budgetSummary}</dd></div>
+              )}
+              <div><dt>Context</dt><dd>{modelMetrics.context}</dd></div>
+            </dl>
+          </div>
 
           <div className="sctva-mini-metrics">
             <div>

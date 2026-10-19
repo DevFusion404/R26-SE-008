@@ -1,0 +1,4 @@
+# Downloaded MLCQ source files and intermediate feature tables.
+# Rebuild with fetch_mlcq_sources.py and build_dataset.py.
+data/
+__pycache__/

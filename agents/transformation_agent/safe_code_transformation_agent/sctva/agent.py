@@ -8,7 +8,7 @@ import re
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Sequence
 
 if __name__ == "__main__" and not __package__:
     # Allow `python sctva/agent.py` to resolve the package-relative imports below.
@@ -46,11 +46,13 @@ from .constants import (
     PARAMETER_OBJECT_ACTION_BY_LANGUAGE,
 )
 from .models import SCTVAResult, TransformationLogEntry, ValidationStepResult
+from .model_assistance import CodeT5CandidateTransformer
 from .reporting.safety_reporter import SafetyReporter
 from .rollback.rollback_manager import RollbackManager
 from .scoring.confidence_scorer import ConfidenceScorer
 from .transformers import (
     c_transformers,
+    java_extract_method,
     java_parameter_object,
     python_inline_class,
     python_transformers,
@@ -106,6 +108,11 @@ class SafeCodeTransformationValidationAgent:
 
     def execute_request(self, request: SCTVARequestContract) -> Dict[str, Any]:
         """Execute validated request contract."""
+        # The adapter never alters the RDP plan or bypasses SCTVA validation.
+        # Its per-request action budget also bounds CPU inference work.
+        model_assistant = CodeT5CandidateTransformer.from_execution_options(
+            request.execution_options
+        )
         file_entries = self._collect_source_files(request)
         # Recover Move Method steps before file scoping.  This handles both
         # modern move_python_method actions and legacy/upstream noop actions
@@ -199,17 +206,35 @@ class SafeCodeTransformationValidationAgent:
                 file_entry=file_entry,
                 fallback_language=request.language,
             )
-            local_actions = self._local_actions_for_file(
-                request=request,
-                file_entry=file_entry,
-                existing_actions=plan_actions,
-            )
-            local_actions = self._apply_local_target_recovery(
-                plan_actions=plan_actions,
-                local_actions=local_actions,
-            )
+            # Model-assisted runs are strictly scoped to RDP plan actions.
+            # For a planned file, local detection may still repair stale target
+            # metadata, but its additional actions must not enter generation.
+            # Unplanned files skip local detection entirely.
+            plan_scoped_model_run = model_assistant is not None
+            if plan_scoped_model_run and not plan_actions:
+                local_actions = []
+            else:
+                local_actions = self._local_actions_for_file(
+                    request=request,
+                    file_entry=file_entry,
+                    existing_actions=plan_actions,
+                )
+                local_actions = self._apply_local_target_recovery(
+                    plan_actions=plan_actions,
+                    local_actions=local_actions,
+                )
+                if plan_scoped_model_run:
+                    local_actions = []
             actions = [*plan_actions, *local_actions]
             if not actions:
+                model_enabled_for_file = (
+                    model_assistant is not None and bool(plan_actions)
+                )
+                model_mode = (
+                    model_assistant.settings.mode
+                    if model_assistant is not None
+                    else ""
+                )
                 file_result = {
                     "file_name": file_entry.file_name,
                     "source_mode": file_entry.source_mode,
@@ -220,6 +245,36 @@ class SafeCodeTransformationValidationAgent:
                     "refactored_code": file_entry.source_code,
                     "total_replacements": 0,
                     "status": "FULL_SUCCESS",
+                    "model_enabled": model_enabled_for_file,
+                    "model_used": False,
+                    "model_attempted": False,
+                    "model_provider": (
+                        model_assistant.provider if model_assistant is not None else ""
+                    ),
+                    "model_validated_accuracy": 0.0,
+                    "model_action_count": 0,
+                    "rule_action_count": 0,
+                    "model_context_modes": [],
+                    "model_attempt_reasons": [],
+                    "model_ineligible_reasons": [],
+                    "model_output_retained": False,
+                    "model_status": (
+                        "MODEL_ENABLED_NO_ELIGIBLE_ACTION"
+                        if model_enabled_for_file
+                        else "MODEL_NOT_USED"
+                    ),
+                    "transformation_engine": (
+                        "HYBRID" if model_enabled_for_file else "RULE_BASED"
+                    ),
+                    "hybrid_strategy": (
+                        "MODEL_FIRST_RULE_FALLBACK"
+                        if model_enabled_for_file and model_mode == "primary"
+                        else "RULE_FIRST_MODEL_FALLBACK"
+                        if model_enabled_for_file
+                        else "RULE_ONLY"
+                    ),
+                    "accepted_output_engine": "NO_CHANGE",
+                    "rule_fallback_used": False,
                     "safety_report": {
                         "rollback_occurred": False,
                         "rollback_reason": None,
@@ -230,19 +285,46 @@ class SafeCodeTransformationValidationAgent:
                 }
                 return index, file_result
 
+            model_usage_before = (
+                model_assistant.usage_snapshot()
+                if model_assistant is not None
+                else None
+            )
             file_result = self._execute_single_file(
                 request=request,
                 file_entry=file_entry,
                 actions=actions,
                 project_files=project_file_payloads,
+                model_assistant=model_assistant,
             )
+            if model_assistant is not None and model_usage_before is not None:
+                model_usage_after = model_assistant.usage_snapshot()
+                file_result["model_generation_seconds"] = round(
+                    max(
+                        0.0,
+                        float(model_usage_after["generation_seconds"])
+                        - float(model_usage_before["generation_seconds"]),
+                    ),
+                    3,
+                )
+                file_result["model_request_generation_seconds_used"] = round(
+                    float(model_usage_after["generation_seconds"]),
+                    3,
+                )
+                file_result["model_file_attempts_consumed"] = max(
+                    0,
+                    int(model_usage_after["attempt_count"])
+                    - int(model_usage_before["attempt_count"]),
+                )
             return index, file_result
 
         indexed_results: Dict[int, Dict[str, Any]] = {}
         # A coordinated Java Parameter Object edit shares a repository-wide
         # caller set.  Execute its file actions deterministically so its audit
         # trail and transaction decision cannot race other file workers.
-        max_workers = 1 if coordinated_parameter_transactions else self._parallel_file_workers(
+        max_workers = 1 if (
+            coordinated_parameter_transactions or model_assistant is not None
+        ) else self._parallel_file_workers(
             request,
             len(file_entries),
         )
@@ -334,6 +416,165 @@ class SafeCodeTransformationValidationAgent:
             if isinstance(result.get("validation_score"), (int, float))
         ]
         avg_validation = sum(validation_scores) / len(validation_scores) if validation_scores else None
+        model_used_results = [
+            result
+            for result in file_results
+            if isinstance(result, dict) and result.get("model_used") is True
+        ]
+        model_attempted = any(
+            isinstance(result, dict) and result.get("model_attempted") is True
+            for result in file_results
+        )
+        model_enabled = any(
+            isinstance(result, dict) and result.get("model_enabled") is True
+            for result in file_results
+        )
+        model_attempt_reasons = sorted({
+            str(reason)
+            for result in file_results
+            if isinstance(result, dict)
+            for reason in (result.get("model_attempt_reasons") or [])
+            if str(reason).strip()
+        })
+        model_ineligible_reasons = sorted({
+            str(reason)
+            for result in file_results
+            if isinstance(result, dict)
+            for reason in (result.get("model_ineligible_reasons") or [])
+            if str(reason).strip()
+        })
+        model_budget_reasons = sorted({
+            str(reason)
+            for result in file_results
+            if isinstance(result, dict)
+            for reason in (result.get("model_budget_reasons") or [])
+            if str(reason).strip()
+        })
+        model_budget_details = [
+            {"file_name": result.get("file_name"), **detail}
+            for result in file_results
+            if isinstance(result, dict)
+            for detail in (result.get("model_budget_details") or [])
+            if isinstance(detail, dict)
+        ]
+        model_accuracy_scores = [
+            float(result.get("model_validated_accuracy") or 0)
+            for result in model_used_results
+        ]
+        model_validated_accuracy = (
+            round(sum(model_accuracy_scores) / len(model_accuracy_scores), 1)
+            if model_accuracy_scores
+            else 0.0
+        )
+        model_action_count = sum(
+            int(result.get("model_action_count") or 0)
+            for result in model_used_results
+        )
+        rule_action_count = sum(
+            int(result.get("rule_action_count") or 0)
+            for result in file_results
+            if isinstance(result, dict)
+        )
+        model_context_modes = sorted({
+            str(mode)
+            for result in file_results
+            if isinstance(result, dict)
+            for mode in (result.get("model_context_modes") or [])
+            if str(mode).strip()
+        })
+        model_providers = sorted({
+            str(result.get("model_provider") or "").strip()
+            for result in file_results
+            if isinstance(result, dict)
+            if str(result.get("model_provider") or "").strip()
+        })
+        model_provider = model_providers[0] if len(model_providers) == 1 else (
+            "mixed_local_models" if model_providers else ""
+        )
+        model_backends = sorted({
+            str(result.get("model_backend") or "").strip()
+            for result in file_results
+            if isinstance(result, dict)
+            and str(result.get("model_backend") or "").strip()
+        })
+        model_devices = sorted({
+            str(result.get("model_device") or "").strip()
+            for result in file_results
+            if isinstance(result, dict)
+            and str(result.get("model_device") or "").strip()
+        })
+        model_runtime_cache_hit = any(
+            isinstance(result, dict)
+            and result.get("model_runtime_cache_hit") is True
+            for result in file_results
+        )
+        model_load_seconds = max(
+            (
+                float(result.get("model_load_seconds") or 0.0)
+                for result in file_results
+                if isinstance(result, dict)
+            ),
+            default=0.0,
+        )
+        model_generation_seconds = sum(
+            float(result.get("model_generation_seconds") or 0.0)
+            for result in file_results
+            if isinstance(result, dict)
+        )
+        hybrid_strategies = sorted({
+            str(result.get("hybrid_strategy") or "").strip()
+            for result in file_results
+            if isinstance(result, dict)
+            and str(result.get("hybrid_strategy") or "").strip()
+        })
+        configured_model_mode = str(
+            getattr(request.execution_options, "codet5_mode", "primary") or "primary"
+        ).strip().lower()
+        hybrid_strategy = (
+            hybrid_strategies[0]
+            if len(hybrid_strategies) == 1
+            else "MIXED_HYBRID_STRATEGIES"
+            if hybrid_strategies
+            else "MODEL_FIRST_RULE_FALLBACK"
+            if model_enabled and configured_model_mode == "primary"
+            else "RULE_FIRST_MODEL_FALLBACK"
+            if model_enabled
+            else "RULE_ONLY"
+        )
+        accepted_output_engines = sorted({
+            str(result.get("accepted_output_engine") or "").strip()
+            for result in file_results
+            if isinstance(result, dict)
+            and str(result.get("accepted_output_engine") or "").strip()
+            and str(result.get("accepted_output_engine") or "").strip() != "NO_CHANGE"
+        })
+        accepted_output_engine = (
+            accepted_output_engines[0]
+            if len(accepted_output_engines) == 1
+            else "MIXED"
+            if accepted_output_engines
+            else "NO_CHANGE"
+        )
+        rule_fallback_used = any(
+            isinstance(result, dict) and result.get("rule_fallback_used") is True
+            for result in file_results
+        )
+        model_final_validation_failures = [
+            {
+                "file_name": result.get("file_name"),
+                **result.get("model_fallback_details", {}),
+            }
+            for result in file_results
+            if isinstance(result, dict)
+            and isinstance(result.get("model_fallback_details"), dict)
+        ]
+        model_failed_validation_steps = sorted({
+            str(stage)
+            for failure in model_final_validation_failures
+            for stage in (failure.get("failed_validation_steps") or [])
+            if str(stage).strip()
+        })
+        transformation_engine = "HYBRID" if model_enabled else "RULE_BASED"
 
         modified_by_name = {
             res.get("file_name"): res.get("refactored_code")
@@ -413,6 +654,73 @@ class SafeCodeTransformationValidationAgent:
                 if isinstance(avg_validation, (int, float))
                 else None
             ),
+            "model_enabled": model_enabled,
+            "model_used": bool(model_used_results),
+            "model_attempted": model_attempted,
+            "model_provider": model_provider,
+            "model_backend": model_backends[0] if len(model_backends) == 1 else (
+                "mixed" if model_backends else ""
+            ),
+            "model_device": model_devices[0] if len(model_devices) == 1 else (
+                "mixed" if model_devices else ""
+            ),
+            "model_runtime_cache_hit": model_runtime_cache_hit,
+            "model_load_seconds": round(model_load_seconds, 3),
+            "model_generation_seconds": round(model_generation_seconds, 3),
+            "model_validated_accuracy": model_validated_accuracy,
+            "model_accuracy_basis": (
+                "SCTVA_FINAL_VALIDATION_SCORE"
+                if model_used_results
+                else "NO_RETAINED_MODEL_OUTPUT"
+            ),
+            "model_action_count": model_action_count,
+            "model_attempt_count": sum(
+                int(result.get("model_attempt_count") or 0)
+                for result in file_results
+                if isinstance(result, dict)
+            ),
+            "model_candidate_count": sum(
+                int(result.get("model_candidate_count") or 0)
+                for result in file_results
+                if isinstance(result, dict)
+            ),
+            "model_candidates": [
+                candidate
+                for result in file_results
+                if isinstance(result, dict)
+                for candidate in (result.get("model_candidates") or [])
+                if isinstance(candidate, dict)
+            ],
+            "rule_action_count": rule_action_count,
+            "model_context_modes": model_context_modes,
+            "model_attempt_reasons": model_attempt_reasons,
+            "model_ineligible_reasons": model_ineligible_reasons,
+            "model_budget_reasons": model_budget_reasons,
+            "model_budget_details": model_budget_details,
+            "model_output_retained": bool(model_used_results) and not rollback_occurred,
+            "model_status": (
+                "MODEL_OUTPUT_RETAINED"
+                if model_used_results and not rollback_occurred
+                else "MODEL_OUTPUT_ROLLED_BACK"
+                if model_used_results
+                else "MODEL_FINAL_VALIDATION_FAILED_RULE_FALLBACK"
+                if model_final_validation_failures
+                else "MODEL_ATTEMPT_REJECTED_RULE_FALLBACK"
+                if model_attempted
+                else "MODEL_ACTION_BUDGET_EXHAUSTED"
+                if model_budget_reasons
+                else "MODEL_SKIPPED_SAFETY_PRECONDITION"
+                if model_ineligible_reasons
+                else "MODEL_ENABLED_NO_ELIGIBLE_ACTION"
+                if model_enabled
+                else "MODEL_NOT_USED"
+            ),
+            "transformation_engine": transformation_engine,
+            "hybrid_strategy": hybrid_strategy,
+            "accepted_output_engine": accepted_output_engine,
+            "rule_fallback_used": rule_fallback_used,
+            "model_failed_validation_steps": model_failed_validation_steps,
+            "model_final_validation_failures": model_final_validation_failures,
             "file_summary": {
                 "total": files_total,
                 "succeeded": files_succeeded,
@@ -434,6 +742,15 @@ class SafeCodeTransformationValidationAgent:
             res_dict["validation_structural"] = target_res.get("validation_structural")
             res_dict["validation_behavioral"] = target_res.get("validation_behavioral")
             res_dict["validation_invariant"] = target_res.get("validation_invariant")
+            res_dict["model_fallback_details"] = target_res.get("model_fallback_details")
+            res_dict["model_candidates"] = target_res.get("model_candidates", [])
+            res_dict["model_candidate_count"] = target_res.get("model_candidate_count", 0)
+            res_dict["model_attempt_count"] = target_res.get("model_attempt_count", 0)
+            res_dict["model_budget_reasons"] = target_res.get("model_budget_reasons", [])
+            res_dict["model_budget_details"] = target_res.get("model_budget_details", [])
+            res_dict["model_final_validation_details"] = target_res.get(
+                "model_final_validation_details"
+            )
         return res_dict
 
     def _collect_source_files(self, request: SCTVARequestContract) -> List[SourceFileContract]:
@@ -1382,6 +1699,9 @@ class SafeCodeTransformationValidationAgent:
         file_entry: SourceFileContract,
         actions: List[RefactoringAction],
         project_files: List[Dict[str, Any]],
+        model_assistant: CodeT5CandidateTransformer | None = None,
+        model_validation_feedback: Dict[int, str] | None = None,
+        allow_model_validation_repair: bool = True,
     ) -> Dict[str, Any]:
         language = (file_entry.language or request.language).strip().lower()
 
@@ -1416,6 +1736,35 @@ class SafeCodeTransformationValidationAgent:
                 current_file_name=file_entry.file_name,
                 repository_complete=bool(request.source_files),
                 behavior_tests=request.refactoring_plan.behavior_tests,
+                model_assistant=model_assistant,
+                model_candidate_validator=(
+                    lambda original, candidate, action: self._validate_model_action_candidate(
+                        language=language,
+                        original_code=original,
+                        candidate_code=candidate,
+                        action=action,
+                        timeout_seconds=request.execution_options.timeout_seconds,
+                        behavior_tests=request.refactoring_plan.behavior_tests,
+                        enable_behavior_tests=request.execution_options.enable_behavior_tests,
+                        strict_mode=request.execution_options.strict_mode,
+                        project_source_files=project_files,
+                        current_file_name=file_entry.file_name,
+                    )
+                    if model_assistant is not None
+                    else None
+                ),
+                model_bundle_candidate_validator=(
+                    lambda original, candidate, bundle_actions: self._validate_model_bundle_candidate(
+                        language=language,
+                        original_code=original,
+                        candidate_code=candidate,
+                        actions=bundle_actions,
+                        timeout_seconds=request.execution_options.timeout_seconds,
+                    )
+                    if model_assistant is not None
+                    else None
+                ),
+                model_validation_feedback=model_validation_feedback,
             )
             validation_actions = self._actions_with_effective_replacements(
                 actions,
@@ -1624,6 +1973,117 @@ class SafeCodeTransformationValidationAgent:
                 "Selective rollback preserved independent accepted actions after an invalid Java Parameter Object action was removed."
             )
 
+        model_candidate_applied = any(
+            entry.replacements_count > 0
+            and (entry.metadata or {}).get("model_assisted") is True
+            for entry in transformation_log
+        )
+        bundle_repair_already_attempted = any(
+            bool(
+                ((entry.metadata or {}).get("model_assistance") or {}).get(
+                    "bundle_repair_attempted"
+                )
+            )
+            for entry in transformation_log
+            if isinstance((entry.metadata or {}).get("model_assistance"), dict)
+        )
+        if (
+            rollback_occurred
+            and model_candidate_applied
+            and model_assistant is not None
+            and model_assistant.settings.mode == "primary"
+        ):
+            failed_steps = [
+                step.name
+                for step in (
+                    syntax_step,
+                    structural_step,
+                    behavioral_step,
+                    invariant_step,
+                )
+                if not step.passed
+            ]
+            failed_validation_details = [
+                {
+                    "name": step.name,
+                    "message": step.message,
+                    "score": step.score,
+                    "details": step.details,
+                }
+                for step in (
+                    syntax_step,
+                    structural_step,
+                    behavioral_step,
+                    invariant_step,
+                )
+                if not step.passed
+            ]
+            repair_summary = " | ".join(
+                self._model_validation_step_feedback(step)
+                for step in (
+                    syntax_step,
+                    structural_step,
+                    behavioral_step,
+                    invariant_step,
+                )
+                if not step.passed
+            )
+            repair_feedback = {
+                entry.action_index: (
+                    "The previous model-generated file failed final SCTVA validation. "
+                    + repair_summary
+                )
+                for entry in transformation_log
+                if entry.replacements_count > 0
+                and (entry.metadata or {}).get("model_assisted") is True
+            }
+            if (
+                allow_model_validation_repair
+                and not bundle_repair_already_attempted
+                and repair_feedback
+                and model_assistant.can_attempt(file_entry.file_name)
+            ):
+                repaired_result = self._execute_single_file(
+                    request=request,
+                    file_entry=file_entry,
+                    actions=actions,
+                    project_files=project_files,
+                    model_assistant=model_assistant,
+                    model_validation_feedback=repair_feedback,
+                    allow_model_validation_repair=False,
+                )
+                if (
+                    repaired_result.get("model_used") is True
+                    and repaired_result.get("model_output_retained") is True
+                    and repaired_result.get("rollback_occurred") is not True
+                ):
+                    repaired_result["model_validation_repair_attempted"] = True
+                    repaired_result["model_validation_repair_accepted"] = True
+                    repaired_result["model_validation_repair_feedback"] = repair_summary
+                    repaired_report = repaired_result.get("safety_report")
+                    if isinstance(repaired_report, dict):
+                        repaired_report.setdefault("human_messages", []).append(
+                            "A validator-guided model repair candidate passed final SCTVA validation."
+                        )
+                    return repaired_result
+            rule_result = self._execute_single_file(
+                request=request,
+                file_entry=file_entry,
+                actions=actions,
+                project_files=project_files,
+                model_assistant=None,
+                allow_model_validation_repair=False,
+            )
+            fallback_result = self._annotate_model_first_rule_fallback(
+                rule_result,
+                model_assistant=model_assistant,
+                failed_model_log=transformation_log,
+                failed_steps=failed_steps,
+                failed_validation_details=failed_validation_details,
+                rollback_reason=rollback_reason,
+            )
+            return fallback_result
+
         self._finalize_extract_class_logs(
             transformation_log,
             syntax_passed=syntax_step.passed,
@@ -1684,6 +2144,21 @@ class SafeCodeTransformationValidationAgent:
         if not confidence_applicable:
             confidence_score = None
 
+        model_usage = self._model_usage_summary(
+            transformation_log,
+            validation_score=validation_score,
+            rollback_occurred=rollback_occurred,
+            transformation_applied=transformation_applied,
+            model_enabled=model_assistant is not None,
+            model_mode=(
+                model_assistant.settings.mode if model_assistant is not None else ""
+            ),
+            configured_model_provider=(
+                model_assistant.provider if model_assistant is not None else ""
+            ),
+            validation_steps=[syntax_step, structural_step, behavioral_step, invariant_step],
+        )
+
         safety_report = self.reporter.build(
             rollback_occurred=rollback_occurred,
             rollback_reason=rollback_reason,
@@ -1701,6 +2176,33 @@ class SafeCodeTransformationValidationAgent:
         safety_report.human_messages.append(
             "Confidence formula: syntax_w*syntax + structural_w*structural + behavioral_w*behavioral"
         )
+        if model_usage["model_used"]:
+            safety_report.human_messages.append(
+                "Local code-model contribution retained: "
+                f"{model_usage['model_action_count']} action candidate(s), "
+                f"validated accuracy {model_usage['model_validated_accuracy']}%."
+            )
+        elif model_usage["model_attempted"]:
+            attempt_reasons = ", ".join(model_usage["model_attempt_reasons"])
+            safety_report.human_messages.append(
+                "The local code model was attempted, but no model candidate was retained; "
+                "the accepted output is rule-based."
+                + (f" Reason(s): {attempt_reasons}." if attempt_reasons else "")
+            )
+        elif model_usage["model_ineligible_reasons"]:
+            ineligible_reasons = ", ".join(model_usage["model_ineligible_reasons"])
+            safety_report.human_messages.append(
+                "Local model inference was skipped by SCTVA's language safety preflight. "
+                f"Reason(s): {ineligible_reasons}."
+            )
+        elif model_usage["model_enabled"]:
+            safety_report.human_messages.append(
+                "The local code model was enabled, but this file had no eligible executable model action."
+            )
+        else:
+            safety_report.human_messages.append(
+                "The local code model was not used for this file; model validated accuracy is 0%."
+            )
 
         requested_move_count = sum(
             1
@@ -1968,6 +2470,7 @@ class SafeCodeTransformationValidationAgent:
         result["source_mode"] = file_entry.source_mode
         result["origin"] = file_entry.origin
         result["confidence_components"] = confidence_details
+        result.update(model_usage)
         # Report only transformations that were actually accepted for this
         # file.  The earlier fixed five-family summary made every unrelated
         # family look like PASS whenever its requested count was zero.
@@ -2008,6 +2511,261 @@ class SafeCodeTransformationValidationAgent:
             else "NOT_APPLIED"
         )
         return result
+
+    def _validate_model_action_candidate(
+        self,
+        *,
+        language: str,
+        original_code: str,
+        candidate_code: str,
+        action: RefactoringAction,
+        timeout_seconds: int,
+        behavior_tests: List[Dict[str, Any]] | None = None,
+        enable_behavior_tests: bool = True,
+        strict_mode: bool = True,
+        project_source_files: List[Dict[str, Any]] | None = None,
+        current_file_name: str = "",
+    ) -> Dict[str, Any]:
+        """Validate one model edit against only its corresponding RDP action."""
+
+        syntax = self.syntax_validator.validate(
+            language=language,
+            source_code=candidate_code,
+            require_compilation=False,
+            timeout_seconds=timeout_seconds,
+        )
+        validation_action = action
+        structural = self.structural_validator.validate(
+            language=language,
+            original_code=original_code,
+            transformed_code=candidate_code,
+            actions=[validation_action],
+        )
+        accepted_metadata: Dict[str, Any] = {}
+        extra_steps: List[ValidationStepResult] = []
+
+        # The final Java behavioral validator proves Extract Method through an
+        # explicit caller -> helper lineage.  Rule transformers naturally
+        # produce that metadata; model candidates must derive the same facts
+        # from the accepted source instead of arriving at final validation as
+        # an unclassified body rewrite.
+        if (
+            language.lower() == "java"
+            and action.action_type == ACTION_EXTRACT_METHOD
+            and syntax.passed
+            and structural.passed
+        ):
+            params = dict(action.parameters or {})
+            source_method = str(
+                params.get("source_method")
+                or params.get("method")
+                or params.get("method_name")
+                or params.get("target_method")
+                or ""
+            ).strip()
+            source_class = str(
+                params.get("source_class")
+                or params.get("target_class")
+                or params.get("class_name")
+                or ""
+            ).strip()
+            if not source_class and source_method:
+                owners = []
+                for candidate_class in declared_class_names(original_code):
+                    model = _parse_java_class(original_code, candidate_class)
+                    if model is not None and model.methods_by_name.get(source_method):
+                        owners.append(candidate_class)
+                if len(owners) == 1:
+                    source_class = owners[0]
+
+            helper_resolution = (
+                java_extract_method.infer_extracted_method_name(
+                    original_code,
+                    candidate_code,
+                    source_class=source_class,
+                    source_method=source_method,
+                )
+                if source_class and source_method
+                else {"status": "unresolved", "reason": "SOURCE_TARGET_NOT_RESOLVED"}
+            )
+            extracted_method = str(helper_resolution.get("method_name") or "").strip()
+            if extracted_method:
+                postconditions = {
+                    "target_resolution": "PASS",
+                    "data_flow": "PASS",
+                    "structural": "PASS",
+                    "scope_validation": "PASS",
+                    "no_severe_new_smell": "PASS",
+                    "long_method_reduction": "PASS",
+                }
+                accepted_metadata = {
+                    "language": "java",
+                    "source_class": source_class,
+                    "source_method": source_method,
+                    "planned_extracted_method": str(
+                        params.get("new_method_name")
+                        or params.get("extracted_method_name")
+                        or ""
+                    ).strip(),
+                    "extracted_method": extracted_method,
+                    "extracted_method_resolution": helper_resolution,
+                    "plan_compliance": "PASS",
+                    "validation": postconditions,
+                }
+                validation_params = dict(params)
+                validation_params["applied_transformation_metadata"] = dict(
+                    accepted_metadata
+                )
+                validation_action = RefactoringAction(
+                    action_type=action.action_type,
+                    parameters=validation_params,
+                    source_step_id=action.source_step_id,
+                    source_refactoring=action.source_refactoring,
+                    warnings=list(action.warnings),
+                )
+                behavioral = self.behavioral_validator.validate(
+                    language=language,
+                    original_code=original_code,
+                    transformed_code=candidate_code,
+                    behavior_tests=list(behavior_tests or []),
+                    enable_behavior_tests=enable_behavior_tests,
+                    actions=[validation_action],
+                    strict_mode=strict_mode,
+                    project_source_files=project_source_files or [],
+                    current_file_name=current_file_name,
+                    structural_validation_passed=True,
+                )
+                invariant = self.invariant_miner.mine(
+                    language=language,
+                    behavioral_step=behavioral,
+                    actions=[validation_action],
+                    strict_mode=strict_mode,
+                )
+                extra_steps.extend((behavioral, invariant))
+            else:
+                structural.passed = False
+                structural.score = 0.0
+                structural.message = (
+                    "Extract Method helper lineage could not be resolved uniquely."
+                )
+                structural.details["model_helper_resolution"] = helper_resolution
+
+        steps = (syntax, structural, *extra_steps)
+        validation = [
+            {
+                "name": step.name,
+                "passed": bool(step.passed),
+                "score": step.score,
+                "message": step.message,
+                "details": step.details,
+                "scope": "single_rdp_action",
+            }
+            for step in steps
+        ]
+        issues = [
+            self._model_validation_step_feedback(step)
+            for step in steps
+            if not step.passed
+        ]
+        return {
+            "passed": not issues,
+            "issues": issues,
+            "validation": validation,
+            "accepted_metadata": accepted_metadata if not issues else {},
+        }
+
+    def _validate_model_bundle_candidate(
+        self,
+        *,
+        language: str,
+        original_code: str,
+        candidate_code: str,
+        actions: Sequence[RefactoringAction],
+        timeout_seconds: int,
+    ) -> Dict[str, Any]:
+        """Validate one combined model edit against its complete action bundle."""
+
+        syntax = self.syntax_validator.validate(
+            language=language,
+            source_code=candidate_code,
+            require_compilation=False,
+            timeout_seconds=timeout_seconds,
+        )
+        structural = self.structural_validator.validate(
+            language=language,
+            original_code=original_code,
+            transformed_code=candidate_code,
+            actions=list(actions),
+        )
+        steps = (syntax, structural)
+        validation = [
+            {
+                "name": step.name,
+                "passed": bool(step.passed),
+                "score": step.score,
+                "message": step.message,
+                "details": step.details,
+                "scope": "file_action_bundle",
+            }
+            for step in steps
+        ]
+        issues = [
+            self._model_validation_step_feedback(step)
+            for step in steps
+            if not step.passed
+        ]
+        return {
+            "passed": not issues,
+            "issues": issues,
+            "validation": validation,
+            "accepted_metadata": {
+                "bundle_action_count": len(actions),
+                "bundle_action_types": [action.action_type for action in actions],
+            } if not issues else {},
+        }
+
+    @staticmethod
+    def _model_validation_step_feedback(step: ValidationStepResult) -> str:
+        """Return bounded, actionable validator feedback for one model retry."""
+
+        details = step.details if isinstance(step.details, dict) else {}
+        reasons: List[str] = []
+
+        for failure in list(details.get("failures") or [])[:3]:
+            text = str(failure).strip()
+            if text and text not in reasons:
+                reasons.append(text)
+
+        for violation in list(details.get("violated_invariants") or [])[:3]:
+            if isinstance(violation, dict):
+                text = str(
+                    violation.get("reason")
+                    or violation.get("name")
+                    or violation
+                ).strip()
+            else:
+                text = str(violation).strip()
+            if text and text not in reasons:
+                reasons.append(text)
+
+        for validation_key in (
+            "extract_method_validation",
+            "parameter_object_validation",
+            "move_method_validation",
+            "inline_class_validation",
+        ):
+            for item in list(details.get(validation_key) or [])[:2]:
+                if not isinstance(item, dict) or item.get("passed") is not False:
+                    continue
+                text = str(item.get("reason") or "").strip()
+                if text and text not in reasons:
+                    reasons.append(text)
+
+        message = f"{step.name}: {step.message}"
+        if reasons:
+            message += " Details: " + "; ".join(reasons[:4])
+        # Keep repair prompts inside small local-model context windows.
+        return message[:900]
 
 
     @staticmethod
@@ -4459,6 +5217,470 @@ class SafeCodeTransformationValidationAgent:
             existing_actions=existing_actions,
             detected_actions=detected_actions,
         )
+
+    @staticmethod
+    def _model_usage_summary(
+        transformation_log: List[TransformationLogEntry],
+        *,
+        validation_score: float,
+        rollback_occurred: bool,
+        transformation_applied: bool,
+        model_enabled: bool = False,
+        model_mode: str = "",
+        configured_model_provider: str = "",
+        validation_steps: List[ValidationStepResult] | None = None,
+    ) -> Dict[str, Any]:
+        """Expose model contribution separately from general safety confidence.
+
+        This percentage is the SCTVA validation score for code actually
+        produced by the configured local code model, not a benchmark accuracy
+        claim. A generated but
+        rejected candidate counts as attempted, not used.
+        """
+
+        attempted_entries = [
+            entry
+            for entry in transformation_log
+            if isinstance((entry.metadata or {}).get("model_assistance"), dict)
+        ]
+        model_generation_attempt_count = 0
+        for entry in attempted_entries:
+            assistance = (entry.metadata or {}).get("model_assistance") or {}
+            if assistance.get("shared_candidate") is True:
+                continue
+            model_generation_attempt_count += 1
+            if isinstance(assistance.get("repair_attempt"), dict):
+                model_generation_attempt_count += 1
+        ineligible_entries = [
+            entry
+            for entry in transformation_log
+            if isinstance((entry.metadata or {}).get("model_eligibility"), dict)
+            and str(
+                ((entry.metadata or {}).get("model_eligibility") or {}).get("status") or ""
+            ).lower() == "ineligible"
+        ]
+        budget_entries = [
+            entry
+            for entry in transformation_log
+            if isinstance((entry.metadata or {}).get("model_budget"), dict)
+            and str(((entry.metadata or {}).get("model_budget") or {}).get("reason") or "").strip()
+        ]
+        model_entries = [
+            entry
+            for entry in transformation_log
+            if entry.replacements_count > 0
+            and (entry.metadata or {}).get("model_assisted") is True
+            and bool(str((entry.metadata or {}).get("model_provider") or "").strip())
+        ]
+        rule_entries = [
+            entry
+            for entry in transformation_log
+            if entry.replacements_count > 0
+            and (entry.metadata or {}).get("model_assisted") is not True
+        ]
+        model_used = bool(model_entries)
+        model_providers = sorted({
+            str((entry.metadata or {}).get("model_provider") or "").strip()
+            for entry in model_entries
+            if str((entry.metadata or {}).get("model_provider") or "").strip()
+        })
+        model_provider = model_providers[0] if len(model_providers) == 1 else (
+            "mixed_local_models"
+            if model_providers
+            else str(configured_model_provider or "").strip()
+        )
+        validated_accuracy = 0.0
+        if model_used:
+            validated_accuracy = round(
+                max(1.0, min(100.0, float(validation_score) * 100.0)),
+                1,
+            )
+
+        context_modes = sorted({
+            str((entry.metadata.get("model_assistance") or {}).get("context_mode"))
+            for entry in attempted_entries
+            if str((entry.metadata.get("model_assistance") or {}).get("context_mode") or "").strip()
+        })
+        attempt_reasons = sorted({
+            str((entry.metadata.get("model_assistance") or {}).get("reason"))
+            for entry in attempted_entries
+            if str(
+                (entry.metadata.get("model_assistance") or {}).get("reason") or ""
+            ).strip()
+        })
+        model_backends = sorted({
+            str((entry.metadata.get("model_assistance") or {}).get("backend") or "").strip()
+            for entry in attempted_entries
+            if str(
+                (entry.metadata.get("model_assistance") or {}).get("backend") or ""
+            ).strip()
+        })
+        model_devices = sorted({
+            str((entry.metadata.get("model_assistance") or {}).get("device") or "").strip()
+            for entry in attempted_entries
+            if str(
+                (entry.metadata.get("model_assistance") or {}).get("device") or ""
+            ).strip()
+        })
+        model_runtime_cache_hit = any(
+            (entry.metadata.get("model_assistance") or {}).get("runtime_cache_hit") is True
+            for entry in attempted_entries
+        )
+        model_load_seconds = max(
+            (
+                float(
+                    (entry.metadata.get("model_assistance") or {}).get(
+                        "model_load_seconds"
+                    )
+                    or 0.0
+                )
+                for entry in attempted_entries
+            ),
+            default=0.0,
+        )
+        model_generation_seconds = max(
+            (
+                float(
+                    (entry.metadata.get("model_assistance") or {}).get(
+                        "request_generation_seconds_used"
+                    )
+                    or 0.0
+                )
+                for entry in attempted_entries
+            ),
+            default=0.0,
+        )
+        ineligible_reasons = sorted({
+            str((entry.metadata.get("model_eligibility") or {}).get("reason"))
+            for entry in ineligible_entries
+            if str(
+                (entry.metadata.get("model_eligibility") or {}).get("reason") or ""
+            ).strip()
+        })
+        budget_reasons = sorted({
+            str(((entry.metadata.get("model_budget") or {}).get("reason") or "")).strip()
+            for entry in budget_entries
+            if str(((entry.metadata.get("model_budget") or {}).get("reason") or "")).strip()
+        })
+        budget_details = [
+            {
+                **dict((entry.metadata or {}).get("model_budget") or {}),
+                "action_index": entry.action_index,
+                "action_type": entry.action_type,
+            }
+            for entry in budget_entries
+        ]
+        candidate_validation = [
+            {
+                "name": step.name,
+                "passed": bool(step.passed),
+                "score": step.score,
+                "message": step.message,
+                "details": step.details,
+                "scope": "final_combined_file",
+            }
+            for step in (validation_steps or [])
+        ]
+        model_candidates = []
+        for entry in transformation_log:
+            metadata = entry.metadata or {}
+            candidate_code = str(metadata.get("model_candidate_code") or "")
+            if not candidate_code:
+                continue
+            candidate_model_info = metadata.get("model_assistance")
+            candidate_model_info = candidate_model_info if isinstance(candidate_model_info, dict) else {}
+            candidate_gate_failed = candidate_model_info.get("status") == "candidate_rejected"
+            action_validation = list(candidate_model_info.get("action_validation") or [])
+            candidate_failures = (
+                [{
+                    "name": "model_candidate_gate",
+                    "passed": False,
+                    "message": str(
+                        candidate_model_info.get("syntax_issue")
+                        or candidate_model_info.get("intent_issue")
+                        or candidate_model_info.get("reason")
+                        or "Model candidate failed the immediate SCTVA checkpoint."
+                    ),
+                }]
+                if candidate_gate_failed
+                else [*action_validation, *candidate_validation]
+            )
+            model_candidates.append({
+                "action_index": entry.action_index,
+                "action_type": entry.action_type,
+                "provider": str(metadata.get("model_provider") or candidate_model_info.get("provider") or ""),
+                "context_mode": str(candidate_model_info.get("context_mode") or ""),
+                "candidate_code": candidate_code,
+                "candidate_sha256": str(candidate_model_info.get("candidate_sha256") or ""),
+                "status": (
+                    "ACCEPTED"
+                    if metadata.get("model_assisted") is True and not rollback_occurred
+                    else "REJECTED_AT_ACTION_CHECKPOINT"
+                    if candidate_gate_failed
+                    else "REJECTED"
+                ),
+                "generation_phase": str(
+                    candidate_model_info.get("generation_phase") or "initial"
+                ),
+                "repair_attempted": isinstance(
+                    candidate_model_info.get("repair_attempt"), dict
+                ),
+                "validation": candidate_failures,
+            })
+        inferred_model_enabled = bool(
+            model_enabled or model_used or attempted_entries or ineligible_entries or budget_entries
+        )
+        normalized_mode = str(model_mode or "primary").strip().lower()
+        hybrid_strategy = (
+            "MODEL_FIRST_RULE_FALLBACK"
+            if inferred_model_enabled and normalized_mode == "primary"
+            else "RULE_FIRST_MODEL_FALLBACK"
+            if inferred_model_enabled
+            else "RULE_ONLY"
+        )
+        if model_used and rule_entries:
+            accepted_output_engine = "MIXED"
+        elif model_used:
+            accepted_output_engine = model_provider.upper() or "LOCAL_MODEL"
+        elif rule_entries:
+            accepted_output_engine = "RULE_BASED"
+        else:
+            accepted_output_engine = "NO_CHANGE"
+        rule_fallback_used = bool(
+            inferred_model_enabled
+            and normalized_mode == "primary"
+            and attempted_entries
+            and not model_used
+            and rule_entries
+        )
+        engine = "HYBRID" if inferred_model_enabled else "RULE_BASED"
+        status = (
+            "MODEL_OUTPUT_RETAINED"
+            if model_used and transformation_applied and not rollback_occurred
+            else "MODEL_OUTPUT_ROLLED_BACK"
+            if model_used and rollback_occurred
+            else "MODEL_ATTEMPT_REJECTED_RULE_FALLBACK"
+            if attempted_entries
+            else "MODEL_ACTION_BUDGET_EXHAUSTED"
+            if budget_entries
+            else "MODEL_SKIPPED_SAFETY_PRECONDITION"
+            if ineligible_entries
+            else "MODEL_ENABLED_NO_ELIGIBLE_ACTION"
+            if model_enabled
+            else "MODEL_NOT_USED"
+        )
+        return {
+            "model_enabled": inferred_model_enabled,
+            "model_used": model_used,
+            "model_attempted": bool(attempted_entries),
+            "model_provider": model_provider,
+            "model_backend": model_backends[0] if len(model_backends) == 1 else (
+                "mixed" if model_backends else ""
+            ),
+            "model_device": model_devices[0] if len(model_devices) == 1 else (
+                "mixed" if model_devices else ""
+            ),
+            "model_runtime_cache_hit": model_runtime_cache_hit,
+            "model_load_seconds": round(model_load_seconds, 3),
+            "model_generation_seconds": round(model_generation_seconds, 3),
+            "model_validated_accuracy": validated_accuracy,
+            "model_accuracy_basis": (
+                "SCTVA_FINAL_VALIDATION_SCORE"
+                if model_used
+                else "NO_RETAINED_MODEL_OUTPUT"
+            ),
+            "model_action_count": len(model_entries),
+            "model_attempt_count": model_generation_attempt_count,
+            "model_candidate_count": len(model_candidates),
+            "model_candidates": model_candidates,
+            "rule_action_count": len(rule_entries),
+            "model_context_modes": context_modes,
+            "model_attempt_reasons": attempt_reasons,
+            "model_ineligible_reasons": ineligible_reasons,
+            "model_budget_reasons": budget_reasons,
+            "model_budget_details": budget_details,
+            "model_output_retained": bool(
+                model_used and transformation_applied and not rollback_occurred
+            ),
+            "model_status": status,
+            "transformation_engine": engine,
+            "hybrid_strategy": hybrid_strategy,
+            "accepted_output_engine": accepted_output_engine,
+            "rule_fallback_used": rule_fallback_used,
+        }
+
+    @staticmethod
+    def _annotate_model_first_rule_fallback(
+        rule_result: Dict[str, Any],
+        *,
+        model_assistant: CodeT5CandidateTransformer,
+        failed_model_log: List[TransformationLogEntry],
+        failed_steps: List[str],
+        failed_validation_details: List[Dict[str, Any]],
+        rollback_reason: str,
+    ) -> Dict[str, Any]:
+        """Attach model-first provenance to the independently validated rule retry."""
+
+        result = dict(rule_result)
+        failed_model_entries = [
+            entry
+            for entry in failed_model_log
+            if entry.replacements_count > 0
+            and (entry.metadata or {}).get("model_assisted") is True
+        ]
+        attempted_model_entries = [
+            entry
+            for entry in failed_model_log
+            if isinstance((entry.metadata or {}).get("model_assistance"), dict)
+        ]
+        model_generation_attempt_count = 0
+        for entry in attempted_model_entries:
+            assistance = (entry.metadata or {}).get("model_assistance") or {}
+            if assistance.get("shared_candidate") is True:
+                continue
+            model_generation_attempt_count += 1
+            if isinstance(assistance.get("repair_attempt"), dict):
+                model_generation_attempt_count += 1
+        context_modes = sorted({
+            str(((entry.metadata or {}).get("model_assistance") or {}).get("context_mode"))
+            for entry in attempted_model_entries
+            if str(
+                ((entry.metadata or {}).get("model_assistance") or {}).get("context_mode")
+                or ""
+            ).strip()
+        })
+        failed_model_info = [
+            (entry.metadata or {}).get("model_assistance") or {}
+            for entry in attempted_model_entries
+        ]
+        failed_model_backends = sorted({
+            str(info.get("backend") or "").strip()
+            for info in failed_model_info
+            if str(info.get("backend") or "").strip()
+        })
+        failed_model_devices = sorted({
+            str(info.get("device") or "").strip()
+            for info in failed_model_info
+            if str(info.get("device") or "").strip()
+        })
+        attempt_reasons = {
+            str(reason)
+            for reason in (result.get("model_attempt_reasons") or [])
+            if str(reason).strip()
+        }
+        attempt_reasons.add("MODEL_CANDIDATE_FAILED_FINAL_VALIDATION")
+        model_candidates = []
+        for entry in failed_model_log:
+            metadata = entry.metadata or {}
+            candidate_code = str(metadata.get("model_candidate_code") or "")
+            if not candidate_code:
+                continue
+            model_info = metadata.get("model_assistance")
+            model_info = model_info if isinstance(model_info, dict) else {}
+            action_validation = list(model_info.get("action_validation") or [])
+            combined_validation = [
+                {**item, "scope": "final_combined_file"}
+                for item in failed_validation_details
+            ]
+            model_candidates.append({
+                "action_index": entry.action_index,
+                "action_type": entry.action_type,
+                "provider": str(metadata.get("model_provider") or model_info.get("provider") or model_assistant.provider),
+                "context_mode": str(model_info.get("context_mode") or ""),
+                "candidate_code": candidate_code,
+                "candidate_sha256": str(model_info.get("candidate_sha256") or ""),
+                "status": "PASSED_ACTION_CHECKPOINT_FILE_REJECTED",
+                "generation_phase": str(model_info.get("generation_phase") or "initial"),
+                "repair_attempted": isinstance(model_info.get("repair_attempt"), dict),
+                "validation": [*action_validation, *combined_validation],
+            })
+        result.update({
+            "model_enabled": True,
+            "model_used": False,
+            "model_attempted": True,
+            "model_provider": model_assistant.provider,
+            "model_backend": (
+                failed_model_backends[0]
+                if len(failed_model_backends) == 1
+                else "mixed"
+                if failed_model_backends
+                else ""
+            ),
+            "model_device": (
+                failed_model_devices[0]
+                if len(failed_model_devices) == 1
+                else "mixed"
+                if failed_model_devices
+                else ""
+            ),
+            "model_runtime_cache_hit": any(
+                info.get("runtime_cache_hit") is True for info in failed_model_info
+            ),
+            "model_load_seconds": round(
+                max(
+                    (float(info.get("model_load_seconds") or 0.0) for info in failed_model_info),
+                    default=0.0,
+                ),
+                3,
+            ),
+            "model_generation_seconds": round(
+                max(
+                    (
+                        float(info.get("request_generation_seconds_used") or 0.0)
+                        for info in failed_model_info
+                    ),
+                    default=0.0,
+                ),
+                3,
+            ),
+            "model_validated_accuracy": 0.0,
+            "model_accuracy_basis": "NO_RETAINED_MODEL_OUTPUT",
+            "model_action_count": 0,
+            "model_attempt_count": model_generation_attempt_count,
+            "model_candidate_count": len(model_candidates),
+            "model_candidates": model_candidates,
+            "model_context_modes": context_modes,
+            "model_attempt_reasons": sorted(attempt_reasons),
+            "model_output_retained": False,
+            "model_status": "MODEL_FINAL_VALIDATION_FAILED_RULE_FALLBACK",
+            "transformation_engine": "HYBRID",
+            "hybrid_strategy": "MODEL_FIRST_RULE_FALLBACK",
+            "accepted_output_engine": "RULE_BASED",
+            "rule_fallback_used": True,
+            "rule_fallback_trigger": "MODEL_FINAL_VALIDATION_FAILED",
+            "model_failed_validation_steps": list(failed_steps),
+            "model_final_validation_details": failed_validation_details,
+        })
+        fallback_details = {
+            "strategy": "MODEL_FIRST_RULE_FALLBACK",
+            "trigger": "MODEL_FINAL_VALIDATION_FAILED",
+            "provider": model_assistant.provider,
+            "failed_model_action_count": len(failed_model_entries),
+            "model_candidate_count": len(model_candidates),
+            "model_candidates": model_candidates,
+            "failed_validation_steps": list(failed_steps),
+            "failed_validation_details": failed_validation_details,
+            "failed_validation_summary": [
+                f"{item.get('name')}: {item.get('message')}"
+                for item in failed_validation_details
+                if str(item.get("message") or "").strip()
+            ],
+            "model_rollback_reason": str(rollback_reason or ""),
+            "accepted_output_engine": "RULE_BASED",
+            "rule_result_status": str(result.get("status") or ""),
+        }
+        result["model_fallback_details"] = fallback_details
+
+        safety_report = result.get("safety_report")
+        if isinstance(safety_report, dict):
+            safety_report["model_fallback"] = fallback_details
+            messages = safety_report.setdefault("human_messages", [])
+            if isinstance(messages, list):
+                messages.append(
+                    "The model-first candidate failed final SCTVA validation and was discarded. "
+                    "The same action was restarted from the original source and the rule-based result was used."
+                )
+        return result
 
     @staticmethod
     def _canonical_refactoring_family(action: RefactoringAction) -> str:

@@ -5,7 +5,10 @@
 
 import { useState, useEffect } from 'react';
 import './index.css';
+import './responsive.css';
 import { useTheme } from './context/ThemeContext.jsx';
+import { saveSessionReport } from './utils/sessionReports.js';
+import { recordCuqaScore } from './utils/analysisHistory.js';
 
 import Overview        from './pages/Overview.jsx';
 import Dashboard       from './pages/Dashboard.jsx';
@@ -27,17 +30,19 @@ import { getEnv } from './config/env';
 const API = getEnv('VITE_CUQA_AGENT_API_URL', getEnv('VITE_CUQA_API_URL', 'http://localhost:8080')).replace(/\/+$/, '');
 
 // ── Sidebar navigation definition ─────────────────────────────────────────
+// Agents carry their pipeline step, colour and a short role so each one is
+// recognisable in the menu, not only on its own page.
 const NAV_MAIN = [
-  { id: 'overview',    icon: '⌂',  label: 'Overview' },
-  { id: 'dashboard',   icon: '⊞',  label: 'Dashboard' },
-  { id: 'repository',  icon: '⛓',  label: 'Repository Input' },
-  { id: 'cuqa',        icon: '🔍', label: 'CUQA Agent' },
-  { id: 'rdp',         icon: '🧠', label: 'RDP Agent' },
-  { id: 'transform',   icon: '⚡', label: 'Transformation Agent' },
-  { id: 'orchestrate', icon: '🎛', label: 'DIWO Agent' },
-  { id: 'reports',     icon: '📋', label: 'Reports' },
-  { id: 'evaluation',  icon: '🧪', label: 'Evaluation' },
-  { id: 'settings',    icon: '⚙',  label: 'Settings' },
+  { id: 'overview',    icon: '⌂',  label: 'Overview',         group: 'Workspace' },
+  { id: 'dashboard',   icon: '⊞',  label: 'Dashboard',        group: 'Workspace' },
+  { id: 'repository',  icon: '⛓',  label: 'Repository Input', group: 'Workspace' },
+  { id: 'cuqa',        icon: '🔍', label: 'CUQA Agent',  group: 'Pipeline agents', step: 1, role: 'Understand & assess', color: 'var(--color-cuqa)' },
+  { id: 'rdp',         icon: '🧠', label: 'RDP Agent',   group: 'Pipeline agents', step: 2, role: 'Plan refactorings',   color: 'var(--color-rdp)' },
+  { id: 'transform',   icon: '⚡', label: 'SCTVA Agent', group: 'Pipeline agents', step: 3, role: 'Transform & validate', color: 'var(--color-transform)' },
+  { id: 'orchestrate', icon: '🎛', label: 'DIWO Agent',  group: 'Pipeline agents', step: 4, role: 'Developer review',    color: 'var(--color-orchestrate)' },
+  { id: 'reports',     icon: '📋', label: 'Reports',          group: 'Results' },
+  { id: 'evaluation',  icon: '🧪', label: 'Evaluation',       group: 'Results' },
+  { id: 'settings',    icon: '⚙',  label: 'Settings',         group: 'Results' },
 ];
 
 const NAV_BOTTOM = [
@@ -102,7 +107,10 @@ export default function App() {
   const [cuqaReport,    setCuqaReport]    = useState(null); // quality report from CUQA → RDP bridge
   // 'idle' | 'cuqa_done' | 'rdp_running' | 'rdp_done'
   const [pipelineState, setPipelineState] = useState('idle');
-  const { theme, toggleTheme, isDark } = useTheme();
+  // Mobile drawer, and the session report Reports should open on
+  const [navOpen,       setNavOpen]       = useState(false);
+  const [focusSessionId, setFocusSessionId] = useState(null);
+  const { toggleTheme, isDark } = useTheme();
 
   async function handleLogout() {
     await UserService.logout();
@@ -153,25 +161,39 @@ export default function App() {
     setPipelineState('rdp_done');
   }
 
-  const GATED_DOWNSTREAM_AGENTS = ['rdp', 'transform', 'orchestrate'];
-  const isDetectionDone = repoLoaded && !!cuqaReport;
+  // Called by DIWO when the developer presses "Complete Workflow": keep the
+  // session's report and open it on the Reports page.
+  function handleWorkflowComplete(report) {
+    const saved = saveSessionReport({
+      ...report,
+      repository: report.repository || {
+        name: repoMeta?.repo_name || null,
+        source: repoMeta?.historyEntry?.source || null,
+        files_found: repoMeta?.files_found ?? null,
+        languages: repoMeta?.detected_languages || [],
+      },
+    });
+    setFocusSessionId(saved.id);
+    localStorage.setItem('rfiq_active_page', 'reports');
+    setPage('reports');
+  }
+
+  const AGENT_PAGES = ['cuqa', 'rdp', 'transform', 'orchestrate'];
 
   function navigate(id) {
-    if (id === 'cuqa' && !repoLoaded) {
-      return; // Lock CUQA Agent until repository is uploaded/linked
-    }
-    if (GATED_DOWNSTREAM_AGENTS.includes(id) && !isDetectionDone) {
-      return; // Lock downstream agents until code smell analysis completes
+    if (AGENT_PAGES.includes(id) && !repoLoaded) {
+      return; // Lock agent pages until a repository is uploaded or linked
     }
     localStorage.setItem('rfiq_active_page', id);
     setPage(id);
+    setNavOpen(false);
   }
 
   // ── Render active page ───────────────────────────────────
   function renderPage() {
     switch (page) {
-      case 'overview':    return <Overview onNavigate={navigate} />;
-      case 'dashboard':   return <Dashboard />;
+      case 'overview':    return <Overview onNavigate={navigate} repoLoaded={repoLoaded} repoMeta={repoMeta} />;
+      case 'dashboard':   return <Dashboard onNavigate={navigate} repoLoaded={repoLoaded} />;
       case 'repository':  return <RepositoryInput onLoaded={handleRepoLoaded} />;
       case 'cuqa':        return (
         <CUQAAgentPage
@@ -179,7 +201,11 @@ export default function App() {
           repoMeta={repoMeta}
           analysisConfig={repoConfig}
           onSendToRdp={handleSendToRdp}
-          onReportReady={(rep) => setCuqaReport(rep)}
+          onReportReady={(rep) => {
+            setCuqaReport(rep);
+            // Keep CUQA's measured score on the history entry for this load
+            recordCuqaScore(repoMeta?.historyEntry?.id, rep);
+          }}
           onNavigate={navigate}
           pipelineState={pipelineState}
           onPipelineStateChange={setPipelineState}
@@ -195,8 +221,8 @@ export default function App() {
         />
       );
       case 'transform':   return <SCTVAAgentPage />;
-      case 'orchestrate': return <DIWOAgentPage />;
-      case 'reports':     return <Reports />;
+      case 'orchestrate': return <DIWOAgentPage onWorkflowComplete={handleWorkflowComplete} />;
+      case 'reports':     return <Reports focusSessionId={focusSessionId} />;
       case 'evaluation':  return <Evaluation />;
       case 'settings':    return <Settings />;
       case 'profile':     return (
@@ -205,6 +231,7 @@ export default function App() {
           isGuest={isGuest}
           onLogout={handleLogout}
           onProfileUpdate={handleProfileUpdate}
+          onNavigate={navigate}
         />
       );
       case 'docs':        return <Documentation />;
@@ -233,6 +260,19 @@ export default function App() {
 
       {/* ── Top Bar ─────────────────────────────────────────── */}
       <header className="topbar">
+        <button
+          type="button"
+          className="topbar-menu-btn"
+          aria-label={navOpen ? 'Close menu' : 'Open menu'}
+          aria-expanded={navOpen}
+          onClick={() => setNavOpen(v => !v)}
+        >
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+            {navOpen
+              ? <path d="M6 6l12 12M18 6L6 18" />
+              : <path d="M4 7h16M4 12h16M4 17h16" />}
+          </svg>
+        </button>
         <span className="topbar-brand">
           <span style={{ color: 'var(--accent)', fontWeight: 800 }}>RefactorIQ</span>
         </span>
@@ -286,7 +326,7 @@ export default function App() {
             >
               {isDark ? '🌙' : '☀️'}
             </span>
-            <span style={{ fontSize: 11 }}>
+            <span className="theme-toggle-label" style={{ fontSize: 11 }}>
               {isDark ? 'Dark' : 'Light'}
             </span>
           </button>
@@ -310,7 +350,8 @@ export default function App() {
       </header>
 
       {/* ── Sidebar ─────────────────────────────────────────── */}
-      <aside className="sidebar">
+      {navOpen && <div className="sidebar-backdrop" onClick={() => setNavOpen(false)} />}
+      <aside className={`sidebar ${navOpen ? 'open' : ''}`}>
         <div className="sidebar-brand">
           <div className="sidebar-brand-name" style={{ color: 'var(--accent)' }}>RefactorIQ</div>
         </div>
@@ -337,38 +378,40 @@ export default function App() {
             </div>
           )}
 
-          {/* Main nav items */}
-          {NAV_MAIN.map(item => {
-            const isActive          = page === item.id;
-            const isCuqaGated       = item.id === 'cuqa' && !repoLoaded;
-            const isDownstreamGated = GATED_DOWNSTREAM_AGENTS.includes(item.id) && !isDetectionDone;
-            const isDisabled        = isCuqaGated || isDownstreamGated;
-            const isAgentReady      = repoLoaded && ['cuqa'].includes(item.id);
+          {/* Main nav items, with a label at the start of each group */}
+          {NAV_MAIN.map((item, idx) => {
+            const isActive     = page === item.id;
+            const isAgent      = AGENT_PAGES.includes(item.id);
+            const isDisabled   = isAgent && !repoLoaded;
+            const startsGroup  = idx === 0 || NAV_MAIN[idx - 1].group !== item.group;
             // Pipeline status dot colours
-            const rdpPulsing        = item.id === 'rdp' && pipelineState === 'rdp_running';
-            const rdpDone           = item.id === 'rdp' && pipelineState === 'rdp_done';
+            const rdpPulsing   = item.id === 'rdp' && pipelineState === 'rdp_running';
+            const rdpDone      = item.id === 'rdp' && pipelineState === 'rdp_done';
 
-            const tooltipText = isCuqaGated
-              ? 'CUQA Agent — Please upload or link a repository in Repository Input first'
-              : isDownstreamGated
-              ? `${item.label} — Upload repository & run CUQA code smell analysis first`
-              : item.label;
+            const tooltipText = isDisabled
+              ? `${item.label} — Upload or link a repository in Repository Input first`
+              : item.step ? `Agent ${item.step}: ${item.label} — ${item.role}` : item.label;
 
             return (
+              <div key={item.id}>
+              {startsGroup && <div className="sidebar-group-label">{item.group}</div>}
               <div
-                key={item.id}
                 id={`nav-${item.id}`}
-                className={`sidebar-item ${isActive ? 'active' : ''} ${isDisabled ? 'disabled' : ''}`}
+                className={`sidebar-item ${item.step ? 'agent' : ''} ${isActive ? 'active' : ''} ${isDisabled ? 'disabled' : ''}`}
                 onClick={() => !isDisabled && navigate(item.id)}
-                style={isDisabled
-                  ? { opacity: 0.35, cursor: 'not-allowed', filter: 'grayscale(0.6)' }
-                  : isAgentReady && !isActive ? { color: 'var(--accent)', opacity: 0.9 } : {}
-                }
+                style={{
+                  ...(item.color ? { '--agent-color': item.color } : {}),
+                  ...(isDisabled ? { opacity: 0.35, cursor: 'not-allowed', filter: 'grayscale(0.6)' } : {}),
+                }}
                 title={tooltipText}
               >
-                <span className="s-icon">{item.icon}</span>
-                <span>{item.label}</span>
-                {/* Lock icon for gated agents before unlock condition */}
+                {item.step
+                  ? <span className="agent-step">{item.step}</span>
+                  : <span className="s-icon">{item.icon}</span>}
+                {item.step
+                  ? <span className="agent-text"><b>{item.label}</b><small>{item.role}</small></span>
+                  : <span>{item.label}</span>}
+                {/* Lock icon for agents before repository upload */}
                 {isDisabled && (
                   <span style={{ marginLeft: 'auto', fontSize: 10, opacity: 0.6 }} title={tooltipText}>🔒</span>
                 )}
@@ -376,7 +419,7 @@ export default function App() {
                 {item.id === 'cuqa' && repoLoaded && !isActive && (
                   <span style={{
                     marginLeft: 'auto', width: 6, height: 6,
-                    borderRadius: '50%', background: 'var(--accent)',
+                    borderRadius: '50%', background: 'var(--color-cuqa)',
                     flexShrink: 0,
                   }} />
                 )}
@@ -394,6 +437,7 @@ export default function App() {
                     marginLeft: 'auto', fontSize: 11, color: '#22c55e', flexShrink: 0,
                   }}>✓</span>
                 )}
+              </div>
               </div>
             );
           })}
