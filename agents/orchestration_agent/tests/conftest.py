@@ -45,6 +45,15 @@ os.environ["DIWO_RUNTIME_DIR"] = str(_SUITE_RUNTIME)
 os.environ["DIWO_DB_PATH"] = str(_SUITE_RUNTIME / "diwo_audit.db")
 # Never let a test clone into the developer's real ~/DIWO/repos.
 os.environ["DIWO_CLONE_ROOT"] = str(_SUITE_RUNTIME / "clones")
+# The suite runs on its throwaway SQLite file. config.py loads backend/.env,
+# but python-dotenv never overrides a variable that is already set, so these
+# keep a developer's .env from pointing the tests at the live Supabase project
+# or at the real GitHub App. GitHub tests opt in through their own fixtures.
+os.environ["DATABASE_PROVIDER"] = "sqlite"
+for _github_var in ("GITHUB_APP_ID", "GITHUB_WEBHOOK_SECRET", "GITHUB_PRIVATE_KEY_PEM",
+                    "GITHUB_PRIVATE_KEY_PATH", "GITHUB_EMBEDDED_WORKER"):
+    os.environ[_github_var] = ""
+os.environ["GITHUB_INTEGRATION_ENABLED"] = "false"
 
 # pyrefly: ignore [missing-import]
 from app import create_app                       # noqa: E402
@@ -90,7 +99,9 @@ def clean_database(app):
     with app.app_context():
         from db.database import get_db
         db = get_db()
-        for table in ("smell_impacts", "feedback_entries", "audit_logs", "workflows"):
+        for table in ("smell_impacts", "feedback_entries", "audit_logs", "workflows",
+                      "github_analysis_jobs", "github_pr_workflows",
+                      "github_pr_transformations", "github_pr_writebacks"):
             db.execute(f"DELETE FROM {table}")
         db.commit()
     yield
@@ -140,6 +151,15 @@ def no_live_agents(monkeypatch):
         raise urllib.error.URLError("network access is disabled in the test suite")
 
     monkeypatch.setattr(urllib.request, "urlopen", no_network)
+
+    # The GitHub App service uses `requests`, which does not go through
+    # urlopen. GitHub tests inject a fake session instead of a real one.
+    import requests
+
+    def no_requests(*args, **kwargs):
+        raise requests.ConnectionError("network access is disabled in the test suite")
+
+    monkeypatch.setattr(requests.Session, "request", no_requests)
 
     # planning_service and transformation_service bind these at import time, so
     # patching the client module alone would not reach them.
