@@ -38,7 +38,27 @@ import {
 } from "./utils/planningSelection";
 // Every orchestration-backend call goes through this one client:
 //   DIWO stage -> diwoApi -> Orchestration Agent -> CUQA / RDP / SCTVA
-import { api } from "./services/diwoApi";
+import { api, fetchGithubWorkflow } from "./services/diwoApi";
+import GithubPrBanner from "./components/GithubPrBanner";
+import GithubTransformationReview from "./components/GithubTransformationReview";
+
+// ─── GitHub-linked workflows ──────────────────────────────────────────────────
+// A RefactorIQ / DIWO Check Run links to <frontend>/?diwo_workflow=<id>. Such a
+// page opens THAT workflow — seeded by the backend from the PR commit — instead
+// of minting a new one from whatever CUQA's shared workspace holds.
+const WORKFLOW_ID_RE = /^wf_[a-z0-9]{1,32}$/i;
+
+function linkedWorkflowFromUrl() {
+  if (typeof window === "undefined") return null;
+  const id = new URLSearchParams(window.location.search).get("diwo_workflow");
+  return id && WORKFLOW_ID_RE.test(id) ? id : null;
+}
+
+function clearLinkedWorkflowFromUrl() {
+  const url = new URL(window.location.href);
+  url.searchParams.delete("diwo_workflow");
+  window.history.replaceState(null, "", url.toString());
+}
 
 // ─── Phase metadata ───────────────────────────────────────────────────────────
 const PHASE_TITLES = [
@@ -114,6 +134,13 @@ export default function DIWOAgentPage() {
   // itself — the log panel alone left the click looking like it did nothing.
   const [planSubmitError, setPlanSubmitError] = useState(null);
   const [workflow, setWorkflow]               = useState(null);
+  // Set when the page was opened from a GitHub Check Run link.
+  const [linkedWorkflowId, setLinkedWorkflowId] = useState(linkedWorkflowFromUrl);
+  const [githubContext, setGithubContext]       = useState(null);
+  const [githubStatus, setGithubStatus]         = useState(null);
+  const [githubError, setGithubError]           = useState(null);
+  // Shared with the /refactoriq PR commands: S-ids and the draft selection.
+  const [githubShared, setGithubShared]         = useState(null);
   const [auditLog, setAuditLog]               = useState([
     { id: `local-init`, time: new Date().toLocaleTimeString(), event: "Session initialized", type: "info" },
   ]);
@@ -256,16 +283,101 @@ export default function DIWOAgentPage() {
     }
   }, []);
 
+  /**
+   * Open the GitHub-linked workflow named in the URL. Its smells and CUQA
+   * report come from the backend, which analysed the exact PR commit — no CUQA
+   * call is made here, and nothing is auto-selected. On failure the page says
+   * why (sign in, no access, unknown id) rather than quietly starting a new
+   * workflow for some other repository.
+   */
+  const loadLinkedWorkflow = useCallback(async (id) => {
+    setBackendBusy(true);
+    setGithubError(null);
+    try {
+      const res = await fetchGithubWorkflow(id);
+      setWorkflowId(res.workflow_id);
+      setWorkflowLanguage(res.language || "java");
+      setMetricsBeforeApi(res.metrics_before || null);
+      setCuqaReport(res.report || null);
+      setGithubContext(res.github || null);
+      setGithubStatus(res.status || null);
+      setGithubShared({
+        smellIds: res.smell_ids || null,
+        draftSelection: res.draft_selection || null,
+        transformationEnabled: Boolean(res.transformation_enabled),
+      });
+      // Reopen at the stage the review reached: the plan from Stage 2 on, the
+      // proposed changes once a plan has been approved.
+      if (res.plan && res.status === "plan_approval") {
+        setPlanData(res.plan);
+        setPreApprovalPlan(res.plan_full || res.plan);
+        setApprovedPlan(null);
+        setPhase(1);
+      } else if (res.plan && ["plan_approved", "transformation", "completed"].includes(res.status)) {
+        setPlanData(res.plan);
+        setApprovedPlan(res.plan);
+        setPhase(2);
+      } else {
+        setPhase(0);
+      }
+      addLog(
+        `Opened GitHub-linked workflow ${res.workflow_id}: ${res.github?.repository} ` +
+        `#${res.github?.pr_number} @ ${res.github?.head_sha?.slice(0, 7)} — ` +
+        `${(res.smells || []).length} smell(s) from CUQA`,
+        "success"
+      );
+      return res;
+    } catch (e) {
+      setGithubError(e);
+      addLog(`GitHub-linked workflow could not be opened: ${e.message}`, "danger");
+      throw e;
+    } finally {
+      setBackendBusy(false);
+    }
+  }, []);
+
+  /** Re-read the PR review state (status, who decided, can I decide) only. */
+  const refreshGithubContext = useCallback(async () => {
+    if (!linkedWorkflowId) return;
+    try {
+      const res = await fetchGithubWorkflow(linkedWorkflowId);
+      setGithubContext(res.github || null);
+      setGithubStatus(res.status || null);
+      setGithubShared((prev) => ({ ...(prev || {}), draftSelection: res.draft_selection || null }));
+    } catch {
+      /* The banner keeps what it had; the decision itself already succeeded. */
+    }
+  }, [linkedWorkflowId]);
+
+  /** Leave the PR view and fall back to the ordinary CUQA-workspace session. */
+  const leaveLinkedWorkflow = useCallback(() => {
+    clearLinkedWorkflowFromUrl();
+    setLinkedWorkflowId(null);
+    setGithubContext(null);
+    setGithubStatus(null);
+    setGithubError(null);
+    setCuqaReport(null);
+    setWorkflowId(null);
+    bootstrapWorkflow({ reason: "reload" }).catch(() => {});
+  }, [bootstrapWorkflow]);
+
   // Nothing is set synchronously in the effect body: the yield below moves the
   // whole bootstrap — including its first setState — off the render pass.
   useEffect(() => {
     let cancelled = false;
     (async () => {
       await Promise.resolve();
-      if (!cancelled) await bootstrapWorkflow({ reason: "mount" }).catch(() => {});
+      if (cancelled) return;
+      if (linkedWorkflowId) {
+        await loadLinkedWorkflow(linkedWorkflowId).catch(() => {});
+      } else {
+        await bootstrapWorkflow({ reason: "mount" }).catch(() => {});
+      }
     })();
     return () => { cancelled = true; };
-  }, [bootstrapWorkflow]);
+    // Runs once per page: leaving the PR view bootstraps explicitly.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   /**
    * Stage 1 fetched (or re-analyzed) the CUQA report on its own — either
@@ -383,6 +495,7 @@ export default function DIWOAgentPage() {
           "success"
         );
         applyPlanResponse(res);
+        refreshGithubContext();
         setWorkflow((prev) => ({
           ...(prev || {}),
           updated_report: res.updated_report || report,
@@ -427,6 +540,7 @@ export default function DIWOAgentPage() {
         feedback: { reason: "Selected in DIWO frontend" },
       });
       applyPlanResponse(res);
+      refreshGithubContext();
       setWorkflow((prev) => ({
         ...(prev || {}),
         updated_report: res.updated_report || prev?.updated_report,
@@ -604,6 +718,27 @@ export default function DIWOAgentPage() {
         },
       });
       if (approveRes.approved_plan) approvedReport = approveRes.approved_plan;
+
+      // GitHub-linked workflows: the approval is recorded and shown on the
+      // pull request. SCTVA then runs server-side on the PR commit (when
+      // enabled), never the simulated transformation; Stage 3 shows its
+      // proposed changes for the final decision.
+      if (approveRes.status === "plan_approved") {
+        setApprovedPlan(approvedReport);
+        setPlanData(approvedReport);
+        setGithubStatus("plan_approved");
+        addLog(
+          `Plan approved for ${githubContext?.repository} #${githubContext?.pr_number} ` +
+          `(${(approvedReport.steps || []).length} step(s)). ` +
+          (approveRes.transformation?.queued
+            ? "SCTVA transformation queued on the pull-request commit."
+            : "Recorded on the pull request; no code has been changed."),
+          "success"
+        );
+        await refreshGithubContext();
+        setPhase(2);
+        return;
+      }
 
       const forwarded = (approvedReport.steps || []).length;
       addLog(
@@ -865,8 +1000,16 @@ export default function DIWOAgentPage() {
           feedback: { reason: "Fallback from plan approval" },
         });
         addLog("Workflow reset to smell review in backend.", "info");
+        refreshGithubContext();
       } catch (e) {
         addLog(`Backend reset failed: ${e.message}`, "warn");
+        // A GitHub-linked workflow refuses decisions it cannot authorize or
+        // that target an outdated commit; moving the UI anyway would show a
+        // state the backend never entered.
+        if (linkedWorkflowId) {
+          setPlanSubmitError(e.message);
+          return;
+        }
       }
     }
 
@@ -957,20 +1100,40 @@ export default function DIWOAgentPage() {
         <div style={{ flex: 1, overflow: "auto", padding: "28px 32px" }}>
           <StepBar current={phase} />
 
+          {(githubContext || githubError) && (
+            <GithubPrBanner
+              github={githubContext}
+              workflowStatus={githubStatus}
+              transformationEnabled={githubShared?.transformationEnabled}
+              error={githubError}
+              onLeave={leaveLinkedWorkflow}
+            />
+          )}
+
           <div style={{ marginBottom: 20 }}>
             <div style={{ fontSize: 20, fontWeight: 800, color: C.text, marginBottom: 4 }}>{PHASE_TITLES[phase]}</div>
             <div style={{ fontSize: 13, color: C.textMuted }}>{PHASE_DESCRIPTIONS[phase]}</div>
           </div>
 
-          {phase === 0 && (
+          {/* A GitHub link shows Stage 1 only once ITS workflow has loaded:
+              mounting earlier would let Stage 1 fetch CUQA's shared workspace,
+              i.e. some other repository. */}
+          {phase === 0 && !(linkedWorkflowId && !githubContext) && (
             <CodeSmellApprovalPage
               workflowId={workflowId}
               onProceed={handleSmellsSelected}
               reportData={workflow?.updated_report || cuqaReport || null}
               onReportLoaded={handleCuqaReportLoaded}
               // Re-analyze re-seeds the workflow rather than only refreshing
-              // what Stage 1 displays — see bootstrapWorkflow.
-              onReloadWorkspace={() => bootstrapWorkflow({ reason: "reload" })}
+              // what Stage 1 displays — see bootstrapWorkflow. A GitHub-linked
+              // workflow reloads ITSELF instead: its findings belong to one PR
+              // commit, never to CUQA's current workspace.
+              onReloadWorkspace={linkedWorkflowId
+                ? () => loadLinkedWorkflow(linkedWorkflowId)
+                : () => bootstrapWorkflow({ reason: "reload" })}
+              githubContext={githubContext}
+              smellDisplayIds={githubShared?.smellIds || null}
+              initialSelectedIds={githubShared?.draftSelection || null}
             />
           )}
           {phase === 1 && (
@@ -986,7 +1149,14 @@ export default function DIWOAgentPage() {
               onFallback={handleFallbackToSmellReview}
             />
           )}
-          {phase === 2 && (
+          {phase === 2 && linkedWorkflowId && githubContext && (
+            <GithubTransformationReview
+              workflowId={workflowId}
+              github={githubContext}
+              onChanged={refreshGithubContext}
+            />
+          )}
+          {phase === 2 && !linkedWorkflowId && (
             <TransformationApprovalPage
               plan={approvedPlan || planData}
               workflowId={workflowId}

@@ -86,10 +86,14 @@ export default function App() {
     () => !UserService.isAuthenticated() && localStorage.getItem('is_guest') === 'true'
   );
 
-  // Persist active page across refreshes
-  const [page, setPage] = useState(
-    () => localStorage.getItem('rfiq_active_page') || 'overview'
-  );
+  // Persist active page across refreshes. A RefactorIQ / DIWO Check Run link
+  // (?diwo_workflow=<id>) opens the DIWO page on that workflow; the sign-in
+  // gate below still applies first, and the backend checks access again.
+  const [page, setPage] = useState(() => (
+    new URLSearchParams(window.location.search).has('diwo_workflow')
+      ? 'orchestrate'
+      : localStorage.getItem('rfiq_active_page') || 'overview'
+  ));
   const [repoLoaded,    setRepoLoaded]    = useState(false);
   const [repoMeta,      setRepoMeta]      = useState(null);
   const [repoConfig,    setRepoConfig]    = useState(null);  // threshold, filters, mode from RepositoryInput
