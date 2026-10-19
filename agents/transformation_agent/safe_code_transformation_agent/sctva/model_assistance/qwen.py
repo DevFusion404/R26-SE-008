@@ -27,7 +27,7 @@ from typing import Any, Callable, Dict, Iterable, Optional, Sequence
 from ..contracts import RefactoringAction
 
 
-DEFAULT_CODET5_MODEL_ID = "Qwen/Qwen2.5-Coder-0.5B-Instruct"
+DEFAULT_QWEN_MODEL_ID = "Qwen/Qwen2.5-Coder-0.5B-Instruct"
 MODEL_ASSISTANCE_REVISION = "java_constant_moved_target_v22_20261019"
 
 
@@ -52,11 +52,11 @@ def _java_constant_declaration_pattern(constant_name: str) -> re.Pattern[str]:
 
 
 @dataclass(frozen=True)
-class CodeT5Settings:
-    """Runtime settings for the optional local-model adapter."""
+class QwenSettings:
+    """Runtime settings for the Qwen2.5-Coder local-model adapter."""
 
     enabled: bool = False
-    model_id: str = DEFAULT_CODET5_MODEL_ID
+    model_id: str = DEFAULT_QWEN_MODEL_ID
     device: str = "auto"
     backend: str = "auto"
     openvino_model_path: str = ""
@@ -79,83 +79,86 @@ class CodeT5Settings:
     mode: str = "primary"
     allow_download: bool = False
 
+    def __post_init__(self) -> None:
+        if self.model_id != DEFAULT_QWEN_MODEL_ID:
+            raise ValueError(
+                "SCTVA supports only Qwen/Qwen2.5-Coder-0.5B-Instruct."
+            )
+
     @classmethod
-    def from_execution_options(cls, options: Any) -> "CodeT5Settings":
+    def from_execution_options(cls, options: Any) -> "QwenSettings":
         return cls(
-            enabled=bool(getattr(options, "enable_codet5", False)),
-            model_id=str(
-                getattr(options, "codet5_model_id", DEFAULT_CODET5_MODEL_ID)
-                or DEFAULT_CODET5_MODEL_ID
-            ).strip(),
-            device=str(getattr(options, "codet5_device", "auto") or "auto").strip(),
+            enabled=bool(getattr(options, "enable_qwen", False)),
+            model_id=DEFAULT_QWEN_MODEL_ID,
+            device=str(getattr(options, "qwen_device", "auto") or "auto").strip(),
             backend=str(
-                getattr(options, "codet5_backend", "auto") or "auto"
+                getattr(options, "qwen_backend", "auto") or "auto"
             ).strip().lower(),
             openvino_model_path=str(
-                getattr(options, "codet5_openvino_model_path", "") or ""
+                getattr(options, "qwen_openvino_model_path", "") or ""
             ).strip(),
-            max_new_tokens=int(getattr(options, "codet5_max_new_tokens", 256) or 256),
+            max_new_tokens=int(getattr(options, "qwen_max_new_tokens", 256) or 256),
             max_bundle_output_tokens=max(
                 64,
                 int(
-                    getattr(options, "codet5_max_bundle_output_tokens", 192)
+                    getattr(options, "qwen_max_bundle_output_tokens", 192)
                     or 192
                 ),
             ),
-            max_input_tokens=int(getattr(options, "codet5_max_input_tokens", 512) or 512),
-            cpu_threads=int(getattr(options, "codet5_cpu_threads", 6) or 6),
+            max_input_tokens=int(getattr(options, "qwen_max_input_tokens", 512) or 512),
+            cpu_threads=int(getattr(options, "qwen_cpu_threads", 6) or 6),
             max_actions_per_request=int(
-                getattr(options, "codet5_max_actions_per_request", 100)
+                getattr(options, "qwen_max_actions_per_request", 100)
             ),
             max_actions_per_file=int(
-                getattr(options, "codet5_max_actions_per_file", 100)
+                getattr(options, "qwen_max_actions_per_file", 100)
             ),
             enable_file_bundling=bool(
-                getattr(options, "codet5_enable_file_bundling", False)
+                getattr(options, "qwen_enable_file_bundling", False)
             ),
             enable_generic_bundling=bool(
-                getattr(options, "codet5_enable_generic_bundling", False)
+                getattr(options, "qwen_enable_generic_bundling", False)
             ),
             max_actions_per_bundle=max(
                 2,
-                int(getattr(options, "codet5_max_actions_per_bundle", 5) or 5),
+                int(getattr(options, "qwen_max_actions_per_bundle", 5) or 5),
             ),
             max_generic_actions_per_bundle=max(
                 2,
                 int(
                     getattr(
                         options,
-                        "codet5_max_generic_actions_per_bundle",
+                        "qwen_max_generic_actions_per_bundle",
                         2,
                     )
                     or 2
                 ),
             ),
             generation_timeout_seconds=int(
-                getattr(options, "codet5_generation_timeout_seconds", 30) or 30
+                getattr(options, "qwen_generation_timeout_seconds", 30) or 30
             ),
             max_generation_seconds_per_request=max(
                 0,
                 int(
                     getattr(
                         options,
-                        "codet5_max_generation_seconds_per_request",
+                        "qwen_max_generation_seconds_per_request",
                         0,
                     )
                     or 0
                 ),
             ),
-            runtime_cache=bool(getattr(options, "codet5_runtime_cache", True)),
+            runtime_cache=bool(getattr(options, "qwen_runtime_cache", True)),
             allow_unsupported_actions=bool(
-                getattr(options, "codet5_allow_unsupported_actions", False)
+                getattr(options, "qwen_allow_unsupported_actions", False)
             ),
-            mode=str(getattr(options, "codet5_mode", "primary") or "primary").strip().lower(),
-            allow_download=bool(getattr(options, "codet5_allow_download", False)),
+            mode=str(getattr(options, "qwen_mode", "primary") or "primary").strip().lower(),
+            allow_download=bool(getattr(options, "qwen_allow_download", False)),
         )
 
 
 @dataclass(frozen=True)
-class CodeT5Candidate:
+class QwenCandidate:
     """A candidate result, never an acceptance decision."""
 
     source_code: str = ""
@@ -166,7 +169,7 @@ class CodeT5Candidate:
 
 
 @dataclass(frozen=True)
-class CodeT5TargetContext:
+class QwenTargetContext:
     """An exact, replaceable source range selected from the current snapshot."""
 
     start: int
@@ -437,7 +440,7 @@ def _imports_context(language: str, source: str) -> str:
     return ""
 
 
-def _python_context(source: str, action: RefactoringAction) -> CodeT5TargetContext | None:
+def _python_context(source: str, action: RefactoringAction) -> QwenTargetContext | None:
     try:
         tree = ast.parse(source)
     except SyntaxError:
@@ -577,7 +580,7 @@ def _python_context(source: str, action: RefactoringAction) -> CodeT5TargetConte
     end_line = max(end_lines)
     start = offsets[start_line - 1]
     end = offsets[end_line] if end_line < len(offsets) else len(source)
-    return CodeT5TargetContext(
+    return QwenTargetContext(
         start=start, end=end, source=source[start:end], kind=selected["kind"],
         name=selected["qualified"], start_line=start_line, end_line=end_line,
         surrounding_context=_imports_context("python", source),
@@ -585,7 +588,7 @@ def _python_context(source: str, action: RefactoringAction) -> CodeT5TargetConte
     )
 
 
-def _c_context(source: str, action: RefactoringAction) -> CodeT5TargetContext | None:
+def _c_context(source: str, action: RefactoringAction) -> QwenTargetContext | None:
     from ..transformers.c_extract_class import _mask_c_like, _matching, _parse_c_module
 
     parameters = dict(action.parameters or {})
@@ -657,7 +660,7 @@ def _c_context(source: str, action: RefactoringAction) -> CodeT5TargetContext | 
             start = sum(len(line) for line in source_lines[:candidate_line - 1])
             end = start + len(source_lines[candidate_line - 1])
             kind = "preprocessor" if stripped.startswith("#") else "statement"
-            return CodeT5TargetContext(
+            return QwenTargetContext(
                 start=start,
                 end=end,
                 source=source[start:end],
@@ -702,7 +705,7 @@ def _c_context(source: str, action: RefactoringAction) -> CodeT5TargetContext | 
         function = matches[0]
         start = _line_start(source, function.start)
         end = _line_end(source, function.end)
-        return CodeT5TargetContext(
+        return QwenTargetContext(
             start=start, end=end, source=source[start:end], kind="function", name=function.name,
             start_line=_line_number(source, start), end_line=_line_number(source, max(start, end - 1)),
             surrounding_context=_imports_context("c", source),
@@ -845,7 +848,7 @@ def _c_context(source: str, action: RefactoringAction) -> CodeT5TargetContext | 
     if len(candidates) != 1:
         return None
     selected = candidates[0]
-    return CodeT5TargetContext(
+    return QwenTargetContext(
         start=selected["start"],
         end=selected["end"],
         source=source[selected["start"]:selected["end"]],
@@ -858,7 +861,7 @@ def _c_context(source: str, action: RefactoringAction) -> CodeT5TargetContext | 
     )
 
 
-def _java_context(source: str, action: RefactoringAction) -> CodeT5TargetContext | None:
+def _java_context(source: str, action: RefactoringAction) -> QwenTargetContext | None:
     from ..transformers.java_extract_class import _parse_java_class
 
     parameters = dict(action.parameters or {})
@@ -1152,7 +1155,7 @@ def _java_context(source: str, action: RefactoringAction) -> CodeT5TargetContext
             return None
     start = _line_start(source, selected_start)
     end = _line_end(source, selected_end)
-    return CodeT5TargetContext(
+    return QwenTargetContext(
         start=start, end=end, source=source[start:end], kind=kind, name=name,
         start_line=_line_number(source, start), end_line=_line_number(source, max(start, end - 1)),
         surrounding_context=_imports_context("java", source),
@@ -1160,7 +1163,7 @@ def _java_context(source: str, action: RefactoringAction) -> CodeT5TargetContext
     )
 
 
-class CodeT5CandidateTransformer:
+class QwenCandidateTransformer:
     """Generate deterministic source-to-source candidates with a local model.
 
     ``generator`` exists for isolated tests and for an eventual fine-tuned
@@ -1170,7 +1173,7 @@ class CodeT5CandidateTransformer:
 
     def __init__(
         self,
-        settings: CodeT5Settings,
+        settings: QwenSettings,
         *,
         generator: Optional[Callable[[str], str]] = None,
     ) -> None:
@@ -1181,7 +1184,6 @@ class CodeT5CandidateTransformer:
         self._torch: Any = None
         self._resolved_device = ""
         self._resolved_backend = "injected" if generator is not None else ""
-        self._is_encoder_decoder = True
         self._effective_max_input_tokens = settings.max_input_tokens
         self._effective_cpu_threads = settings.cpu_threads
         self._runtime_cache_hit = False
@@ -1195,11 +1197,11 @@ class CodeT5CandidateTransformer:
 
     @property
     def provider(self) -> str:
-        return "qwen_coder" if "qwen" in self.settings.model_id.lower() else "codet5_plus"
+        return "qwen_coder"
 
     @property
     def display_name(self) -> str:
-        return "Qwen2.5-Coder" if self.provider == "qwen_coder" else "CodeT5+"
+        return "Qwen2.5-Coder"
 
     @property
     def grouped_generation_enabled(self) -> bool:
@@ -1225,15 +1227,15 @@ class CodeT5CandidateTransformer:
         with self._lock:
             file_attempts = self._file_attempt_counts.get(file_key, 0)
             if self._attempt_count >= self.settings.max_actions_per_request:
-                reason = "CODET5_REQUEST_ACTION_BUDGET_EXHAUSTED"
+                reason = "QWEN_REQUEST_ACTION_BUDGET_EXHAUSTED"
             elif file_attempts >= self.settings.max_actions_per_file:
-                reason = "CODET5_FILE_ACTION_BUDGET_EXHAUSTED"
+                reason = "QWEN_FILE_ACTION_BUDGET_EXHAUSTED"
             elif (
                 self.settings.max_generation_seconds_per_request > 0
                 and self._generation_seconds_used
                 >= self.settings.max_generation_seconds_per_request
             ):
-                reason = "CODET5_REQUEST_TIME_BUDGET_EXHAUSTED"
+                reason = "QWEN_REQUEST_TIME_BUDGET_EXHAUSTED"
             else:
                 reason = ""
             return {
@@ -1292,7 +1294,7 @@ class CodeT5CandidateTransformer:
         self,
         language: str,
         action: RefactoringAction,
-        context: CodeT5TargetContext | None,
+        context: QwenTargetContext | None,
     ) -> tuple[int, int]:
         max_new_tokens = self.settings.max_new_tokens
         timeout_seconds = self.settings.generation_timeout_seconds
@@ -1318,8 +1320,8 @@ class CodeT5CandidateTransformer:
         return max_new_tokens, timeout_seconds
 
     @classmethod
-    def from_execution_options(cls, options: Any) -> "CodeT5CandidateTransformer | None":
-        settings = CodeT5Settings.from_execution_options(options)
+    def from_execution_options(cls, options: Any) -> "QwenCandidateTransformer | None":
+        settings = QwenSettings.from_execution_options(options)
         return cls(settings) if settings.enabled else None
 
     def prepare_action(
@@ -1560,7 +1562,7 @@ class CodeT5CandidateTransformer:
         language: str,
         source_code: str,
         action: RefactoringAction,
-    ) -> CodeT5TargetContext | None:
+    ) -> QwenTargetContext | None:
         """Resolve a replaceable target from the current transformed source."""
 
         normalized_language = str(language or "").strip().lower()
@@ -1578,7 +1580,7 @@ class CodeT5CandidateTransformer:
         language: str,
         action: RefactoringAction,
         current_file_name: str,
-        context: CodeT5TargetContext,
+        context: QwenTargetContext,
         include_surrounding_context: bool = True,
         validation_feedback: str = "",
         previous_candidate: str = "",
@@ -1896,7 +1898,7 @@ class CodeT5CandidateTransformer:
     @staticmethod
     def _merge_target_output(
         source_code: str,
-        context: CodeT5TargetContext,
+        context: QwenTargetContext,
         output: str,
     ) -> str:
         replacement = output
@@ -1929,7 +1931,7 @@ class CodeT5CandidateTransformer:
         *,
         language: str,
         output: str,
-        context: CodeT5TargetContext | None,
+        context: QwenTargetContext | None,
         action: RefactoringAction,
     ) -> tuple[str, Dict[str, Any]]:
         """Align a model-invented constant alias with the exact RDP contract.
@@ -2117,7 +2119,7 @@ class CodeT5CandidateTransformer:
         *,
         language: str,
         output: str,
-        context: CodeT5TargetContext | None,
+        context: QwenTargetContext | None,
         action: RefactoringAction,
     ) -> tuple[str, Dict[str, Any]]:
         """Complete a declaration-only Java constant candidate safely.
@@ -2294,7 +2296,7 @@ class CodeT5CandidateTransformer:
         *,
         language: str,
         output: str,
-        context: CodeT5TargetContext | None,
+        context: QwenTargetContext | None,
         action: RefactoringAction,
     ) -> tuple[str, Dict[str, Any]]:
         """Project a complete Java response back to its proven target span.
@@ -2398,7 +2400,7 @@ class CodeT5CandidateTransformer:
         *,
         language: str,
         output: str,
-        context: CodeT5TargetContext | None,
+        context: QwenTargetContext | None,
         action: RefactoringAction,
     ) -> tuple[str, Dict[str, Any]]:
         """Complete a macro-only C constant candidate without free-form edits."""
@@ -2476,14 +2478,12 @@ class CodeT5CandidateTransformer:
         try:
             import torch
             from transformers import (
-                AutoConfig,
                 AutoModelForCausalLM,
-                AutoModelForSeq2SeqLM,
                 AutoTokenizer,
             )
         except ImportError as exc:
             raise RuntimeError(
-                "CODET5_DEPENDENCIES_NOT_INSTALLED: install requirements-codet5.txt"
+                "QWEN_DEPENDENCIES_NOT_INSTALLED: install requirements-qwen.txt"
             ) from exc
 
         requested = self.settings.device.lower()
@@ -2492,13 +2492,13 @@ class CodeT5CandidateTransformer:
         elif requested in {"cpu", "cuda"}:
             device = requested
         else:
-            raise RuntimeError("CODET5_INVALID_DEVICE")
+            raise RuntimeError("QWEN_INVALID_DEVICE")
         if device == "cuda" and not torch.cuda.is_available():
-            raise RuntimeError("CODET5_CUDA_UNAVAILABLE")
+            raise RuntimeError("QWEN_CUDA_UNAVAILABLE")
 
         requested_backend = self.settings.backend.strip().lower()
         if requested_backend not in {"auto", "pytorch", "openvino"}:
-            raise RuntimeError("CODET5_INVALID_BACKEND")
+            raise RuntimeError("QWEN_INVALID_BACKEND")
         openvino_path = Path(self.settings.openvino_model_path).expanduser() if (
             self.settings.openvino_model_path
         ) else None
@@ -2511,11 +2511,11 @@ class CodeT5CandidateTransformer:
         else:
             backend = requested_backend
         if backend == "openvino" and device != "cpu":
-            raise RuntimeError("CODET5_OPENVINO_REQUIRES_CPU_DEVICE")
+            raise RuntimeError("QWEN_OPENVINO_REQUIRES_CPU_DEVICE")
         if backend == "openvino" and (
             openvino_path is None or not openvino_path.exists()
         ):
-            raise RuntimeError("CODET5_OPENVINO_MODEL_PATH_NOT_FOUND")
+            raise RuntimeError("QWEN_OPENVINO_MODEL_PATH_NOT_FOUND")
 
         effective_cpu_threads = min(
             self.settings.cpu_threads,
@@ -2543,7 +2543,6 @@ class CodeT5CandidateTransformer:
                 self._torch = cached["torch"]
                 self._resolved_device = cached["device"]
                 self._resolved_backend = cached["backend"]
-                self._is_encoder_decoder = cached["is_encoder_decoder"]
                 self._effective_max_input_tokens = cached["max_input_tokens"]
                 self._runtime_inference_lock = cached["inference_lock"]
                 self._runtime_cache_hit = True
@@ -2577,10 +2576,6 @@ class CodeT5CandidateTransformer:
                 repo_id=self.settings.model_id,
                 local_files_only=True,
             )
-        config = AutoConfig.from_pretrained(
-            model_source,
-            local_files_only=local_files_only,
-        )
         tokenizer_options: Dict[str, Any] = {
             "local_files_only": local_files_only,
         }
@@ -2590,28 +2585,15 @@ class CodeT5CandidateTransformer:
             model_source,
             **tokenizer_options,
         )
-        self._is_encoder_decoder = bool(
-            getattr(config, "is_encoder_decoder", False)
-        )
-        model_class = (
-            AutoModelForSeq2SeqLM
-            if self._is_encoder_decoder
-            else AutoModelForCausalLM
-        )
         if backend == "openvino":
             try:
-                from optimum.intel import OVModelForCausalLM, OVModelForSeq2SeqLM
+                from optimum.intel import OVModelForCausalLM
             except ImportError as exc:
                 raise RuntimeError(
-                    "CODET5_OPENVINO_DEPENDENCIES_NOT_INSTALLED: "
+                    "QWEN_OPENVINO_DEPENDENCIES_NOT_INSTALLED: "
                     "install requirements-openvino.txt"
                 ) from exc
-            openvino_model_class = (
-                OVModelForSeq2SeqLM
-                if self._is_encoder_decoder
-                else OVModelForCausalLM
-            )
-            self._model = openvino_model_class.from_pretrained(
+            self._model = OVModelForCausalLM.from_pretrained(
                 model_source,
                 # Optimum Intel 1.x treats every model_id as a Hub repo during
                 # its local_files_only pre-check. On Windows that turns an
@@ -2629,7 +2611,7 @@ class CodeT5CandidateTransformer:
                 },
             )
         else:
-            self._model = model_class.from_pretrained(
+            self._model = AutoModelForCausalLM.from_pretrained(
                 model_source,
                 local_files_only=local_files_only,
                 torch_dtype="auto",
@@ -2663,7 +2645,6 @@ class CodeT5CandidateTransformer:
                 "torch": self._torch,
                 "device": self._resolved_device,
                 "backend": self._resolved_backend,
-                "is_encoder_decoder": self._is_encoder_decoder,
                 "max_input_tokens": self._effective_max_input_tokens,
                 "inference_lock": self._runtime_inference_lock,
             }
@@ -2675,7 +2656,6 @@ class CodeT5CandidateTransformer:
                 self._torch = existing["torch"]
                 self._resolved_device = existing["device"]
                 self._resolved_backend = existing["backend"]
-                self._is_encoder_decoder = existing["is_encoder_decoder"]
                 self._effective_max_input_tokens = existing["max_input_tokens"]
                 self._runtime_inference_lock = existing["inference_lock"]
                 self._runtime_cache_hit = True
@@ -2792,7 +2772,7 @@ class CodeT5CandidateTransformer:
     @staticmethod
     def _target_output_shape_issue(
         language: str,
-        context: CodeT5TargetContext | None,
+        context: QwenTargetContext | None,
         output: str,
     ) -> str:
         """Reject complete-file output before it can be merged into one span."""
@@ -2809,12 +2789,12 @@ class CodeT5CandidateTransformer:
                 r"(?:public\s+)?(?:class|interface|enum|record)\s+)",
                 output,
             ):
-                return "CODET5_OUTPUT_MUST_BE_TARGET_REPLACEMENT"
+                return "QWEN_OUTPUT_MUST_BE_TARGET_REPLACEMENT"
         return ""
 
     @staticmethod
     def _target_merge_output(
-        context: CodeT5TargetContext | None,
+        context: QwenTargetContext | None,
         output: str,
         action: RefactoringAction,
     ) -> str:
@@ -2838,7 +2818,7 @@ class CodeT5CandidateTransformer:
         return declaration_pattern.sub("", output, count=1).lstrip("\r\n")
 
     def _model_prompt(self, prompt: str) -> str:
-        if self._is_encoder_decoder or not hasattr(self._tokenizer, "apply_chat_template"):
+        if not hasattr(self._tokenizer, "apply_chat_template"):
             return prompt
         return self._tokenizer.apply_chat_template(
             [
@@ -3114,7 +3094,7 @@ class CodeT5CandidateTransformer:
             for _index, action in actions
         ]
         if any(context is None for context in contexts):
-            return "CODET5_BUNDLE_TARGET_NOT_RESOLVED"
+            return "QWEN_BUNDLE_TARGET_NOT_RESOLVED"
         spans = [
             (context.start, context.end)
             for context in contexts
@@ -3139,7 +3119,7 @@ class CodeT5CandidateTransformer:
                     for start, end in spans
                 )
             if not allowed:
-                return "CODET5_BUNDLE_CHANGE_OUTSIDE_RESOLVED_TARGETS"
+                return "QWEN_BUNDLE_CHANGE_OUTSIDE_RESOLVED_TARGETS"
         return ""
 
     def partition_bundle_actions(
@@ -3168,7 +3148,7 @@ class CodeT5CandidateTransformer:
             if not bundle_kind:
                 return False
             specs: list[Dict[str, Any]] = []
-            contexts: list[CodeT5TargetContext] = []
+            contexts: list[QwenTargetContext] = []
             names: set[str] = set()
             for action_index, action in candidate_actions:
                 spec = (
@@ -3196,7 +3176,7 @@ class CodeT5CandidateTransformer:
 
             start = min(context.start for context in contexts)
             end = max(context.end for context in contexts)
-            combined_context = CodeT5TargetContext(
+            combined_context = QwenTargetContext(
                 start=start,
                 end=end,
                 source=source_code[start:end],
@@ -3290,7 +3270,7 @@ class CodeT5CandidateTransformer:
         *,
         language: str,
         current_file_name: str,
-        context: CodeT5TargetContext,
+        context: QwenTargetContext,
         action_specs: Sequence[Dict[str, Any]],
         bundle_kind: str = "constant_bundle",
         validation_feedback: str = "",
@@ -3361,7 +3341,7 @@ class CodeT5CandidateTransformer:
         current_file_name: str,
         validation_feedback: str = "",
         previous_candidate: str = "",
-    ) -> CodeT5Candidate:
+    ) -> QwenCandidate:
         """Generate one candidate for a bounded compatible action bundle.
 
         Constant bundles use their reversible declaration contract. Other
@@ -3370,20 +3350,20 @@ class CodeT5CandidateTransformer:
         """
 
         if not self.settings.enabled or not self.settings.enable_file_bundling:
-            return CodeT5Candidate(reason="CODET5_FILE_BUNDLING_DISABLED")
+            return QwenCandidate(reason="QWEN_FILE_BUNDLING_DISABLED")
         normalized_language = str(language or "").strip().lower()
         if normalized_language not in {"python", "java", "c"}:
-            return CodeT5Candidate(reason="CODET5_BUNDLE_LANGUAGE_UNSUPPORTED")
+            return QwenCandidate(reason="QWEN_BUNDLE_LANGUAGE_UNSUPPORTED")
         bundle_kind = self.bundle_kind(actions)
         if not bundle_kind:
-            return CodeT5Candidate(reason="CODET5_BUNDLE_CONTRACT_UNSUPPORTED")
+            return QwenCandidate(reason="QWEN_BUNDLE_CONTRACT_UNSUPPORTED")
         bundle_limit = (
             self.settings.max_actions_per_bundle
             if bundle_kind == "constant_bundle"
             else self.settings.max_generic_actions_per_bundle
         )
         if not 2 <= len(actions) <= bundle_limit:
-            return CodeT5Candidate(reason="CODET5_BUNDLE_SIZE_UNSUPPORTED")
+            return QwenCandidate(reason="QWEN_BUNDLE_SIZE_UNSUPPORTED")
 
         with self._lock:
             file_key = str(current_file_name or "<unknown>").replace("\\", "/").lower()
@@ -3398,14 +3378,14 @@ class CodeT5CandidateTransformer:
                 )
             ):
                 budget_reason = (
-                    "CODET5_REQUEST_ACTION_BUDGET_EXHAUSTED"
+                    "QWEN_REQUEST_ACTION_BUDGET_EXHAUSTED"
                     if self._attempt_count >= self.settings.max_actions_per_request
-                    else "CODET5_FILE_ACTION_BUDGET_EXHAUSTED"
+                    else "QWEN_FILE_ACTION_BUDGET_EXHAUSTED"
                     if file_attempt_count >= self.settings.max_actions_per_file
-                    else "CODET5_REQUEST_TIME_BUDGET_EXHAUSTED"
+                    else "QWEN_REQUEST_TIME_BUDGET_EXHAUSTED"
                 )
-                return CodeT5Candidate(
-                    reason="CODET5_ACTION_BUDGET_EXHAUSTED",
+                return QwenCandidate(
+                    reason="QWEN_ACTION_BUDGET_EXHAUSTED",
                     metadata={
                         "available": False,
                         "reason": budget_reason,
@@ -3424,7 +3404,7 @@ class CodeT5CandidateTransformer:
                 )
 
             specs: list[Dict[str, Any]] = []
-            contexts: list[CodeT5TargetContext] = []
+            contexts: list[QwenTargetContext] = []
             names: set[str] = set()
             for action_index, action in actions:
                 spec = (
@@ -3442,17 +3422,17 @@ class CodeT5CandidateTransformer:
                     action=action,
                 )
                 if spec is None or context is None:
-                    return CodeT5Candidate(reason="CODET5_BUNDLE_TARGET_NOT_RESOLVED")
+                    return QwenCandidate(reason="QWEN_BUNDLE_TARGET_NOT_RESOLVED")
                 if bundle_kind == "constant_bundle":
                     if spec["constant_name"] in names:
-                        return CodeT5Candidate(reason="CODET5_BUNDLE_DUPLICATE_CONSTANT_NAME")
+                        return QwenCandidate(reason="QWEN_BUNDLE_DUPLICATE_CONSTANT_NAME")
                     names.add(spec["constant_name"])
                 specs.append(spec)
                 contexts.append(context)
 
             start = min(context.start for context in contexts)
             end = max(context.end for context in contexts)
-            combined_context = CodeT5TargetContext(
+            combined_context = QwenTargetContext(
                 start=start,
                 end=end,
                 source=source_code[start:end],
@@ -3498,8 +3478,8 @@ class CodeT5CandidateTransformer:
                     encoded, input_tokens = self._encode_prompt(prompt)
                     repair_prompt_compacted = True
                 if input_tokens > self._effective_max_input_tokens:
-                    return CodeT5Candidate(
-                        reason="CODET5_BUNDLE_CONTEXT_TOO_LARGE",
+                    return QwenCandidate(
+                        reason="QWEN_BUNDLE_CONTEXT_TOO_LARGE",
                         metadata={
                             "input_tokens": input_tokens,
                             "model_max_input_tokens": self._effective_max_input_tokens,
@@ -3517,8 +3497,8 @@ class CodeT5CandidateTransformer:
                     self.settings.max_bundle_output_tokens,
                 )
                 if estimated_output_tokens > bundle_output_limit:
-                    return CodeT5Candidate(
-                        reason="CODET5_BUNDLE_OUTPUT_TOO_LARGE",
+                    return QwenCandidate(
+                        reason="QWEN_BUNDLE_OUTPUT_TOO_LARGE",
                         metadata={
                             "estimated_output_tokens": estimated_output_tokens,
                             "max_new_tokens": bundle_output_limit,
@@ -3563,8 +3543,7 @@ class CodeT5CandidateTransformer:
                                 top_k=None,
                             )
                     output_tokens = generated[0]
-                    if not self._is_encoder_decoder:
-                        output_tokens = output_tokens[encoded["input_ids"].shape[-1]:]
+                    output_tokens = output_tokens[encoded["input_ids"].shape[-1]:]
                     output = self._tokenizer.decode(
                         output_tokens,
                         skip_special_tokens=True,
@@ -3596,7 +3575,7 @@ class CodeT5CandidateTransformer:
                         model_output,
                     )
                 ):
-                    output_shape_issue = "CODET5_BUNDLE_OUTPUT_MUST_BE_TARGET_REPLACEMENT"
+                    output_shape_issue = "QWEN_BUNDLE_OUTPUT_MUST_BE_TARGET_REPLACEMENT"
                 candidate = (
                     complete_source_output
                     or self._merge_target_output(
@@ -3659,12 +3638,12 @@ class CodeT5CandidateTransformer:
                     metadata["target_output_repair"] = suffix_repair
                 reason = ""
                 if not model_output:
-                    reason = "CODET5_EMPTY_OUTPUT"
+                    reason = "QWEN_EMPTY_OUTPUT"
                 elif output_shape_issue:
                     reason = output_shape_issue
                 elif candidate == source_code:
-                    reason = "CODET5_NO_SOURCE_CHANGE"
-                return CodeT5Candidate(
+                    reason = "QWEN_NO_SOURCE_CHANGE"
+                return QwenCandidate(
                     source_code="" if reason else candidate,
                     status="skipped" if reason else "candidate_generated",
                     reason=reason,
@@ -3672,8 +3651,8 @@ class CodeT5CandidateTransformer:
                     target_replacement=model_output,
                 )
             except Exception as exc:
-                return CodeT5Candidate(
-                    reason=f"CODET5_BUNDLE_RUNTIME_ERROR: {exc}",
+                return QwenCandidate(
+                    reason=f"QWEN_BUNDLE_RUNTIME_ERROR: {exc}",
                     metadata={
                         "provider": self.provider,
                         "model_id": self.settings.model_id,
@@ -3689,7 +3668,7 @@ class CodeT5CandidateTransformer:
         source_code: str,
         actions: Sequence[tuple[int, RefactoringAction]],
         current_file_name: str,
-    ) -> Dict[int, CodeT5Candidate]:
+    ) -> Dict[int, QwenCandidate]:
         """Generate independent candidates in one tensor-batched inference call.
 
         Batching deliberately keeps the existing one-action prompt and output
@@ -3781,8 +3760,7 @@ class CodeT5CandidateTransformer:
                     if getattr(tokenizer, "pad_token_id", None) is None:
                         tokenizer.pad_token = tokenizer.eos_token
                     original_padding_side = getattr(tokenizer, "padding_side", "right")
-                    if not self._is_encoder_decoder:
-                        tokenizer.padding_side = "left"
+                    tokenizer.padding_side = "left"
                     outputs: list[str | None] = [None] * len(prepared)
                     uncached = list(enumerate(prepared))
                     # Bound resident KV-cache/matrix memory on CPU while still
@@ -3851,8 +3829,7 @@ class CodeT5CandidateTransformer:
                                 chunk,
                                 generated,
                             ):
-                                if not self._is_encoder_decoder:
-                                    output_tokens = output_tokens[prompt_width:]
+                                output_tokens = output_tokens[prompt_width:]
                                 decoded = self._tokenizer.decode(
                                     output_tokens,
                                     skip_special_tokens=True,
@@ -3864,7 +3841,7 @@ class CodeT5CandidateTransformer:
                 if len(outputs) != len(prepared) or any(
                     output is None for output in outputs
                 ):
-                    raise RuntimeError("CODET5_BATCH_OUTPUT_COUNT_MISMATCH")
+                    raise RuntimeError("QWEN_BATCH_OUTPUT_COUNT_MISMATCH")
 
                 generation_elapsed = (
                     max(0.0, time.monotonic() - generation_started)
@@ -3876,7 +3853,7 @@ class CodeT5CandidateTransformer:
                     self._file_generation_seconds.get(file_key, 0.0)
                     + generation_elapsed
                 )
-                candidates: Dict[int, CodeT5Candidate] = {}
+                candidates: Dict[int, QwenCandidate] = {}
                 per_generated_action_elapsed = generation_elapsed / max(
                     1,
                     generated_item_count,
@@ -3982,14 +3959,14 @@ class CodeT5CandidateTransformer:
                         metadata["target_output_repair"] = suffix_repair
                     reason = ""
                     if not model_output:
-                        reason = "CODET5_EMPTY_OUTPUT"
+                        reason = "QWEN_EMPTY_OUTPUT"
                     elif output_shape_issue:
                         reason = output_shape_issue
                     elif candidate_source == source_code:
-                        reason = "CODET5_NO_SOURCE_CHANGE"
+                        reason = "QWEN_NO_SOURCE_CHANGE"
                     elif model_output.startswith(("diff --git", "--- ", "+++ ")):
-                        reason = "CODET5_OUTPUT_MUST_BE_TARGET_REPLACEMENT"
-                    candidates[item["action_index"]] = CodeT5Candidate(
+                        reason = "QWEN_OUTPUT_MUST_BE_TARGET_REPLACEMENT"
+                    candidates[item["action_index"]] = QwenCandidate(
                         source_code="" if reason else candidate_source,
                         status="skipped" if reason else "candidate_generated",
                         reason=reason,
@@ -4011,8 +3988,8 @@ class CodeT5CandidateTransformer:
         language: str,
         current_source_code: str,
         action: RefactoringAction,
-        candidate: CodeT5Candidate,
-    ) -> CodeT5Candidate:
+        candidate: QwenCandidate,
+    ) -> QwenCandidate:
         """Reapply a prefetched target replacement to the latest file snapshot."""
 
         metadata = dict(candidate.metadata or {})
@@ -4025,8 +4002,8 @@ class CodeT5CandidateTransformer:
             action=action,
         )
         if context is None:
-            return CodeT5Candidate(
-                reason="CODET5_BATCH_TARGET_REBASE_FAILED",
+            return QwenCandidate(
+                reason="QWEN_BATCH_TARGET_REBASE_FAILED",
                 metadata=metadata,
             )
         metadata["batch_rebased"] = True
@@ -4051,11 +4028,11 @@ class CodeT5CandidateTransformer:
         current_file_name: str,
         validation_feedback: str = "",
         previous_candidate: str = "",
-    ) -> CodeT5Candidate:
+    ) -> QwenCandidate:
         """Return one candidate or a traceable non-acceptance reason."""
 
         if not self.settings.enabled:
-            return CodeT5Candidate(reason="CODET5_DISABLED")
+            return QwenCandidate(reason="QWEN_DISABLED")
 
         with self._lock:
             file_key = str(current_file_name or "<unknown>").replace("\\", "/").lower()
@@ -4070,14 +4047,14 @@ class CodeT5CandidateTransformer:
                 )
             ):
                 budget_reason = (
-                    "CODET5_REQUEST_ACTION_BUDGET_EXHAUSTED"
+                    "QWEN_REQUEST_ACTION_BUDGET_EXHAUSTED"
                     if self._attempt_count >= self.settings.max_actions_per_request
-                    else "CODET5_FILE_ACTION_BUDGET_EXHAUSTED"
+                    else "QWEN_FILE_ACTION_BUDGET_EXHAUSTED"
                     if file_attempt_count >= self.settings.max_actions_per_file
-                    else "CODET5_REQUEST_TIME_BUDGET_EXHAUSTED"
+                    else "QWEN_REQUEST_TIME_BUDGET_EXHAUSTED"
                 )
-                return CodeT5Candidate(
-                    reason="CODET5_ACTION_BUDGET_EXHAUSTED",
+                return QwenCandidate(
+                    reason="QWEN_ACTION_BUDGET_EXHAUSTED",
                     metadata={
                         "provider": self.provider,
                         "model_id": self.settings.model_id,
@@ -4106,7 +4083,7 @@ class CodeT5CandidateTransformer:
                     current_file_name=current_file_name,
                 )
                 encoded, input_tokens = self._encode_prompt(prompt)
-                context: CodeT5TargetContext | None = None
+                context: QwenTargetContext | None = None
                 context_mode = "full_file"
                 full_file_input_tokens = input_tokens
                 resolved_context = self.resolve_target_context(
@@ -4122,8 +4099,8 @@ class CodeT5CandidateTransformer:
                     resolved_context is None
                     and action.action_type != "noop"
                 ):
-                    return CodeT5Candidate(
-                        reason="CODET5_TARGET_CONTEXT_NOT_RESOLVED",
+                    return QwenCandidate(
+                        reason="QWEN_TARGET_CONTEXT_NOT_RESOLVED",
                         metadata={
                             "input_tokens": input_tokens,
                             "configured_max_input_tokens": self.settings.max_input_tokens,
@@ -4135,8 +4112,8 @@ class CodeT5CandidateTransformer:
                 if use_target_context:
                     context = resolved_context
                     if context is None:
-                        return CodeT5Candidate(
-                            reason="CODET5_TARGET_CONTEXT_NOT_RESOLVED",
+                        return QwenCandidate(
+                            reason="QWEN_TARGET_CONTEXT_NOT_RESOLVED",
                             metadata={
                                 "input_tokens": input_tokens,
                                 "configured_max_input_tokens": self.settings.max_input_tokens,
@@ -4165,8 +4142,8 @@ class CodeT5CandidateTransformer:
                         )
                         encoded, input_tokens = self._encode_prompt(prompt)
                     if input_tokens > self._effective_max_input_tokens:
-                        return CodeT5Candidate(
-                            reason="CODET5_TARGET_CONTEXT_TOO_LARGE",
+                        return QwenCandidate(
+                            reason="QWEN_TARGET_CONTEXT_TOO_LARGE",
                             metadata={
                                 "input_tokens": input_tokens,
                                 "full_file_input_tokens": full_file_input_tokens,
@@ -4211,8 +4188,7 @@ class CodeT5CandidateTransformer:
                                 top_k=None,
                             )
                     output_tokens = generated[0]
-                    if not self._is_encoder_decoder:
-                        output_tokens = output_tokens[encoded["input_ids"].shape[-1]:]
+                    output_tokens = output_tokens[encoded["input_ids"].shape[-1]:]
                     output = self._tokenizer.decode(
                         output_tokens,
                         skip_special_tokens=True,
@@ -4340,26 +4316,26 @@ class CodeT5CandidateTransformer:
                         "model_output_sha256": hashlib.sha256(model_output.encode("utf-8")).hexdigest() if model_output else "",
                     })
                 if not model_output:
-                    return CodeT5Candidate(reason="CODET5_EMPTY_OUTPUT", metadata=metadata)
+                    return QwenCandidate(reason="QWEN_EMPTY_OUTPUT", metadata=metadata)
                 if output_shape_issue:
-                    return CodeT5Candidate(reason=output_shape_issue, metadata=metadata)
+                    return QwenCandidate(reason=output_shape_issue, metadata=metadata)
                 if candidate == source_code:
-                    return CodeT5Candidate(reason="CODET5_NO_SOURCE_CHANGE", metadata=metadata)
+                    return QwenCandidate(reason="QWEN_NO_SOURCE_CHANGE", metadata=metadata)
                 if model_output.startswith(("diff --git", "--- ", "+++ ")):
                     reason = (
-                        "CODET5_OUTPUT_MUST_BE_TARGET_REPLACEMENT"
+                        "QWEN_OUTPUT_MUST_BE_TARGET_REPLACEMENT"
                         if context is not None
-                        else "CODET5_OUTPUT_MUST_BE_COMPLETE_SOURCE"
+                        else "QWEN_OUTPUT_MUST_BE_COMPLETE_SOURCE"
                     )
-                    return CodeT5Candidate(reason=reason, metadata=metadata)
-                return CodeT5Candidate(
+                    return QwenCandidate(reason=reason, metadata=metadata)
+                return QwenCandidate(
                     source_code=candidate,
                     status="candidate_generated",
                     metadata=metadata,
                 )
             except Exception as exc:  # The model must never crash SCTVA execution.
-                return CodeT5Candidate(
-                    reason=str(exc) or "CODET5_GENERATION_FAILED",
+                return QwenCandidate(
+                    reason=str(exc) or "QWEN_GENERATION_FAILED",
                     metadata={
                         "provider": self.provider,
                         "model_id": self.settings.model_id,

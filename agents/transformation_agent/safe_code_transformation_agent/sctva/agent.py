@@ -46,7 +46,7 @@ from .constants import (
     PARAMETER_OBJECT_ACTION_BY_LANGUAGE,
 )
 from .models import SCTVAResult, TransformationLogEntry, ValidationStepResult
-from .model_assistance import CodeT5CandidateTransformer
+from .model_assistance import QwenCandidateTransformer
 from .reporting.safety_reporter import SafetyReporter
 from .rollback.rollback_manager import RollbackManager
 from .scoring.confidence_scorer import ConfidenceScorer
@@ -110,7 +110,7 @@ class SafeCodeTransformationValidationAgent:
         """Execute validated request contract."""
         # The adapter never alters the RDP plan or bypasses SCTVA validation.
         # Its per-request action budget also bounds CPU inference work.
-        model_assistant = CodeT5CandidateTransformer.from_execution_options(
+        model_assistant = QwenCandidateTransformer.from_execution_options(
             request.execution_options
         )
         file_entries = self._collect_source_files(request)
@@ -527,7 +527,7 @@ class SafeCodeTransformationValidationAgent:
             and str(result.get("hybrid_strategy") or "").strip()
         })
         configured_model_mode = str(
-            getattr(request.execution_options, "codet5_mode", "primary") or "primary"
+            getattr(request.execution_options, "qwen_mode", "primary") or "primary"
         ).strip().lower()
         hybrid_strategy = (
             hybrid_strategies[0]
@@ -1698,7 +1698,7 @@ class SafeCodeTransformationValidationAgent:
         file_entry: SourceFileContract,
         actions: List[RefactoringAction],
         project_files: List[Dict[str, Any]],
-        model_assistant: CodeT5CandidateTransformer | None = None,
+        model_assistant: QwenCandidateTransformer | None = None,
         model_validation_feedback: Dict[int, str] | None = None,
         allow_model_validation_repair: bool = True,
     ) -> Dict[str, Any]:
@@ -5546,7 +5546,7 @@ class SafeCodeTransformationValidationAgent:
     def _annotate_model_first_rule_fallback(
         rule_result: Dict[str, Any],
         *,
-        model_assistant: CodeT5CandidateTransformer,
+        model_assistant: QwenCandidateTransformer,
         failed_model_log: List[TransformationLogEntry],
         failed_steps: List[str],
         failed_validation_details: List[Dict[str, Any]],

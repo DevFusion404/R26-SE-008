@@ -2,21 +2,23 @@ import json
 import re
 from pathlib import Path
 
-import sctva.model_assistance.codet5 as codet5_module
+import pytest
+
+import sctva.model_assistance.qwen as qwen_module
 from sctva.contracts import ExecutionOptions, RefactoringAction, SCTVARequestContract
 from sctva.agent import SafeCodeTransformationValidationAgent
-from sctva.model_assistance.codet5 import (
-    CodeT5CandidateTransformer,
-    CodeT5Settings,
-    CodeT5TargetContext,
+from sctva.model_assistance.qwen import (
+    QwenCandidateTransformer,
+    QwenSettings,
+    QwenTargetContext,
 )
 from sctva.models import TransformationLogEntry
 from sctva.transformers.engine import TransformationEngine, _model_candidate_intent_issue
 
 
-def test_codet5_prompt_keeps_normalized_rdp_target_metadata():
-    assistant = CodeT5CandidateTransformer(
-        CodeT5Settings(enabled=True),
+def test_qwen_prompt_keeps_normalized_rdp_target_metadata():
+    assistant = QwenCandidateTransformer(
+        QwenSettings(enabled=True),
         generator=lambda prompt: prompt,
     )
     action = RefactoringAction(
@@ -45,8 +47,8 @@ def test_codet5_prompt_keeps_normalized_rdp_target_metadata():
 
 
 def test_model_generation_disables_grouping_even_for_legacy_settings():
-    assistant = CodeT5CandidateTransformer(
-        CodeT5Settings(
+    assistant = QwenCandidateTransformer(
+        QwenSettings(
             enabled=True,
             enable_file_bundling=True,
             enable_generic_bundling=True,
@@ -58,11 +60,11 @@ def test_model_generation_disables_grouping_even_for_legacy_settings():
 
 
 def test_target_prompts_include_language_specific_accuracy_contracts():
-    assistant = CodeT5CandidateTransformer(
-        CodeT5Settings(enabled=True),
+    assistant = QwenCandidateTransformer(
+        QwenSettings(enabled=True),
         generator=lambda prompt: prompt,
     )
-    context = CodeT5TargetContext(
+    context = QwenTargetContext(
         start=0,
         end=12,
         source="target body\n",
@@ -96,8 +98,8 @@ def test_target_prompts_include_language_specific_accuracy_contracts():
 
 
 def test_java_model_only_refactorings_resolve_targets_and_keep_semantic_parameters():
-    assistant = CodeT5CandidateTransformer(
-        CodeT5Settings(enabled=True),
+    assistant = QwenCandidateTransformer(
+        QwenSettings(enabled=True),
         generator=lambda prompt: prompt,
     )
     source = (
@@ -145,8 +147,8 @@ def test_java_model_only_refactorings_resolve_targets_and_keep_semantic_paramete
 
 
 def test_java_class_target_prompt_requests_complete_class_replacement():
-    assistant = CodeT5CandidateTransformer(
-        CodeT5Settings(enabled=True),
+    assistant = QwenCandidateTransformer(
+        QwenSettings(enabled=True),
         generator=lambda prompt: prompt,
     )
     action = RefactoringAction(
@@ -264,11 +266,11 @@ def test_model_action_checkpoint_accepts_valid_constants_in_all_languages():
         ]
 
 
-def test_codet5_primary_candidate_is_recorded_without_loading_transformers():
+def test_qwen_primary_candidate_is_recorded_without_loading_transformers():
     original = "int value(void) { return 1; }\n"
     candidate = "int value(void) { int base = 1; return base; }\n"
-    assistant = CodeT5CandidateTransformer(
-        CodeT5Settings(enabled=True, allow_unsupported_actions=True),
+    assistant = QwenCandidateTransformer(
+        QwenSettings(enabled=True, allow_unsupported_actions=True),
         generator=lambda _prompt: candidate,
     )
     action = RefactoringAction(
@@ -295,10 +297,10 @@ def test_codet5_primary_candidate_is_recorded_without_loading_transformers():
     assert logs[0].metadata["reclassified_action_type"] == "model_assisted_transformation"
 
 
-def test_codet5_invalid_primary_candidate_falls_back_to_native_transformer():
+def test_qwen_invalid_primary_candidate_falls_back_to_native_transformer():
     original = "int value(int input) { return input > 10; }\n"
-    assistant = CodeT5CandidateTransformer(
-        CodeT5Settings(enabled=True),
+    assistant = QwenCandidateTransformer(
+        QwenSettings(enabled=True),
         generator=lambda _prompt: "int value(void) {\n",
     )
     action = RefactoringAction(
@@ -327,15 +329,15 @@ def test_codet5_invalid_primary_candidate_falls_back_to_native_transformer():
     assert logs[0].metadata["model_assistance"]["mode"] == "primary"
     assert (
         logs[0].metadata["model_assistance"]["reason"]
-        == "CODET5_CANDIDATE_SYNTAX_INVALID"
+        == "QWEN_CANDIDATE_SYNTAX_INVALID"
     )
     assert any("primary candidate rejected" in warning for warning in warnings)
 
 
-def test_codet5_semantically_incomplete_c_constant_candidate_falls_back():
+def test_qwen_semantically_incomplete_c_constant_candidate_falls_back():
     original = "int value(int input) { return input > 10; }\n"
-    assistant = CodeT5CandidateTransformer(
-        CodeT5Settings(enabled=True),
+    assistant = QwenCandidateTransformer(
+        QwenSettings(enabled=True),
         generator=lambda _prompt: (
             "#define MAX_VALUE 10\n\n"
             "int value(int input) { return input > 10; }"
@@ -364,7 +366,7 @@ def test_codet5_semantically_incomplete_c_constant_candidate_falls_back():
     assert "input > MAX_VALUE" in transformed
     assert logs[0].metadata.get("model_assisted") is not True
     assert logs[0].metadata["model_assistance"]["reason"] == (
-        "CODET5_CANDIDATE_INTENT_NOT_SATISFIED"
+        "QWEN_CANDIDATE_INTENT_NOT_SATISFIED"
     )
     assert logs[0].metadata["model_assistance"]["intent_issue"] == (
         "C_INTRODUCE_CONSTANT_USAGE_NOT_MIGRATED"
@@ -372,10 +374,10 @@ def test_codet5_semantically_incomplete_c_constant_candidate_falls_back():
     assert any("safety checkpoint" in warning for warning in warnings)
 
 
-def test_codet5_c_constant_candidate_with_unrelated_operator_change_falls_back():
+def test_qwen_c_constant_candidate_with_unrelated_operator_change_falls_back():
     original = "int value(int input) { return input > 10; }\n"
-    assistant = CodeT5CandidateTransformer(
-        CodeT5Settings(enabled=True),
+    assistant = QwenCandidateTransformer(
+        QwenSettings(enabled=True),
         generator=lambda _prompt: (
             "#define MAX_VALUE 10\n\n"
             "int value(int input) { return input >= MAX_VALUE; }\n"
@@ -409,79 +411,79 @@ def test_codet5_c_constant_candidate_with_unrelated_operator_change_falls_back()
     )
 
 
-def test_codet5_execution_options_are_disabled_by_default(monkeypatch):
+def test_qwen_execution_options_are_disabled_by_default(monkeypatch):
     options = ExecutionOptions.from_dict({})
-    assert options.enable_codet5 is False
-    assert options.codet5_model_id == "Qwen/Qwen2.5-Coder-0.5B-Instruct"
-    assert options.codet5_backend == "auto"
-    assert options.codet5_openvino_model_path == ""
-    assert options.codet5_max_new_tokens == 256
-    assert options.codet5_max_bundle_output_tokens == 192
-    assert options.codet5_max_input_tokens == 512
-    assert options.codet5_cpu_threads == 6
-    assert options.codet5_max_actions_per_request == 100
-    assert options.codet5_max_actions_per_file == 100
-    assert options.codet5_enable_file_bundling is False
-    assert options.codet5_enable_generic_bundling is False
-    assert options.codet5_generation_timeout_seconds == 30
-    assert options.codet5_max_generic_actions_per_bundle == 2
-    assert options.codet5_max_generation_seconds_per_request == 0
-    assert options.codet5_runtime_cache is True
-    assert CodeT5CandidateTransformer.from_execution_options(options) is None
+    assert options.enable_qwen is False
+    assert options.qwen_model_id == "Qwen/Qwen2.5-Coder-0.5B-Instruct"
+    assert options.qwen_backend == "auto"
+    assert options.qwen_openvino_model_path == ""
+    assert options.qwen_max_new_tokens == 256
+    assert options.qwen_max_bundle_output_tokens == 192
+    assert options.qwen_max_input_tokens == 512
+    assert options.qwen_cpu_threads == 6
+    assert options.qwen_max_actions_per_request == 100
+    assert options.qwen_max_actions_per_file == 100
+    assert options.qwen_enable_file_bundling is False
+    assert options.qwen_enable_generic_bundling is False
+    assert options.qwen_generation_timeout_seconds == 30
+    assert options.qwen_max_generic_actions_per_bundle == 2
+    assert options.qwen_max_generation_seconds_per_request == 0
+    assert options.qwen_runtime_cache is True
+    assert QwenCandidateTransformer.from_execution_options(options) is None
 
     enabled = ExecutionOptions.from_dict(
         {
-            "enable_codet5": True,
-            "codet5_device": "cpu",
-            "codet5_max_new_tokens": 128,
-            "codet5_max_bundle_output_tokens": 96,
-            "codet5_max_input_tokens": 1024,
-            "codet5_cpu_threads": 4,
-            "codet5_max_actions_per_request": 2,
-            "codet5_max_actions_per_file": 2,
-            "codet5_generation_timeout_seconds": 15,
-            "codet5_backend": "pytorch",
-            "codet5_enable_generic_bundling": True,
-            "codet5_max_generic_actions_per_bundle": 3,
-            "codet5_max_generation_seconds_per_request": 45,
-            "codet5_runtime_cache": False,
-            "codet5_mode": "primary",
+            "enable_qwen": True,
+            "qwen_device": "cpu",
+            "qwen_max_new_tokens": 128,
+            "qwen_max_bundle_output_tokens": 96,
+            "qwen_max_input_tokens": 1024,
+            "qwen_cpu_threads": 4,
+            "qwen_max_actions_per_request": 2,
+            "qwen_max_actions_per_file": 2,
+            "qwen_generation_timeout_seconds": 15,
+            "qwen_backend": "pytorch",
+            "qwen_enable_generic_bundling": True,
+            "qwen_max_generic_actions_per_bundle": 3,
+            "qwen_max_generation_seconds_per_request": 45,
+            "qwen_runtime_cache": False,
+            "qwen_mode": "primary",
         }
     )
-    assert enabled.enable_codet5 is True
-    assert enabled.codet5_device == "cpu"
-    assert enabled.codet5_max_new_tokens == 128
-    assert enabled.codet5_max_bundle_output_tokens == 96
-    assert enabled.codet5_cpu_threads == 4
-    assert enabled.codet5_max_actions_per_request == 2
-    assert enabled.codet5_max_actions_per_file == 2
-    assert enabled.codet5_generation_timeout_seconds == 15
-    assert enabled.codet5_backend == "pytorch"
-    assert enabled.codet5_enable_generic_bundling is True
-    assert enabled.codet5_max_generic_actions_per_bundle == 3
-    assert enabled.codet5_max_generation_seconds_per_request == 45
-    assert enabled.codet5_runtime_cache is False
-    assert enabled.codet5_mode == "primary"
-    assert enabled.codet5_allow_download is False
+    assert enabled.enable_qwen is True
+    assert enabled.qwen_device == "cpu"
+    assert enabled.qwen_max_new_tokens == 128
+    assert enabled.qwen_max_bundle_output_tokens == 96
+    assert enabled.qwen_cpu_threads == 4
+    assert enabled.qwen_max_actions_per_request == 2
+    assert enabled.qwen_max_actions_per_file == 2
+    assert enabled.qwen_generation_timeout_seconds == 15
+    assert enabled.qwen_backend == "pytorch"
+    assert enabled.qwen_enable_generic_bundling is True
+    assert enabled.qwen_max_generic_actions_per_bundle == 3
+    assert enabled.qwen_max_generation_seconds_per_request == 45
+    assert enabled.qwen_runtime_cache is False
+    assert enabled.qwen_mode == "primary"
+    assert enabled.qwen_allow_download is False
 
-    monkeypatch.setenv("SCTVA_ENABLE_CODET5", "true")
-    monkeypatch.setenv("SCTVA_CODET5_MODE", "primary")
-    monkeypatch.setenv("SCTVA_CODET5_DEVICE", "cpu")
+    monkeypatch.setenv("SCTVA_ENABLE_QWEN", "true")
+    monkeypatch.setenv("SCTVA_QWEN_MODE", "primary")
+    monkeypatch.setenv("SCTVA_QWEN_DEVICE", "cpu")
     environment_enabled = ExecutionOptions.from_dict({})
-    assert environment_enabled.enable_codet5 is True
-    assert environment_enabled.codet5_mode == "primary"
-    assert environment_enabled.codet5_device == "cpu"
+    assert environment_enabled.enable_qwen is True
+    assert environment_enabled.qwen_mode == "primary"
+    assert environment_enabled.qwen_device == "cpu"
 
 
-def test_codet5_action_budget_prevents_unbounded_model_inference():
+def test_qwen_action_budget_prevents_unbounded_model_inference():
     calls = []
 
     def generator(prompt):
         calls.append(prompt)
         return "int value(void) { return 2; }\n"
 
-    assistant = CodeT5CandidateTransformer(
-        CodeT5Settings(
+    assistant = QwenCandidateTransformer(
+        QwenSettings(
             enabled=True,
             enable_file_bundling=False,
             max_actions_per_request=2,
@@ -507,14 +509,14 @@ def test_codet5_action_budget_prevents_unbounded_model_inference():
 
     assert first.status == "candidate_generated"
     assert second.status == "candidate_generated"
-    assert exhausted.reason == "CODET5_ACTION_BUDGET_EXHAUSTED"
+    assert exhausted.reason == "QWEN_ACTION_BUDGET_EXHAUSTED"
     assert exhausted.metadata["attempts_used"] == 2
     assert len(calls) == 2
 
 
 def test_model_budget_is_distributed_one_attempt_per_file():
-    assistant = CodeT5CandidateTransformer(
-        CodeT5Settings(
+    assistant = QwenCandidateTransformer(
+        QwenSettings(
             enabled=True,
             max_actions_per_request=2,
             max_actions_per_file=1,
@@ -541,8 +543,8 @@ def test_model_budget_is_distributed_one_attempt_per_file():
 
 
 def test_exhausted_budget_is_skipped_instead_of_reported_as_rejected_attempt():
-    assistant = CodeT5CandidateTransformer(
-        CodeT5Settings(
+    assistant = QwenCandidateTransformer(
+        QwenSettings(
             enabled=True,
             max_actions_per_request=1,
             max_actions_per_file=1,
@@ -583,19 +585,16 @@ def test_exhausted_budget_is_skipped_instead_of_reported_as_rejected_attempt():
     assert summary["model_status"] == "MODEL_ACTION_BUDGET_EXHAUSTED"
 
 
-def test_instruction_model_provider_is_reported_separately_from_codet5():
-    qwen = CodeT5CandidateTransformer(CodeT5Settings(enabled=True))
-    codet5 = CodeT5CandidateTransformer(CodeT5Settings(
-        enabled=True,
-        model_id="Salesforce/codet5p-220m",
-    ))
+def test_qwen_adapter_reports_the_fixed_qwen_provider():
+    qwen = QwenCandidateTransformer(QwenSettings(enabled=True))
 
     assert qwen.provider == "qwen_coder"
     assert qwen.display_name == "Qwen2.5-Coder"
-    assert codet5.provider == "codet5_plus"
+    with pytest.raises(ValueError, match="supports only"):
+        QwenSettings(enabled=True, model_id="unsupported/model")
 
 
-def test_codet5_large_python_file_uses_ast_target_span_and_preserves_other_code():
+def test_qwen_large_python_file_uses_ast_target_span_and_preserves_other_code():
     filler = "\n".join(f"UNRELATED_{index} = {index}" for index in range(180))
     original = (
         "import math\n\n"
@@ -608,8 +607,8 @@ def test_codet5_large_python_file_uses_ast_target_span_and_preserves_other_code(
         + "\n"
     )
     prompts = []
-    assistant = CodeT5CandidateTransformer(
-        CodeT5Settings(enabled=True, max_input_tokens=512),
+    assistant = QwenCandidateTransformer(
+        QwenSettings(enabled=True, max_input_tokens=512),
         generator=lambda prompt: prompts.append(prompt) or (
             "def selected(self, value):\n    result = value + 1\n    return result"
         ),
@@ -640,7 +639,7 @@ def test_codet5_large_python_file_uses_ast_target_span_and_preserves_other_code(
     assert "        result = value + 1" in candidate.source_code
 
 
-def test_codet5_large_java_extract_method_uses_method_member_span_only():
+def test_qwen_large_java_extract_method_uses_method_member_span_only():
     filler = "\n".join(f"// repository context line {index}" for index in range(220))
     original = (
         "package sample;\n\n"
@@ -655,8 +654,8 @@ def test_codet5_large_java_extract_method_uses_method_member_span_only():
         "}\n"
     )
     prompts = []
-    assistant = CodeT5CandidateTransformer(
-        CodeT5Settings(enabled=True, max_input_tokens=512),
+    assistant = QwenCandidateTransformer(
+        QwenSettings(enabled=True, max_input_tokens=512),
         generator=lambda prompt: prompts.append(prompt) or (
             "public int selected(int value) {\n"
             "    return increment(value);\n"
@@ -694,7 +693,7 @@ def test_codet5_large_java_extract_method_uses_method_member_span_only():
     assert "private int increment(int value)" in candidate.source_code
 
 
-def test_codet5_large_c_file_uses_symbol_model_target_span_only():
+def test_qwen_large_c_file_uses_symbol_model_target_span_only():
     filler = "\n".join(f"/* repository context line {index} */" for index in range(220))
     original = (
         "#include <stdio.h>\n"
@@ -706,8 +705,8 @@ def test_codet5_large_c_file_uses_symbol_model_target_span_only():
         "    return value * 2;\n"
         "}\n"
     )
-    assistant = CodeT5CandidateTransformer(
-        CodeT5Settings(enabled=True, max_input_tokens=512),
+    assistant = QwenCandidateTransformer(
+        QwenSettings(enabled=True, max_input_tokens=512),
         generator=lambda _prompt: (
             "int selected(int value) {\n"
             "    int result = value + 1;\n"
@@ -736,7 +735,7 @@ def test_codet5_large_c_file_uses_symbol_model_target_span_only():
     assert "int result = value + 1;" in candidate.source_code
 
 
-def test_codet5_java_context_uses_line_when_method_metadata_is_missing():
+def test_qwen_java_context_uses_line_when_method_metadata_is_missing():
     source = (
         "public class Order {\n"
         "    int first() {\n"
@@ -747,7 +746,7 @@ def test_codet5_java_context_uses_line_when_method_metadata_is_missing():
         "    }\n"
         "}\n"
     )
-    assistant = CodeT5CandidateTransformer(CodeT5Settings(enabled=True))
+    assistant = QwenCandidateTransformer(QwenSettings(enabled=True))
     action = RefactoringAction(
         action_type="introduce_constant",
         parameters={"source_file": "Order.java", "source_line": 6},
@@ -762,14 +761,14 @@ def test_codet5_java_context_uses_line_when_method_metadata_is_missing():
     assert context.name == "Order.second"
 
 
-def test_codet5_java_context_uses_unique_literal_anchor_without_line_or_method():
+def test_qwen_java_context_uses_unique_literal_anchor_without_line_or_method():
     source = (
         "public class Order {\n"
         "    int regular() { return 10; }\n"
         "    int discounted() { return 125; }\n"
         "}\n"
     )
-    assistant = CodeT5CandidateTransformer(CodeT5Settings(enabled=True))
+    assistant = QwenCandidateTransformer(QwenSettings(enabled=True))
     action = RefactoringAction(
         action_type="introduce_constant",
         parameters={"source_file": "Order.java", "literal_value": 125},
@@ -795,7 +794,7 @@ def test_java_constant_context_follows_literal_moved_into_extracted_helper():
         "    }\n"
         "}\n"
     )
-    assistant = CodeT5CandidateTransformer(CodeT5Settings(enabled=True))
+    assistant = QwenCandidateTransformer(QwenSettings(enabled=True))
     action = RefactoringAction(
         action_type="introduce_constant",
         parameters={
@@ -819,7 +818,7 @@ def test_java_constant_context_follows_literal_moved_into_extracted_helper():
     assert context.source.strip() == "int mobileColumn = result.getInt(3);"
 
 
-def test_codet5_java_introduce_constant_uses_exact_field_member_span():
+def test_qwen_java_introduce_constant_uses_exact_field_member_span():
     source = (
         "public class Credentials {\n"
         "    private String user = \"root\";\n"
@@ -828,8 +827,8 @@ def test_codet5_java_introduce_constant_uses_exact_field_member_span():
         "}\n"
     )
     prompts = []
-    assistant = CodeT5CandidateTransformer(
-        CodeT5Settings(enabled=True),
+    assistant = QwenCandidateTransformer(
+        QwenSettings(enabled=True),
         generator=lambda prompt: prompts.append(prompt)
         or "private String password = DEFAULT_PASSWORD;",
     )
@@ -869,7 +868,7 @@ def test_codet5_java_introduce_constant_uses_exact_field_member_span():
     assert "private static final String DEFAULT_PASSWORD" in candidate.source_code
 
 
-def test_codet5_java_constant_recovers_field_when_prior_insert_shifts_rdp_line():
+def test_qwen_java_constant_recovers_field_when_prior_insert_shifts_rdp_line():
     source = (
         "public class Credentials {\n"
         "    private static final int PRIOR = 6;\n"
@@ -877,7 +876,7 @@ def test_codet5_java_constant_recovers_field_when_prior_insert_shifts_rdp_line()
         "    private String password = \"1234\";\n"
         "}\n"
     )
-    assistant = CodeT5CandidateTransformer(CodeT5Settings(enabled=True))
+    assistant = QwenCandidateTransformer(QwenSettings(enabled=True))
     action = RefactoringAction(
         action_type="introduce_constant",
         parameters={
@@ -909,8 +908,8 @@ def test_java_introduce_constant_model_candidate_preserves_only_planned_change()
         "    int untouched() { return 9; }\n"
         "}\n"
     )
-    assistant = CodeT5CandidateTransformer(
-        CodeT5Settings(enabled=True),
+    assistant = QwenCandidateTransformer(
+        QwenSettings(enabled=True),
         generator=lambda _prompt: (
             "private static final int LIMIT = 6;\n"
             "int calculate(int value) {\n"
@@ -954,8 +953,8 @@ def test_java_introduce_constant_projects_missing_model_declaration():
         "    int untouched() { return 9; }\n"
         "}\n"
     )
-    assistant = CodeT5CandidateTransformer(
-        CodeT5Settings(enabled=True),
+    assistant = QwenCandidateTransformer(
+        QwenSettings(enabled=True),
         generator=lambda _prompt: (
             "int calculate(int value) {\n"
             "    return value + LIMIT;\n"
@@ -997,8 +996,8 @@ def test_java_introduce_constant_projects_missing_string_field_declaration():
         "    private String password = \"1234\";\n"
         "}\n"
     )
-    assistant = CodeT5CandidateTransformer(
-        CodeT5Settings(enabled=True),
+    assistant = QwenCandidateTransformer(
+        QwenSettings(enabled=True),
         generator=lambda _prompt: "private String password = DEFAULT_PASSWORD;",
     )
     action = RefactoringAction(
@@ -1035,8 +1034,8 @@ def test_java_introduce_constant_projects_noncanonical_model_declaration():
         "    int value = 6;\n"
         "}\n"
     )
-    assistant = CodeT5CandidateTransformer(
-        CodeT5Settings(enabled=True),
+    assistant = QwenCandidateTransformer(
+        QwenSettings(enabled=True),
         generator=lambda _prompt: (
             "public final int LIMIT = 6;\n"
             "int value = LIMIT;"
@@ -1075,8 +1074,8 @@ def test_java_introduce_constant_corrects_model_type_and_value():
         "    int value = 3;\n"
         "}\n"
     )
-    assistant = CodeT5CandidateTransformer(
-        CodeT5Settings(enabled=True),
+    assistant = QwenCandidateTransformer(
+        QwenSettings(enabled=True),
         generator=lambda _prompt: (
             "private static final double THRESHOLD_LIMIT_3 = 3.0;\n"
             "int value = THRESHOLD_LIMIT_3;"
@@ -1117,8 +1116,8 @@ def test_java_introduce_constant_does_not_hide_unrelated_edit_when_correcting_ty
         "    }\n"
         "}\n"
     )
-    assistant = CodeT5CandidateTransformer(
-        CodeT5Settings(
+    assistant = QwenCandidateTransformer(
+        QwenSettings(
             enabled=True,
             max_actions_per_request=2,
             max_actions_per_file=2,
@@ -1163,8 +1162,8 @@ def test_java_introduce_constant_does_not_project_unrelated_model_edit():
         "    }\n"
         "}\n"
     )
-    assistant = CodeT5CandidateTransformer(
-        CodeT5Settings(
+    assistant = QwenCandidateTransformer(
+        QwenSettings(
             enabled=True,
             max_actions_per_request=2,
             max_actions_per_file=2,
@@ -1214,8 +1213,8 @@ def test_java_introduce_constant_rejects_unrelated_model_edit():
         "}\n"
     )
     prompts = []
-    assistant = CodeT5CandidateTransformer(
-        CodeT5Settings(
+    assistant = QwenCandidateTransformer(
+        QwenSettings(
             enabled=True,
             max_actions_per_request=2,
             max_actions_per_file=2,
@@ -1249,7 +1248,7 @@ def test_java_introduce_constant_rejects_unrelated_model_edit():
 
     assert logs[0].metadata.get("model_assisted") is not True
     assert logs[0].metadata["model_assistance"]["reason"] == (
-        "CODET5_CANDIDATE_INTENT_NOT_SATISFIED"
+        "QWEN_CANDIDATE_INTENT_NOT_SATISFIED"
     )
     assert len(prompts) == 1
     assert logs[0].metadata["model_assistance"]["repair_skipped"]["reason"] == (
@@ -1276,8 +1275,8 @@ def test_java_introduce_constant_repairs_missing_declaration_with_feedback():
         "    return value + LIMIT;\n"
         "}",
     ))
-    assistant = CodeT5CandidateTransformer(
-        CodeT5Settings(enabled=True, max_actions_per_request=2, max_actions_per_file=2),
+    assistant = QwenCandidateTransformer(
+        QwenSettings(enabled=True, max_actions_per_request=2, max_actions_per_file=2),
         generator=lambda prompt: prompts.append(prompt) or next(outputs),
     )
     action = RefactoringAction(
@@ -1319,8 +1318,8 @@ def test_java_introduce_constant_aligns_reversible_model_alias_to_rdp_name():
         "    int selected = 6;\n"
         "}\n"
     )
-    assistant = CodeT5CandidateTransformer(
-        CodeT5Settings(enabled=True),
+    assistant = QwenCandidateTransformer(
+        QwenSettings(enabled=True),
         generator=lambda _prompt: (
             "private static final int SIX = 6;\n"
             "int selected = SIX;"
@@ -1365,8 +1364,8 @@ def test_java_introduce_constant_trims_extra_model_class_closing_brace():
         "    }\n"
         "}\n"
     )
-    assistant = CodeT5CandidateTransformer(
-        CodeT5Settings(enabled=True),
+    assistant = QwenCandidateTransformer(
+        QwenSettings(enabled=True),
         generator=lambda _prompt: (
             "private static final int LIMIT = 6;\n"
             "int calculate(int value) {\n"
@@ -1413,8 +1412,8 @@ def test_java_introduce_constant_collapses_duplicate_generated_declarations():
         "    }\n"
         "}\n"
     )
-    assistant = CodeT5CandidateTransformer(
-        CodeT5Settings(enabled=True),
+    assistant = QwenCandidateTransformer(
+        QwenSettings(enabled=True),
         generator=lambda _prompt: (
             "private static final int LIMIT = 6;\n"
             "private static final int LIMIT = 6;\n"
@@ -1462,8 +1461,8 @@ def legacy_multiple_java_constants_remain_model_eligible_after_line_shifts():
         "private static final int SIX = 6;\nint first = SIX;",
         "private static final int FIVE = 5;\nint second = FIVE;",
     ))
-    assistant = CodeT5CandidateTransformer(
-        CodeT5Settings(
+    assistant = QwenCandidateTransformer(
+        QwenSettings(
             enabled=True,
             enable_file_bundling=False,
             max_actions_per_request=2,
@@ -1525,8 +1524,8 @@ def legacy_compatible_java_constants_use_one_file_action_bundle_candidate():
         "}\n"
     )
     prompts = []
-    assistant = CodeT5CandidateTransformer(
-        CodeT5Settings(
+    assistant = QwenCandidateTransformer(
+        QwenSettings(
             enabled=True,
             enable_file_bundling=True,
             max_actions_per_bundle=5,
@@ -1593,8 +1592,8 @@ def legacy_dependency_aware_java_bundle_applies_two_local_actions_in_one_generat
         "}\n"
     )
     prompts = []
-    assistant = CodeT5CandidateTransformer(
-        CodeT5Settings(
+    assistant = QwenCandidateTransformer(
+        QwenSettings(
             enabled=True,
             enable_file_bundling=True,
             enable_generic_bundling=True,
@@ -1700,9 +1699,9 @@ def test_generic_file_bundles_are_accuracy_first_opt_in():
         ),
     ]
 
-    default_assistant = CodeT5CandidateTransformer(CodeT5Settings(enabled=True))
-    enabled_assistant = CodeT5CandidateTransformer(
-        CodeT5Settings(enabled=True, enable_generic_bundling=True)
+    default_assistant = QwenCandidateTransformer(QwenSettings(enabled=True))
+    enabled_assistant = QwenCandidateTransformer(
+        QwenSettings(enabled=True, enable_generic_bundling=True)
     )
 
     default_bundles = default_assistant.plan_dependency_aware_bundles(
@@ -1734,8 +1733,8 @@ def legacy_dependency_aware_bundle_rejects_a_missing_action_then_uses_rules():
         "}\n"
     )
     prompts = []
-    assistant = CodeT5CandidateTransformer(
-        CodeT5Settings(
+    assistant = QwenCandidateTransformer(
+        QwenSettings(
             enabled=True,
             enable_file_bundling=True,
             enable_generic_bundling=True,
@@ -1790,7 +1789,7 @@ def legacy_dependency_aware_bundle_rejects_a_missing_action_then_uses_rules():
     assert "int first = 12;" not in transformed
     assert all(log.metadata.get("model_assisted") is not True for log in logs)
     assert logs[0].metadata["model_assistance"]["reason"] == (
-        "CODET5_BUNDLE_REPLACE_LITERAL_INTENT_NOT_SATISFIED"
+        "QWEN_BUNDLE_REPLACE_LITERAL_INTENT_NOT_SATISFIED"
     )
     assert any("file-action bundle rejected" in warning for warning in warnings)
 
@@ -1804,8 +1803,8 @@ def test_dependency_aware_planner_keeps_structural_action_as_bundle_barrier():
         "    }\n"
         "}\n"
     )
-    assistant = CodeT5CandidateTransformer(
-        CodeT5Settings(
+    assistant = QwenCandidateTransformer(
+        QwenSettings(
             enabled=True,
             enable_file_bundling=True,
             enable_generic_bundling=True,
@@ -1873,8 +1872,8 @@ def test_dependency_aware_bundle_rejects_edits_outside_resolved_targets():
         "    int second() { return 22; }\n"
         "}\n"
     )
-    assistant = CodeT5CandidateTransformer(
-        CodeT5Settings(enabled=True, enable_generic_bundling=True),
+    assistant = QwenCandidateTransformer(
+        QwenSettings(enabled=True, enable_generic_bundling=True),
         generator=lambda _prompt: candidate,
     )
     actions = [
@@ -1915,7 +1914,7 @@ def test_dependency_aware_bundle_rejects_edits_outside_resolved_targets():
         current_file_name="Values.java",
     )
 
-    assert issue == "CODET5_BUNDLE_CHANGE_OUTSIDE_RESOLVED_TARGETS"
+    assert issue == "QWEN_BUNDLE_CHANGE_OUTSIDE_RESOLVED_TARGETS"
     assert bundles == []
 
 
@@ -1930,8 +1929,8 @@ def test_bundle_preflight_splits_a_token_oversized_cross_file_span():
         "    int second = 5;\n"
         "}\n"
     )
-    assistant = CodeT5CandidateTransformer(
-        CodeT5Settings(
+    assistant = QwenCandidateTransformer(
+        QwenSettings(
             enabled=True,
             enable_file_bundling=True,
             max_input_tokens=160,
@@ -1987,8 +1986,8 @@ def test_bundle_preflight_splits_a_generation_expensive_span():
         "    int second = 5;\n"
         "}\n"
     )
-    assistant = CodeT5CandidateTransformer(
-        CodeT5Settings(
+    assistant = QwenCandidateTransformer(
+        QwenSettings(
             enabled=True,
             enable_file_bundling=True,
             max_input_tokens=1024,
@@ -2044,8 +2043,8 @@ def test_oversized_bundle_preflight_does_not_consume_generation_budget():
         "    int second = 5;\n"
         "}\n"
     )
-    assistant = CodeT5CandidateTransformer(
-        CodeT5Settings(
+    assistant = QwenCandidateTransformer(
+        QwenSettings(
             enabled=True,
             enable_file_bundling=True,
             max_input_tokens=160,
@@ -2084,7 +2083,7 @@ def test_oversized_bundle_preflight_does_not_consume_generation_budget():
         current_file_name="Limits.java",
     )
 
-    assert candidate.reason == "CODET5_BUNDLE_CONTEXT_TOO_LARGE"
+    assert candidate.reason == "QWEN_BUNDLE_CONTEXT_TOO_LARGE"
     assert assistant._attempt_count == 0
     assert assistant._file_attempt_counts == {}
 
@@ -2097,8 +2096,8 @@ def test_bundle_repair_drops_large_rejected_candidate_before_generation():
         "}\n"
     )
     prompts = []
-    assistant = CodeT5CandidateTransformer(
-        CodeT5Settings(
+    assistant = QwenCandidateTransformer(
+        QwenSettings(
             enabled=True,
             enable_file_bundling=True,
             max_input_tokens=512,
@@ -2174,8 +2173,8 @@ def legacy_unrelated_bundle_change_decomposes_to_single_model_actions():
             return "private static final int SIX = 6;\nint first = SIX;"
         return "private static final int FIVE = 5;\nint second = FIVE;"
 
-    assistant = CodeT5CandidateTransformer(
-        CodeT5Settings(enabled=True, enable_file_bundling=True),
+    assistant = QwenCandidateTransformer(
+        QwenSettings(enabled=True, enable_file_bundling=True),
         generator=generate,
     )
     actions = [
@@ -2227,8 +2226,8 @@ def legacy_complete_java_file_bundle_output_is_validated_as_a_full_candidate():
         "    int second = 5;\n"
         "}\n"
     )
-    assistant = CodeT5CandidateTransformer(
-        CodeT5Settings(
+    assistant = QwenCandidateTransformer(
+        QwenSettings(
             enabled=True,
             enable_file_bundling=True,
             enable_generic_bundling=True,
@@ -2292,8 +2291,8 @@ def legacy_rejected_java_bundle_decomposes_before_rule_fallback():
         "}\n"
     )
     prompts = []
-    assistant = CodeT5CandidateTransformer(
-        CodeT5Settings(
+    assistant = QwenCandidateTransformer(
+        QwenSettings(
             enabled=True,
             enable_file_bundling=True,
             max_actions_per_bundle=5,
@@ -2377,8 +2376,8 @@ def legacy_invalid_bundle_constant_declaration_retries_single_model_actions():
             )
         return "private static final int FIVE = 5;\nint second = FIVE;"
 
-    assistant = CodeT5CandidateTransformer(
-        CodeT5Settings(enabled=True, enable_file_bundling=True),
+    assistant = QwenCandidateTransformer(
+        QwenSettings(enabled=True, enable_file_bundling=True),
         generator=generate,
     )
     actions = [
@@ -2427,8 +2426,8 @@ def legacy_compatible_c_constants_use_one_file_action_bundle_candidate():
         "int retries = 3;\n"
     )
     prompts = []
-    assistant = CodeT5CandidateTransformer(
-        CodeT5Settings(
+    assistant = QwenCandidateTransformer(
+        QwenSettings(
             enabled=True,
             enable_file_bundling=True,
             max_actions_per_bundle=5,
@@ -2487,8 +2486,8 @@ def legacy_agent_reports_one_candidate_for_two_accepted_bundle_actions(monkeypat
         "    int second = 5;\n"
         "}\n"
     )
-    assistant = CodeT5CandidateTransformer(
-        CodeT5Settings(
+    assistant = QwenCandidateTransformer(
+        QwenSettings(
             enabled=True,
             enable_file_bundling=True,
             enable_generic_bundling=True,
@@ -2501,7 +2500,7 @@ def legacy_agent_reports_one_candidate_for_two_accepted_bundle_actions(monkeypat
         ),
     )
     monkeypatch.setattr(
-        CodeT5CandidateTransformer,
+        QwenCandidateTransformer,
         "from_execution_options",
         classmethod(lambda _cls, _options: assistant),
     )
@@ -2544,7 +2543,7 @@ def legacy_agent_reports_one_candidate_for_two_accepted_bundle_actions(monkeypat
             "enable_behavior_tests": False,
             "require_compilation": False,
             "enable_sctva_auto_refactoring": False,
-            "enable_codet5": True,
+            "enable_qwen": True,
         },
     })
 
@@ -2569,8 +2568,8 @@ def legacy_agent_accepts_one_dependency_aware_candidate_for_two_local_actions(
         "    }\n"
         "}\n"
     )
-    assistant = CodeT5CandidateTransformer(
-        CodeT5Settings(
+    assistant = QwenCandidateTransformer(
+        QwenSettings(
             enabled=True,
             enable_file_bundling=True,
             enable_generic_bundling=True,
@@ -2585,7 +2584,7 @@ def legacy_agent_accepts_one_dependency_aware_candidate_for_two_local_actions(
         ),
     )
     monkeypatch.setattr(
-        CodeT5CandidateTransformer,
+        QwenCandidateTransformer,
         "from_execution_options",
         classmethod(lambda _cls, _options: assistant),
     )
@@ -2628,7 +2627,7 @@ def legacy_agent_accepts_one_dependency_aware_candidate_for_two_local_actions(
             "enable_behavior_tests": False,
             "require_compilation": False,
             "enable_sctva_auto_refactoring": False,
-            "enable_codet5": True,
+            "enable_qwen": True,
         },
     })
 
@@ -2667,8 +2666,8 @@ def legacy_ten_compatible_actions_are_generated_as_two_bundles():
             )
         return "\n".join([*declarations, target])
 
-    assistant = CodeT5CandidateTransformer(
-        CodeT5Settings(
+    assistant = QwenCandidateTransformer(
+        QwenSettings(
             enabled=True,
             enable_file_bundling=True,
             max_actions_per_bundle=5,
@@ -2714,8 +2713,8 @@ def test_repeated_java_constant_uses_model_once_then_exact_rule_continuation():
         "}\n"
     )
     prompts = []
-    assistant = CodeT5CandidateTransformer(
-        CodeT5Settings(
+    assistant = QwenCandidateTransformer(
+        QwenSettings(
             enabled=True,
             max_actions_per_request=4,
             max_actions_per_file=4,
@@ -2779,8 +2778,8 @@ def test_repeated_java_constant_can_retry_after_prior_model_rejection():
         "int first = 7;",
         "private static final int SIX = 6;\nint second = SIX;",
     ))
-    assistant = CodeT5CandidateTransformer(
-        CodeT5Settings(
+    assistant = QwenCandidateTransformer(
+        QwenSettings(
             enabled=True,
             max_actions_per_request=4,
             max_actions_per_file=4,
@@ -2883,14 +2882,13 @@ def legacy_java_constant_batch_uses_one_model_generate_call():
         "    int second = 5;\n"
         "}\n"
     )
-    assistant = CodeT5CandidateTransformer(
-        CodeT5Settings(enabled=True, enable_file_bundling=False)
+    assistant = QwenCandidateTransformer(
+        QwenSettings(enabled=True, enable_file_bundling=False)
     )
     assistant._tokenizer = FakeTokenizer()
     assistant._model = FakeModel()
     assistant._torch = FakeTorch()
     assistant._resolved_device = "cpu"
-    assistant._is_encoder_decoder = True
     actions = [
         RefactoringAction(
             action_type="introduce_constant",
@@ -2940,8 +2938,8 @@ def test_hint_only_java_constants_resolve_stable_methods_after_line_shifts():
         "private static final int THRESHOLD_LIMIT_3 = 3;\n"
         "    void details() { read(THRESHOLD_LIMIT_3); }",
     ))
-    assistant = CodeT5CandidateTransformer(
-        CodeT5Settings(
+    assistant = QwenCandidateTransformer(
+        QwenSettings(
             enabled=True,
             max_actions_per_request=4,
             max_actions_per_file=4,
@@ -3004,8 +3002,8 @@ def test_hint_numeric_java_string_is_prepared_as_typed_string_contract():
         "}\n"
     )
     prompts = []
-    assistant = CodeT5CandidateTransformer(
-        CodeT5Settings(enabled=True),
+    assistant = QwenCandidateTransformer(
+        QwenSettings(enabled=True),
         generator=lambda prompt: (
             prompts.append(prompt)
             or 'private static final String CONSTANT_STRING_N_2210 = "2210";\n'
@@ -3050,8 +3048,8 @@ def test_java_introduce_constant_reuses_existing_model_constant():
         "    int second = 3;\n"
         "}\n"
     )
-    assistant = CodeT5CandidateTransformer(
-        CodeT5Settings(enabled=True),
+    assistant = QwenCandidateTransformer(
+        QwenSettings(enabled=True),
         generator=lambda _prompt: "int second = THRESHOLD_LIMIT_3;",
     )
     action = RefactoringAction(
@@ -3090,8 +3088,8 @@ def test_java_model_preparation_disambiguates_existing_constant_with_other_value
         "}\n"
     )
     prompts = []
-    assistant = CodeT5CandidateTransformer(
-        CodeT5Settings(enabled=True),
+    assistant = QwenCandidateTransformer(
+        QwenSettings(enabled=True),
         generator=lambda prompt: prompts.append(prompt) or (
             "private static final int LIMIT_2 = 6;\n"
             "int selected = LIMIT_2;"
@@ -3136,8 +3134,8 @@ def test_java_introduce_constant_removes_duplicate_model_declaration():
         "    int second = 3;\n"
         "}\n"
     )
-    assistant = CodeT5CandidateTransformer(
-        CodeT5Settings(enabled=True),
+    assistant = QwenCandidateTransformer(
+        QwenSettings(enabled=True),
         generator=lambda _prompt: (
             "private static final int THRESHOLD_LIMIT_3 = 3;\n"
             "int second = THRESHOLD_LIMIT_3;"
@@ -3179,8 +3177,8 @@ def test_java_introduce_constant_collapses_exact_and_wrong_model_duplicate():
         "    int second = 3;\n"
         "}\n"
     )
-    assistant = CodeT5CandidateTransformer(
-        CodeT5Settings(enabled=True),
+    assistant = QwenCandidateTransformer(
+        QwenSettings(enabled=True),
         generator=lambda _prompt: (
             "private static final double THRESHOLD_LIMIT_3 = 3.0;\n"
             "int second = THRESHOLD_LIMIT_3;"
@@ -3224,8 +3222,8 @@ def test_java_introduce_constant_completes_declaration_only_model_output():
         "    int second = 3;\n"
         "}\n"
     )
-    assistant = CodeT5CandidateTransformer(
-        CodeT5Settings(
+    assistant = QwenCandidateTransformer(
+        QwenSettings(
             enabled=True,
             max_actions_per_request=2,
             max_actions_per_file=2,
@@ -3274,8 +3272,8 @@ def test_java_introduce_constant_completes_wrong_declaration_only_output():
         "    int second = 3;\n"
         "}\n"
     )
-    assistant = CodeT5CandidateTransformer(
-        CodeT5Settings(
+    assistant = QwenCandidateTransformer(
+        QwenSettings(
             enabled=True,
             max_actions_per_request=2,
             max_actions_per_file=2,
@@ -3322,8 +3320,8 @@ def test_java_introduce_constant_completes_usage_only_model_output():
         "    int second = 3;\n"
         "}\n"
     )
-    assistant = CodeT5CandidateTransformer(
-        CodeT5Settings(enabled=True),
+    assistant = QwenCandidateTransformer(
+        QwenSettings(enabled=True),
         generator=lambda _prompt: "int second = THRESHOLD_LIMIT_3;",
     )
     action = RefactoringAction(
@@ -3363,8 +3361,8 @@ def test_java_introduce_constant_accepts_wrapped_commented_declaration():
         "    }\n"
         "}\n"
     )
-    assistant = CodeT5CandidateTransformer(
-        CodeT5Settings(enabled=True),
+    assistant = QwenCandidateTransformer(
+        QwenSettings(enabled=True),
         generator=lambda _prompt: (
             "private\n"
             "static final\n"
@@ -3405,8 +3403,8 @@ def test_java_introduce_constant_completes_truncated_declaration_only_output():
         "    int selected = 6;\n"
         "}\n"
     )
-    assistant = CodeT5CandidateTransformer(
-        CodeT5Settings(enabled=True),
+    assistant = QwenCandidateTransformer(
+        QwenSettings(enabled=True),
         generator=lambda _prompt: "private static final int LIMIT = 6",
     )
     action = RefactoringAction(
@@ -3444,8 +3442,8 @@ def test_java_introduce_constant_completes_declaration_prefix_only_output():
         "    int selected = 6;\n"
         "}\n"
     )
-    assistant = CodeT5CandidateTransformer(
-        CodeT5Settings(enabled=True),
+    assistant = QwenCandidateTransformer(
+        QwenSettings(enabled=True),
         generator=lambda _prompt: "private static final int LIMIT =",
     )
     action = RefactoringAction(
@@ -3477,7 +3475,7 @@ def test_java_introduce_constant_completes_declaration_prefix_only_output():
     assert completion["reason"] == "truncated_declaration_and_target_completed"
 
 
-def test_codet5_normalises_copied_java_repair_output_markers():
+def test_qwen_normalises_copied_java_repair_output_markers():
     output = (
         "<required-repair-output>\n"
         "private static final int LIMIT = 6;\n"
@@ -3485,7 +3483,7 @@ def test_codet5_normalises_copied_java_repair_output_markers():
         "</required-repair-output>"
     )
 
-    assert CodeT5CandidateTransformer._normalise_model_output(output) == (
+    assert QwenCandidateTransformer._normalise_model_output(output) == (
         "private static final int LIMIT = 6;\nint selected = LIMIT;"
     )
 
@@ -3496,8 +3494,8 @@ def test_java_introduce_constant_corrects_truncated_placeholder_declaration():
         "    int selected = 2210;\n"
         "}\n"
     )
-    assistant = CodeT5CandidateTransformer(
-        CodeT5Settings(enabled=True),
+    assistant = QwenCandidateTransformer(
+        QwenSettings(enabled=True),
         generator=lambda _prompt: (
             "private static final Object THRESHOLD_LIMIT_2210 = null"
         ),
@@ -3530,15 +3528,15 @@ def test_java_introduce_constant_corrects_truncated_placeholder_declaration():
     assert "Object THRESHOLD_LIMIT_2210" not in transformed
 
 
-def test_codet5_normalises_unclosed_markdown_fence_to_empty_output():
-    assert CodeT5CandidateTransformer._normalise_model_output("```") == ""
-    assert CodeT5CandidateTransformer._normalise_model_output("```java") == ""
+def test_qwen_normalises_unclosed_markdown_fence_to_empty_output():
+    assert QwenCandidateTransformer._normalise_model_output("```") == ""
+    assert QwenCandidateTransformer._normalise_model_output("```java") == ""
 
 
 def test_elapsed_generation_time_does_not_skip_later_files():
     source = "class Values { int selected() { return 1; } }\n"
-    assistant = CodeT5CandidateTransformer(
-        CodeT5Settings(
+    assistant = QwenCandidateTransformer(
+        QwenSettings(
             enabled=True,
             max_actions_per_request=100,
             max_actions_per_file=100,
@@ -3570,8 +3568,8 @@ def test_elapsed_generation_time_does_not_skip_later_files():
 
 def test_configured_generation_time_budget_uses_rule_fallback_before_inference():
     source = "class Values { int selected() { return 1; } }\n"
-    assistant = CodeT5CandidateTransformer(
-        CodeT5Settings(
+    assistant = QwenCandidateTransformer(
+        QwenSettings(
             enabled=True,
             max_generation_seconds_per_request=45,
         ),
@@ -3594,16 +3592,16 @@ def test_configured_generation_time_budget_uses_rule_fallback_before_inference()
     )
 
     assert status["available"] is False
-    assert status["reason"] == "CODET5_REQUEST_TIME_BUDGET_EXHAUSTED"
-    assert candidate.reason == "CODET5_ACTION_BUDGET_EXHAUSTED"
+    assert status["reason"] == "QWEN_REQUEST_TIME_BUDGET_EXHAUSTED"
+    assert candidate.reason == "QWEN_ACTION_BUDGET_EXHAUSTED"
     assert candidate.metadata["budget_reason"] == (
-        "CODET5_REQUEST_TIME_BUDGET_EXHAUSTED"
+        "QWEN_REQUEST_TIME_BUDGET_EXHAUSTED"
     )
 
 
 def test_explicit_openvino_backend_requires_an_exported_model_path():
-    assistant = CodeT5CandidateTransformer(
-        CodeT5Settings(
+    assistant = QwenCandidateTransformer(
+        QwenSettings(
             enabled=True,
             backend="openvino",
             openvino_model_path="missing-openvino-model-for-test",
@@ -3622,7 +3620,7 @@ def test_explicit_openvino_backend_requires_an_exported_model_path():
     )
 
     assert candidate.status == "skipped"
-    assert "CODET5_OPENVINO_MODEL_PATH_NOT_FOUND" in candidate.reason
+    assert "QWEN_OPENVINO_MODEL_PATH_NOT_FOUND" in candidate.reason
 
 
 def test_openvino_local_windows_path_avoids_broken_hub_cache_precheck(
@@ -3635,7 +3633,6 @@ def test_openvino_local_windows_path_avoids_broken_hub_cache_precheck(
     calls = {}
 
     class FakeConfig:
-        is_encoder_decoder = False
         use_cache = False
 
     class FakeTokenizer:
@@ -3667,8 +3664,8 @@ def test_openvino_local_windows_path_avoids_broken_hub_cache_precheck(
         FakeOVModelForCausalLM,
     )
 
-    assistant = CodeT5CandidateTransformer(
-        CodeT5Settings(
+    assistant = QwenCandidateTransformer(
+        QwenSettings(
             enabled=True,
             backend="openvino",
             device="cpu",
@@ -3690,7 +3687,7 @@ def test_openvino_local_windows_path_avoids_broken_hub_cache_precheck(
 
 
 def test_process_runtime_cache_reuses_loaded_model_objects(monkeypatch):
-    settings = CodeT5Settings(
+    settings = QwenSettings(
         enabled=True,
         backend="pytorch",
         device="cpu",
@@ -3699,7 +3696,7 @@ def test_process_runtime_cache_reuses_loaded_model_objects(monkeypatch):
     fake_model = object()
     fake_tokenizer = object()
     fake_torch = object()
-    inference_lock = codet5_module.threading.Lock()
+    inference_lock = qwen_module.threading.Lock()
     cache_key = (
         "pytorch",
         settings.model_id,
@@ -3709,7 +3706,7 @@ def test_process_runtime_cache_reuses_loaded_model_objects(monkeypatch):
         6,
     )
     monkeypatch.setitem(
-        codet5_module._MODEL_RUNTIME_CACHE,
+        qwen_module._MODEL_RUNTIME_CACHE,
         cache_key,
         {
             "tokenizer": fake_tokenizer,
@@ -3717,12 +3714,11 @@ def test_process_runtime_cache_reuses_loaded_model_objects(monkeypatch):
             "torch": fake_torch,
             "device": "cpu",
             "backend": "pytorch",
-            "is_encoder_decoder": False,
             "max_input_tokens": 512,
             "inference_lock": inference_lock,
         },
     )
-    assistant = CodeT5CandidateTransformer(settings)
+    assistant = QwenCandidateTransformer(settings)
 
     assistant._load()
 
@@ -3743,8 +3739,8 @@ def test_model_run_skips_files_not_referenced_by_rdp_plan(monkeypatch):
         "    int value() { return 9; }\n"
         "}\n"
     )
-    assistant = CodeT5CandidateTransformer(
-        CodeT5Settings(
+    assistant = QwenCandidateTransformer(
+        QwenSettings(
             enabled=True,
             max_actions_per_request=100,
             max_actions_per_file=100,
@@ -3755,7 +3751,7 @@ def test_model_run_skips_files_not_referenced_by_rdp_plan(monkeypatch):
         ),
     )
     monkeypatch.setattr(
-        CodeT5CandidateTransformer,
+        QwenCandidateTransformer,
         "from_execution_options",
         classmethod(lambda _cls, _options: assistant),
     )
@@ -3788,7 +3784,7 @@ def test_model_run_skips_files_not_referenced_by_rdp_plan(monkeypatch):
             "behavior_tests": [],
         },
         "execution_options": {
-            "enable_codet5": True,
+            "enable_qwen": True,
             "enable_sctva_auto_refactoring": True,
             "enable_behavior_tests": False,
             "require_compilation": False,
@@ -3827,8 +3823,8 @@ def test_java_constant_generation_budget_covers_complete_target():
         "    int calculate(int value) { return value + 6; }\n"
         "}\n"
     )
-    assistant = CodeT5CandidateTransformer(
-        CodeT5Settings(
+    assistant = QwenCandidateTransformer(
+        QwenSettings(
             enabled=True,
             max_new_tokens=256,
             generation_timeout_seconds=90,
@@ -3861,8 +3857,8 @@ def test_java_constant_recovers_exact_target_from_complete_class_output():
         "    int untouched() { return 9; }\n"
         "}\n"
     )
-    assistant = CodeT5CandidateTransformer(
-        CodeT5Settings(enabled=True),
+    assistant = QwenCandidateTransformer(
+        QwenSettings(enabled=True),
         generator=lambda _prompt: (
             "public class Limits {\n"
             "    private static final int LIMIT = 6;\n"
@@ -3908,8 +3904,8 @@ def test_java_constant_does_not_recover_changed_target_from_complete_class_outpu
         "    int calculate(int value) { return value + 6; }\n"
         "}\n"
     )
-    assistant = CodeT5CandidateTransformer(
-        CodeT5Settings(enabled=True),
+    assistant = QwenCandidateTransformer(
+        QwenSettings(enabled=True),
         generator=lambda _prompt: (
             "public class Limits {\n"
             "    private static final int LIMIT = 6;\n"
@@ -3940,7 +3936,7 @@ def test_java_constant_does_not_recover_changed_target_from_complete_class_outpu
     assert "return value + LIMIT;" in transformed
     assert "return value - LIMIT;" not in transformed
     assert logs[0].metadata["model_assistance"]["reason"] == (
-        "CODET5_OUTPUT_MUST_BE_TARGET_REPLACEMENT"
+        "QWEN_OUTPUT_MUST_BE_TARGET_REPLACEMENT"
     )
 
 
@@ -3950,8 +3946,8 @@ def test_java_constant_recovers_exact_target_from_unified_diff_output():
         "    int calculate(int value) { return value + 6; }\n"
         "}\n"
     )
-    assistant = CodeT5CandidateTransformer(
-        CodeT5Settings(enabled=True),
+    assistant = QwenCandidateTransformer(
+        QwenSettings(enabled=True),
         generator=lambda _prompt: (
             "--- Limits.java\n"
             "+++ Limits.java\n"
@@ -3998,8 +3994,8 @@ def test_java_constant_completes_full_class_with_declaration_and_unchanged_targe
         "    int calculate(int value) { return value + 6; }\n"
         "}\n"
     )
-    assistant = CodeT5CandidateTransformer(
-        CodeT5Settings(enabled=True),
+    assistant = QwenCandidateTransformer(
+        QwenSettings(enabled=True),
         generator=lambda _prompt: (
             "public class Limits {\n"
             "    private static final int LIMIT = 6;\n"
@@ -4036,14 +4032,14 @@ def test_java_constant_completes_full_class_with_declaration_and_unchanged_targe
     assert completion["reason"] == "complete_source_declaration_intent_completed"
 
 
-def test_codet5_exact_java_method_wins_over_stale_line_hint():
+def test_qwen_exact_java_method_wins_over_stale_line_hint():
     source = (
         "public class Order {\n"
         "    int selected() { return 10; }\n"
         "    int other() { return 20; }\n"
         "}\n"
     )
-    assistant = CodeT5CandidateTransformer(CodeT5Settings(enabled=True))
+    assistant = QwenCandidateTransformer(QwenSettings(enabled=True))
     action = RefactoringAction(
         action_type="extract_method",
         parameters={
@@ -4062,14 +4058,14 @@ def test_codet5_exact_java_method_wins_over_stale_line_hint():
     assert context.name == "Order.selected"
 
 
-def test_codet5_python_context_uses_unique_literal_anchor():
+def test_qwen_python_context_uses_unique_literal_anchor():
     source = (
         "def ordinary():\n"
         "    return 10\n\n"
         "def selected():\n"
         "    return 125\n"
     )
-    assistant = CodeT5CandidateTransformer(CodeT5Settings(enabled=True))
+    assistant = QwenCandidateTransformer(QwenSettings(enabled=True))
     action = RefactoringAction(
         action_type="introduce_constant",
         parameters={"source_file": "sample.py", "literal_value": 125},
@@ -4083,9 +4079,9 @@ def test_codet5_python_context_uses_unique_literal_anchor():
     assert context.name == "selected"
 
 
-def test_codet5_c_context_uses_only_function_when_metadata_is_missing():
+def test_qwen_c_context_uses_only_function_when_metadata_is_missing():
     source = "int selected(void) {\n    return 10;\n}\n"
-    assistant = CodeT5CandidateTransformer(CodeT5Settings(enabled=True))
+    assistant = QwenCandidateTransformer(QwenSettings(enabled=True))
     action = RefactoringAction(
         action_type="replace_nested_conditional_with_guard_clauses",
         parameters={"source_file": "sample.c"},
@@ -4099,7 +4095,7 @@ def test_codet5_c_context_uses_only_function_when_metadata_is_missing():
     assert context.name == "selected"
 
 
-def test_codet5_c_header_resolves_line_targeted_preprocessor_directive():
+def test_qwen_c_header_resolves_line_targeted_preprocessor_directive():
     source = (
         "#ifndef SAMPLE_H\n"
         "#define SAMPLE_H\n"
@@ -4108,7 +4104,7 @@ def test_codet5_c_header_resolves_line_targeted_preprocessor_directive():
         "#endif\n"
         "#endif\n"
     )
-    assistant = CodeT5CandidateTransformer(CodeT5Settings(enabled=True))
+    assistant = QwenCandidateTransformer(QwenSettings(enabled=True))
     action = RefactoringAction(
         action_type="introduce_constant",
         parameters={
@@ -4130,9 +4126,9 @@ def test_codet5_c_header_resolves_line_targeted_preprocessor_directive():
     assert "__GNUC__ >= 4" in context.source
 
 
-def test_codet5_c_localized_action_recovers_one_unique_stale_line_anchor():
+def test_qwen_c_localized_action_recovers_one_unique_stale_line_anchor():
     source = "int value(void) {\n    int result = 10;\n    return result;\n}\n"
-    assistant = CodeT5CandidateTransformer(CodeT5Settings(enabled=True))
+    assistant = QwenCandidateTransformer(QwenSettings(enabled=True))
     action = RefactoringAction(
         action_type="introduce_constant",
         parameters={"source_line": 1, "literal_value": 10, "constant_name": "LIMIT"},
@@ -4148,9 +4144,9 @@ def test_codet5_c_localized_action_recovers_one_unique_stale_line_anchor():
     assert context.source.strip() == "int result = 10;"
 
 
-def test_codet5_c_localized_action_does_not_guess_between_stale_anchors():
+def test_qwen_c_localized_action_does_not_guess_between_stale_anchors():
     source = "int value(int flag) {\n    if (flag) return -2;\n    return -2;\n}\n"
-    assistant = CodeT5CandidateTransformer(CodeT5Settings(enabled=True))
+    assistant = QwenCandidateTransformer(QwenSettings(enabled=True))
     action = RefactoringAction(
         action_type="introduce_constant",
         parameters={"source_line": 1, "literal_value": -2, "constant_name": "ERROR_CODE"},
@@ -4163,7 +4159,7 @@ def test_codet5_c_localized_action_does_not_guess_between_stale_anchors():
     assert context is None
 
 
-def test_codet5_cxx_header_resolves_exact_method_declaration():
+def test_qwen_cxx_header_resolves_exact_method_declaration():
     source = (
         "#include <string>\n"
         "class Reader {\n"
@@ -4172,7 +4168,7 @@ def test_codet5_cxx_header_resolves_exact_method_declaration():
         "    int ParseError() const;\n"
         "};\n"
     )
-    assistant = CodeT5CandidateTransformer(CodeT5Settings(enabled=True))
+    assistant = QwenCandidateTransformer(QwenSettings(enabled=True))
     action = RefactoringAction(
         action_type="introduce_constant",
         parameters={
@@ -4191,7 +4187,7 @@ def test_codet5_cxx_header_resolves_exact_method_declaration():
     assert context.source.strip() == "int ParseError() const;"
 
 
-def test_codet5_c_uses_target_span_even_when_complete_file_input_fits():
+def test_qwen_c_uses_target_span_even_when_complete_file_input_fits():
     source = (
         "#include <stdio.h>\n\n"
         "static int selected(void) {\n"
@@ -4205,8 +4201,8 @@ def test_codet5_c_uses_target_span_even_when_complete_file_input_fits():
         prompts.append(prompt)
         return "static int selected(void) {\n    return 50;\n}"
 
-    assistant = CodeT5CandidateTransformer(
-        CodeT5Settings(enabled=True, max_input_tokens=512),
+    assistant = QwenCandidateTransformer(
+        QwenSettings(enabled=True, max_input_tokens=512),
         generator=generator,
     )
     action = RefactoringAction(
@@ -4218,13 +4214,13 @@ def test_codet5_c_uses_target_span_even_when_complete_file_input_fits():
         language="c", source_code=source, action=action, current_file_name="sample.c"
     )
 
-    assert candidate.reason == "CODET5_NO_SOURCE_CHANGE"
+    assert candidate.reason == "QWEN_NO_SOURCE_CHANGE"
     assert candidate.metadata["context_mode"] == "target_span"
     assert "<target-source>" in prompts[0]
     assert "untouched" not in prompts[0]
 
 
-def test_codet5_java_uses_resolved_target_span_when_file_fits():
+def test_qwen_java_uses_resolved_target_span_when_file_fits():
     source = (
         "package sample;\n"
         "class Values {\n"
@@ -4233,8 +4229,8 @@ def test_codet5_java_uses_resolved_target_span_when_file_fits():
         "}\n"
     )
     prompts = []
-    assistant = CodeT5CandidateTransformer(
-        CodeT5Settings(enabled=True, max_input_tokens=512),
+    assistant = QwenCandidateTransformer(
+        QwenSettings(enabled=True, max_input_tokens=512),
         generator=lambda prompt: prompts.append(prompt) or "int selected() { return 1; }",
     )
     action = RefactoringAction(
@@ -4260,15 +4256,15 @@ def test_codet5_java_uses_resolved_target_span_when_file_fits():
     assert "untouched" not in prompts[0]
 
 
-def test_codet5_retries_once_with_action_validation_feedback():
+def test_qwen_retries_once_with_action_validation_feedback():
     source = "class Values {\n    int selected() { return 1; }\n}\n"
     prompts = []
     outputs = iter((
         "int selected() { return 2; }",
         "int selected() { return 3; }",
     ))
-    assistant = CodeT5CandidateTransformer(
-        CodeT5Settings(
+    assistant = QwenCandidateTransformer(
+        QwenSettings(
             enabled=True,
             max_actions_per_request=2,
             max_actions_per_file=2,
@@ -4344,8 +4340,8 @@ def test_java_extract_model_candidate_retains_validated_lineage_through_final_ch
             "source_method": "calculate",
         },
     )
-    assistant = CodeT5CandidateTransformer(
-        CodeT5Settings(enabled=True, max_actions_per_file=2),
+    assistant = QwenCandidateTransformer(
+        QwenSettings(enabled=True, max_actions_per_file=2),
         generator=lambda _prompt: generated_members,
     )
     agent = SafeCodeTransformationValidationAgent()
@@ -4473,18 +4469,18 @@ def test_java_extract_model_candidate_that_changes_behavior_is_rejected():
     )
 
 
-def test_codet5_unwraps_single_fenced_block_with_explanation():
+def test_qwen_unwraps_single_fenced_block_with_explanation():
     output = "Here is the transformed target:\n```c\nint value(void) { return 2; }\n```\nDone."
 
-    normalized = CodeT5CandidateTransformer._normalise_model_output(output)
+    normalized = QwenCandidateTransformer._normalise_model_output(output)
 
     assert normalized == "int value(void) { return 2; }"
 
 
 def test_c_model_preflight_allows_safe_local_array_extent():
     calls = []
-    assistant = CodeT5CandidateTransformer(
-        CodeT5Settings(enabled=True),
+    assistant = QwenCandidateTransformer(
+        QwenSettings(enabled=True),
         generator=lambda prompt: calls.append(prompt) or (
             "#define BUFFER_SIZE 50\n"
             "    char buffer[BUFFER_SIZE];"
@@ -4530,8 +4526,8 @@ def test_c_model_preflight_allows_safe_local_array_extent():
 
 def test_c_model_preflight_allows_header_prototype_array_extent():
     calls = []
-    assistant = CodeT5CandidateTransformer(
-        CodeT5Settings(enabled=True),
+    assistant = QwenCandidateTransformer(
+        QwenSettings(enabled=True),
         generator=lambda prompt: calls.append(prompt) or (
             "#define READER_BUFFER_SIZE 64\n"
             "int read_value(char buffer[READER_BUFFER_SIZE]);"
@@ -4571,8 +4567,8 @@ def test_c_model_preflight_allows_header_prototype_array_extent():
 
 def test_c_model_preflight_attempts_inihfuzz_global_array_extent():
     calls = []
-    assistant = CodeT5CandidateTransformer(
-        CodeT5Settings(enabled=True),
+    assistant = QwenCandidateTransformer(
+        QwenSettings(enabled=True),
         generator=lambda prompt: calls.append(prompt) or "#define PREV_SECTION_SIZE 50",
     )
     action = RefactoringAction(
@@ -4608,7 +4604,7 @@ def test_c_model_preflight_attempts_inihfuzz_global_array_extent():
     assert completion["contract"] == "c_introduce_constant_target_statement"
 
 
-def test_codet5_ambiguous_large_file_target_is_not_guessed():
+def test_qwen_ambiguous_large_file_target_is_not_guessed():
     filler = "\n".join(f"# unrelated context {index}" for index in range(180))
     original = (
         "class First:\n"
@@ -4620,8 +4616,8 @@ def test_codet5_ambiguous_large_file_target_is_not_guessed():
         + filler
         + "\n"
     )
-    assistant = CodeT5CandidateTransformer(
-        CodeT5Settings(enabled=True, max_input_tokens=512),
+    assistant = QwenCandidateTransformer(
+        QwenSettings(enabled=True, max_input_tokens=512),
         generator=lambda _prompt: "must not be called",
     )
     action = RefactoringAction(
@@ -4637,7 +4633,7 @@ def test_codet5_ambiguous_large_file_target_is_not_guessed():
     )
 
     assert not candidate.source_code
-    assert candidate.reason == "CODET5_TARGET_CONTEXT_NOT_RESOLVED"
+    assert candidate.reason == "QWEN_TARGET_CONTEXT_NOT_RESOLVED"
     assert candidate.metadata["context_mode"] == "target_span_unresolved"
 
 
@@ -4662,7 +4658,7 @@ def test_model_accuracy_is_zero_when_rule_based_output_is_used():
     assert summary["model_status"] == "MODEL_NOT_USED"
 
 
-def test_model_accuracy_is_positive_only_for_retained_codet5_output():
+def test_model_accuracy_is_positive_only_for_retained_qwen_output():
     summary = SafeCodeTransformationValidationAgent._model_usage_summary(
         [
             TransformationLogEntry(
@@ -4672,7 +4668,7 @@ def test_model_accuracy_is_positive_only_for_retained_codet5_output():
                 metadata={
                     "status": "success",
                     "model_assisted": True,
-                    "model_provider": "codet5_plus",
+                    "model_provider": "qwen_coder",
                     "model_assistance": {"context_mode": "target_span"},
                 },
             )
@@ -4687,7 +4683,7 @@ def test_model_accuracy_is_positive_only_for_retained_codet5_output():
     assert summary["model_context_modes"] == ["target_span"]
     assert summary["transformation_engine"] == "HYBRID"
     assert summary["hybrid_strategy"] == "MODEL_FIRST_RULE_FALLBACK"
-    assert summary["accepted_output_engine"] == "CODET5_PLUS"
+    assert summary["accepted_output_engine"] == "QWEN_CODER"
     assert summary["rule_fallback_used"] is False
     assert summary["model_status"] == "MODEL_OUTPUT_RETAINED"
 
@@ -4703,7 +4699,7 @@ def test_rejected_model_attempt_reports_zero_and_rule_fallback():
                     "status": "success",
                     "model_assistance": {
                         "status": "candidate_generated",
-                        "reason": "CODET5_CANDIDATE_SYNTAX_INVALID",
+                        "reason": "QWEN_CANDIDATE_SYNTAX_INVALID",
                     },
                 },
             )
@@ -4722,7 +4718,7 @@ def test_rejected_model_attempt_reports_zero_and_rule_fallback():
     assert summary["accepted_output_engine"] == "RULE_BASED"
     assert summary["rule_fallback_used"] is True
     assert summary["model_attempt_reasons"] == [
-        "CODET5_CANDIDATE_SYNTAX_INVALID"
+        "QWEN_CANDIDATE_SYNTAX_INVALID"
     ]
 
 
@@ -4737,10 +4733,10 @@ def test_rejected_model_attempt_reports_the_final_repair_reason():
                     "status": "success",
                     "model_assistance": {
                         "status": "candidate_rejected",
-                        "reason": "CODET5_CANDIDATE_INTENT_NOT_SATISFIED",
+                        "reason": "QWEN_CANDIDATE_INTENT_NOT_SATISFIED",
                         "repair_attempt": {
                             "status": "candidate_rejected",
-                            "reason": "CODET5_EMPTY_OUTPUT",
+                            "reason": "QWEN_EMPTY_OUTPUT",
                         },
                     },
                 },
@@ -4751,7 +4747,7 @@ def test_rejected_model_attempt_reports_the_final_repair_reason():
         transformation_applied=True,
     )
 
-    assert summary["model_attempt_reasons"] == ["CODET5_EMPTY_OUTPUT"]
+    assert summary["model_attempt_reasons"] == ["QWEN_EMPTY_OUTPUT"]
 
 
 def test_enabled_model_without_eligible_action_is_reported_separately():
@@ -4773,8 +4769,8 @@ def test_enabled_model_without_eligible_action_is_reported_separately():
 
 
 def test_final_model_validation_failure_is_reported_as_rule_fallback():
-    assistant = CodeT5CandidateTransformer(
-        CodeT5Settings(enabled=True),
+    assistant = QwenCandidateTransformer(
+        QwenSettings(enabled=True),
         generator=lambda _prompt: "unused",
     )
     rule_result = {
@@ -4868,8 +4864,8 @@ def test_primary_model_final_validation_failure_gets_one_validator_guided_repair
             "enable_sctva_auto_refactoring": False,
         },
     })
-    assistant = CodeT5CandidateTransformer(
-        CodeT5Settings(enabled=True),
+    assistant = QwenCandidateTransformer(
+        QwenSettings(enabled=True),
         generator=lambda _prompt: (
             "#define MAX_VALUE 10\n\n"
             "int value(int input) { return input > MAX_VALUE; }\n"
@@ -4913,8 +4909,8 @@ def test_primary_model_final_validation_failure_gets_one_validator_guided_repair
 
 
 def test_usage_snapshot_keeps_generation_accounting_scoped_to_its_file():
-    assistant = CodeT5CandidateTransformer(
-        CodeT5Settings(enabled=True),
+    assistant = QwenCandidateTransformer(
+        QwenSettings(enabled=True),
         generator=lambda _prompt: "private static final int LIMIT = 6;\nint value = LIMIT;",
     )
     action = RefactoringAction(

@@ -43,7 +43,7 @@ from ..constants import (
     EXTRACT_CLASS_ACTIONS,
 )
 from ..contracts import RefactoringAction
-from ..model_assistance import CodeT5CandidateTransformer
+from ..model_assistance import QwenCandidateTransformer
 from ..models import TransformationLogEntry
 from ..validators.syntax_validator import SyntaxValidator
 from . import (
@@ -417,7 +417,7 @@ def _model_bundle_intent_issue(
 
     normalized_language = str(language or "").strip().lower()
     if normalized_language not in {"java", "c"} or len(actions) < 2:
-        return "CODET5_BUNDLE_CONTRACT_UNSUPPORTED"
+        return "QWEN_BUNDLE_CONTRACT_UNSUPPORTED"
 
     restored = candidate_source
     seen_names: set[str] = set()
@@ -426,7 +426,7 @@ def _model_bundle_intent_issue(
             ACTION_INTRODUCE_CONSTANT,
             ACTION_EXTRACT_CONSTANT,
         }:
-            return "CODET5_BUNDLE_CONTRACT_UNSUPPORTED"
+            return "QWEN_BUNDLE_CONTRACT_UNSUPPORTED"
         parameters = action.parameters or {}
         name = str(parameters.get("constant_name") or "EXTRACTED_CONSTANT").strip()
         values: List[Any] = []
@@ -441,7 +441,7 @@ def _model_bundle_intent_issue(
             or not re.fullmatch(r"[A-Za-z_$][A-Za-z0-9_$]*", name)
             or name in seen_names
         ):
-            return "CODET5_BUNDLE_ACTION_AMBIGUOUS"
+            return "QWEN_BUNDLE_ACTION_AMBIGUOUS"
         seen_names.add(name)
 
         if normalized_language == "java":
@@ -482,7 +482,7 @@ def _model_bundle_intent_issue(
         )
 
     if re.sub(r"\s+", "", restored) != re.sub(r"\s+", "", original_source):
-        return "CODET5_BUNDLE_UNRELATED_SOURCE_CHANGE"
+        return "QWEN_BUNDLE_UNRELATED_SOURCE_CHANGE"
     return ""
 
 
@@ -519,7 +519,7 @@ def _model_local_bundle_intent_issue(
         parameters = action.parameters or {}
         if action.action_type == ACTION_REPLACE_LITERAL:
             if "old_literal" not in parameters or "new_literal" not in parameters:
-                return "CODET5_BUNDLE_REPLACE_LITERAL_CONTRACT_MISSING"
+                return "QWEN_BUNDLE_REPLACE_LITERAL_CONTRACT_MISSING"
             old_literal = parameters["old_literal"]
             new_literal = parameters["new_literal"]
             if not (
@@ -528,12 +528,12 @@ def _model_local_bundle_intent_issue(
                 and literal_count(candidate_source, new_literal)
                 > literal_count(original_source, new_literal)
             ):
-                return "CODET5_BUNDLE_REPLACE_LITERAL_INTENT_NOT_SATISFIED"
+                return "QWEN_BUNDLE_REPLACE_LITERAL_INTENT_NOT_SATISFIED"
         elif action.action_type == ACTION_REPLACE_UNSAFE_FUNCTION:
             unsafe_function = str(parameters.get("unsafe_function") or "").strip()
             safe_alternative = str(parameters.get("safe_alternative") or "").strip()
             if not unsafe_function or not safe_alternative:
-                return "CODET5_BUNDLE_UNSAFE_FUNCTION_CONTRACT_MISSING"
+                return "QWEN_BUNDLE_UNSAFE_FUNCTION_CONTRACT_MISSING"
             unsafe_pattern = re.compile(rf"\b{re.escape(unsafe_function)}\s*\(")
             safe_pattern = re.compile(rf"\b{re.escape(safe_alternative)}\s*\(")
             if not (
@@ -542,7 +542,7 @@ def _model_local_bundle_intent_issue(
                 and len(safe_pattern.findall(candidate_source))
                 > len(safe_pattern.findall(original_source))
             ):
-                return "CODET5_BUNDLE_UNSAFE_FUNCTION_INTENT_NOT_SATISFIED"
+                return "QWEN_BUNDLE_UNSAFE_FUNCTION_INTENT_NOT_SATISFIED"
     return ""
 
 
@@ -1149,7 +1149,7 @@ class TransformationEngine:
         current_file_name: str = "",
         repository_complete: bool = False,
         behavior_tests: Sequence[Dict[str, Any]] | None = None,
-        model_assistant: CodeT5CandidateTransformer | None = None,
+        model_assistant: QwenCandidateTransformer | None = None,
         model_candidate_validator: Callable[
             [str, str, RefactoringAction], Dict[str, Any]
         ] | None = None,
@@ -1972,11 +1972,11 @@ class TransformationEngine:
                             )
                         if candidate_syntax_issue or candidate_intent_issue or checkpoint_issue:
                             rejection_reason = (
-                                "CODET5_CANDIDATE_SYNTAX_INVALID"
+                                "QWEN_CANDIDATE_SYNTAX_INVALID"
                                 if candidate_syntax_issue
-                                else "CODET5_CANDIDATE_ACTION_VALIDATION_FAILED"
+                                else "QWEN_CANDIDATE_ACTION_VALIDATION_FAILED"
                                 if checkpoint_issue
-                                else "CODET5_CANDIDATE_INTENT_NOT_SATISFIED"
+                                else "QWEN_CANDIDATE_INTENT_NOT_SATISFIED"
                             )
                             rejection_issue = (
                                 candidate_syntax_issue
@@ -4560,13 +4560,13 @@ class TransformationEngine:
                     if action_metadata.get("model_assisted") is True:
                         action_metadata.update({
                             "status": "review_required",
-                            "reason": "CODET5_CANDIDATE_SYNTAX_INVALID",
+                            "reason": "QWEN_CANDIDATE_SYNTAX_INVALID",
                         })
                         model_diagnostics = action_metadata.get("model_assistance")
                         if isinstance(model_diagnostics, dict):
                             model_diagnostics.update({
                                 "status": "candidate_rejected",
-                                "reason": "CODET5_CANDIDATE_SYNTAX_INVALID",
+                                "reason": "QWEN_CANDIDATE_SYNTAX_INVALID",
                                 "syntax_issue": syntax_issue,
                             })
                     warnings.append(

@@ -236,7 +236,7 @@ function modelMetricsFromResult(result) {
   const accuracy = used && Number.isFinite(reportedAccuracy)
     ? Math.max(1, Math.min(100, reportedAccuracy))
     : 0;
-  const rawEngine = String(result?.transformation_engine || (used ? 'CODET5_PLUS' : 'RULE_BASED'));
+  const rawEngine = String(result?.transformation_engine || (used ? 'QWEN_CODER' : 'RULE_BASED'));
   const rawStatus = String(
     result?.model_status
     || (used ? 'MODEL_OUTPUT_RETAINED' : attempted ? 'MODEL_ATTEMPT_REJECTED_RULE_FALLBACK' : 'MODEL_NOT_USED')

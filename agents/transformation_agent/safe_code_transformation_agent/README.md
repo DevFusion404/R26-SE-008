@@ -12,7 +12,7 @@ SCTVA is a safety-first execution agent that consumes source code plus a structu
 - Confidence scoring: `sctva/scoring/confidence_scorer.py`
 - Reporting: `sctva/reporting/safety_reporter.py`
 - Integration: `sctva/integration/planner_adapter.py`, `sctva/integration/api.py`
-- Optional local code-model candidate layer: `sctva/model_assistance/codet5.py`
+- Optional local code-model candidate layer: `sctva/model_assistance/qwen.py`
 
 ## Optional Local Code-Model Candidate Layer
 
@@ -24,11 +24,10 @@ is attempted only when the native transformer produces no change. Every model
 proposal is still subject to SCTVA's syntax, structural, behavioral, invariant,
 and rollback checks.
 
-The default local profile uses `Qwen2.5-Coder-0.5B-Instruct`. Unlike a base
-CodeT5+ checkpoint, it is instruction-tuned to follow source-transformation
-requests. SCTVA retains compatibility with CodeT5+ checkpoints when an
-operator explicitly selects one. When a complete-file prompt exceeds the
-configured input limit, SCTVA resolves the current Python AST or Java/C symbol model and
+The local-model adapter uses only `Qwen/Qwen2.5-Coder-0.5B-Instruct`, an
+instruction-tuned checkpoint for source-transformation requests. When a
+complete-file prompt exceeds the configured input limit, SCTVA resolves the
+current Python AST or Java/C symbol model and
 sends only the exact target function, method, or class plus compact declaration
 context. Model output is merged back into that exact source span; unrelated
 source is never regenerated. Ambiguous targets and target spans that still do
@@ -57,7 +56,7 @@ callers can still omit or disable it explicitly. For a local CPU run, install
 the model dependencies into the same Python environment that starts SCTVA:
 
 ```bash
-pip install -r requirements-codet5.txt
+pip install -r requirements-qwen.txt
 ```
 
 CUDA deployments can replace the default CPU-compatible PyTorch package with
@@ -68,38 +67,38 @@ Enable it per request; the RDP plan format is not changed:
 ```json
 {
   "execution_options": {
-    "enable_codet5": true,
-    "codet5_model_id": "Qwen/Qwen2.5-Coder-0.5B-Instruct",
-    "codet5_device": "cpu",
-    "codet5_backend": "auto",
-    "codet5_openvino_model_path": "",
-    "codet5_max_input_tokens": 512,
-    "codet5_max_new_tokens": 256,
-    "codet5_max_bundle_output_tokens": 192,
-    "codet5_cpu_threads": 6,
-    "codet5_max_actions_per_request": 100,
-    "codet5_max_actions_per_file": 100,
-    "codet5_enable_file_bundling": false,
-    "codet5_enable_generic_bundling": false,
-    "codet5_max_actions_per_bundle": 5,
-    "codet5_max_generic_actions_per_bundle": 2,
-    "codet5_generation_timeout_seconds": 30,
-    "codet5_max_generation_seconds_per_request": 0,
-    "codet5_runtime_cache": true,
-    "codet5_allow_unsupported_actions": false,
+    "enable_qwen": true,
+    "qwen_model_id": "Qwen/Qwen2.5-Coder-0.5B-Instruct",
+    "qwen_device": "cpu",
+    "qwen_backend": "auto",
+    "qwen_openvino_model_path": "",
+    "qwen_max_input_tokens": 512,
+    "qwen_max_new_tokens": 256,
+    "qwen_max_bundle_output_tokens": 192,
+    "qwen_cpu_threads": 6,
+    "qwen_max_actions_per_request": 100,
+    "qwen_max_actions_per_file": 100,
+    "qwen_enable_file_bundling": false,
+    "qwen_enable_generic_bundling": false,
+    "qwen_max_actions_per_bundle": 5,
+    "qwen_max_generic_actions_per_bundle": 2,
+    "qwen_generation_timeout_seconds": 30,
+    "qwen_max_generation_seconds_per_request": 0,
+    "qwen_runtime_cache": true,
+    "qwen_allow_unsupported_actions": false,
     "max_parallel_files": 3,
-    "codet5_mode": "primary"
+    "qwen_mode": "primary"
   }
 }
 ```
 
-Set `codet5_allow_unsupported_actions` to `true` only for research experiments
+Set `qwen_allow_unsupported_actions` to `true` only for research experiments
 with RDP actions that currently normalize to `noop`. Such generic candidates
 receive generic safety validation, but do not claim a method-specific
 structural proof. The model never changes files directly and SCTVA rejects its
 candidate on any failed validation.
 
-`codet5_mode` defaults to `primary`: the configured model is attempted first and the
+`qwen_mode` defaults to `primary`: the configured model is attempted first and the
 existing rule-based transformer is used when the model cannot provide a
 syntax-safe candidate. Set it to `fallback` to preserve the earlier behavior
 where deterministic transformations are attempted first.
@@ -133,8 +132,8 @@ python -m pip install -r requirements-openvino.txt
 optimum-cli export openvino --model Qwen/Qwen2.5-Coder-0.5B-Instruct --task text-generation-with-past --weight-format fp32 C:\models\qwen25-coder-05b-openvino
 ```
 
-Then configure `codet5_backend` as `openvino` and set
-`codet5_openvino_model_path` to that directory. With `auto`, SCTVA selects
+Then configure `qwen_backend` as `openvino` and set
+`qwen_openvino_model_path` to that directory. With `auto`, SCTVA selects
 OpenVINO only when the configured path exists and otherwise retains PyTorch.
 OpenVINO inference uses FP32 activation precision and a four-item CPU
 micro-batch. The earlier BF16 activation and U8 KV-cache throughput profile was
@@ -144,38 +143,38 @@ action set or bypass candidate validation.
 The web client uses a 30-second per-generation timeout and no request-level
 generation cutoff. Therefore a slow first file does not prevent later eligible
 RDP actions from reaching the model. To reduce CPU latency without dropping
-actions, `codet5_max_bundle_output_tokens` limits only multi-action bundle
+actions, `qwen_max_bundle_output_tokens` limits only multi-action bundle
 output. An oversized bundle is split before generation and its independent
 constant actions use the existing tensor-batched single-action path. Every
 candidate still passes the same validation gates. Set a positive
-`codet5_max_generation_seconds_per_request` only when an explicit whole-request
+`qwen_max_generation_seconds_per_request` only when an explicit whole-request
 latency cutoff is more important than attempting every eligible action.
 
 For unchanged RDP payloads in a deployed environment, configure SCTVA instead
 of changing the RDP JSON:
 
 ```text
-SCTVA_ENABLE_CODET5=true
-SCTVA_CODET5_MODE=primary
-SCTVA_CODET5_DEVICE=cpu
-SCTVA_CODET5_BACKEND=auto
-SCTVA_CODET5_OPENVINO_MODEL_PATH=C:\models\qwen25-coder-05b-openvino
-SCTVA_CODET5_MODEL_ID=Qwen/Qwen2.5-Coder-0.5B-Instruct
-SCTVA_CODET5_CPU_THREADS=6
-SCTVA_CODET5_MAX_ACTIONS_PER_REQUEST=100
-SCTVA_CODET5_MAX_ACTIONS_PER_FILE=100
-SCTVA_CODET5_ENABLE_FILE_BUNDLING=false
-SCTVA_CODET5_ENABLE_GENERIC_BUNDLING=false
-SCTVA_CODET5_MAX_ACTIONS_PER_BUNDLE=5
-SCTVA_CODET5_MAX_GENERIC_ACTIONS_PER_BUNDLE=2
-SCTVA_CODET5_MAX_BUNDLE_OUTPUT_TOKENS=192
-SCTVA_CODET5_GENERATION_TIMEOUT_SECONDS=30
-SCTVA_CODET5_MAX_GENERATION_SECONDS_PER_REQUEST=0
-SCTVA_CODET5_RUNTIME_CACHE=true
+SCTVA_ENABLE_QWEN=true
+SCTVA_QWEN_MODE=primary
+SCTVA_QWEN_DEVICE=cpu
+SCTVA_QWEN_BACKEND=auto
+SCTVA_QWEN_OPENVINO_MODEL_PATH=C:\models\qwen25-coder-05b-openvino
+SCTVA_QWEN_MODEL_ID=Qwen/Qwen2.5-Coder-0.5B-Instruct
+SCTVA_QWEN_CPU_THREADS=6
+SCTVA_QWEN_MAX_ACTIONS_PER_REQUEST=100
+SCTVA_QWEN_MAX_ACTIONS_PER_FILE=100
+SCTVA_QWEN_ENABLE_FILE_BUNDLING=false
+SCTVA_QWEN_ENABLE_GENERIC_BUNDLING=false
+SCTVA_QWEN_MAX_ACTIONS_PER_BUNDLE=5
+SCTVA_QWEN_MAX_GENERIC_ACTIONS_PER_BUNDLE=2
+SCTVA_QWEN_MAX_BUNDLE_OUTPUT_TOKENS=192
+SCTVA_QWEN_GENERATION_TIMEOUT_SECONDS=30
+SCTVA_QWEN_MAX_GENERATION_SECONDS_PER_REQUEST=0
+SCTVA_QWEN_RUNTIME_CACHE=true
 ```
 
-`SCTVA_CODET5_MAX_INPUT_TOKENS`, `SCTVA_CODET5_MAX_NEW_TOKENS`, and
-`SCTVA_CODET5_ALLOW_UNSUPPORTED_ACTIONS` are also available. Both action budgets
+`SCTVA_QWEN_MAX_INPUT_TOKENS`, `SCTVA_QWEN_MAX_NEW_TOKENS`, and
+`SCTVA_QWEN_ALLOW_UNSUPPORTED_ACTIONS` are also available. Both action budgets
 count generation attempts, including bounded repairs; one successful bundle
 therefore consumes one attempt even when it applies several planned actions.
 The request budget caps the complete run, while the per-file budget caps attempts for one source file.
@@ -186,7 +185,7 @@ Request-level
 
 The adapter uses local model files only by default, so a deployed service never
 waits on Hugging Face network access. Download the checkpoint during setup. Set
-`SCTVA_CODET5_ALLOW_DOWNLOAD=true` only when runtime downloads are explicitly
+`SCTVA_QWEN_ALLOW_DOWNLOAD=true` only when runtime downloads are explicitly
 acceptable.
 
 Hugging Face stores a local setup download in the user's cache (normally
