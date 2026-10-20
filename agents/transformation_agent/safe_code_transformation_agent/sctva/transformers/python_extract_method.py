@@ -8,7 +8,7 @@ import re
 from dataclasses import dataclass
 from typing import Any, Iterable, Sequence
 
-from .extract_method_common import MAX_EXTRACTED_PARAMETERS, MIN_EXTRACTED_LOC, nonblank_loc
+from .extract_method_common import MAX_EXTRACTED_PARAMETERS, MIN_EXTRACTED_LOC
 from .python_ast_fingerprints import (
     literal_constant_bindings,
     meaningful_top_level_statements,

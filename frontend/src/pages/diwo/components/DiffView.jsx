@@ -12,28 +12,165 @@
  * buildDiffSegments() in utils/diffMapper.js produces; this file only paints it.
  */
 
-import { useMemo } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { C } from "../diwoTheme.jsx";
 import { buildDiffSegments } from "../utils/diffMapper";
 
-/** Scrollable theme-aware panel every code and diff view sits in. */
-export function CodeSurface({ children, maxHeight = 460, style = {} }) {
+/** Marker colours on the change map, matching the diff blocks. */
+const MAP_COLORS = { before: "#ef4444", after: "#3b82f6" };
+
+/**
+ * Scrollable theme-aware panel every code and diff view sits in.
+ *
+ * `changeMap` adds an overview ruler down the right edge: one mark for every
+ * changed block in the content (red = original lines, blue = refactored),
+ * placed at its position in the whole file, plus a box showing the part on
+ * screen. Clicking a mark scrolls to that change, so a long diff no longer has
+ * to be scrolled through to find what changed. Any descendant carrying
+ * `data-change-kind` becomes a mark.
+ */
+export function CodeSurface({ children, maxHeight = 460, style = {}, changeMap = false }) {
+  const scrollRef = useRef(null);
+  const [marks, setMarks] = useState([]);
+  const [viewport, setViewport] = useState({ top: 0, height: 1 });
+
+  useEffect(() => {
+    if (!changeMap) return undefined;
+    const box = scrollRef.current;
+    if (!box) return undefined;
+
+    const readViewport = () => {
+      const total = box.scrollHeight || 1;
+      setViewport({ top: box.scrollTop / total, height: Math.min(1, box.clientHeight / total) });
+    };
+    const measure = () => {
+      const total = box.scrollHeight || 1;
+      const boxTop = box.getBoundingClientRect().top;
+      setMarks([...box.querySelectorAll("[data-change-kind]")].map((el, i) => {
+        const rect = el.getBoundingClientRect();
+        const offset = rect.top - boxTop + box.scrollTop;
+        return {
+          key: i,
+          kind: el.dataset.changeKind,
+          label: el.dataset.changeLabel || "",
+          offset,
+          top: offset / total,
+          height: rect.height / total,
+        };
+      }));
+      readViewport();
+    };
+
+    // Measured after paint and again whenever the content's size changes
+    // (another file, another view, fonts loading).
+    const frame = requestAnimationFrame(measure);
+    const observer = new ResizeObserver(measure);
+    observer.observe(box);
+    if (box.firstElementChild) observer.observe(box.firstElementChild);
+    box.addEventListener("scroll", readViewport, { passive: true });
+    return () => {
+      cancelAnimationFrame(frame);
+      observer.disconnect();
+      box.removeEventListener("scroll", readViewport);
+    };
+  }, [changeMap, children]);
+
+  const scrollToOffset = (offset) => {
+    scrollRef.current?.scrollTo({ top: Math.max(0, offset - 24), behavior: "smooth" });
+  };
+
+  const showMap = changeMap && marks.length > 0;
+
   return (
     <div
       style={{
+        display: "flex",
         background: "var(--bg-code)",
         border: `1px solid ${C.border}`,
         borderRadius: 10,
-        overflow: "auto",
-        fontFamily: "Fira Code, Courier New, monospace",
-        fontSize: 11,
-        lineHeight: 1.6,
-        padding: "8px 0",
-        maxHeight,
-        ...style,
+        overflow: "hidden",
       }}
     >
-      {children}
+      <div
+        ref={scrollRef}
+        style={{
+          flex: 1,
+          minWidth: 0,
+          overflow: "auto",
+          // A clear, heavier monospace first; Courier New (the old fallback on
+          // most machines) is thin and hard to read at small sizes.
+          fontFamily: "'JetBrains Mono', 'Cascadia Code', Consolas, 'Fira Code', Menlo, monospace",
+          fontSize: 11,
+          lineHeight: 1.6,
+          padding: "8px 0",
+          maxHeight,
+          ...style,
+        }}
+      >
+        <div>{children}</div>
+      </div>
+
+      {showMap && (
+        <div
+          role="navigation"
+          aria-label={`${marks.length} changed block(s) — click a mark to jump to it`}
+          title="Changes in this file — click a mark to jump to it"
+          onClick={(e) => {
+            // A click between marks scrolls to that point of the file.
+            const rect = e.currentTarget.getBoundingClientRect();
+            const ratio = (e.clientY - rect.top) / rect.height;
+            const box = scrollRef.current;
+            if (box) scrollToOffset(ratio * box.scrollHeight - box.clientHeight / 2 + 24);
+          }}
+          style={{
+            position: "relative",
+            width: 16,
+            flexShrink: 0,
+            cursor: "pointer",
+            borderLeft: `1px solid ${C.border}`,
+            background: "color-mix(in srgb, var(--text-muted) 8%, transparent)",
+          }}
+        >
+          {/* The part of the file currently on screen. */}
+          <div
+            aria-hidden="true"
+            style={{
+              position: "absolute",
+              left: 1,
+              right: 1,
+              top: `${viewport.top * 100}%`,
+              height: `${viewport.height * 100}%`,
+              background: "color-mix(in srgb, var(--text-muted) 22%, transparent)",
+              borderRadius: 3,
+              pointerEvents: "none",
+            }}
+          />
+          {marks.map((mark) => (
+            <button
+              key={mark.key}
+              type="button"
+              title={mark.label || (mark.kind === "before" ? "Original lines" : "Refactored lines")}
+              aria-label={mark.label || `Change ${mark.key + 1}`}
+              onClick={(e) => {
+                e.stopPropagation();
+                scrollToOffset(mark.offset);
+              }}
+              style={{
+                position: "absolute",
+                left: 3,
+                right: 3,
+                top: `${mark.top * 100}%`,
+                height: `max(4px, ${mark.height * 100}%)`,
+                padding: 0,
+                border: "none",
+                borderRadius: 2,
+                background: MAP_COLORS[mark.kind] || C.accent,
+                cursor: "pointer",
+              }}
+            />
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -118,19 +255,24 @@ function DiffLine({ row, tone }) {
  * looking at when they ask "why is this block red?", and an answer one line
  * away is an answer they have to go and find.
  */
-function DiffGroup({ rows, kind, note }) {
+function DiffGroup({ rows, kind, note, mapLabel = "" }) {
   if (rows.length === 0) return null;
   const tone = DIFF_TONES[kind];
 
   return (
-    <div style={{ background: tone.fill, borderLeft: `3px solid ${tone.rail}` }}>
+    <div
+      // Picked up by CodeSurface's change map.
+      data-change-kind={kind}
+      data-change-label={mapLabel}
+      style={{ background: tone.fill, borderLeft: `3px solid ${tone.rail}` }}
+    >
       <div
         style={{
           display: "flex",
           alignItems: "baseline",
           gap: 8,
           flexWrap: "wrap",
-          fontSize: 9,
+          fontSize: 10.5,
           fontWeight: 700,
           letterSpacing: 1,
           textTransform: "uppercase",
@@ -193,11 +335,13 @@ export function DiffBlock({
                   key={row.key}
                   style={{ display: "grid", gridTemplateColumns: "56px 24px 1fr", padding: "1px 0" }}
                 >
-                  <span style={{ color: "#3f4a5f", textAlign: "right", paddingRight: 8, userSelect: "none" }}>
+                  <span style={{ color: "var(--text-muted)", textAlign: "right", paddingRight: 8, userSelect: "none" }}>
                     {row.lineNo}
                   </span>
-                  <span style={{ color: "#3f4a5f", textAlign: "center", userSelect: "none" }}>·</span>
-                  <span style={{ whiteSpace: "pre", color: "#8a97ab", padding: "0 12px 0 6px" }}>
+                  <span style={{ color: "var(--text-muted)", textAlign: "center", userSelect: "none" }}>·</span>
+                  {/* Unchanged context: the theme's secondary text, readable in
+                      both modes (the fixed greys faded out on a light page). */}
+                  <span style={{ whiteSpace: "pre", color: "var(--text-secondary)", padding: "0 12px 0 6px" }}>
                     {row.text || " "}
                   </span>
                 </div>
@@ -223,7 +367,7 @@ export function DiffBlock({
                 gap: 10,
                 padding: "5px 12px",
                 background: "rgba(148,163,184,0.08)",
-                fontSize: 10,
+                fontSize: 11.5,
                 fontWeight: 700,
                 letterSpacing: 0.6,
                 color: C.textSub,
@@ -232,8 +376,18 @@ export function DiffBlock({
               <span style={{ color: C.accent }}>Change {segment.ordinal}/{changeCount}</span>
               <span style={{ color: C.textMuted, fontWeight: 500 }}>{changeTitle(segment)}</span>
             </div>
-            <DiffGroup rows={segment.before} kind="before" note={beforeNote} />
-            <DiffGroup rows={segment.after} kind="after" note={afterNote} />
+            <DiffGroup
+              rows={segment.before}
+              kind="before"
+              note={beforeNote}
+              mapLabel={`Change ${segment.ordinal}/${changeCount} · original ${rangeLabel(segment.before, "beforeNo")}`}
+            />
+            <DiffGroup
+              rows={segment.after}
+              kind="after"
+              note={afterNote}
+              mapLabel={`Change ${segment.ordinal}/${changeCount} · refactored ${rangeLabel(segment.after, "afterNo")}`}
+            />
           </div>
         );
       })}

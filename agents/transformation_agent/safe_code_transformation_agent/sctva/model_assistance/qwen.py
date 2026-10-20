@@ -12,7 +12,6 @@ optional deployment feature and cannot affect the existing rule-based path.
 from __future__ import annotations
 
 import ast
-import difflib
 import hashlib
 import json
 import os
@@ -22,40 +21,51 @@ import threading
 import time
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, Optional, Sequence
+from typing import Any, Callable, Dict, Iterable, Optional
 
 from ..contracts import RefactoringAction
 
 
-DEFAULT_CODET5_MODEL_ID = "Qwen/Qwen2.5-Coder-0.5B-Instruct"
-MODEL_ASSISTANCE_REVISION = "openvino_cpu_throughput_v12_20261018"
+DEFAULT_QWEN_MODEL_ID = "Qwen/Qwen2.5-Coder-0.5B-Instruct"
+MODEL_ASSISTANCE_REVISION = "java_constant_moved_target_v22_20261019"
 
 
 _MODEL_RUNTIME_CACHE: Dict[tuple[Any, ...], Dict[str, Any]] = {}
 _MODEL_RUNTIME_CACHE_LOCK = threading.Lock()
 
 
+def _java_constant_declaration_pattern(constant_name: str) -> re.Pattern[str]:
+    """Match one bounded Java field declaration for a planned constant.
+
+    Java permits line breaks between declaration tokens, and instruction-tuned
+    models commonly append a short line comment. Keeping this grammar in one
+    place prevents completion and merge from disagreeing about valid output.
+    """
+
+    return re.compile(
+        rf"(?m)^[ \t]*(?:(?:public|protected|private|static|final)\s+)*"
+        rf"[A-Za-z_$][A-Za-z0-9_$<>\[\].?]*\s+"
+        rf"{re.escape(constant_name)}\s*=\s*(?P<initializer>[^;{{}}]+?);"
+        rf"[ \t]*(?://[^\r\n]*)?(?:\r?\n)?"
+    )
+
+
 @dataclass(frozen=True)
-class CodeT5Settings:
-    """Runtime settings for the optional local-model adapter."""
+class QwenSettings:
+    """Runtime settings for the Qwen2.5-Coder local-model adapter."""
 
     enabled: bool = False
-    model_id: str = DEFAULT_CODET5_MODEL_ID
+    model_id: str = DEFAULT_QWEN_MODEL_ID
     device: str = "auto"
     backend: str = "auto"
     openvino_model_path: str = ""
     max_new_tokens: int = 256
-    max_bundle_output_tokens: int = 192
     # Keep the configurable ceiling conservative; _load also reads the checkpoint's
     # actual tokenizer/config limit before generation.
     max_input_tokens: int = 512
-    cpu_threads: int = 4
+    cpu_threads: int = 6
     max_actions_per_request: int = 100
     max_actions_per_file: int = 100
-    enable_file_bundling: bool = False
-    enable_generic_bundling: bool = False
-    max_actions_per_bundle: int = 5
-    max_generic_actions_per_bundle: int = 2
     generation_timeout_seconds: int = 30
     max_generation_seconds_per_request: int = 0
     runtime_cache: bool = True
@@ -63,83 +73,58 @@ class CodeT5Settings:
     mode: str = "primary"
     allow_download: bool = False
 
+    def __post_init__(self) -> None:
+        if self.model_id != DEFAULT_QWEN_MODEL_ID:
+            raise ValueError(
+                "SCTVA supports only Qwen/Qwen2.5-Coder-0.5B-Instruct."
+            )
+
     @classmethod
-    def from_execution_options(cls, options: Any) -> "CodeT5Settings":
+    def from_execution_options(cls, options: Any) -> "QwenSettings":
         return cls(
-            enabled=bool(getattr(options, "enable_codet5", False)),
-            model_id=str(
-                getattr(options, "codet5_model_id", DEFAULT_CODET5_MODEL_ID)
-                or DEFAULT_CODET5_MODEL_ID
-            ).strip(),
-            device=str(getattr(options, "codet5_device", "auto") or "auto").strip(),
+            enabled=bool(getattr(options, "enable_qwen", False)),
+            model_id=DEFAULT_QWEN_MODEL_ID,
+            device=str(getattr(options, "qwen_device", "auto") or "auto").strip(),
             backend=str(
-                getattr(options, "codet5_backend", "auto") or "auto"
+                getattr(options, "qwen_backend", "auto") or "auto"
             ).strip().lower(),
             openvino_model_path=str(
-                getattr(options, "codet5_openvino_model_path", "") or ""
+                getattr(options, "qwen_openvino_model_path", "") or ""
             ).strip(),
-            max_new_tokens=int(getattr(options, "codet5_max_new_tokens", 256) or 256),
-            max_bundle_output_tokens=max(
-                64,
-                int(
-                    getattr(options, "codet5_max_bundle_output_tokens", 192)
-                    or 192
-                ),
-            ),
-            max_input_tokens=int(getattr(options, "codet5_max_input_tokens", 512) or 512),
-            cpu_threads=int(getattr(options, "codet5_cpu_threads", 4) or 4),
+            max_new_tokens=int(getattr(options, "qwen_max_new_tokens", 256) or 256),
+            max_input_tokens=int(getattr(options, "qwen_max_input_tokens", 512) or 512),
+            cpu_threads=int(getattr(options, "qwen_cpu_threads", 6) or 6),
             max_actions_per_request=int(
-                getattr(options, "codet5_max_actions_per_request", 100)
+                getattr(options, "qwen_max_actions_per_request", 100)
             ),
             max_actions_per_file=int(
-                getattr(options, "codet5_max_actions_per_file", 100)
-            ),
-            enable_file_bundling=bool(
-                getattr(options, "codet5_enable_file_bundling", False)
-            ),
-            enable_generic_bundling=bool(
-                getattr(options, "codet5_enable_generic_bundling", False)
-            ),
-            max_actions_per_bundle=max(
-                2,
-                int(getattr(options, "codet5_max_actions_per_bundle", 5) or 5),
-            ),
-            max_generic_actions_per_bundle=max(
-                2,
-                int(
-                    getattr(
-                        options,
-                        "codet5_max_generic_actions_per_bundle",
-                        2,
-                    )
-                    or 2
-                ),
+                getattr(options, "qwen_max_actions_per_file", 100)
             ),
             generation_timeout_seconds=int(
-                getattr(options, "codet5_generation_timeout_seconds", 30) or 30
+                getattr(options, "qwen_generation_timeout_seconds", 30) or 30
             ),
             max_generation_seconds_per_request=max(
                 0,
                 int(
                     getattr(
                         options,
-                        "codet5_max_generation_seconds_per_request",
+                        "qwen_max_generation_seconds_per_request",
                         0,
                     )
                     or 0
                 ),
             ),
-            runtime_cache=bool(getattr(options, "codet5_runtime_cache", True)),
+            runtime_cache=bool(getattr(options, "qwen_runtime_cache", True)),
             allow_unsupported_actions=bool(
-                getattr(options, "codet5_allow_unsupported_actions", False)
+                getattr(options, "qwen_allow_unsupported_actions", False)
             ),
-            mode=str(getattr(options, "codet5_mode", "primary") or "primary").strip().lower(),
-            allow_download=bool(getattr(options, "codet5_allow_download", False)),
+            mode=str(getattr(options, "qwen_mode", "fallback") or "fallback").strip().lower(),
+            allow_download=bool(getattr(options, "qwen_allow_download", False)),
         )
 
 
 @dataclass(frozen=True)
-class CodeT5Candidate:
+class QwenCandidate:
     """A candidate result, never an acceptance decision."""
 
     source_code: str = ""
@@ -150,7 +135,7 @@ class CodeT5Candidate:
 
 
 @dataclass(frozen=True)
-class CodeT5TargetContext:
+class QwenTargetContext:
     """An exact, replaceable source range selected from the current snapshot."""
 
     start: int
@@ -168,31 +153,74 @@ _CLASS_SCOPED_ACTIONS = {
     "extract_class",
     "extract_python_class",
     "extract_java_class",
+    "extract_subclass",
+    "introduce_facade",
     "inline_class",
     "inline_python_class",
+    "inline_java_class",
     "move_python_method",
+    "move_java_method",
+    "pull_up_method",
+    "replace_data_value_with_object",
+    "collapse_hierarchy",
     "replace_conditional_with_polymorphism",
 }
 
 _MULTI_CLASS_ACTIONS = {
     "inline_class",
     "inline_python_class",
+    "inline_java_class",
     "move_python_method",
+    "move_java_method",
+    "pull_up_method",
+    "collapse_hierarchy",
 }
 
-# These operations can be proven inside a bounded source span. Broader
-# repository/multi-class transformations remain explicit single-action
-# barriers until they have an equally strong composition contract.
-_GENERIC_FILE_BUNDLE_ACTIONS = {
-    "remove_dead_code",
-    "replace_literal",
-    "narrow_exception_handler",
-    "replace_unsafe_function",
-    "replace_nested_conditional_with_guard_clauses",
-}
-
-_BUNDLE_DESTRUCTIVE_ACTIONS = {
-    "remove_dead_code",
+_JAVA_ACTION_REQUIREMENTS = {
+    "extract_subclass": (
+        "Create the requested subclass as a sibling declaration and move only cohesive, "
+        "subclass-specific members into it. Keep the source class concrete and behavior-compatible."
+    ),
+    "introduce_facade": (
+        "Create the requested facade as a sibling declaration. Expose focused delegating methods "
+        "without changing the existing subsystem public API or business logic."
+    ),
+    "replace_temp_with_query": (
+        "Replace one derived local temporary in the target method with a private side-effect-free "
+        "query method. Preserve evaluation order and do not duplicate side effects."
+    ),
+    "move_java_method": (
+        "Move the requested method from source_class to destination_class and update references in "
+        "this resolved source span. Preserve its signature, visibility requirements, and behavior."
+    ),
+    "pull_up_method": (
+        "Move the requested duplicate method from source_class into target_class and remove only "
+        "the redundant source declaration. Preserve dispatch and visibility."
+    ),
+    "replace_data_value_with_object": (
+        "Replace the targeted primitive data concept with one small immutable value class and "
+        "update only usages inside the resolved class. Preserve the class public behavior."
+    ),
+    "inline_java_class": (
+        "Move the target lazy class state and behavior into its owning class, update references, "
+        "and remove the target class declaration only when no references remain."
+    ),
+    "collapse_hierarchy": (
+        "Collapse source_class into parent_class in this resolved span, preserving all callable "
+        "behavior and removing only the redundant hierarchy declaration."
+    ),
+    "replace_parameter_with_method_call": (
+        "Remove only the redundant target-method parameter whose value can be obtained by an "
+        "existing query, replace its uses with that query, and update visible call sites in span."
+    ),
+    "replace_conditional_with_polymorphism": (
+        "Replace the target type conditional with polymorphic dispatch while preserving every "
+        "branch result, exception, and externally visible signature."
+    ),
+    "hide_delegate": (
+        "Replace the message chain in the target method with one delegating method on the owning "
+        "class. Preserve the target method signature and return value."
+    ),
 }
 
 
@@ -363,7 +391,7 @@ def _imports_context(language: str, source: str) -> str:
     return ""
 
 
-def _python_context(source: str, action: RefactoringAction) -> CodeT5TargetContext | None:
+def _python_context(source: str, action: RefactoringAction) -> QwenTargetContext | None:
     try:
         tree = ast.parse(source)
     except SyntaxError:
@@ -503,7 +531,7 @@ def _python_context(source: str, action: RefactoringAction) -> CodeT5TargetConte
     end_line = max(end_lines)
     start = offsets[start_line - 1]
     end = offsets[end_line] if end_line < len(offsets) else len(source)
-    return CodeT5TargetContext(
+    return QwenTargetContext(
         start=start, end=end, source=source[start:end], kind=selected["kind"],
         name=selected["qualified"], start_line=start_line, end_line=end_line,
         surrounding_context=_imports_context("python", source),
@@ -511,7 +539,7 @@ def _python_context(source: str, action: RefactoringAction) -> CodeT5TargetConte
     )
 
 
-def _c_context(source: str, action: RefactoringAction) -> CodeT5TargetContext | None:
+def _c_context(source: str, action: RefactoringAction) -> QwenTargetContext | None:
     from ..transformers.c_extract_class import _mask_c_like, _matching, _parse_c_module
 
     parameters = dict(action.parameters or {})
@@ -527,6 +555,25 @@ def _c_context(source: str, action: RefactoringAction) -> CodeT5TargetContext | 
     ))
     source_line, _ = _line_range(parameters)
     masked = _mask_c_like(source)
+
+    # These two C refactorings introduce a file-scope ``static`` helper and,
+    # for parameter replacement, may update another function's local call.
+    # A function-only replacement cannot represent that valid C output.
+    if action.action_type in {
+        "replace_temp_with_query",
+        "replace_parameter_with_method_call",
+    }:
+        return QwenTargetContext(
+            start=0,
+            end=len(source),
+            source=source,
+            kind="translation_unit",
+            name=method_name or "c_translation_unit",
+            start_line=1,
+            end_line=max(1, len(source.splitlines())),
+            surrounding_context="",
+            resolution="c_translation_unit_for_file_scope_query_refactoring",
+        )
 
     # Localized C refactorings should never ask a small model to regenerate a
     # complete function. Resolve the exact anchored source line when it forms
@@ -583,7 +630,7 @@ def _c_context(source: str, action: RefactoringAction) -> CodeT5TargetContext | 
             start = sum(len(line) for line in source_lines[:candidate_line - 1])
             end = start + len(source_lines[candidate_line - 1])
             kind = "preprocessor" if stripped.startswith("#") else "statement"
-            return CodeT5TargetContext(
+            return QwenTargetContext(
                 start=start,
                 end=end,
                 source=source[start:end],
@@ -628,7 +675,7 @@ def _c_context(source: str, action: RefactoringAction) -> CodeT5TargetContext | 
         function = matches[0]
         start = _line_start(source, function.start)
         end = _line_end(source, function.end)
-        return CodeT5TargetContext(
+        return QwenTargetContext(
             start=start, end=end, source=source[start:end], kind="function", name=function.name,
             start_line=_line_number(source, start), end_line=_line_number(source, max(start, end - 1)),
             surrounding_context=_imports_context("c", source),
@@ -771,7 +818,7 @@ def _c_context(source: str, action: RefactoringAction) -> CodeT5TargetContext | 
     if len(candidates) != 1:
         return None
     selected = candidates[0]
-    return CodeT5TargetContext(
+    return QwenTargetContext(
         start=selected["start"],
         end=selected["end"],
         source=source[selected["start"]:selected["end"]],
@@ -784,7 +831,7 @@ def _c_context(source: str, action: RefactoringAction) -> CodeT5TargetContext | 
     )
 
 
-def _java_context(source: str, action: RefactoringAction) -> CodeT5TargetContext | None:
+def _java_context(source: str, action: RefactoringAction) -> QwenTargetContext | None:
     from ..transformers.java_extract_class import _parse_java_class
 
     parameters = dict(action.parameters or {})
@@ -792,15 +839,29 @@ def _java_context(source: str, action: RefactoringAction) -> CodeT5TargetContext
         parameters.get("source_method"), parameters.get("method"),
         parameters.get("method_name"), parameters.get("target_method"),
     ))
-    class_name = _first_text((
-        parameters.get("class_to_inline"), parameters.get("target_class"),
-        parameters.get("source_class"), parameters.get("class_name"),
-    ))
+    class_name = _first_text(
+        (
+            parameters.get("class_to_inline"),
+            parameters.get("target_class"),
+            parameters.get("source_class"),
+            parameters.get("class_name"),
+        )
+        if action.action_type in {"inline_class", "inline_java_class"}
+        else (
+            parameters.get("source_class"),
+            parameters.get("class_name"),
+            parameters.get("target_class"),
+        )
+    )
     field_name = _first_text((
         parameters.get("field_name"), parameters.get("field"),
         parameters.get("target_field"),
     ))
-    destination_name = _first_text((parameters.get("destination_class"),))
+    destination_name = _first_text((
+        parameters.get("destination_class"),
+        parameters.get("target_class"),
+        parameters.get("parent_class"),
+    ))
     source_line, _ = _line_range(parameters)
     class_names = list(dict.fromkeys(re.findall(
         r"\b(?:class|interface|enum|record)\s+([A-Za-z_$][A-Za-z0-9_$]*)\b", source,
@@ -988,29 +1049,60 @@ def _java_context(source: str, action: RefactoringAction) -> CodeT5TargetContext
         if len(literal_values) == 1:
             from ..transformers import java_transformers
 
-            member_source = source[selected_start:selected_end]
-            member_offset = selected_start
-            line_candidates: list[tuple[int, int]] = []
-            cursor = 0
-            for line in member_source.splitlines(keepends=True):
-                _, replacements = java_transformers._replace_literal(
-                    line,
-                    literal_values[0],
-                    "__SCTVA_PLANNED_CONSTANT__",
-                    1,
-                )
-                if replacements > 0:
-                    source_line = line.rstrip("\r\n")
-                    line_candidates.append(
-                        (
-                            member_offset + cursor,
-                            member_offset + cursor + len(source_line),
-                        )
+            def literal_lines(start: int, end: int) -> list[tuple[int, int]]:
+                member_source = source[start:end]
+                line_candidates: list[tuple[int, int]] = []
+                cursor = 0
+                for line in member_source.splitlines(keepends=True):
+                    _, replacements = java_transformers._replace_literal(
+                        line,
+                        literal_values[0],
+                        "__SCTVA_PLANNED_CONSTANT__",
+                        1,
                     )
-                cursor += len(line)
+                    if replacements > 0:
+                        source_line_text = line.rstrip("\r\n")
+                        line_candidates.append(
+                            (
+                                start + cursor,
+                                start + cursor + len(source_line_text),
+                            )
+                        )
+                    cursor += len(line)
+                return line_candidates
+
+            line_candidates = literal_lines(selected_start, selected_end)
             if len(line_candidates) == 1:
                 selected_start, selected_end = line_candidates[0]
                 kind = "statement"
+            elif not line_candidates:
+                # A preceding Extract Method can move the planned statement
+                # from its RDP-named owner into a new helper. The old owner is
+                # still resolvable, but prompting it cannot satisfy Introduce
+                # Constant because the literal no longer exists there. Follow
+                # the literal through the current symbol model only when one
+                # method now contains one unambiguous target line.
+                moved_candidates: list[tuple[Any, Any, int, int]] = []
+                for owner, method in all_methods:
+                    if method.start == selected_start and method.end == selected_end:
+                        continue
+                    method_lines = literal_lines(method.start, method.end)
+                    if len(method_lines) == 1:
+                        moved_candidates.append(
+                            (owner, method, method_lines[0][0], method_lines[0][1])
+                        )
+                    elif len(method_lines) > 1:
+                        moved_candidates.extend(
+                            (owner, method, start, end)
+                            for start, end in method_lines
+                        )
+                if len(moved_candidates) == 1:
+                    moved_owner, moved_method, moved_start, moved_end = (
+                        moved_candidates[0]
+                    )
+                    selected_start, selected_end = moved_start, moved_end
+                    kind = "statement"
+                    name = f"{moved_owner.name}.{moved_method.name}"
     # A Java method declaration is itself a class-member span.  Replacing that
     # one span with the rewritten source method followed by one sibling helper
     # keeps every unrelated field/method byte-for-byte intact while still
@@ -1033,7 +1125,7 @@ def _java_context(source: str, action: RefactoringAction) -> CodeT5TargetContext
             return None
     start = _line_start(source, selected_start)
     end = _line_end(source, selected_end)
-    return CodeT5TargetContext(
+    return QwenTargetContext(
         start=start, end=end, source=source[start:end], kind=kind, name=name,
         start_line=_line_number(source, start), end_line=_line_number(source, max(start, end - 1)),
         surrounding_context=_imports_context("java", source),
@@ -1041,7 +1133,7 @@ def _java_context(source: str, action: RefactoringAction) -> CodeT5TargetContext
     )
 
 
-class CodeT5CandidateTransformer:
+class QwenCandidateTransformer:
     """Generate deterministic source-to-source candidates with a local model.
 
     ``generator`` exists for isolated tests and for an eventual fine-tuned
@@ -1051,7 +1143,7 @@ class CodeT5CandidateTransformer:
 
     def __init__(
         self,
-        settings: CodeT5Settings,
+        settings: QwenSettings,
         *,
         generator: Optional[Callable[[str], str]] = None,
     ) -> None:
@@ -1062,7 +1154,6 @@ class CodeT5CandidateTransformer:
         self._torch: Any = None
         self._resolved_device = ""
         self._resolved_backend = "injected" if generator is not None else ""
-        self._is_encoder_decoder = True
         self._effective_max_input_tokens = settings.max_input_tokens
         self._effective_cpu_threads = settings.cpu_threads
         self._runtime_cache_hit = False
@@ -1070,16 +1161,17 @@ class CodeT5CandidateTransformer:
         self._attempt_count = 0
         self._file_attempt_counts: Dict[str, int] = {}
         self._generation_seconds_used = 0.0
+        self._file_generation_seconds: Dict[str, float] = {}
         self._lock = threading.Lock()
         self._runtime_inference_lock = threading.Lock()
 
     @property
     def provider(self) -> str:
-        return "qwen_coder" if "qwen" in self.settings.model_id.lower() else "codet5_plus"
+        return "qwen_coder"
 
     @property
     def display_name(self) -> str:
-        return "Qwen2.5-Coder" if self.provider == "qwen_coder" else "CodeT5+"
+        return "Qwen2.5-Coder"
 
     def can_attempt(self, current_file_name: str) -> bool:
         """Return whether inference budget remains without consuming it."""
@@ -1093,15 +1185,15 @@ class CodeT5CandidateTransformer:
         with self._lock:
             file_attempts = self._file_attempt_counts.get(file_key, 0)
             if self._attempt_count >= self.settings.max_actions_per_request:
-                reason = "CODET5_REQUEST_ACTION_BUDGET_EXHAUSTED"
+                reason = "QWEN_REQUEST_ACTION_BUDGET_EXHAUSTED"
             elif file_attempts >= self.settings.max_actions_per_file:
-                reason = "CODET5_FILE_ACTION_BUDGET_EXHAUSTED"
+                reason = "QWEN_FILE_ACTION_BUDGET_EXHAUSTED"
             elif (
                 self.settings.max_generation_seconds_per_request > 0
                 and self._generation_seconds_used
                 >= self.settings.max_generation_seconds_per_request
             ):
-                reason = "CODET5_REQUEST_TIME_BUDGET_EXHAUSTED"
+                reason = "QWEN_REQUEST_TIME_BUDGET_EXHAUSTED"
             else:
                 reason = ""
             return {
@@ -1117,14 +1209,64 @@ class CodeT5CandidateTransformer:
                 ),
             }
 
-    def usage_snapshot(self) -> Dict[str, float | int]:
-        """Return monotonic request counters for accurate per-file telemetry."""
+    def usage_snapshot(self, current_file_name: str = "") -> Dict[str, float | int]:
+        """Return request and optional file-scoped counters atomically.
 
+        Model-assisted file workflows can prepare and validate concurrently.
+        Keeping the per-file counters here prevents one worker's generation
+        time from being attributed to another file in the UI.
+        """
+
+        file_key = str(current_file_name or "").replace("\\", "/").lower()
         with self._lock:
             return {
                 "attempt_count": self._attempt_count,
                 "generation_seconds": self._generation_seconds_used,
+                "file_attempt_count": self._file_attempt_counts.get(file_key, 0),
+                "file_generation_seconds": self._file_generation_seconds.get(
+                    file_key,
+                    0.0,
+                ),
             }
+
+    def clone_for_mode(self, mode: str) -> "QwenCandidateTransformer":
+        """Create an isolated attempt view without changing the configured mode.
+
+        Rule-first execution does not consume a model budget.  When its final
+        validation fails, SCTVA creates this primary-mode view for the one
+        model retry.  The process-level runtime cache remains shared, while
+        attempt accounting is merged back into the configured instance after
+        the retry completes.
+        """
+
+        return QwenCandidateTransformer(
+            replace(self.settings, mode=str(mode or "primary").strip().lower()),
+            generator=self._generator,
+        )
+
+    def absorb_usage_from(self, attempt: "QwenCandidateTransformer") -> None:
+        """Merge a completed isolated retry into this request's model budget."""
+
+        if attempt is self:
+            return
+
+        with attempt._lock:
+            attempts = attempt._attempt_count
+            file_attempts = dict(attempt._file_attempt_counts)
+            generation_seconds = attempt._generation_seconds_used
+            file_generation_seconds = dict(attempt._file_generation_seconds)
+
+        with self._lock:
+            self._attempt_count += attempts
+            self._generation_seconds_used += generation_seconds
+            for file_key, count in file_attempts.items():
+                self._file_attempt_counts[file_key] = (
+                    self._file_attempt_counts.get(file_key, 0) + count
+                )
+            for file_key, elapsed in file_generation_seconds.items():
+                self._file_generation_seconds[file_key] = (
+                    self._file_generation_seconds.get(file_key, 0.0) + elapsed
+                )
 
     def _bounded_generation_timeout(
         self,
@@ -1149,7 +1291,7 @@ class CodeT5CandidateTransformer:
         self,
         language: str,
         action: RefactoringAction,
-        context: CodeT5TargetContext | None,
+        context: QwenTargetContext | None,
     ) -> tuple[int, int]:
         max_new_tokens = self.settings.max_new_tokens
         timeout_seconds = self.settings.generation_timeout_seconds
@@ -1157,14 +1299,26 @@ class CodeT5CandidateTransformer:
             str(language or "").lower() in {"java", "c"}
             and action.action_type in {"introduce_constant", "extract_constant"}
         ):
-            return min(max_new_tokens, 64), min(timeout_seconds, 30)
+            if context is None:
+                return max_new_tokens, timeout_seconds
+            # The output must contain the transformed target plus a sibling
+            # declaration. A fixed 64-token ceiling truncated ordinary Java
+            # methods and produced dangling braces or partial declarations.
+            estimated_target_tokens = max(1, (len(context.source) + 2) // 3)
+            minimum_tokens = (
+                96
+                if context.kind.startswith(("statement", "field"))
+                else 128
+            )
+            required_tokens = max(minimum_tokens, estimated_target_tokens + 40)
+            return min(max_new_tokens, required_tokens), timeout_seconds
         if context is not None and context.kind.startswith("statement"):
             max_new_tokens = min(max_new_tokens, 128)
         return max_new_tokens, timeout_seconds
 
     @classmethod
-    def from_execution_options(cls, options: Any) -> "CodeT5CandidateTransformer | None":
-        settings = CodeT5Settings.from_execution_options(options)
+    def from_execution_options(cls, options: Any) -> "QwenCandidateTransformer | None":
+        settings = QwenSettings.from_execution_options(options)
         return cls(settings) if settings.enabled else None
 
     def prepare_action(
@@ -1253,6 +1407,30 @@ class CodeT5CandidateTransformer:
                 resolved_literal
             )
 
+        # The rule transformer gives a later action a unique suffix when an
+        # earlier action has already used the requested name for a *different*
+        # value. Until now the model prompt retained the colliding RDP name,
+        # inviting it to emit a second field declaration. The candidate gate
+        # correctly rejected that duplicate as ambiguous. Mirror the rule
+        # transformer's name resolution before prompting the model.
+        literal_text = java_transformers._to_java_literal(resolved_literal)
+        existing_declarations = list(
+            _java_constant_declaration_pattern(constant_name).finditer(
+                current_source_code
+            )
+        )
+        conflicting_constant_name = any(
+            re.sub(r"\s+", "", match.group("initializer"))
+            != re.sub(r"\s+", "", literal_text)
+            for match in existing_declarations
+        )
+        resolved_name_before_collision = constant_name
+        if conflicting_constant_name:
+            constant_name = java_transformers._unique_constant_name(
+                current_source_code,
+                constant_name,
+            )
+
         parameters["literal_value"] = resolved_literal
         parameters["constant_name"] = constant_name
         prepared = replace(action, parameters=parameters)
@@ -1281,6 +1459,10 @@ class CodeT5CandidateTransformer:
             "resolved_literal": resolved_literal,
             "requested_constant_name": requested_name,
             "resolved_constant_name": constant_name,
+            "constant_name_collision_resolved": conflicting_constant_name,
+            "conflicting_constant_name": (
+                resolved_name_before_collision if conflicting_constant_name else ""
+            ),
             "reference_target": (
                 reference_context.name if reference_context is not None else ""
             ),
@@ -1309,6 +1491,13 @@ class CodeT5CandidateTransformer:
             "target_statement_fingerprint", "requested_dead_code_method",
             "requested_dead_code_class", "resolved_dead_code_method",
             "resolved_dead_code_class", "description", "smell", "smell_type",
+            "new_subclass_name", "facade_class_name", "parent_class",
+            "value_object_name", "query_method_name", "replacement_method",
+            "parameter_name", "query_expression", "query_parameters",
+            "temp_name", "temporary_name", "destination_file",
+            "destination_module", "header_file", "functions_to_extract",
+            "methods_to_extract", "globals_to_extract", "fields_to_extract",
+            "target_range", "source_lines", "semantic_recovery_required",
         }
         normalized: Dict[str, Any] = {}
         for key in sorted(allowed & set(parameters)):
@@ -1374,7 +1563,7 @@ class CodeT5CandidateTransformer:
         language: str,
         source_code: str,
         action: RefactoringAction,
-    ) -> CodeT5TargetContext | None:
+    ) -> QwenTargetContext | None:
         """Resolve a replaceable target from the current transformed source."""
 
         normalized_language = str(language or "").strip().lower()
@@ -1392,7 +1581,7 @@ class CodeT5CandidateTransformer:
         language: str,
         action: RefactoringAction,
         current_file_name: str,
-        context: CodeT5TargetContext,
+        context: QwenTargetContext,
         include_surrounding_context: bool = True,
         validation_feedback: str = "",
         previous_candidate: str = "",
@@ -1432,11 +1621,11 @@ class CodeT5CandidateTransformer:
                     f"required-declaration: {required_declaration}",
                     (
                         f"Replace only the planned literal {java_literal} in target-source "
-                        f"with {constant_name}. Return the required declaration first, then "
-                        "the complete transformed target-source: exactly two class members/source "
-                        "fragments. Emit the required declaration exactly once. Do not emit an "
-                        "enclosing class declaration or an enclosing-class closing brace. "
-                        "Preserve every other token."
+                        f"with {constant_name}. Return only the complete transformed target-source. "
+                        "Do not emit the constant declaration; SCTVA attaches required-declaration "
+                        "after verifying that the returned target performs exactly the planned "
+                        "replacement. Do not emit an enclosing class declaration or an "
+                        "enclosing-class closing brace. Preserve every other token."
                     ),
                 ]
                 if validation_feedback:
@@ -1444,6 +1633,38 @@ class CodeT5CandidateTransformer:
                         "validator-feedback: "
                         + re.sub(r"\s+", " ", validation_feedback).strip()[:500]
                     )
+                    # A small CPU model is much more reliable when a rejected
+                    # constant candidate is repaired from one exact, bounded
+                    # source-to-source template rather than prose alone. The
+                    # normal candidate gate still proves the returned output
+                    # against the original source before it can be accepted.
+                    source_line = parameters.get("source_line")
+                    relative_line: int | None = None
+                    if isinstance(source_line, (int, float)):
+                        relative_line = int(source_line) - context.start_line + 1
+                        if relative_line <= 0:
+                            relative_line = None
+                    repaired_target, replacements = java_transformers._replace_literal(
+                        context.source,
+                        literal_value,
+                        constant_name,
+                        relative_line,
+                    )
+                    if replacements <= 0:
+                        repaired_target, replacements = java_transformers._replace_literal(
+                            context.source,
+                            literal_value,
+                            constant_name,
+                            None,
+                        )
+                    if replacements == 1:
+                        parts.extend((
+                            "repair-template: copy only this exact transformed target; return no "
+                            "constant declaration, other source, or explanation.",
+                            "<required-repair-target>",
+                            repaired_target.lstrip("\r\n"),
+                            "</required-repair-target>",
+                        ))
                 parts.extend((
                     "<target-source>",
                     context.source,
@@ -1508,6 +1729,37 @@ class CodeT5CandidateTransformer:
             "rdp-contract: perform exactly the requested action on the resolved target; do not add other refactorings or alter unrelated declarations.",
             "constraints: preserve behavior, public API, control flow, variable scope, exception behavior, and indentation; modify only target-source; return replacement source for target-source only; do not return a diff, markdown, explanation, or the complete file.",
         ]
+        language_contracts = {
+            "python": (
+                "python-contract: return one syntactically complete replacement for the exact "
+                "resolved AST target. Preserve decorators, async state, signature, type hints, "
+                "indentation, imports, exception behavior, evaluation order, and local scope "
+                "unless the RDP action explicitly changes one of them."
+            ),
+            "java": (
+                "java-contract: return the complete resolved class declaration when resolved_target "
+                "is a class; otherwise return only the resolved member or source span without its "
+                "enclosing class. Preserve annotations, modifiers, generic parameters, throws "
+                "clauses, visibility, overload resolution, exceptions, and evaluation order unless "
+                "the requested refactoring explicitly changes one of them."
+            ),
+            "c": (
+                "c-contract: return only the exact resolved declaration, function, or statement "
+                "span. Preserve preprocessor directives, macros, storage qualifiers, pointer and "
+                "array declarators, ABI-visible signatures, side effects, and evaluation order. "
+                "Do not add includes or global declarations unless the RDP action requires them."
+            ),
+        }
+        language_contract = language_contracts.get(str(language).lower())
+        if language_contract:
+            parts.append(language_contract)
+        if str(language).lower() == "java":
+            action_requirement = _JAVA_ACTION_REQUIREMENTS.get(action.action_type)
+            if action_requirement:
+                parts.append(
+                    "java-action-requirement: " + action_requirement
+                    + " Return a real transformed replacement; an unchanged target does not satisfy the action."
+                )
         if validation_feedback:
             parts.extend((
                 "<validation-feedback>",
@@ -1614,6 +1866,22 @@ class CodeT5CandidateTransformer:
                 "required-c-output: preserve the entire target-source span; do not return a constant declaration alone. "
                 f"Add '#define {constant_name} {literal_value}' immediately before the preserved target and replace only the requested numeric token with {constant_name}."
             )
+        if str(language).lower() == "c" and action.action_type == "replace_temp_with_query":
+            parts.append(
+                "c-replace-temp-with-query requirement: identify one local temporary initialized by a pure expression. "
+                "Create one file-local static query helper returning exactly that expression, with only the needed "
+                "unchanged function parameters. Remove the temporary declaration and replace its later uses with the "
+                "helper call. Do not select an expression containing a call, assignment, increment, decrement, array "
+                "access, or a dependency that is later mutated."
+            )
+        if str(language).lower() == "c" and action.action_type == "replace_parameter_with_method_call":
+            parts.append(
+                "c-replace-parameter-with-method-call requirement: perform this only when target metadata identifies "
+                "parameter_name and a pure query_expression, and the target is a static function whose complete local "
+                "call-site set can be updated. Create one static query helper, remove only that parameter from the "
+                "signature and each local call, and replace only its function-body uses with the helper call. Otherwise "
+                "return the unchanged target rather than guessing an API change."
+            )
         if include_surrounding_context and context.surrounding_context:
             parts.extend((
                 "<declaration-context>",
@@ -1647,7 +1915,7 @@ class CodeT5CandidateTransformer:
     @staticmethod
     def _merge_target_output(
         source_code: str,
-        context: CodeT5TargetContext,
+        context: QwenTargetContext,
         output: str,
     ) -> str:
         replacement = output
@@ -1676,11 +1944,199 @@ class CodeT5CandidateTransformer:
         return source_code[:context.start] + replacement + source_code[context.end:]
 
     @staticmethod
+    def _canonicalize_java_constant_target_identifier(
+        *,
+        language: str,
+        output: str,
+        context: QwenTargetContext | None,
+        action: RefactoringAction,
+    ) -> tuple[str, Dict[str, Any]]:
+        """Align a model-invented constant alias with the exact RDP contract.
+
+        This is deliberately narrower than repairing source. An alias is
+        accepted only when removing its optional declaration and restoring
+        the planned literal reconstructs the resolved target exactly, apart
+        from formatting whitespace. Any unrelated model edit makes the proof
+        fail and leaves the candidate for the normal checkpoint to reject.
+        """
+
+        if (
+            str(language).lower() != "java"
+            or not output
+            or context is None
+            or context.kind not in {
+                "field_with_sibling_constant",
+                "method_with_sibling_constant",
+                "statement_with_sibling_constant",
+            }
+            or action.action_type not in {"introduce_constant", "extract_constant"}
+        ):
+            return output, {}
+
+        parameters = action.parameters or {}
+        planned_name = str(
+            parameters.get("constant_name") or "EXTRACTED_CONSTANT"
+        ).strip()
+        if not re.fullmatch(r"[A-Za-z_$][A-Za-z0-9_$]*", planned_name):
+            return output, {}
+        if re.search(rf"\b{re.escape(planned_name)}\b", output):
+            return output, {}
+
+        literal_values = _planned_literal_values(parameters)
+        if len(literal_values) != 1:
+            return output, {}
+
+        from ..transformers import java_transformers
+
+        literal_text = java_transformers._to_java_literal(literal_values[0])
+        source_identifiers = set(re.findall(r"[A-Za-z_$][A-Za-z0-9_$]*", context.source))
+        java_words = {
+            "abstract", "assert", "boolean", "break", "byte", "case", "catch",
+            "char", "class", "const", "continue", "default", "do", "double",
+            "else", "enum", "extends", "final", "finally", "float", "for",
+            "goto", "if", "implements", "import", "instanceof", "int",
+            "interface", "long", "native", "new", "package", "private",
+            "protected", "public", "record", "return", "short", "static",
+            "strictfp", "super", "switch", "synchronized", "this", "throw",
+            "throws", "transient", "try", "var", "void", "volatile", "while",
+            "true", "false", "null", "String", "Object",
+        }
+        output_identifiers = set(re.findall(r"[A-Za-z_$][A-Za-z0-9_$]*", output))
+        aliases = sorted(output_identifiers - source_identifiers - java_words - {planned_name})
+        viable: list[tuple[str, str]] = []
+
+        def replace_code_identifier(
+            source: str,
+            identifier: str,
+            replacement: str,
+        ) -> tuple[str, int]:
+            result: list[str] = []
+            state = "code"
+            index = 0
+            replacements = 0
+            while index < len(source):
+                char = source[index]
+                nxt = source[index + 1] if index + 1 < len(source) else ""
+                if state == "code":
+                    if char == "/" and nxt == "/":
+                        result.append("//")
+                        state = "line_comment"
+                        index += 2
+                        continue
+                    if char == "/" and nxt == "*":
+                        result.append("/*")
+                        state = "block_comment"
+                        index += 2
+                        continue
+                    if source.startswith('"""', index):
+                        result.append('"""')
+                        state = "text_block"
+                        index += 3
+                        continue
+                    if char == '"':
+                        result.append(char)
+                        state = "string"
+                        index += 1
+                        continue
+                    if char == "'":
+                        result.append(char)
+                        state = "char"
+                        index += 1
+                        continue
+                    if char.isalpha() or char in "_$":
+                        end = index + 1
+                        while end < len(source) and (
+                            source[end].isalnum() or source[end] in "_$"
+                        ):
+                            end += 1
+                        token = source[index:end]
+                        if token == identifier:
+                            result.append(replacement)
+                            replacements += 1
+                        else:
+                            result.append(token)
+                        index = end
+                        continue
+                    result.append(char)
+                    index += 1
+                    continue
+
+                result.append(char)
+                if state == "line_comment" and char in "\r\n":
+                    state = "code"
+                elif state == "block_comment" and char == "*" and nxt == "/":
+                    result.append("/")
+                    state = "code"
+                    index += 2
+                    continue
+                elif state == "text_block" and source.startswith('"""', index):
+                    result.extend(('"', '"'))
+                    state = "code"
+                    index += 3
+                    continue
+                elif state in {"string", "char"}:
+                    quote = '"' if state == "string" else "'"
+                    if char == "\\" and index + 1 < len(source):
+                        result.append(source[index + 1])
+                        index += 2
+                        continue
+                    if char == quote:
+                        state = "code"
+                index += 1
+            return "".join(result), replacements
+
+        for alias in aliases:
+            declaration_pattern = re.compile(
+                rf"(?m)^[ \t]*(?P<modifiers>(?:(?:public|protected|private|static|final)\s+)*)"
+                rf"[A-Za-z_$][A-Za-z0-9_$<>\[\].?]*\s+{re.escape(alias)}\s*=\s*"
+                rf"{re.escape(literal_text)}\s*;[ \t]*(?://[^\r\n]*)?(?:\r?\n)?"
+            )
+            declarations = list(declaration_pattern.finditer(output))
+            if len(declarations) > 1:
+                continue
+            body = output
+            if declarations:
+                modifiers = set(declarations[0].group("modifiers").split())
+                if not {"static", "final"}.issubset(modifiers):
+                    continue
+                declaration = declarations[0]
+                body = body[:declaration.start()] + body[declaration.end():]
+            restored, restored_count = replace_code_identifier(
+                body,
+                alias,
+                literal_text,
+            )
+            if restored_count <= 0:
+                continue
+            if re.sub(r"\s+", "", restored) != re.sub(r"\s+", "", context.source):
+                continue
+            aligned, aligned_count = replace_code_identifier(
+                body,
+                alias,
+                planned_name,
+            )
+            if aligned_count != restored_count:
+                continue
+            aligned = aligned.strip()
+            viable.append((alias, aligned))
+
+        if len(viable) != 1:
+            return output, {}
+        alias, aligned = viable[0]
+        return aligned, {
+            "status": "normalized",
+            "reason": "model_constant_identifier_aligned_to_rdp_contract",
+            "contract": "java_introduce_constant_target_identifier",
+            "model_identifier": alias,
+            "planned_identifier": planned_name,
+        }
+
+    @staticmethod
     def _complete_java_constant_target_output(
         *,
         language: str,
         output: str,
-        context: CodeT5TargetContext | None,
+        context: QwenTargetContext | None,
         action: RefactoringAction,
     ) -> tuple[str, Dict[str, Any]]:
         """Complete a declaration-only Java constant candidate safely.
@@ -1729,12 +2185,31 @@ class CodeT5CandidateTransformer:
         # already selected the exact Java type/modifiers/value. The canonical
         # declaration below is derived from the RDP action, never from model
         # text, and the normal action gate verifies it after target merging.
-        declaration_pattern = re.compile(
-            rf"(?m)^[ \t]*(?:(?:public|protected|private|static|final)\s+)*"
+        declaration_pattern = _java_constant_declaration_pattern(constant_name)
+
+        # A timed-out generation can stop after producing the complete,
+        # correct declaration but before its final semicolon. Repair only an
+        # output that consists solely of that exact planned declaration.
+        incomplete_declaration = re.fullmatch(
+            rf"\s*(?:(?:public|protected|private|static|final)\s+)*"
             rf"[A-Za-z_$][A-Za-z0-9_$<>\[\].?]*\s+"
-            rf"{re.escape(constant_name)}\s*=\s*[^;\r\n]+;"
-            rf"[ \t]*(?:\r?\n)?"
+            rf"{re.escape(constant_name)}\s*=\s*[^;{{}}\r\n]+?"
+            rf"\s*(?://[^\r\n]*)?\s*",
+            output,
         )
+        # CPU generation can stop immediately after ``=``. This remains
+        # unambiguous evidence of the planned declaration only when its Java
+        # type and requested identifier are both present. The value below is
+        # always completed from the RDP contract, never guessed from text.
+        declaration_prefix_only = re.fullmatch(
+            rf"\s*(?:(?:public|protected|private|static|final)\s+)*"
+            rf"{re.escape(java_type)}\s+{re.escape(constant_name)}\s*=\s*",
+            output,
+        )
+        truncated_declaration_completed = False
+        if (incomplete_declaration or declaration_prefix_only) and ";" not in output:
+            output = declaration
+            truncated_declaration_completed = True
         declarations = list(declaration_pattern.finditer(output))
         duplicate_declarations_normalized = False
         if len(declarations) > 1:
@@ -1791,6 +2266,8 @@ class CodeT5CandidateTransformer:
                 "status": "completed",
                 "reason": "missing_constant_declaration_restored",
                 "contract": "java_introduce_constant_target_member",
+                "declaration_source": "rdp_action_contract",
+                "model_generated_target": True,
                 "replacements": 1,
             }
         if not declarations:
@@ -1822,7 +2299,115 @@ class CodeT5CandidateTransformer:
         completed = declaration + newline + rewritten_member.lstrip("\r\n")
         return completed, {
             "status": "completed",
-            "reason": "missing_target_member_restored",
+            "reason": (
+                "truncated_declaration_and_target_completed"
+                if truncated_declaration_completed
+                else "missing_target_member_restored"
+            ),
+            "contract": "java_introduce_constant_target_member",
+            "replacements": replacements,
+        }
+
+    @staticmethod
+    def _recover_java_constant_from_complete_output(
+        *,
+        language: str,
+        output: str,
+        context: QwenTargetContext | None,
+        action: RefactoringAction,
+    ) -> tuple[str, Dict[str, Any]]:
+        """Project a complete Java response back to its proven target span.
+
+        Recovery is permitted only when the response contains the exact target
+        obtained by applying the planned literal substitution to the resolved
+        source. Other model edits are discarded rather than merged.
+        """
+
+        if (
+            str(language).lower() != "java"
+            or context is None
+            or context.kind not in {
+                "field_with_sibling_constant",
+                "method_with_sibling_constant",
+                "statement_with_sibling_constant",
+            }
+            or action.action_type not in {"introduce_constant", "extract_constant"}
+        ):
+            return output, {}
+
+        parameters = action.parameters or {}
+        constant_name = str(
+            parameters.get("constant_name") or "EXTRACTED_CONSTANT"
+        ).strip()
+        if not re.fullmatch(r"[A-Za-z_$][A-Za-z0-9_$]*", constant_name):
+            return output, {}
+        literal_values = _planned_literal_values(parameters)
+        if len(literal_values) != 1:
+            return output, {}
+
+        from ..transformers import java_transformers
+
+        literal_value = literal_values[0]
+        source_line = parameters.get("source_line")
+        relative_line: int | None = None
+        if isinstance(source_line, (int, float)):
+            relative_line = int(source_line) - context.start_line + 1
+            if relative_line <= 0:
+                relative_line = None
+        rewritten_target, replacements = java_transformers._replace_literal(
+            context.source,
+            literal_value,
+            constant_name,
+            relative_line,
+        )
+        if replacements <= 0:
+            rewritten_target, replacements = java_transformers._replace_literal(
+                context.source,
+                literal_value,
+                constant_name,
+                None,
+            )
+        if replacements != 1:
+            return output, {}
+
+        evidence_output = output
+        if output.startswith(("diff --git", "--- ", "+++ ")):
+            evidence_output = "\n".join(
+                line
+                for line in output.splitlines()
+                if not line.startswith(("-", "@@", "diff --git", "index "))
+                and not line.startswith("+++ ")
+            )
+        compact_output = re.sub(r"\s+", "", evidence_output)
+        compact_target = re.sub(r"\s+", "", rewritten_target)
+        compact_original_target = re.sub(r"\s+", "", context.source)
+        declaration_pattern = _java_constant_declaration_pattern(constant_name)
+        declaration_count = len(declaration_pattern.findall(evidence_output))
+        transformed_target_present = bool(
+            compact_target and compact_target in compact_output
+        )
+        unchanged_target_with_declaration = bool(
+            declaration_count == 1
+            and compact_original_target
+            and compact_original_target in compact_output
+        )
+        if not transformed_target_present and not unchanged_target_with_declaration:
+            return output, {}
+
+        literal_text = java_transformers._to_java_literal(literal_value)
+        java_type = java_transformers._java_type_for_literal(literal_value)
+        declaration = (
+            f"private static final {java_type} {constant_name} = {literal_text};"
+        )
+        newline = "\r\n" if "\r\n" in context.source else "\n"
+        projected = declaration + newline + rewritten_target.lstrip("\r\n")
+        return projected, {
+            "status": "projected",
+            "reason": (
+                "complete_source_projected_to_exact_target"
+                if transformed_target_present
+                else "complete_source_declaration_intent_completed"
+            ),
             "contract": "java_introduce_constant_target_member",
             "replacements": replacements,
         }
@@ -1832,7 +2417,7 @@ class CodeT5CandidateTransformer:
         *,
         language: str,
         output: str,
-        context: CodeT5TargetContext | None,
+        context: QwenTargetContext | None,
         action: RefactoringAction,
     ) -> tuple[str, Dict[str, Any]]:
         """Complete a macro-only C constant candidate without free-form edits."""
@@ -1910,14 +2495,12 @@ class CodeT5CandidateTransformer:
         try:
             import torch
             from transformers import (
-                AutoConfig,
                 AutoModelForCausalLM,
-                AutoModelForSeq2SeqLM,
                 AutoTokenizer,
             )
         except ImportError as exc:
             raise RuntimeError(
-                "CODET5_DEPENDENCIES_NOT_INSTALLED: install requirements-codet5.txt"
+                "QWEN_DEPENDENCIES_NOT_INSTALLED: install requirements-qwen.txt"
             ) from exc
 
         requested = self.settings.device.lower()
@@ -1926,13 +2509,13 @@ class CodeT5CandidateTransformer:
         elif requested in {"cpu", "cuda"}:
             device = requested
         else:
-            raise RuntimeError("CODET5_INVALID_DEVICE")
+            raise RuntimeError("QWEN_INVALID_DEVICE")
         if device == "cuda" and not torch.cuda.is_available():
-            raise RuntimeError("CODET5_CUDA_UNAVAILABLE")
+            raise RuntimeError("QWEN_CUDA_UNAVAILABLE")
 
         requested_backend = self.settings.backend.strip().lower()
         if requested_backend not in {"auto", "pytorch", "openvino"}:
-            raise RuntimeError("CODET5_INVALID_BACKEND")
+            raise RuntimeError("QWEN_INVALID_BACKEND")
         openvino_path = Path(self.settings.openvino_model_path).expanduser() if (
             self.settings.openvino_model_path
         ) else None
@@ -1945,23 +2528,28 @@ class CodeT5CandidateTransformer:
         else:
             backend = requested_backend
         if backend == "openvino" and device != "cpu":
-            raise RuntimeError("CODET5_OPENVINO_REQUIRES_CPU_DEVICE")
+            raise RuntimeError("QWEN_OPENVINO_REQUIRES_CPU_DEVICE")
         if backend == "openvino" and (
             openvino_path is None or not openvino_path.exists()
         ):
-            raise RuntimeError("CODET5_OPENVINO_MODEL_PATH_NOT_FOUND")
+            raise RuntimeError("QWEN_OPENVINO_MODEL_PATH_NOT_FOUND")
 
+        effective_cpu_threads = min(
+            self.settings.cpu_threads,
+            max(1, os.cpu_count() or self.settings.cpu_threads),
+        )
         cache_source = str(openvino_path or self.settings.model_id)
         if backend == "openvino":
-            # A process must not reuse a runtime compiled with the older FP32
-            # activation/KV-cache profile after this throughput profile ships.
-            cache_source += "|bf16-u8-kv-v1"
+            # Keep this profile separate from the prior BF16/U8 runtime so a
+            # live process cannot reuse numerically reduced cached state.
+            cache_source += "|fp32-accuracy-v1"
         cache_key = (
             backend,
             cache_source,
             device,
             bool(self.settings.allow_download),
             int(self.settings.max_input_tokens),
+            effective_cpu_threads,
         )
         if self.settings.runtime_cache:
             with _MODEL_RUNTIME_CACHE_LOCK:
@@ -1972,14 +2560,10 @@ class CodeT5CandidateTransformer:
                 self._torch = cached["torch"]
                 self._resolved_device = cached["device"]
                 self._resolved_backend = cached["backend"]
-                self._is_encoder_decoder = cached["is_encoder_decoder"]
                 self._effective_max_input_tokens = cached["max_input_tokens"]
                 self._runtime_inference_lock = cached["inference_lock"]
                 self._runtime_cache_hit = True
-                self._effective_cpu_threads = min(
-                    self.settings.cpu_threads,
-                    max(1, os.cpu_count() or self.settings.cpu_threads),
-                )
+                self._effective_cpu_threads = effective_cpu_threads
                 if device == "cpu" and hasattr(torch, "set_num_threads"):
                     torch.set_num_threads(self._effective_cpu_threads)
                 self._model_load_seconds = max(
@@ -1988,10 +2572,7 @@ class CodeT5CandidateTransformer:
                 )
                 return
 
-        self._effective_cpu_threads = min(
-            self.settings.cpu_threads,
-            max(1, os.cpu_count() or self.settings.cpu_threads),
-        )
+        self._effective_cpu_threads = effective_cpu_threads
         if device == "cpu":
             torch.set_num_threads(self._effective_cpu_threads)
             try:
@@ -2012,10 +2593,6 @@ class CodeT5CandidateTransformer:
                 repo_id=self.settings.model_id,
                 local_files_only=True,
             )
-        config = AutoConfig.from_pretrained(
-            model_source,
-            local_files_only=local_files_only,
-        )
         tokenizer_options: Dict[str, Any] = {
             "local_files_only": local_files_only,
         }
@@ -2025,28 +2602,15 @@ class CodeT5CandidateTransformer:
             model_source,
             **tokenizer_options,
         )
-        self._is_encoder_decoder = bool(
-            getattr(config, "is_encoder_decoder", False)
-        )
-        model_class = (
-            AutoModelForSeq2SeqLM
-            if self._is_encoder_decoder
-            else AutoModelForCausalLM
-        )
         if backend == "openvino":
             try:
-                from optimum.intel import OVModelForCausalLM, OVModelForSeq2SeqLM
+                from optimum.intel import OVModelForCausalLM
             except ImportError as exc:
                 raise RuntimeError(
-                    "CODET5_OPENVINO_DEPENDENCIES_NOT_INSTALLED: "
+                    "QWEN_OPENVINO_DEPENDENCIES_NOT_INSTALLED: "
                     "install requirements-openvino.txt"
                 ) from exc
-            openvino_model_class = (
-                OVModelForSeq2SeqLM
-                if self._is_encoder_decoder
-                else OVModelForCausalLM
-            )
-            self._model = openvino_model_class.from_pretrained(
+            self._model = OVModelForCausalLM.from_pretrained(
                 model_source,
                 # Optimum Intel 1.x treats every model_id as a Hub repo during
                 # its local_files_only pre-check. On Windows that turns an
@@ -2058,18 +2622,13 @@ class CodeT5CandidateTransformer:
                 device="CPU",
                 compile=True,
                 ov_config={
-                    # Keep the exported FP32 weights unchanged while using
-                    # the CPU's native reduced-precision execution path.
-                    "INFERENCE_PRECISION_HINT": "bf16",
-                    # These are runtime-only OpenVINO optimizations. SCTVA's
-                    # normal candidate validators still decide acceptance.
-                    "DYNAMIC_QUANTIZATION_GROUP_SIZE": "32",
-                    "KV_CACHE_PRECISION": "u8",
+                    "INFERENCE_PRECISION_HINT": "f32",
+                    "INFERENCE_NUM_THREADS": str(self._effective_cpu_threads),
                     "PERFORMANCE_HINT": "LATENCY",
                 },
             )
         else:
-            self._model = model_class.from_pretrained(
+            self._model = AutoModelForCausalLM.from_pretrained(
                 model_source,
                 local_files_only=local_files_only,
                 torch_dtype="auto",
@@ -2103,7 +2662,6 @@ class CodeT5CandidateTransformer:
                 "torch": self._torch,
                 "device": self._resolved_device,
                 "backend": self._resolved_backend,
-                "is_encoder_decoder": self._is_encoder_decoder,
                 "max_input_tokens": self._effective_max_input_tokens,
                 "inference_lock": self._runtime_inference_lock,
             }
@@ -2115,7 +2673,6 @@ class CodeT5CandidateTransformer:
                 self._torch = existing["torch"]
                 self._resolved_device = existing["device"]
                 self._resolved_backend = existing["backend"]
-                self._is_encoder_decoder = existing["is_encoder_decoder"]
                 self._effective_max_input_tokens = existing["max_input_tokens"]
                 self._runtime_inference_lock = existing["inference_lock"]
                 self._runtime_cache_hit = True
@@ -2140,6 +2697,17 @@ class CodeT5CandidateTransformer:
         # guessing at any surrounding prose or code.
         value = re.sub(
             r"(?m)^[ \t]*```(?:[A-Za-z0-9_+.-]+)?[ \t]*(?:\r?\n|$)",
+            "",
+            value,
+        ).strip()
+        # The repair prompt names its exact-output block. Some instruction-
+        # tuned checkpoints copy those marker lines with the source. They are
+        # prompt syntax, never Java source, so remove only known standalone
+        # markers before the target contract parser evaluates the replacement.
+        value = re.sub(
+            r"(?mi)^\s*</?(?:required-repair-output|required-repair-target|"
+            r"rejected-target-replacement|"
+            r"sctva-target-task|target-source)>\s*(?:\r?\n|$)",
             "",
             value,
         ).strip()
@@ -2221,7 +2789,7 @@ class CodeT5CandidateTransformer:
     @staticmethod
     def _target_output_shape_issue(
         language: str,
-        context: CodeT5TargetContext | None,
+        context: QwenTargetContext | None,
         output: str,
     ) -> str:
         """Reject complete-file output before it can be merged into one span."""
@@ -2238,12 +2806,12 @@ class CodeT5CandidateTransformer:
                 r"(?:public\s+)?(?:class|interface|enum|record)\s+)",
                 output,
             ):
-                return "CODET5_OUTPUT_MUST_BE_TARGET_REPLACEMENT"
+                return "QWEN_OUTPUT_MUST_BE_TARGET_REPLACEMENT"
         return ""
 
     @staticmethod
     def _target_merge_output(
-        context: CodeT5TargetContext | None,
+        context: QwenTargetContext | None,
         output: str,
         action: RefactoringAction,
     ) -> str:
@@ -2260,19 +2828,14 @@ class CodeT5CandidateTransformer:
         ).strip()
         if not re.fullmatch(r"[A-Za-z_$][A-Za-z0-9_$]*", constant_name):
             return output
-        declaration_pattern = re.compile(
-            rf"(?m)^[ \t]*(?:(?:public|protected|private|static|final)\s+)*"
-            rf"[A-Za-z_$][A-Za-z0-9_$<>\[\].?]*\s+"
-            rf"{re.escape(constant_name)}\s*=\s*[^;\r\n]+;"
-            rf"[ \t]*(?:\r?\n)?"
-        )
+        declaration_pattern = _java_constant_declaration_pattern(constant_name)
         declarations = list(declaration_pattern.finditer(output))
         if len(declarations) != 1:
             return output
         return declaration_pattern.sub("", output, count=1).lstrip("\r\n")
 
     def _model_prompt(self, prompt: str) -> str:
-        if self._is_encoder_decoder or not hasattr(self._tokenizer, "apply_chat_template"):
+        if not hasattr(self._tokenizer, "apply_chat_template"):
             return prompt
         return self._tokenizer.apply_chat_template(
             [
@@ -2289,1162 +2852,6 @@ class CodeT5CandidateTransformer:
             add_generation_prompt=True,
         )
 
-    @staticmethod
-    def _bundle_constant_spec(
-        language: str,
-        action_index: int,
-        action: RefactoringAction,
-    ) -> Dict[str, Any] | None:
-        """Return a compact reversible contract for one constant action."""
-
-        if action.action_type not in {"introduce_constant", "extract_constant"}:
-            return None
-        parameters = action.parameters or {}
-        values = _planned_literal_values(parameters)
-        if len(values) != 1:
-            return None
-        name = str(parameters.get("constant_name") or "EXTRACTED_CONSTANT").strip()
-        if not re.fullmatch(r"[A-Za-z_$][A-Za-z0-9_$]*", name):
-            return None
-
-        normalized_language = str(language or "").strip().lower()
-        value = values[0]
-        if normalized_language == "java":
-            from ..transformers import java_transformers
-
-            literal = java_transformers._to_java_literal(value)
-            declaration = (
-                f"private static final {java_transformers._java_type_for_literal(value)} "
-                f"{name} = {literal};"
-            )
-        elif normalized_language == "c":
-            from ..transformers import c_transformers
-
-            value = c_transformers.normalize_planned_numeric_literal(value)
-            if not isinstance(value, (int, float)) or isinstance(value, bool):
-                return None
-            literal = c_transformers._to_c_literal(value)
-            declaration = f"#define {name} {literal}"
-        else:
-            return None
-
-        return {
-            "action_index": action_index,
-            "action_type": action.action_type,
-            "constant_name": name,
-            "literal": literal,
-            "required_declaration": declaration,
-        }
-
-    @staticmethod
-    def bundle_kind(actions: Sequence[tuple[int, RefactoringAction]]) -> str:
-        """Return the composition contract shared by an action sequence."""
-
-        if len(actions) < 2:
-            return ""
-        action_types = {action.action_type for _index, action in actions}
-        if action_types <= {"introduce_constant", "extract_constant"}:
-            return "constant_bundle"
-        if action_types <= _GENERIC_FILE_BUNDLE_ACTIONS:
-            return "bounded_local_bundle"
-        return ""
-
-    def _bundle_generic_spec(
-        self,
-        action_index: int,
-        action: RefactoringAction,
-    ) -> Dict[str, Any]:
-        return {
-            "action_index": action_index,
-            "action_type": action.action_type,
-            "source_step_id": action.source_step_id,
-            "source_refactoring": str(action.source_refactoring or ""),
-            "parameters": self._safe_parameters(dict(action.parameters or {})),
-        }
-
-    @staticmethod
-    def _bundle_action_symbols(action: RefactoringAction) -> tuple[set[str], set[str]]:
-        parameters = dict(action.parameters or {})
-        reads: set[str] = set()
-        writes: set[str] = set()
-        for key in (
-            "old_name", "source_method", "method", "method_name",
-            "target_method", "function", "function_name", "unsafe_function",
-            "variable", "variable_name", "field", "field_name",
-        ):
-            value = parameters.get(key)
-            if isinstance(value, str) and value.strip():
-                reads.add(value.strip())
-        for key in (
-            "new_name", "new_method_name", "constant_name",
-            "parameter_object_name", "safe_alternative",
-        ):
-            value = parameters.get(key)
-            if isinstance(value, str) and value.strip():
-                writes.add(value.strip())
-        return reads, writes
-
-    def _bundle_pair_compatible(
-        self,
-        *,
-        language: str,
-        source_code: str,
-        left: tuple[int, RefactoringAction],
-        right: tuple[int, RefactoringAction],
-    ) -> bool:
-        left_context = self.resolve_target_context(
-            language=language,
-            source_code=source_code,
-            action=left[1],
-        )
-        right_context = self.resolve_target_context(
-            language=language,
-            source_code=source_code,
-            action=right[1],
-        )
-        if left_context is None or right_context is None:
-            return False
-
-        exact_same_scope = (
-            left_context.start == right_context.start
-            and left_context.end == right_context.end
-        )
-        disjoint = (
-            left_context.end <= right_context.start
-            or right_context.end <= left_context.start
-        )
-        if not exact_same_scope and not disjoint:
-            return False
-        both_constant_actions = all(
-            item[1].action_type in {"introduce_constant", "extract_constant"}
-            for item in (left, right)
-        )
-        # Generic actions share one candidate only when they resolve to the
-        # same owner span. Regenerating the gap between disjoint methods made
-        # prompts larger and reduced acceptance accuracy. Constant bundles
-        # retain their reversible disjoint-span contract.
-        if not both_constant_actions and not exact_same_scope:
-            return False
-        if exact_same_scope and (
-            left[1].action_type in _BUNDLE_DESTRUCTIVE_ACTIONS
-            or right[1].action_type in _BUNDLE_DESTRUCTIVE_ACTIONS
-        ):
-            return False
-
-        if (
-            left[1].action_type == "replace_literal"
-            and right[1].action_type == "replace_literal"
-        ):
-            left_parameters = left[1].parameters or {}
-            right_parameters = right[1].parameters or {}
-            try:
-                left_values = {
-                    left_parameters.get("old_literal"),
-                    left_parameters.get("new_literal"),
-                }
-                right_values = {
-                    right_parameters.get("old_literal"),
-                    right_parameters.get("new_literal"),
-                }
-                if left_values.intersection(right_values):
-                    return False
-            except TypeError:
-                # Non-scalar literal payloads are not safe bundle contracts.
-                return False
-
-        left_reads, left_writes = self._bundle_action_symbols(left[1])
-        right_reads, right_writes = self._bundle_action_symbols(right[1])
-        if (
-            left_writes.intersection(right_reads | right_writes)
-            or right_writes.intersection(left_reads | left_writes)
-        ):
-            return False
-        return True
-
-    def plan_dependency_aware_bundles(
-        self,
-        *,
-        language: str,
-        source_code: str,
-        actions: Sequence[tuple[int, RefactoringAction]],
-        current_file_name: str,
-        allow_generic: bool = True,
-    ) -> list[list[tuple[int, RefactoringAction]]]:
-        """Create ordered, token-safe bundles while retaining action identity."""
-
-        bundles: list[list[tuple[int, RefactoringAction]]] = []
-        pending: list[tuple[int, RefactoringAction]] = []
-        pending_kind = ""
-
-        def flush() -> None:
-            nonlocal pending, pending_kind
-            if len(pending) >= 2:
-                for partition in self.partition_bundle_actions(
-                    language=language,
-                    source_code=source_code,
-                    actions=pending,
-                    current_file_name=current_file_name,
-                ):
-                    if len(partition) >= 2:
-                        bundles.append(partition)
-            pending = []
-            pending_kind = ""
-
-        for item in actions:
-            single_type = item[1].action_type
-            item_kind = (
-                "constant_bundle"
-                if single_type in {"introduce_constant", "extract_constant"}
-                else "bounded_local_bundle"
-                if (
-                    allow_generic
-                    and self.settings.enable_generic_bundling
-                    and single_type in _GENERIC_FILE_BUNDLE_ACTIONS
-                )
-                else ""
-            )
-            if not item_kind:
-                flush()
-                continue
-            if pending and (
-                pending_kind != item_kind
-                or len(pending) >= (
-                    self.settings.max_actions_per_bundle
-                    if item_kind == "constant_bundle"
-                    else self.settings.max_generic_actions_per_bundle
-                )
-                or any(
-                    not self._bundle_pair_compatible(
-                        language=language,
-                        source_code=source_code,
-                        left=existing,
-                        right=item,
-                    )
-                    for existing in pending
-                )
-            ):
-                flush()
-            pending.append(item)
-            pending_kind = item_kind
-        flush()
-        return bundles
-
-    def bundle_candidate_scope_issue(
-        self,
-        *,
-        language: str,
-        original_source: str,
-        candidate_source: str,
-        actions: Sequence[tuple[int, RefactoringAction]],
-    ) -> str:
-        """Reject generic bundle edits that escape all resolved target spans."""
-
-        contexts = [
-            self.resolve_target_context(
-                language=language,
-                source_code=original_source,
-                action=action,
-            )
-            for _index, action in actions
-        ]
-        if any(context is None for context in contexts):
-            return "CODET5_BUNDLE_TARGET_NOT_RESOLVED"
-        spans = [
-            (context.start, context.end)
-            for context in contexts
-            if context is not None
-        ]
-        matcher = difflib.SequenceMatcher(
-            None,
-            original_source,
-            candidate_source,
-            autojunk=False,
-        )
-        for tag, original_start, original_end, _candidate_start, _candidate_end in (
-            matcher.get_opcodes()
-        ):
-            if tag == "equal":
-                continue
-            if original_start == original_end:
-                allowed = any(start <= original_start <= end for start, end in spans)
-            else:
-                allowed = any(
-                    start <= original_start and original_end <= end
-                    for start, end in spans
-                )
-            if not allowed:
-                return "CODET5_BUNDLE_CHANGE_OUTSIDE_RESOLVED_TARGETS"
-        return ""
-
-    def partition_bundle_actions(
-        self,
-        *,
-        language: str,
-        source_code: str,
-        actions: Sequence[tuple[int, RefactoringAction]],
-        current_file_name: str,
-    ) -> list[list[tuple[int, RefactoringAction]]]:
-        """Split a compatible run before inference when its prompt cannot fit.
-
-        Singleton partitions deliberately return to the established per-action
-        path. Preflight loads/tokenizes the prompt but never consumes an action
-        budget because no generation has happened yet.
-        """
-
-        items = list(actions)
-        if len(items) < 2:
-            return [items] if items else []
-
-        normalized_language = str(language or "").strip().lower()
-
-        def fits(candidate_actions: Sequence[tuple[int, RefactoringAction]]) -> bool:
-            bundle_kind = self.bundle_kind(candidate_actions)
-            if not bundle_kind:
-                return False
-            specs: list[Dict[str, Any]] = []
-            contexts: list[CodeT5TargetContext] = []
-            names: set[str] = set()
-            for action_index, action in candidate_actions:
-                spec = (
-                    self._bundle_constant_spec(
-                        normalized_language,
-                        action_index,
-                        action,
-                    )
-                    if bundle_kind == "constant_bundle"
-                    else self._bundle_generic_spec(action_index, action)
-                )
-                context = self.resolve_target_context(
-                    language=normalized_language,
-                    source_code=source_code,
-                    action=action,
-                )
-                if spec is None or context is None:
-                    return False
-                if bundle_kind == "constant_bundle":
-                    if spec["constant_name"] in names:
-                        return False
-                    names.add(spec["constant_name"])
-                specs.append(spec)
-                contexts.append(context)
-
-            start = min(context.start for context in contexts)
-            end = max(context.end for context in contexts)
-            combined_context = CodeT5TargetContext(
-                start=start,
-                end=end,
-                source=source_code[start:end],
-                kind="file_action_bundle",
-                name=bundle_kind,
-                start_line=_line_number(source_code, start),
-                end_line=_line_number(source_code, max(start, end - 1)),
-                resolution=f"dependency_aware_{bundle_kind}",
-            )
-            prompt = self.build_bundle_prompt(
-                language=normalized_language,
-                current_file_name=current_file_name,
-                context=combined_context,
-                action_specs=specs,
-                bundle_kind=bundle_kind,
-            )
-            _encoded, input_tokens = self._encode_prompt(prompt)
-            estimated_output_tokens = (
-                self._rough_token_count(combined_context.source)
-                + ((20 if bundle_kind == "constant_bundle" else 64) * len(specs))
-            )
-            bundle_output_limit = min(
-                self.settings.max_new_tokens,
-                self.settings.max_bundle_output_tokens,
-            )
-            return (
-                input_tokens <= self._effective_max_input_tokens
-                and estimated_output_tokens <= bundle_output_limit
-            )
-
-        with self._lock:
-            try:
-                self._load()
-                partitions: list[list[tuple[int, RefactoringAction]]] = []
-                pending: list[tuple[int, RefactoringAction]] = []
-                for item in items:
-                    proposed = [*pending, item]
-                    if len(proposed) <= 1 or fits(proposed):
-                        pending = proposed
-                        continue
-                    if pending:
-                        partitions.append(pending)
-                    pending = [item]
-                if pending:
-                    partitions.append(pending)
-                return partitions
-            except Exception:
-                # Preflight is an optimization only. Preserve the prior path
-                # so normal model error reporting and rule fallback still run.
-                return [items]
-
-    @staticmethod
-    def _complete_java_bundle_output(
-        source_code: str,
-        model_output: str,
-    ) -> str:
-        """Recognize an unambiguous complete Java source candidate.
-
-        Acceptance is still decided later by collective reversibility plus the
-        normal SCTVA validators. This only avoids merging a complete file into
-        a smaller target span.
-        """
-
-        if not model_output or model_output.startswith(("diff --git", "--- ", "+++ ")):
-            return ""
-        type_pattern = re.compile(
-            r"\b(?:class|interface|enum|record)\s+([A-Za-z_$][A-Za-z0-9_$]*)"
-        )
-        source_types = set(type_pattern.findall(source_code))
-        output_types = set(type_pattern.findall(model_output))
-        if not source_types.intersection(output_types):
-            return ""
-        if not re.search(
-            r"(?m)^\s*(?:package\s+|import\s+|"
-            r"(?:(?:public|protected|private|abstract|final|static|sealed|non-sealed)\s+)*"
-            r"(?:class|interface|enum|record)\s+)",
-            model_output,
-        ):
-            return ""
-        # Output normalization strips surrounding whitespace. Restore only the
-        # source file's final newline so the bundle scope gate does not mistake
-        # an EOF formatting difference for an edit outside the target spans.
-        if source_code.endswith("\r\n") and not model_output.endswith(("\r", "\n")):
-            return model_output + "\r\n"
-        if source_code.endswith("\n") and not model_output.endswith("\n"):
-            return model_output + "\n"
-        return model_output
-
-    def build_bundle_prompt(
-        self,
-        *,
-        language: str,
-        current_file_name: str,
-        context: CodeT5TargetContext,
-        action_specs: Sequence[Dict[str, Any]],
-        bundle_kind: str = "constant_bundle",
-        validation_feedback: str = "",
-        previous_candidate: str = "",
-    ) -> str:
-        """Build one bounded prompt that applies several compatible actions."""
-
-        action_contract = json.dumps(
-            list(action_specs),
-            ensure_ascii=True,
-            sort_keys=True,
-            separators=(",", ":"),
-        )
-        if bundle_kind == "constant_bundle":
-            bundle_requirement = (
-                "Perform every listed Introduce/Extract Constant action exactly once. "
-                "Emit every required_declaration exactly as written and replace only its "
-                "planned literal occurrence with constant_name. Preserve all other tokens, "
-                "declarations, operators, calls, control flow, comments, and formatting."
-            )
-        else:
-            bundle_requirement = (
-                "Apply the listed RDP actions sequentially in action_index order. Every action "
-                "must be visible in the returned source. Preserve behavior and public APIs unless "
-                "an action explicitly requires that API change. Do not invent refactorings, rename "
-                "unlisted symbols, or modify code outside the resolved target scopes."
-            )
-        parts = [
-            "<sctva-file-action-bundle>",
-            f"language: {language}",
-            f"file: {current_file_name}",
-            f"bundle-kind: {bundle_kind}",
-            f"action-count: {len(action_specs)}",
-            f"actions: {action_contract}",
-            bundle_requirement,
-            (
-                "Return only the complete transformed target-source span. Do not return "
-                "Markdown, explanation, a diff, package/import lines, or an enclosing class/program."
-            ),
-        ]
-        if validation_feedback:
-            parts.extend((
-                "<validation-feedback>",
-                re.sub(r"\s+", " ", validation_feedback).strip()[:1200],
-                "</validation-feedback>",
-                "Repair every reported issue while still applying every listed action exactly once.",
-            ))
-        if previous_candidate:
-            parts.extend((
-                "<rejected-target-replacement>",
-                previous_candidate[:8000],
-                "</rejected-target-replacement>",
-            ))
-        parts.extend((
-            "<target-source>",
-            context.source,
-            "</target-source>",
-            "</sctva-file-action-bundle>",
-        ))
-        return "\n".join(parts)
-
-    def propose_bundle(
-        self,
-        *,
-        language: str,
-        source_code: str,
-        actions: Sequence[tuple[int, RefactoringAction]],
-        current_file_name: str,
-        validation_feedback: str = "",
-        previous_candidate: str = "",
-    ) -> CodeT5Candidate:
-        """Generate one candidate for a bounded compatible action bundle.
-
-        Constant bundles use their reversible declaration contract. Other
-        bundles are restricted to dependency-planned local target spans and
-        must pass scope plus multi-action structural validation in the engine.
-        """
-
-        if not self.settings.enabled or not self.settings.enable_file_bundling:
-            return CodeT5Candidate(reason="CODET5_FILE_BUNDLING_DISABLED")
-        normalized_language = str(language or "").strip().lower()
-        if normalized_language not in {"python", "java", "c"}:
-            return CodeT5Candidate(reason="CODET5_BUNDLE_LANGUAGE_UNSUPPORTED")
-        bundle_kind = self.bundle_kind(actions)
-        if not bundle_kind:
-            return CodeT5Candidate(reason="CODET5_BUNDLE_CONTRACT_UNSUPPORTED")
-        bundle_limit = (
-            self.settings.max_actions_per_bundle
-            if bundle_kind == "constant_bundle"
-            else self.settings.max_generic_actions_per_bundle
-        )
-        if not 2 <= len(actions) <= bundle_limit:
-            return CodeT5Candidate(reason="CODET5_BUNDLE_SIZE_UNSUPPORTED")
-
-        with self._lock:
-            file_key = str(current_file_name or "<unknown>").replace("\\", "/").lower()
-            file_attempt_count = self._file_attempt_counts.get(file_key, 0)
-            if (
-                self._attempt_count >= self.settings.max_actions_per_request
-                or file_attempt_count >= self.settings.max_actions_per_file
-                or (
-                    self.settings.max_generation_seconds_per_request > 0
-                    and self._generation_seconds_used
-                    >= self.settings.max_generation_seconds_per_request
-                )
-            ):
-                budget_reason = (
-                    "CODET5_REQUEST_ACTION_BUDGET_EXHAUSTED"
-                    if self._attempt_count >= self.settings.max_actions_per_request
-                    else "CODET5_FILE_ACTION_BUDGET_EXHAUSTED"
-                    if file_attempt_count >= self.settings.max_actions_per_file
-                    else "CODET5_REQUEST_TIME_BUDGET_EXHAUSTED"
-                )
-                return CodeT5Candidate(
-                    reason="CODET5_ACTION_BUDGET_EXHAUSTED",
-                    metadata={
-                        "available": False,
-                        "reason": budget_reason,
-                        "request_attempts_used": self._attempt_count,
-                        "request_attempt_limit": self.settings.max_actions_per_request,
-                        "file_attempts_used": file_attempt_count,
-                        "file_attempt_limit": self.settings.max_actions_per_file,
-                        "generation_seconds_used": round(
-                            self._generation_seconds_used,
-                            3,
-                        ),
-                        "generation_seconds_limit": (
-                            self.settings.max_generation_seconds_per_request
-                        ),
-                    },
-                )
-
-            specs: list[Dict[str, Any]] = []
-            contexts: list[CodeT5TargetContext] = []
-            names: set[str] = set()
-            for action_index, action in actions:
-                spec = (
-                    self._bundle_constant_spec(
-                        normalized_language,
-                        action_index,
-                        action,
-                    )
-                    if bundle_kind == "constant_bundle"
-                    else self._bundle_generic_spec(action_index, action)
-                )
-                context = self.resolve_target_context(
-                    language=normalized_language,
-                    source_code=source_code,
-                    action=action,
-                )
-                if spec is None or context is None:
-                    return CodeT5Candidate(reason="CODET5_BUNDLE_TARGET_NOT_RESOLVED")
-                if bundle_kind == "constant_bundle":
-                    if spec["constant_name"] in names:
-                        return CodeT5Candidate(reason="CODET5_BUNDLE_DUPLICATE_CONSTANT_NAME")
-                    names.add(spec["constant_name"])
-                specs.append(spec)
-                contexts.append(context)
-
-            start = min(context.start for context in contexts)
-            end = max(context.end for context in contexts)
-            combined_context = CodeT5TargetContext(
-                start=start,
-                end=end,
-                source=source_code[start:end],
-                kind="file_action_bundle",
-                name=bundle_kind,
-                start_line=_line_number(source_code, start),
-                end_line=_line_number(source_code, max(start, end - 1)),
-                resolution=f"dependency_aware_{bundle_kind}",
-            )
-
-            attempt_number = self._attempt_count + 1
-            try:
-                self._load()
-                prompt = self.build_bundle_prompt(
-                    language=normalized_language,
-                    current_file_name=current_file_name,
-                    context=combined_context,
-                    action_specs=specs,
-                    bundle_kind=bundle_kind,
-                    validation_feedback=validation_feedback,
-                    previous_candidate=previous_candidate,
-                )
-                encoded, input_tokens = self._encode_prompt(prompt)
-                repair_prompt_compacted = False
-                if input_tokens > self._effective_max_input_tokens and validation_feedback:
-                    # A rejected candidate can be much larger than the target
-                    # span. Keep the validator guidance, but do not let that
-                    # inspection artifact make the bounded repair ineligible.
-                    compact_feedback = re.sub(
-                        r"\s+",
-                        " ",
-                        validation_feedback,
-                    ).strip()[:600]
-                    prompt = self.build_bundle_prompt(
-                        language=normalized_language,
-                        current_file_name=current_file_name,
-                        context=combined_context,
-                        action_specs=specs,
-                        bundle_kind=bundle_kind,
-                        validation_feedback=compact_feedback,
-                        previous_candidate="",
-                    )
-                    encoded, input_tokens = self._encode_prompt(prompt)
-                    repair_prompt_compacted = True
-                if input_tokens > self._effective_max_input_tokens:
-                    return CodeT5Candidate(
-                        reason="CODET5_BUNDLE_CONTEXT_TOO_LARGE",
-                        metadata={
-                            "input_tokens": input_tokens,
-                            "model_max_input_tokens": self._effective_max_input_tokens,
-                            "bundle_action_count": len(specs),
-                            "repair_prompt_compacted": repair_prompt_compacted,
-                        },
-                    )
-
-                estimated_output_tokens = (
-                    self._rough_token_count(combined_context.source)
-                    + ((20 if bundle_kind == "constant_bundle" else 64) * len(specs))
-                )
-                bundle_output_limit = min(
-                    self.settings.max_new_tokens,
-                    self.settings.max_bundle_output_tokens,
-                )
-                if estimated_output_tokens > bundle_output_limit:
-                    return CodeT5Candidate(
-                        reason="CODET5_BUNDLE_OUTPUT_TOO_LARGE",
-                        metadata={
-                            "estimated_output_tokens": estimated_output_tokens,
-                            "max_new_tokens": bundle_output_limit,
-                            "configured_max_new_tokens": self.settings.max_new_tokens,
-                            "max_bundle_output_tokens": (
-                                self.settings.max_bundle_output_tokens
-                            ),
-                            "bundle_action_count": len(specs),
-                        },
-                    )
-
-                # Count only an actual generation. Context/output preflight is
-                # free so an oversized bundle can fall back to smaller spans.
-                self._attempt_count += 1
-                self._file_attempt_counts[file_key] = file_attempt_count + 1
-                attempt_number = self._attempt_count
-
-                generation_started = time.monotonic()
-                if self._generator is not None:
-                    output = self._generator(prompt)
-                else:
-                    encoded = {
-                        key: value.to(self._resolved_device)
-                        for key, value in encoded.items()
-                    }
-                    with self._runtime_inference_lock:
-                        with self._torch.inference_mode():
-                            generated = self._model.generate(
-                                **encoded,
-                                max_new_tokens=min(
-                                    bundle_output_limit,
-                                    max(96, estimated_output_tokens),
-                                ),
-                                max_time=self._bounded_generation_timeout(
-                                    self.settings.generation_timeout_seconds
-                                ),
-                                use_cache=True,
-                                do_sample=False,
-                                num_beams=1,
-                                temperature=None,
-                                top_p=None,
-                                top_k=None,
-                            )
-                    output_tokens = generated[0]
-                    if not self._is_encoder_decoder:
-                        output_tokens = output_tokens[encoded["input_ids"].shape[-1]:]
-                    output = self._tokenizer.decode(
-                        output_tokens,
-                        skip_special_tokens=True,
-                    )
-
-                elapsed = max(0.0, time.monotonic() - generation_started)
-                self._generation_seconds_used += elapsed
-                model_output = self._normalise_model_output(output)
-                model_output, suffix_repair = self._repair_java_target_suffix(
-                    normalized_language,
-                    model_output,
-                )
-                output_shape_issue = ""
-                complete_source_output = ""
-                if normalized_language == "java":
-                    complete_source_output = self._complete_java_bundle_output(
-                        source_code,
-                        model_output,
-                    )
-                if (
-                    normalized_language == "java"
-                    and not complete_source_output
-                    and re.search(
-                        r"(?m)^\s*(?:package\s+|import\s+|"
-                        r"(?:public\s+)?(?:class|interface|enum|record)\s+)",
-                        model_output,
-                    )
-                ):
-                    output_shape_issue = "CODET5_BUNDLE_OUTPUT_MUST_BE_TARGET_REPLACEMENT"
-                candidate = (
-                    complete_source_output
-                    or self._merge_target_output(
-                        source_code,
-                        combined_context,
-                        model_output,
-                    )
-                    if model_output and not output_shape_issue
-                    else ""
-                )
-                metadata = {
-                    "provider": self.provider,
-                    "model_id": self.settings.model_id,
-                    "adapter_revision": MODEL_ASSISTANCE_REVISION,
-                    "device": self._resolved_device or "injected_generator",
-                    "backend": self._resolved_backend or "pytorch",
-                    "runtime_cache_hit": self._runtime_cache_hit,
-                    "model_load_seconds": round(self._model_load_seconds, 3),
-                    "attempt_number": attempt_number,
-                    "generation_elapsed_seconds": round(elapsed, 3),
-                    "request_generation_seconds_used": round(
-                        self._generation_seconds_used,
-                        3,
-                    ),
-                    "input_tokens": input_tokens,
-                    "effective_max_new_tokens": min(
-                        bundle_output_limit,
-                        max(96, estimated_output_tokens),
-                    ),
-                    "context_mode": "file_action_bundle",
-                    "target_kind": combined_context.kind,
-                    "target_start_line": combined_context.start_line,
-                    "target_end_line": combined_context.end_line,
-                    "bundle_mode": bundle_kind,
-                    "bundle_action_count": len(specs),
-                    "bundle_action_indexes": [spec["action_index"] for spec in specs],
-                    "bundle_actions": specs,
-                    "bundle_candidate_number": 2 if validation_feedback else 1,
-                    "generation_phase": (
-                        "validator_guided_bundle_repair"
-                        if validation_feedback
-                        else "initial_bundle"
-                    ),
-                    "repair_prompt_compacted": repair_prompt_compacted,
-                    "source_sha256": hashlib.sha256(source_code.encode("utf-8")).hexdigest(),
-                    "candidate_sha256": (
-                        hashlib.sha256(candidate.encode("utf-8")).hexdigest()
-                        if candidate
-                        else ""
-                    ),
-                    "model_output_chars": len(model_output),
-                    "model_output_preview": model_output[:400],
-                }
-                if complete_source_output:
-                    metadata.update({
-                        "context_mode": "full_file_bundle_output",
-                        "output_shape": "complete_java_source",
-                    })
-                if suffix_repair:
-                    metadata["target_output_repair"] = suffix_repair
-                reason = ""
-                if not model_output:
-                    reason = "CODET5_EMPTY_OUTPUT"
-                elif output_shape_issue:
-                    reason = output_shape_issue
-                elif candidate == source_code:
-                    reason = "CODET5_NO_SOURCE_CHANGE"
-                return CodeT5Candidate(
-                    source_code="" if reason else candidate,
-                    status="skipped" if reason else "candidate_generated",
-                    reason=reason,
-                    metadata=metadata,
-                    target_replacement=model_output,
-                )
-            except Exception as exc:
-                return CodeT5Candidate(
-                    reason=f"CODET5_BUNDLE_RUNTIME_ERROR: {exc}",
-                    metadata={
-                        "provider": self.provider,
-                        "model_id": self.settings.model_id,
-                        "attempt_number": attempt_number,
-                        "bundle_action_count": len(actions),
-                    },
-                )
-
-    def propose_batch(
-        self,
-        *,
-        language: str,
-        source_code: str,
-        actions: Sequence[tuple[int, RefactoringAction]],
-        current_file_name: str,
-    ) -> Dict[int, CodeT5Candidate]:
-        """Generate independent candidates in one tensor-batched inference call.
-
-        Batching deliberately keeps the existing one-action prompt and output
-        contract.  It is limited to non-overlapping Introduce/Extract Constant
-        targets, which can be generated from the same source snapshot and then
-        safely rebased as earlier actions are accepted.  Every candidate still
-        passes through the normal per-action SCTVA gates in the engine.
-        """
-
-        if not self.settings.enabled or len(actions) < 2:
-            return {}
-        if str(language or "").strip().lower() != "java":
-            return {}
-
-        with self._lock:
-            file_key = str(current_file_name or "<unknown>").replace("\\", "/").lower()
-            file_attempt_count = self._file_attempt_counts.get(file_key, 0)
-            consumed_attempts = 0
-            remaining = min(
-                self.settings.max_actions_per_request - self._attempt_count,
-                self.settings.max_actions_per_file - file_attempt_count,
-            )
-            if remaining < 2:
-                return {}
-
-            try:
-                self._load()
-                prepared: list[Dict[str, Any]] = []
-                occupied_ranges: list[tuple[int, int]] = []
-                for action_index, action in actions:
-                    if action.action_type not in {"introduce_constant", "extract_constant"}:
-                        continue
-                    context = self.resolve_target_context(
-                        language=language,
-                        source_code=source_code,
-                        action=action,
-                    )
-                    if context is None:
-                        continue
-                    if any(
-                        context.start < occupied_end and context.end > occupied_start
-                        for occupied_start, occupied_end in occupied_ranges
-                    ):
-                        continue
-                    prompt = self.build_target_prompt(
-                        language=language,
-                        action=action,
-                        current_file_name=current_file_name,
-                        context=context,
-                    )
-                    _encoded, input_tokens = self._encode_prompt(prompt)
-                    if input_tokens > self._effective_max_input_tokens and context.surrounding_context:
-                        prompt = self.build_target_prompt(
-                            language=language,
-                            action=action,
-                            current_file_name=current_file_name,
-                            context=context,
-                            include_surrounding_context=False,
-                        )
-                        _encoded, input_tokens = self._encode_prompt(prompt)
-                    if input_tokens > self._effective_max_input_tokens:
-                        continue
-                    occupied_ranges.append((context.start, context.end))
-                    prepared.append({
-                        "action_index": action_index,
-                        "action": action,
-                        "context": context,
-                        "prompt": prompt,
-                        "input_tokens": input_tokens,
-                    })
-                    if len(prepared) >= remaining:
-                        break
-
-                if len(prepared) < 2:
-                    return {}
-
-                first_attempt = self._attempt_count + 1
-                self._attempt_count += len(prepared)
-                self._file_attempt_counts[file_key] = file_attempt_count + len(prepared)
-                consumed_attempts = len(prepared)
-
-                generation_started = time.monotonic()
-                generation_call_count = 1
-                if self._generator is not None:
-                    outputs = [self._generator(item["prompt"]) for item in prepared]
-                    generated_item_count = len(prepared)
-                else:
-                    tokenizer = self._tokenizer
-                    if getattr(tokenizer, "pad_token_id", None) is None:
-                        tokenizer.pad_token = tokenizer.eos_token
-                    original_padding_side = getattr(tokenizer, "padding_side", "right")
-                    if not self._is_encoder_decoder:
-                        tokenizer.padding_side = "left"
-                    outputs: list[str | None] = [None] * len(prepared)
-                    uncached = list(enumerate(prepared))
-                    # Bound resident KV-cache/matrix memory on CPU while still
-                    # amortizing tokenizer and model overhead across actions.
-                    micro_batch_size = (
-                        8
-                        if self._resolved_backend == "openvino"
-                        else 4
-                        if self._resolved_device == "cpu"
-                        else 8
-                    )
-                    chunks = [
-                        uncached[start:start + micro_batch_size]
-                        for start in range(0, len(uncached), micro_batch_size)
-                    ]
-                    generation_call_count = len(chunks)
-                    generated_item_count = len(uncached)
-                    try:
-                        for chunk in chunks:
-                            model_prompts = [
-                                self._model_prompt(item["prompt"])
-                                for _item_index, item in chunk
-                            ]
-                            encoded = tokenizer(
-                                model_prompts,
-                                return_tensors="pt",
-                                padding=True,
-                                truncation=False,
-                                verbose=False,
-                            )
-                            encoded = {
-                                key: value.to(self._resolved_device)
-                                for key, value in encoded.items()
-                            }
-                            max_new_tokens = max(
-                                self._generation_limits(
-                                    language,
-                                    item["action"],
-                                    item["context"],
-                                )[0]
-                                for _item_index, item in chunk
-                            )
-                            timeout_seconds = max(
-                                self._generation_limits(
-                                    language,
-                                    item["action"],
-                                    item["context"],
-                                )[1]
-                                for _item_index, item in chunk
-                            )
-                            with self._runtime_inference_lock:
-                                with self._torch.inference_mode():
-                                    generated = self._model.generate(
-                                        **encoded,
-                                        max_new_tokens=max_new_tokens,
-                                        max_time=self._bounded_generation_timeout(
-                                            timeout_seconds,
-                                            in_flight_seconds=max(
-                                                0.0,
-                                                time.monotonic() - generation_started,
-                                            ),
-                                        ),
-                                        use_cache=True,
-                                        do_sample=False,
-                                        num_beams=1,
-                                        temperature=None,
-                                        top_p=None,
-                                        top_k=None,
-                                    )
-                            prompt_width = int(encoded["input_ids"].shape[-1])
-                            for (item_index, item), output_tokens in zip(
-                                chunk,
-                                generated,
-                            ):
-                                if not self._is_encoder_decoder:
-                                    output_tokens = output_tokens[prompt_width:]
-                                decoded = self._tokenizer.decode(
-                                    output_tokens,
-                                    skip_special_tokens=True,
-                                )
-                                outputs[item_index] = decoded
-                    finally:
-                        tokenizer.padding_side = original_padding_side
-
-                if len(outputs) != len(prepared) or any(
-                    output is None for output in outputs
-                ):
-                    raise RuntimeError("CODET5_BATCH_OUTPUT_COUNT_MISMATCH")
-
-                generation_elapsed = (
-                    max(0.0, time.monotonic() - generation_started)
-                    if generated_item_count
-                    else 0.0
-                )
-                self._generation_seconds_used += generation_elapsed
-                candidates: Dict[int, CodeT5Candidate] = {}
-                per_generated_action_elapsed = generation_elapsed / max(
-                    1,
-                    generated_item_count,
-                )
-
-                for offset, (item, output) in enumerate(zip(prepared, outputs)):
-                    action = item["action"]
-                    context = item["context"]
-                    model_output = self._normalise_model_output(str(output))
-                    model_output, suffix_repair = self._repair_java_target_suffix(
-                        language,
-                        model_output,
-                    )
-                    output_shape_issue = self._target_output_shape_issue(
-                        language,
-                        context,
-                        model_output,
-                    )
-                    completion: Dict[str, Any] = {}
-                    if not output_shape_issue:
-                        model_output, completion = self._complete_java_constant_target_output(
-                            language=language,
-                            output=model_output,
-                            context=context,
-                            action=action,
-                        )
-                    merge_output = self._target_merge_output(context, model_output, action)
-                    candidate_source = (
-                        self._merge_target_output(source_code, context, merge_output)
-                        if merge_output and not output_shape_issue
-                        else merge_output
-                    )
-                    metadata = {
-                        "provider": self.provider,
-                        "model_id": self.settings.model_id,
-                        "adapter_revision": MODEL_ASSISTANCE_REVISION,
-                        "device": self._resolved_device or "injected_generator",
-                        "backend": self._resolved_backend or "pytorch",
-                        "runtime_cache_hit": self._runtime_cache_hit,
-                        "model_load_seconds": round(self._model_load_seconds, 3),
-                        "attempt_number": first_attempt + offset,
-                        "generation_elapsed_seconds": round(
-                            per_generated_action_elapsed, 3
-                        ),
-                        "batch_generation_elapsed_seconds": round(generation_elapsed, 3),
-                        "batch_size": len(prepared),
-                        "batch_generation_calls": generation_call_count,
-                        "batch_position": offset + 1,
-                        "batch_mode": "independent_target_tensor_batch",
-                        "request_generation_seconds_used": round(
-                            self._generation_seconds_used, 3
-                        ),
-                        "input_tokens": item["input_tokens"],
-                        "context_mode": "target_span",
-                        "target_kind": context.kind,
-                        "target_name": context.name,
-                        "target_start_line": context.start_line,
-                        "target_end_line": context.end_line,
-                        "target_resolution": context.resolution,
-                        "source_sha256": hashlib.sha256(source_code.encode("utf-8")).hexdigest(),
-                        "candidate_sha256": (
-                            hashlib.sha256(candidate_source.encode("utf-8")).hexdigest()
-                            if candidate_source
-                            else ""
-                        ),
-                        "model_output_chars": len(model_output),
-                        "model_output_preview": model_output[:400],
-                        "generation_phase": "initial_batch",
-                    }
-                    if completion:
-                        metadata["target_contract_completion"] = completion
-                    if suffix_repair:
-                        metadata["target_output_repair"] = suffix_repair
-                    reason = ""
-                    if not model_output:
-                        reason = "CODET5_EMPTY_OUTPUT"
-                    elif output_shape_issue:
-                        reason = output_shape_issue
-                    elif candidate_source == source_code:
-                        reason = "CODET5_NO_SOURCE_CHANGE"
-                    elif model_output.startswith(("diff --git", "--- ", "+++ ")):
-                        reason = "CODET5_OUTPUT_MUST_BE_TARGET_REPLACEMENT"
-                    candidates[item["action_index"]] = CodeT5Candidate(
-                        source_code="" if reason else candidate_source,
-                        status="skipped" if reason else "candidate_generated",
-                        reason=reason,
-                        metadata=metadata,
-                        target_replacement=merge_output,
-                    )
-                return candidates
-            except Exception:
-                # A batching-specific failure must not disturb the established
-                # single-action path. The engine will call propose() normally.
-                if consumed_attempts:
-                    self._attempt_count -= consumed_attempts
-                    self._file_attempt_counts[file_key] = file_attempt_count
-                return {}
-
-    def rebase_batched_candidate(
-        self,
-        *,
-        language: str,
-        current_source_code: str,
-        action: RefactoringAction,
-        candidate: CodeT5Candidate,
-    ) -> CodeT5Candidate:
-        """Reapply a prefetched target replacement to the latest file snapshot."""
-
-        metadata = dict(candidate.metadata or {})
-        replacement = candidate.target_replacement
-        if not replacement:
-            return candidate
-        context = self.resolve_target_context(
-            language=language,
-            source_code=current_source_code,
-            action=action,
-        )
-        if context is None:
-            return CodeT5Candidate(
-                reason="CODET5_BATCH_TARGET_REBASE_FAILED",
-                metadata=metadata,
-            )
-        metadata["batch_rebased"] = True
-        metadata["target_start_line"] = context.start_line
-        metadata["target_end_line"] = context.end_line
-        return replace(
-            candidate,
-            source_code=self._merge_target_output(
-                current_source_code,
-                context,
-                replacement,
-            ),
-            metadata=metadata,
-        )
-
     def propose(
         self,
         *,
@@ -3454,11 +2861,11 @@ class CodeT5CandidateTransformer:
         current_file_name: str,
         validation_feedback: str = "",
         previous_candidate: str = "",
-    ) -> CodeT5Candidate:
+    ) -> QwenCandidate:
         """Return one candidate or a traceable non-acceptance reason."""
 
         if not self.settings.enabled:
-            return CodeT5Candidate(reason="CODET5_DISABLED")
+            return QwenCandidate(reason="QWEN_DISABLED")
 
         with self._lock:
             file_key = str(current_file_name or "<unknown>").replace("\\", "/").lower()
@@ -3473,14 +2880,14 @@ class CodeT5CandidateTransformer:
                 )
             ):
                 budget_reason = (
-                    "CODET5_REQUEST_ACTION_BUDGET_EXHAUSTED"
+                    "QWEN_REQUEST_ACTION_BUDGET_EXHAUSTED"
                     if self._attempt_count >= self.settings.max_actions_per_request
-                    else "CODET5_FILE_ACTION_BUDGET_EXHAUSTED"
+                    else "QWEN_FILE_ACTION_BUDGET_EXHAUSTED"
                     if file_attempt_count >= self.settings.max_actions_per_file
-                    else "CODET5_REQUEST_TIME_BUDGET_EXHAUSTED"
+                    else "QWEN_REQUEST_TIME_BUDGET_EXHAUSTED"
                 )
-                return CodeT5Candidate(
-                    reason="CODET5_ACTION_BUDGET_EXHAUSTED",
+                return QwenCandidate(
+                    reason="QWEN_ACTION_BUDGET_EXHAUSTED",
                     metadata={
                         "provider": self.provider,
                         "model_id": self.settings.model_id,
@@ -3502,16 +2909,14 @@ class CodeT5CandidateTransformer:
             attempt_number = self._attempt_count
             try:
                 self._load()
-                prompt = self.build_prompt(
-                    language=language,
-                    source_code=source_code,
-                    action=action,
-                    current_file_name=current_file_name,
-                )
-                encoded, input_tokens = self._encode_prompt(prompt)
-                context: CodeT5TargetContext | None = None
+                context: QwenTargetContext | None = None
                 context_mode = "full_file"
-                full_file_input_tokens = input_tokens
+                # Do not tokenize a complete file before using its resolved
+                # target span. Tokenizing a large source is expensive on CPU,
+                # and the full-file prompt is never sent to the model when a
+                # replaceable target is available.
+                full_file_input_tokens = self._rough_token_count(source_code)
+                full_file_input_tokens_estimated = True
                 resolved_context = self.resolve_target_context(
                     language=language,
                     source_code=source_code,
@@ -3525,10 +2930,14 @@ class CodeT5CandidateTransformer:
                     resolved_context is None
                     and action.action_type != "noop"
                 ):
-                    return CodeT5Candidate(
-                        reason="CODET5_TARGET_CONTEXT_NOT_RESOLVED",
+                    return QwenCandidate(
+                        reason="QWEN_TARGET_CONTEXT_NOT_RESOLVED",
                         metadata={
-                            "input_tokens": input_tokens,
+                            "input_tokens": full_file_input_tokens,
+                            "full_file_input_tokens": full_file_input_tokens,
+                            "full_file_input_tokens_estimated": (
+                                full_file_input_tokens_estimated
+                            ),
                             "configured_max_input_tokens": self.settings.max_input_tokens,
                             "model_max_input_tokens": self._effective_max_input_tokens,
                             "context_mode": "target_span_unresolved",
@@ -3538,10 +2947,14 @@ class CodeT5CandidateTransformer:
                 if use_target_context:
                     context = resolved_context
                     if context is None:
-                        return CodeT5Candidate(
-                            reason="CODET5_TARGET_CONTEXT_NOT_RESOLVED",
+                        return QwenCandidate(
+                            reason="QWEN_TARGET_CONTEXT_NOT_RESOLVED",
                             metadata={
-                                "input_tokens": input_tokens,
+                                "input_tokens": full_file_input_tokens,
+                                "full_file_input_tokens": full_file_input_tokens,
+                                "full_file_input_tokens_estimated": (
+                                    full_file_input_tokens_estimated
+                                ),
                                 "configured_max_input_tokens": self.settings.max_input_tokens,
                                 "model_max_input_tokens": self._effective_max_input_tokens,
                                 "context_mode": "target_span_unresolved",
@@ -3568,11 +2981,14 @@ class CodeT5CandidateTransformer:
                         )
                         encoded, input_tokens = self._encode_prompt(prompt)
                     if input_tokens > self._effective_max_input_tokens:
-                        return CodeT5Candidate(
-                            reason="CODET5_TARGET_CONTEXT_TOO_LARGE",
+                        return QwenCandidate(
+                            reason="QWEN_TARGET_CONTEXT_TOO_LARGE",
                             metadata={
                                 "input_tokens": input_tokens,
                                 "full_file_input_tokens": full_file_input_tokens,
+                                "full_file_input_tokens_estimated": (
+                                    full_file_input_tokens_estimated
+                                ),
                                 "configured_max_input_tokens": self.settings.max_input_tokens,
                                 "model_max_input_tokens": self._effective_max_input_tokens,
                                 "context_mode": "target_span",
@@ -3583,6 +2999,16 @@ class CodeT5CandidateTransformer:
                             },
                         )
                     context_mode = "target_span"
+                else:
+                    prompt = self.build_prompt(
+                        language=language,
+                        source_code=source_code,
+                        action=action,
+                        current_file_name=current_file_name,
+                    )
+                    encoded, input_tokens = self._encode_prompt(prompt)
+                    full_file_input_tokens = input_tokens
+                    full_file_input_tokens_estimated = False
 
                 if self._generator is not None:
                     generation_started = time.monotonic()
@@ -3614,8 +3040,7 @@ class CodeT5CandidateTransformer:
                                 top_k=None,
                             )
                     output_tokens = generated[0]
-                    if not self._is_encoder_decoder:
-                        output_tokens = output_tokens[encoded["input_ids"].shape[-1]:]
+                    output_tokens = output_tokens[encoded["input_ids"].shape[-1]:]
                     output = self._tokenizer.decode(
                         output_tokens,
                         skip_special_tokens=True,
@@ -3625,10 +3050,22 @@ class CodeT5CandidateTransformer:
                     0.0, time.monotonic() - generation_started
                 )
                 self._generation_seconds_used += generation_elapsed_seconds
+                self._file_generation_seconds[file_key] = (
+                    self._file_generation_seconds.get(file_key, 0.0)
+                    + generation_elapsed_seconds
+                )
                 model_output = self._normalise_model_output(output)
                 model_output, suffix_repair = self._repair_java_target_suffix(
                     language,
                     model_output,
+                )
+                model_output, target_identifier_normalization = (
+                    self._canonicalize_java_constant_target_identifier(
+                        language=language,
+                        output=model_output,
+                        context=context,
+                        action=action,
+                    )
                 )
                 output_shape_issue = self._target_output_shape_issue(
                     language,
@@ -3636,15 +3073,33 @@ class CodeT5CandidateTransformer:
                     model_output,
                 )
                 target_contract_completion: Dict[str, Any] = {}
-                if not output_shape_issue:
+                if output_shape_issue or model_output.startswith(
+                    ("diff --git", "--- ", "+++ ")
+                ):
                     model_output, target_contract_completion = (
-                        self._complete_java_constant_target_output(
+                        self._recover_java_constant_from_complete_output(
                             language=language,
                             output=model_output,
                             context=context,
                             action=action,
                         )
                     )
+                    if target_contract_completion:
+                        output_shape_issue = self._target_output_shape_issue(
+                            language,
+                            context,
+                            model_output,
+                        )
+                if not output_shape_issue:
+                    if not target_contract_completion:
+                        model_output, target_contract_completion = (
+                            self._complete_java_constant_target_output(
+                                language=language,
+                                output=model_output,
+                                context=context,
+                                action=action,
+                            )
+                        )
                     if not target_contract_completion:
                         model_output, target_contract_completion = (
                             self._complete_c_constant_target_output(
@@ -3686,6 +3141,7 @@ class CodeT5CandidateTransformer:
                     ),
                     "input_tokens": input_tokens,
                     "full_file_input_tokens": full_file_input_tokens,
+                    "full_file_input_tokens_estimated": full_file_input_tokens_estimated,
                     "context_mode": context_mode,
                     "source_sha256": hashlib.sha256(source_code.encode("utf-8")).hexdigest(),
                     "candidate_sha256": hashlib.sha256(candidate.encode("utf-8")).hexdigest() if candidate else "",
@@ -3696,6 +3152,10 @@ class CodeT5CandidateTransformer:
                 }
                 if target_contract_completion:
                     metadata["target_contract_completion"] = target_contract_completion
+                if target_identifier_normalization:
+                    metadata["target_identifier_normalization"] = (
+                        target_identifier_normalization
+                    )
                 if suffix_repair:
                     metadata["target_output_repair"] = suffix_repair
                 if context is not None:
@@ -3709,26 +3169,26 @@ class CodeT5CandidateTransformer:
                         "model_output_sha256": hashlib.sha256(model_output.encode("utf-8")).hexdigest() if model_output else "",
                     })
                 if not model_output:
-                    return CodeT5Candidate(reason="CODET5_EMPTY_OUTPUT", metadata=metadata)
+                    return QwenCandidate(reason="QWEN_EMPTY_OUTPUT", metadata=metadata)
                 if output_shape_issue:
-                    return CodeT5Candidate(reason=output_shape_issue, metadata=metadata)
+                    return QwenCandidate(reason=output_shape_issue, metadata=metadata)
                 if candidate == source_code:
-                    return CodeT5Candidate(reason="CODET5_NO_SOURCE_CHANGE", metadata=metadata)
+                    return QwenCandidate(reason="QWEN_NO_SOURCE_CHANGE", metadata=metadata)
                 if model_output.startswith(("diff --git", "--- ", "+++ ")):
                     reason = (
-                        "CODET5_OUTPUT_MUST_BE_TARGET_REPLACEMENT"
+                        "QWEN_OUTPUT_MUST_BE_TARGET_REPLACEMENT"
                         if context is not None
-                        else "CODET5_OUTPUT_MUST_BE_COMPLETE_SOURCE"
+                        else "QWEN_OUTPUT_MUST_BE_COMPLETE_SOURCE"
                     )
-                    return CodeT5Candidate(reason=reason, metadata=metadata)
-                return CodeT5Candidate(
+                    return QwenCandidate(reason=reason, metadata=metadata)
+                return QwenCandidate(
                     source_code=candidate,
                     status="candidate_generated",
                     metadata=metadata,
                 )
             except Exception as exc:  # The model must never crash SCTVA execution.
-                return CodeT5Candidate(
-                    reason=str(exc) or "CODET5_GENERATION_FAILED",
+                return QwenCandidate(
+                    reason=str(exc) or "QWEN_GENERATION_FAILED",
                     metadata={
                         "provider": self.provider,
                         "model_id": self.settings.model_id,

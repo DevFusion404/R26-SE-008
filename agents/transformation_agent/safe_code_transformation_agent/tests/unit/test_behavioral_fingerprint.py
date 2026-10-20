@@ -133,6 +133,9 @@ public class Probe {
         "java_runtime_infrastructure_unavailable"
     )
     assert result.details["runtime_failure_categories"] == ["TARGET_CLASS_LOAD_FAILED"]
+    assert result.details["runtime_verification_status"] == "unavailable"
+    assert result.details["score_applicable"] is False
+    assert result.details["score_basis"] == "static_fallback"
 
 
 def test_behavior_match_success():
@@ -408,6 +411,8 @@ public class Demo {
     assert result.passed is True
     assert result.details["fingerprint_status"] == "degraded_static_passed"
     assert result.details["runtime_unavailable_reason"] == "missing_java_dependencies"
+    assert result.details["runtime_verification_status"] == "unavailable"
+    assert result.details["score_applicable"] is False
 
 
 def test_java_dependency_classifier_accepts_missing_servlet_classpath():

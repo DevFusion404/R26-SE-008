@@ -932,7 +932,6 @@ class JavaExtractClassRefactoring:
     ) -> str:
         edits: list[tuple[int, int, str]] = []
         selected_method_names = {method.name for method in candidate.methods}
-        selected_field_names = {item.name for item in candidate.fields}
 
         for item in candidate.fields:
             edits.append((item.start, item.end, ""))

@@ -1,0 +1,526 @@
+[
+  {
+    "case_id": "c_encapsulate_c_variable_1_r5772_positive",
+    "language": "c",
+    "file_name": "benchmark/c/encapsulate-c-variable_R5772.c",
+    "source_code": "#include <string.h>\n\nint shared_R5772 = 1;\n\nint helper_R5772(int value) {\n    return value * 2;\n}\n\nint calculate_R5772(int value, int tax, int discount) {\n    int subtotal = value + tax;\n    int adjusted = subtotal - discount;\n    if (adjusted > 0) {\n        if (adjusted < 100) {\n            return adjusted + 658;\n        }\n    }\n    return 0;\n}\n\nint process_R5772(int value, int tax, int discount, int fee) {\n    return value + tax - discount + fee;\n}\n\nvoid copy_R5772(char *destination, const char *source) {\n    strcpy(destination, source);\n}\n\nstatic int unused_R5772(void) {\n    return -1;\n}\n",
+    "action": {
+      "action_type": "encapsulate_c_variable",
+      "source_refactoring": "Encapsulate Variable",
+      "parameters": {
+        "source_file": "benchmark/c/encapsulate-c-variable_R5772.c",
+        "variable_name": "shared_R5772",
+        "getter_name": "get_shared_R5772",
+        "setter_name": "set_shared_R5772",
+        "source_line": 3
+      }
+    },
+    "ground_truth": {
+      "model_should_accept": true,
+      "label": "positive"
+    },
+    "dataset_split": "positive",
+    "provenance": "rdp_catalog_seeded_synthetic"
+  },
+  {
+    "case_id": "c_encapsulate_c_variable_1_r5772_negative",
+    "language": "c",
+    "file_name": "benchmark/c/encapsulate-c-variable_R5772.c",
+    "source_code": "#include <string.h>\n\nint shared_R5772 = 1;\n\nint helper_R5772(int value) {\n    return value * 2;\n}\n\nint calculate_R5772(int value, int tax, int discount) {\n    int subtotal = value + tax;\n    int adjusted = subtotal - discount;\n    if (adjusted > 0) {\n        if (adjusted < 100) {\n            return adjusted + 658;\n        }\n    }\n    return 0;\n}\n\nint process_R5772(int value, int tax, int discount, int fee) {\n    return value + tax - discount + fee;\n}\n\nvoid copy_R5772(char *destination, const char *source) {\n    strcpy(destination, source);\n}\n\nstatic int unused_R5772(void) {\n    return -1;\n}\n",
+    "action": {
+      "action_type": "encapsulate_c_variable",
+      "source_refactoring": "Encapsulate Variable",
+      "parameters": {
+        "source_file": "benchmark/c/encapsulate-c-variable_R5772.c",
+        "variable_name": "MissingR5772",
+        "getter_name": "get_shared_R5772",
+        "setter_name": "set_shared_R5772",
+        "source_line": 130
+      }
+    },
+    "ground_truth": {
+      "model_should_accept": false,
+      "label": "negative"
+    },
+    "dataset_split": "negative",
+    "provenance": "rdp_catalog_seeded_synthetic"
+  },
+  {
+    "case_id": "c_extract_c_component_1_r9230_positive",
+    "language": "c",
+    "file_name": "benchmark/c/extract-c-component_R9230.c",
+    "source_code": "#include <string.h>\n\nint shared_R9230 = 1;\n\nint helper_R9230(int value) {\n    return value * 2;\n}\n\nint calculate_R9230(int value, int tax, int discount) {\n    int subtotal = value + tax;\n    int adjusted = subtotal - discount;\n    if (adjusted > 0) {\n        if (adjusted < 100) {\n            return adjusted + 492;\n        }\n    }\n    return 0;\n}\n\nint process_R9230(int value, int tax, int discount, int fee) {\n    return value + tax - discount + fee;\n}\n\nvoid copy_R9230(char *destination, const char *source) {\n    strcpy(destination, source);\n}\n\nstatic int unused_R9230(void) {\n    return -1;\n}\n",
+    "action": {
+      "action_type": "extract_c_component",
+      "source_refactoring": "Extract Class",
+      "parameters": {
+        "source_file": "benchmark/c/extract-c-component_R9230.c",
+        "source_method": "calculate_R9230",
+        "method": "calculate_R9230",
+        "source_class": "AccountR9230",
+        "destination_file": "calculation_R9230.c",
+        "functions_to_extract": [
+          "calculate_R9230"
+        ]
+      }
+    },
+    "ground_truth": {
+      "model_should_accept": true,
+      "label": "positive"
+    },
+    "dataset_split": "positive",
+    "provenance": "rdp_catalog_seeded_synthetic"
+  },
+  {
+    "case_id": "c_extract_c_component_1_r9230_negative",
+    "language": "c",
+    "file_name": "benchmark/c/extract-c-component_R9230.c",
+    "source_code": "#include <string.h>\n\nint shared_R9230 = 1;\n\nint helper_R9230(int value) {\n    return value * 2;\n}\n\nint calculate_R9230(int value, int tax, int discount) {\n    int subtotal = value + tax;\n    int adjusted = subtotal - discount;\n    if (adjusted > 0) {\n        if (adjusted < 100) {\n            return adjusted + 492;\n        }\n    }\n    return 0;\n}\n\nint process_R9230(int value, int tax, int discount, int fee) {\n    return value + tax - discount + fee;\n}\n\nvoid copy_R9230(char *destination, const char *source) {\n    strcpy(destination, source);\n}\n\nstatic int unused_R9230(void) {\n    return -1;\n}\n",
+    "action": {
+      "action_type": "extract_c_component",
+      "source_refactoring": "Extract Class",
+      "parameters": {
+        "source_file": "benchmark/c/extract-c-component_R9230.c",
+        "source_method": "MissingR9230",
+        "method": "MissingR9230",
+        "source_class": "MissingR9230",
+        "destination_file": "calculation_R9230.c",
+        "functions_to_extract": [
+          "MissingR9230"
+        ]
+      }
+    },
+    "ground_truth": {
+      "model_should_accept": false,
+      "label": "negative"
+    },
+    "dataset_split": "negative",
+    "provenance": "rdp_catalog_seeded_synthetic"
+  },
+  {
+    "case_id": "c_extract_method_1_r3665_positive",
+    "language": "c",
+    "file_name": "benchmark/c/extract-method_R3665.c",
+    "source_code": "#include <string.h>\n\nint shared_R3665 = 1;\n\nint helper_R3665(int value) {\n    return value * 2;\n}\n\nint calculate_R3665(int value, int tax, int discount) {\n    int subtotal = value + tax;\n    int adjusted = subtotal - discount;\n    if (adjusted > 0) {\n        if (adjusted < 100) {\n            return adjusted + 914;\n        }\n    }\n    return 0;\n}\n\nint process_R3665(int value, int tax, int discount, int fee) {\n    return value + tax - discount + fee;\n}\n\nvoid copy_R3665(char *destination, const char *source) {\n    strcpy(destination, source);\n}\n\nstatic int unused_R3665(void) {\n    return -1;\n}\n",
+    "action": {
+      "action_type": "extract_method",
+      "source_refactoring": "Extract Method",
+      "parameters": {
+        "source_file": "benchmark/c/extract-method_R3665.c",
+        "source_method": "calculate_R3665",
+        "method": "calculate_R3665",
+        "source_class": "AccountR3665",
+        "start_line": 10,
+        "end_line": 14,
+        "new_method_name": "calculate_core_R3665"
+      }
+    },
+    "ground_truth": {
+      "model_should_accept": true,
+      "label": "positive"
+    },
+    "dataset_split": "positive",
+    "provenance": "rdp_catalog_seeded_synthetic"
+  },
+  {
+    "case_id": "c_extract_method_1_r3665_negative",
+    "language": "c",
+    "file_name": "benchmark/c/extract-method_R3665.c",
+    "source_code": "#include <string.h>\n\nint shared_R3665 = 1;\n\nint helper_R3665(int value) {\n    return value * 2;\n}\n\nint calculate_R3665(int value, int tax, int discount) {\n    int subtotal = value + tax;\n    int adjusted = subtotal - discount;\n    if (adjusted > 0) {\n        if (adjusted < 100) {\n            return adjusted + 914;\n        }\n    }\n    return 0;\n}\n\nint process_R3665(int value, int tax, int discount, int fee) {\n    return value + tax - discount + fee;\n}\n\nvoid copy_R3665(char *destination, const char *source) {\n    strcpy(destination, source);\n}\n\nstatic int unused_R3665(void) {\n    return -1;\n}\n",
+    "action": {
+      "action_type": "extract_method",
+      "source_refactoring": "Extract Method",
+      "parameters": {
+        "source_file": "benchmark/c/extract-method_R3665.c",
+        "source_method": "MissingR3665",
+        "method": "MissingR3665",
+        "source_class": "MissingR3665",
+        "start_line": 130,
+        "end_line": 131,
+        "new_method_name": "calculate_core_R3665"
+      }
+    },
+    "ground_truth": {
+      "model_should_accept": false,
+      "label": "negative"
+    },
+    "dataset_split": "negative",
+    "provenance": "rdp_catalog_seeded_synthetic"
+  },
+  {
+    "case_id": "c_introduce_constant_1_r1451_positive",
+    "language": "c",
+    "file_name": "benchmark/c/introduce-constant_R1451.c",
+    "source_code": "#include <string.h>\n\nint shared_R1451 = 1;\n\nint helper_R1451(int value) {\n    return value * 2;\n}\n\nint calculate_R1451(int value, int tax, int discount) {\n    int subtotal = value + tax;\n    int adjusted = subtotal - discount;\n    if (adjusted > 0) {\n        if (adjusted < 100) {\n            return adjusted + 902;\n        }\n    }\n    return 0;\n}\n\nint process_R1451(int value, int tax, int discount, int fee) {\n    return value + tax - discount + fee;\n}\n\nvoid copy_R1451(char *destination, const char *source) {\n    strcpy(destination, source);\n}\n\nstatic int unused_R1451(void) {\n    return -1;\n}\n",
+    "action": {
+      "action_type": "introduce_constant",
+      "source_refactoring": "Introduce Constant",
+      "parameters": {
+        "source_file": "benchmark/c/introduce-constant_R1451.c",
+        "literal_value": 902,
+        "constant_name": "DEFAULT_AMOUNT_R1451",
+        "source_line": 14,
+        "source_method": "calculate_R1451"
+      }
+    },
+    "ground_truth": {
+      "model_should_accept": true,
+      "label": "positive"
+    },
+    "dataset_split": "positive",
+    "provenance": "rdp_catalog_seeded_synthetic"
+  },
+  {
+    "case_id": "c_introduce_constant_1_r1451_negative",
+    "language": "c",
+    "file_name": "benchmark/c/introduce-constant_R1451.c",
+    "source_code": "#include <string.h>\n\nint shared_R1451 = 1;\n\nint helper_R1451(int value) {\n    return value * 2;\n}\n\nint calculate_R1451(int value, int tax, int discount) {\n    int subtotal = value + tax;\n    int adjusted = subtotal - discount;\n    if (adjusted > 0) {\n        if (adjusted < 100) {\n            return adjusted + 902;\n        }\n    }\n    return 0;\n}\n\nint process_R1451(int value, int tax, int discount, int fee) {\n    return value + tax - discount + fee;\n}\n\nvoid copy_R1451(char *destination, const char *source) {\n    strcpy(destination, source);\n}\n\nstatic int unused_R1451(void) {\n    return -1;\n}\n",
+    "action": {
+      "action_type": "introduce_constant",
+      "source_refactoring": "Introduce Constant",
+      "parameters": {
+        "source_file": "benchmark/c/introduce-constant_R1451.c",
+        "literal_value": 900005,
+        "constant_name": "DEFAULT_AMOUNT_R1451",
+        "source_line": 130,
+        "source_method": "MissingR1451"
+      }
+    },
+    "ground_truth": {
+      "model_should_accept": false,
+      "label": "negative"
+    },
+    "dataset_split": "negative",
+    "provenance": "rdp_catalog_seeded_synthetic"
+  },
+  {
+    "case_id": "c_introduce_c_parameter_object_1_r3868_positive",
+    "language": "c",
+    "file_name": "benchmark/c/introduce-c-parameter-object_R3868.c",
+    "source_code": "#include <string.h>\n\nint shared_R3868 = 1;\n\nint helper_R3868(int value) {\n    return value * 2;\n}\n\nint calculate_R3868(int value, int tax, int discount) {\n    int subtotal = value + tax;\n    int adjusted = subtotal - discount;\n    if (adjusted > 0) {\n        if (adjusted < 100) {\n            return adjusted + 406;\n        }\n    }\n    return 0;\n}\n\nint process_R3868(int value, int tax, int discount, int fee) {\n    return value + tax - discount + fee;\n}\n\nvoid copy_R3868(char *destination, const char *source) {\n    strcpy(destination, source);\n}\n\nstatic int unused_R3868(void) {\n    return -1;\n}\n",
+    "action": {
+      "action_type": "introduce_c_parameter_object",
+      "source_refactoring": "Introduce Parameter Object",
+      "parameters": {
+        "source_file": "benchmark/c/introduce-c-parameter-object_R3868.c",
+        "source_class": "AccountR3868",
+        "source_method": "process_R3868",
+        "method": "process_R3868",
+        "parameter_object_name": "ProcessParamsR3868",
+        "parameter_name": "params"
+      }
+    },
+    "ground_truth": {
+      "model_should_accept": true,
+      "label": "positive"
+    },
+    "dataset_split": "positive",
+    "provenance": "rdp_catalog_seeded_synthetic"
+  },
+  {
+    "case_id": "c_introduce_c_parameter_object_1_r3868_negative",
+    "language": "c",
+    "file_name": "benchmark/c/introduce-c-parameter-object_R3868.c",
+    "source_code": "#include <string.h>\n\nint shared_R3868 = 1;\n\nint helper_R3868(int value) {\n    return value * 2;\n}\n\nint calculate_R3868(int value, int tax, int discount) {\n    int subtotal = value + tax;\n    int adjusted = subtotal - discount;\n    if (adjusted > 0) {\n        if (adjusted < 100) {\n            return adjusted + 406;\n        }\n    }\n    return 0;\n}\n\nint process_R3868(int value, int tax, int discount, int fee) {\n    return value + tax - discount + fee;\n}\n\nvoid copy_R3868(char *destination, const char *source) {\n    strcpy(destination, source);\n}\n\nstatic int unused_R3868(void) {\n    return -1;\n}\n",
+    "action": {
+      "action_type": "introduce_c_parameter_object",
+      "source_refactoring": "Introduce Parameter Object",
+      "parameters": {
+        "source_file": "benchmark/c/introduce-c-parameter-object_R3868.c",
+        "source_class": "MissingR3868",
+        "source_method": "MissingR3868",
+        "method": "MissingR3868",
+        "parameter_object_name": "ProcessParamsR3868",
+        "parameter_name": "params"
+      }
+    },
+    "ground_truth": {
+      "model_should_accept": false,
+      "label": "negative"
+    },
+    "dataset_split": "negative",
+    "provenance": "rdp_catalog_seeded_synthetic"
+  },
+  {
+    "case_id": "c_move_c_function_1_r5358_positive",
+    "language": "c",
+    "file_name": "benchmark/c/move-c-function_R5358.c",
+    "source_code": "#include <string.h>\n\nint shared_R5358 = 1;\n\nint helper_R5358(int value) {\n    return value * 2;\n}\n\nint calculate_R5358(int value, int tax, int discount) {\n    int subtotal = value + tax;\n    int adjusted = subtotal - discount;\n    if (adjusted > 0) {\n        if (adjusted < 100) {\n            return adjusted + 474;\n        }\n    }\n    return 0;\n}\n\nint process_R5358(int value, int tax, int discount, int fee) {\n    return value + tax - discount + fee;\n}\n\nvoid copy_R5358(char *destination, const char *source) {\n    strcpy(destination, source);\n}\n\nstatic int unused_R5358(void) {\n    return -1;\n}\n",
+    "action": {
+      "action_type": "move_c_function",
+      "source_refactoring": "Move Method",
+      "parameters": {
+        "source_file": "benchmark/c/move-c-function_R5358.c",
+        "source_method": "helper_R5358",
+        "method": "helper_R5358",
+        "destination_file": "helpers_R5358.c"
+      }
+    },
+    "ground_truth": {
+      "model_should_accept": true,
+      "label": "positive"
+    },
+    "dataset_split": "positive",
+    "provenance": "rdp_catalog_seeded_synthetic"
+  },
+  {
+    "case_id": "c_move_c_function_1_r5358_negative",
+    "language": "c",
+    "file_name": "benchmark/c/move-c-function_R5358.c",
+    "source_code": "#include <string.h>\n\nint shared_R5358 = 1;\n\nint helper_R5358(int value) {\n    return value * 2;\n}\n\nint calculate_R5358(int value, int tax, int discount) {\n    int subtotal = value + tax;\n    int adjusted = subtotal - discount;\n    if (adjusted > 0) {\n        if (adjusted < 100) {\n            return adjusted + 474;\n        }\n    }\n    return 0;\n}\n\nint process_R5358(int value, int tax, int discount, int fee) {\n    return value + tax - discount + fee;\n}\n\nvoid copy_R5358(char *destination, const char *source) {\n    strcpy(destination, source);\n}\n\nstatic int unused_R5358(void) {\n    return -1;\n}\n",
+    "action": {
+      "action_type": "move_c_function",
+      "source_refactoring": "Move Method",
+      "parameters": {
+        "source_file": "benchmark/c/move-c-function_R5358.c",
+        "source_method": "MissingR5358",
+        "method": "MissingR5358",
+        "destination_file": "helpers_R5358.c"
+      }
+    },
+    "ground_truth": {
+      "model_should_accept": false,
+      "label": "negative"
+    },
+    "dataset_split": "negative",
+    "provenance": "rdp_catalog_seeded_synthetic"
+  },
+  {
+    "case_id": "c_remove_dead_code_1_r8382_positive",
+    "language": "c",
+    "file_name": "benchmark/c/remove-dead-code_R8382.c",
+    "source_code": "#include <string.h>\n\nint shared_R8382 = 1;\n\nint helper_R8382(int value) {\n    return value * 2;\n}\n\nint calculate_R8382(int value, int tax, int discount) {\n    int subtotal = value + tax;\n    int adjusted = subtotal - discount;\n    if (adjusted > 0) {\n        if (adjusted < 100) {\n            return adjusted + 372;\n        }\n    }\n    return 0;\n}\n\nint process_R8382(int value, int tax, int discount, int fee) {\n    return value + tax - discount + fee;\n}\n\nvoid copy_R8382(char *destination, const char *source) {\n    strcpy(destination, source);\n}\n\nstatic int unused_R8382(void) {\n    return -1;\n}\n",
+    "action": {
+      "action_type": "remove_dead_code",
+      "source_refactoring": "Remove Dead Code",
+      "parameters": {
+        "source_file": "benchmark/c/remove-dead-code_R8382.c",
+        "source_class": "",
+        "source_method": "unused_R8382",
+        "method": "unused_R8382",
+        "target_name": "unused_R8382",
+        "target_kind": "function"
+      }
+    },
+    "ground_truth": {
+      "model_should_accept": true,
+      "label": "positive"
+    },
+    "dataset_split": "positive",
+    "provenance": "rdp_catalog_seeded_synthetic"
+  },
+  {
+    "case_id": "c_remove_dead_code_1_r8382_negative",
+    "language": "c",
+    "file_name": "benchmark/c/remove-dead-code_R8382.c",
+    "source_code": "#include <string.h>\n\nint shared_R8382 = 1;\n\nint helper_R8382(int value) {\n    return value * 2;\n}\n\nint calculate_R8382(int value, int tax, int discount) {\n    int subtotal = value + tax;\n    int adjusted = subtotal - discount;\n    if (adjusted > 0) {\n        if (adjusted < 100) {\n            return adjusted + 372;\n        }\n    }\n    return 0;\n}\n\nint process_R8382(int value, int tax, int discount, int fee) {\n    return value + tax - discount + fee;\n}\n\nvoid copy_R8382(char *destination, const char *source) {\n    strcpy(destination, source);\n}\n\nstatic int unused_R8382(void) {\n    return -1;\n}\n",
+    "action": {
+      "action_type": "remove_dead_code",
+      "source_refactoring": "Remove Dead Code",
+      "parameters": {
+        "source_file": "benchmark/c/remove-dead-code_R8382.c",
+        "source_class": "",
+        "source_method": "MissingR8382",
+        "method": "MissingR8382",
+        "target_name": "MissingR8382",
+        "target_kind": "function"
+      }
+    },
+    "ground_truth": {
+      "model_should_accept": false,
+      "label": "negative"
+    },
+    "dataset_split": "negative",
+    "provenance": "rdp_catalog_seeded_synthetic"
+  },
+  {
+    "case_id": "c_replace_nested_conditional_with_guard_clauses_1_r4555_positive",
+    "language": "c",
+    "file_name": "benchmark/c/replace-nested-conditional-with-guard-clauses_R4555.c",
+    "source_code": "#include <string.h>\n\nint shared_R4555 = 1;\n\nint helper_R4555(int value) {\n    return value * 2;\n}\n\nint calculate_R4555(int value, int tax, int discount) {\n    int subtotal = value + tax;\n    int adjusted = subtotal - discount;\n    if (adjusted > 0) {\n        if (adjusted < 100) {\n            return adjusted + 345;\n        }\n    }\n    return 0;\n}\n\nint process_R4555(int value, int tax, int discount, int fee) {\n    return value + tax - discount + fee;\n}\n\nvoid copy_R4555(char *destination, const char *source) {\n    strcpy(destination, source);\n}\n\nstatic int unused_R4555(void) {\n    return -1;\n}\n",
+    "action": {
+      "action_type": "replace_nested_conditional_with_guard_clauses",
+      "source_refactoring": "Replace Nested Conditional with Guard Clauses",
+      "parameters": {
+        "source_file": "benchmark/c/replace-nested-conditional-with-guard-clauses_R4555.c",
+        "source_class": "AccountR4555",
+        "source_method": "calculate_R4555",
+        "method": "calculate_R4555"
+      }
+    },
+    "ground_truth": {
+      "model_should_accept": true,
+      "label": "positive"
+    },
+    "dataset_split": "positive",
+    "provenance": "rdp_catalog_seeded_synthetic"
+  },
+  {
+    "case_id": "c_replace_nested_conditional_with_guard_clauses_1_r4555_negative",
+    "language": "c",
+    "file_name": "benchmark/c/replace-nested-conditional-with-guard-clauses_R4555.c",
+    "source_code": "#include <string.h>\n\nint shared_R4555 = 1;\n\nint helper_R4555(int value) {\n    return value * 2;\n}\n\nint calculate_R4555(int value, int tax, int discount) {\n    int subtotal = value + tax;\n    int adjusted = subtotal - discount;\n    if (adjusted > 0) {\n        if (adjusted < 100) {\n            return adjusted + 345;\n        }\n    }\n    return 0;\n}\n\nint process_R4555(int value, int tax, int discount, int fee) {\n    return value + tax - discount + fee;\n}\n\nvoid copy_R4555(char *destination, const char *source) {\n    strcpy(destination, source);\n}\n\nstatic int unused_R4555(void) {\n    return -1;\n}\n",
+    "action": {
+      "action_type": "replace_nested_conditional_with_guard_clauses",
+      "source_refactoring": "Replace Nested Conditional with Guard Clauses",
+      "parameters": {
+        "source_file": "benchmark/c/replace-nested-conditional-with-guard-clauses_R4555.c",
+        "source_class": "MissingR4555",
+        "source_method": "MissingR4555",
+        "method": "MissingR4555"
+      }
+    },
+    "ground_truth": {
+      "model_should_accept": false,
+      "label": "negative"
+    },
+    "dataset_split": "negative",
+    "provenance": "rdp_catalog_seeded_synthetic"
+  },
+  {
+    "case_id": "c_replace_parameter_with_method_call_1_r6120_positive",
+    "language": "c",
+    "file_name": "benchmark/c/replace-parameter-with-method-call_R6120.c",
+    "source_code": "#include <string.h>\n\nint shared_R6120 = 1;\n\nint helper_R6120(int value) {\n    return value * 2;\n}\n\nint calculate_R6120(int value, int tax, int discount) {\n    int subtotal = value + tax;\n    int adjusted = subtotal - discount;\n    if (adjusted > 0) {\n        if (adjusted < 100) {\n            return adjusted + 518;\n        }\n    }\n    return 0;\n}\n\nint process_R6120(int value, int tax, int discount, int fee) {\n    return value + tax - discount + fee;\n}\n\nvoid copy_R6120(char *destination, const char *source) {\n    strcpy(destination, source);\n}\n\nstatic int unused_R6120(void) {\n    return -1;\n}\n",
+    "action": {
+      "action_type": "replace_parameter_with_method_call",
+      "source_refactoring": "Replace Parameter with Method Call",
+      "parameters": {
+        "source_file": "benchmark/c/replace-parameter-with-method-call_R6120.c",
+        "source_class": "AccountR6120",
+        "source_method": "process_R6120",
+        "method": "process_R6120",
+        "parameter_name": "tax",
+        "query_method_name": "default_tax_r6120",
+        "query_expression": "1"
+      }
+    },
+    "ground_truth": {
+      "model_should_accept": true,
+      "label": "positive"
+    },
+    "dataset_split": "positive",
+    "provenance": "rdp_catalog_seeded_synthetic"
+  },
+  {
+    "case_id": "c_replace_parameter_with_method_call_1_r6120_negative",
+    "language": "c",
+    "file_name": "benchmark/c/replace-parameter-with-method-call_R6120.c",
+    "source_code": "#include <string.h>\n\nint shared_R6120 = 1;\n\nint helper_R6120(int value) {\n    return value * 2;\n}\n\nint calculate_R6120(int value, int tax, int discount) {\n    int subtotal = value + tax;\n    int adjusted = subtotal - discount;\n    if (adjusted > 0) {\n        if (adjusted < 100) {\n            return adjusted + 518;\n        }\n    }\n    return 0;\n}\n\nint process_R6120(int value, int tax, int discount, int fee) {\n    return value + tax - discount + fee;\n}\n\nvoid copy_R6120(char *destination, const char *source) {\n    strcpy(destination, source);\n}\n\nstatic int unused_R6120(void) {\n    return -1;\n}\n",
+    "action": {
+      "action_type": "replace_parameter_with_method_call",
+      "source_refactoring": "Replace Parameter with Method Call",
+      "parameters": {
+        "source_file": "benchmark/c/replace-parameter-with-method-call_R6120.c",
+        "source_class": "MissingR6120",
+        "source_method": "MissingR6120",
+        "method": "MissingR6120",
+        "parameter_name": "tax",
+        "query_method_name": "default_tax_r6120",
+        "query_expression": "1"
+      }
+    },
+    "ground_truth": {
+      "model_should_accept": false,
+      "label": "negative"
+    },
+    "dataset_split": "negative",
+    "provenance": "rdp_catalog_seeded_synthetic"
+  },
+  {
+    "case_id": "c_replace_temp_with_query_1_r5569_positive",
+    "language": "c",
+    "file_name": "benchmark/c/replace-temp-with-query_R5569.c",
+    "source_code": "#include <string.h>\n\nint shared_R5569 = 1;\n\nint helper_R5569(int value) {\n    return value * 2;\n}\n\nint calculate_R5569(int value, int tax, int discount) {\n    int subtotal = value + tax;\n    int adjusted = subtotal - discount;\n    if (adjusted > 0) {\n        if (adjusted < 100) {\n            return adjusted + 614;\n        }\n    }\n    return 0;\n}\n\nint process_R5569(int value, int tax, int discount, int fee) {\n    return value + tax - discount + fee;\n}\n\nvoid copy_R5569(char *destination, const char *source) {\n    strcpy(destination, source);\n}\n\nstatic int unused_R5569(void) {\n    return -1;\n}\n",
+    "action": {
+      "action_type": "replace_temp_with_query",
+      "source_refactoring": "Replace Temp with Query",
+      "parameters": {
+        "source_file": "benchmark/c/replace-temp-with-query_R5569.c",
+        "source_method": "calculate_R5569",
+        "method": "calculate_R5569",
+        "source_class": "AccountR5569",
+        "temp_name": "subtotal",
+        "query_method_name": "query_subtotal_r5569"
+      }
+    },
+    "ground_truth": {
+      "model_should_accept": true,
+      "label": "positive"
+    },
+    "dataset_split": "positive",
+    "provenance": "rdp_catalog_seeded_synthetic"
+  },
+  {
+    "case_id": "c_replace_temp_with_query_1_r5569_negative",
+    "language": "c",
+    "file_name": "benchmark/c/replace-temp-with-query_R5569.c",
+    "source_code": "#include <string.h>\n\nint shared_R5569 = 1;\n\nint helper_R5569(int value) {\n    return value * 2;\n}\n\nint calculate_R5569(int value, int tax, int discount) {\n    int subtotal = value + tax;\n    int adjusted = subtotal - discount;\n    if (adjusted > 0) {\n        if (adjusted < 100) {\n            return adjusted + 614;\n        }\n    }\n    return 0;\n}\n\nint process_R5569(int value, int tax, int discount, int fee) {\n    return value + tax - discount + fee;\n}\n\nvoid copy_R5569(char *destination, const char *source) {\n    strcpy(destination, source);\n}\n\nstatic int unused_R5569(void) {\n    return -1;\n}\n",
+    "action": {
+      "action_type": "replace_temp_with_query",
+      "source_refactoring": "Replace Temp with Query",
+      "parameters": {
+        "source_file": "benchmark/c/replace-temp-with-query_R5569.c",
+        "source_method": "MissingR5569",
+        "method": "MissingR5569",
+        "source_class": "MissingR5569",
+        "temp_name": "subtotal",
+        "query_method_name": "query_subtotal_r5569"
+      }
+    },
+    "ground_truth": {
+      "model_should_accept": false,
+      "label": "negative"
+    },
+    "dataset_split": "negative",
+    "provenance": "rdp_catalog_seeded_synthetic"
+  },
+  {
+    "case_id": "c_replace_unsafe_function_1_r5710_positive",
+    "language": "c",
+    "file_name": "benchmark/c/replace-unsafe-function_R5710.c",
+    "source_code": "#include <string.h>\n\nint shared_R5710 = 1;\n\nint helper_R5710(int value) {\n    return value * 2;\n}\n\nint calculate_R5710(int value, int tax, int discount) {\n    int subtotal = value + tax;\n    int adjusted = subtotal - discount;\n    if (adjusted > 0) {\n        if (adjusted < 100) {\n            return adjusted + 578;\n        }\n    }\n    return 0;\n}\n\nint process_R5710(int value, int tax, int discount, int fee) {\n    return value + tax - discount + fee;\n}\n\nvoid copy_R5710(char *destination, const char *source) {\n    strcpy(destination, source);\n}\n\nstatic int unused_R5710(void) {\n    return -1;\n}\n",
+    "action": {
+      "action_type": "replace_unsafe_function",
+      "source_refactoring": "Replace Unsafe Function",
+      "parameters": {
+        "source_file": "benchmark/c/replace-unsafe-function_R5710.c",
+        "source_method": "copy_R5710",
+        "method": "copy_R5710",
+        "unsafe_function": "strcpy",
+        "safe_alternative": "strncpy",
+        "source_line": 25
+      }
+    },
+    "ground_truth": {
+      "model_should_accept": true,
+      "label": "positive"
+    },
+    "dataset_split": "positive",
+    "provenance": "rdp_catalog_seeded_synthetic"
+  },
+  {
+    "case_id": "c_replace_unsafe_function_1_r5710_negative",
+    "language": "c",
+    "file_name": "benchmark/c/replace-unsafe-function_R5710.c",
+    "source_code": "#include <string.h>\n\nint shared_R5710 = 1;\n\nint helper_R5710(int value) {\n    return value * 2;\n}\n\nint calculate_R5710(int value, int tax, int discount) {\n    int subtotal = value + tax;\n    int adjusted = subtotal - discount;\n    if (adjusted > 0) {\n        if (adjusted < 100) {\n            return adjusted + 578;\n        }\n    }\n    return 0;\n}\n\nint process_R5710(int value, int tax, int discount, int fee) {\n    return value + tax - discount + fee;\n}\n\nvoid copy_R5710(char *destination, const char *source) {\n    strcpy(destination, source);\n}\n\nstatic int unused_R5710(void) {\n    return -1;\n}\n",
+    "action": {
+      "action_type": "replace_unsafe_function",
+      "source_refactoring": "Replace Unsafe Function",
+      "parameters": {
+        "source_file": "benchmark/c/replace-unsafe-function_R5710.c",
+        "source_method": "MissingR5710",
+        "method": "MissingR5710",
+        "unsafe_function": "MissingR5710",
+        "safe_alternative": "strncpy",
+        "source_line": 130
+      }
+    },
+    "ground_truth": {
+      "model_should_accept": false,
+      "label": "negative"
+    },
+    "dataset_split": "negative",
+    "provenance": "rdp_catalog_seeded_synthetic"
+  }
+]

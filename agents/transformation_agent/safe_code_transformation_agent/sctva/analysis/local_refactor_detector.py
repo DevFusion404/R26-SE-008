@@ -433,19 +433,6 @@ class LocalRefactorDetector:
             )
         }
 
-    @staticmethod
-    def _find_matching_brace(source_code: str, opening_index: int) -> int | None:
-        depth = 0
-        for index in range(opening_index, len(source_code)):
-            character = source_code[index]
-            if character == "{":
-                depth += 1
-            elif character == "}":
-                depth -= 1
-                if depth == 0:
-                    return index
-        return None
-
     @classmethod
     def _existing_action_keys(
         cls,
