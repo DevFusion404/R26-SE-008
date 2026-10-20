@@ -175,6 +175,9 @@ def no_live_agents(monkeypatch):
     monkeypatch.setattr(planning_service, "rdp_generate_plan", unreachable_rdp)
     monkeypatch.setattr(transformation_service, "sctva_execute", unreachable_sctva)
     monkeypatch.setattr(transformation_service, "fetch_workspace_sources", unreachable_sctva)
+    # The smell-selection source snapshot reads the same workspace.
+    from services import source_snapshot
+    monkeypatch.setattr(source_snapshot, "fetch_workspace_sources", unreachable_sctva)
 
     # The impact service caches SCTVA's action set across calls; without this a
     # capability probe from one test would leak into the next.
@@ -232,6 +235,8 @@ def stub_sctva_execute(monkeypatch):
 
     monkeypatch.setattr(transformation_service, "fetch_workspace_sources", sources)
     monkeypatch.setattr(transformation_service, "sctva_execute", execute)
+    from services import source_snapshot
+    monkeypatch.setattr(source_snapshot, "fetch_workspace_sources", sources)
     return calls
 
 

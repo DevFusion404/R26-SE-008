@@ -279,6 +279,15 @@ def commit_smell_selection(wf, selected_ids, selected_files, selection_mode,
 
     update_workflow(wf["id"], status="smell_selection",
                     selected_smells_json=json.dumps(selected))
+
+    # Keep the selected files' source NOW, while CUQA's shared workspace still
+    # holds this repository: another user's upload before the transformation
+    # would otherwise leave every planned file unreadable. GitHub-linked
+    # workflows (source_provider set) read the PR commit instead and never
+    # touch the shared workspace, so they are skipped.
+    if source_provider is None:
+        from services.source_snapshot import capture_source_snapshot
+        capture_source_snapshot(wf["id"], selected)
     # What the developer actually kept, and what they dropped — by file, by
     # smell type, and itemised. The ids alone made this entry unreadable
     # without the report beside it, which is exactly when an audit trail is
