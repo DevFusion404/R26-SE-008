@@ -30,10 +30,12 @@ from collections import defaultdict
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
+from typing import Any
 
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib.artist import Artist
 import numpy as np
 import pandas as pd
 import sklearn
@@ -50,6 +52,7 @@ from sklearn.metrics import (
 from sklearn.model_selection import StratifiedGroupKFold
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import FunctionTransformer, StandardScaler
+from sklearn.utils import Bunch
 
 TRAINING_DIR = Path(__file__).resolve().parent
 REPO_ROOT = TRAINING_DIR.parents[2]
@@ -79,7 +82,7 @@ BOOTSTRAP_ITERATIONS = 1000
 # cross-validated F1 on the training repositories.
 MIN_CV_F1_TO_ENABLE = 0.50
 
-GB_PARAMS = dict(n_estimators=150, max_depth=2, learning_rate=0.05, subsample=0.8)
+GB_PARAMS: dict[str, Any] = dict(n_estimators=150, max_depth=2, learning_rate=0.05, subsample=0.8)
 
 
 @dataclass(frozen=True)
@@ -292,7 +295,7 @@ def cuqa_rule_predictions(tables: dict[str, pd.DataFrame]) -> dict[str, list[dic
     keys: set[str] = set()
     for table in tables.values():
         for row in table.itertuples():
-            key = source_key(row.repository, row.commit_hash, row.path)
+            key = source_key(str(row.repository), str(row.commit_hash), str(row.path))
             if (SOURCE_CACHE / f"{key}.java").exists():
                 keys.add(key)
     if not keys:
@@ -314,7 +317,7 @@ def rule_labels(table: pd.DataFrame, rule_output: dict[str, list[dict]], rule_ty
     """1 where the CUQA rule flags the sampled entity with *rule_type*."""
     flags = np.zeros(len(table), dtype=int)
     for i, row in enumerate(table.itertuples()):
-        key = source_key(row.repository, row.commit_hash, row.path)
+        key = source_key(str(row.repository), str(row.commit_hash), str(row.path))
         for smell in rule_output.get(key, []):
             line = smell.get("line")
             if (smell["type"] == rule_type and smell["entity"] == row.entity_name
@@ -363,7 +366,12 @@ def reviewer_agreement() -> dict:
 
 def export_classifier(clf: GradientBoostingClassifier, X_reference) -> dict:
     """Serialise a fitted binary gradient boosting model to plain lists."""
-    init_score = float(np.ravel(clf._raw_predict_init(X_reference[:1]))[0])
+    learning_rate = float(clf.get_params()["learning_rate"])
+    first_row = X_reference[:1]
+    # the decision function is the initial score plus the scaled tree outputs,
+    # so the initial score is what is left after removing the trees
+    tree_sum = sum(float(estimator.predict(first_row)[0]) for estimator in clf.estimators_[:, 0])
+    init_score = float(np.ravel(clf.decision_function(first_row))[0]) - learning_rate * tree_sum
     trees = []
     for estimator in clf.estimators_[:, 0]:
         tree = estimator.tree_
@@ -374,7 +382,7 @@ def export_classifier(clf: GradientBoostingClassifier, X_reference) -> dict:
             "right": [int(v) for v in tree.children_right],
             "value": [float(v) for v in tree.value[:, 0, 0]],
         })
-    return {"init_score": init_score, "learning_rate": float(clf.learning_rate), "trees": trees}
+    return {"init_score": init_score, "learning_rate": learning_rate, "trees": trees}
 
 
 # ---------------------------------------------------------------------------
@@ -383,7 +391,7 @@ def export_classifier(clf: GradientBoostingClassifier, X_reference) -> dict:
 
 def plot_curves(results: dict, path_pr: Path, path_roc: Path) -> None:
     fig, axes = plt.subplots(1, 4, figsize=(18, 4.8))
-    handles: dict[str, object] = {}
+    handles: dict[str, Artist] = {}
     for ax, spec in zip(axes, SMELLS):
         r = results[spec.key]
         precision, recall, _ = precision_recall_curve(r["y_test"], r["proba_test"])
@@ -715,6 +723,7 @@ def main() -> int:
         # 5. feature importance
         perm = permutation_importance(model, X_test, y_test, scoring="average_precision",
                                       n_repeats=20, random_state=RANDOM_SEED)
+        assert isinstance(perm, Bunch)  # one scoring name gives one Bunch, not a dict of them
         order = np.argsort(-perm.importances_mean)
         importance = [(names[i], float(perm.importances_mean[i]), float(perm.importances_std[i])) for i in order]
         evidence = [names[i] for i in np.argsort(-model.feature_importances_)[:5]]
