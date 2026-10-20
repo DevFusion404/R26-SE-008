@@ -45,6 +45,9 @@ export default function SourceViewer({
   selectedIds = null,
   onToggleSmell,
   onClose,
+  // Where the file's text comes from. Defaults to the CUQA workspace; a
+  // GitHub-linked workflow passes a loader that reads the analysed commit.
+  loadSource = fetchFileSource,
 }) {
   const [state, setState] = useState({ loading: true, source: null, error: null, missing: false });
   const [focused, setFocused] = useState(focusId);
@@ -69,7 +72,7 @@ export default function SourceViewer({
     const controller = new AbortController();
     let alive = true;
 
-    fetchFileSource(file, { signal: controller.signal })
+    loadSource(file, { signal: controller.signal })
       .then((result) => {
         if (!alive) return;
         setState({
@@ -88,6 +91,9 @@ export default function SourceViewer({
       alive = false;
       controller.abort();
     };
+    // loadSource is fixed for an instance: the parent keys the viewer by file
+    // and passes a loader bound to one workflow.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [file]);
 
   // Esc closes, matching every other overlay the developer has used.

@@ -92,7 +92,29 @@ def list_workflows():
 # ---------- Audit Log ----------
 
 def log_event(workflow_id, stage, action, details=None, actor="developer"):
+    if actor == "developer":
+        actor = _signed_in_actor()
     return _backend().log_event(workflow_id, stage, action, details=details, actor=actor)
+
+
+def _signed_in_actor() -> str:
+    """Who is acting, when that is known: 'developer:<email>' for a signed-in
+    DIWO user, 'github:<login>' for a verified GitHub command sender.
+
+    Only GitHub-linked workflows authenticate today, so for every other
+    workflow this stays plain 'developer', as it always was.
+    """
+    try:
+        from flask import g, has_app_context
+        if has_app_context():
+            user = getattr(g, "diwo_user", None) or {}
+            if user.get("email"):
+                return f"developer:{user['email']}"
+            if user.get("github_login"):
+                return f"github:{user['github_login']}"
+    except Exception:  # noqa: BLE001 - attribution must never fail the write
+        pass
+    return "developer"
 
 
 def get_audit_logs(workflow_id):

@@ -532,6 +532,18 @@ def quality_report(payload: dict = None): # type: ignore
         report = generate_file_report(source, os.path.basename(full_path), detector=detector)
         return {"type": "file", "report": report}
 
+    repo_report = _build_repo_report(_workspace["root"], _workspace["files"], _workspace["repo_name"],
+                                     detector=detector)
+    return {"type": "repository", "report": repo_report}
+
+
+def _build_repo_report(root: str, files: list[str], repo_name: Optional[str],
+                       detector: Optional[str] = None) -> dict:
+    """Repository quality report for every file in `files` under `root`.
+
+    Shared by /api/quality-report (the global workspace) and
+    /api/analyze-snapshot (a private, per-request directory).
+    """
     # All files in the repository — no cap, so the report covers the whole
     # uploaded project.
     # Collect (relative_path, source_text) for every file so that
@@ -541,8 +553,8 @@ def quality_report(payload: dict = None): # type: ignore
     # the same name (__init__.py, utils.py) and each must keep its own source.
     file_reports = []
     all_sources: list[tuple[str, str]] = []   # (relative_path, source) for repo index
-    for rel in _workspace["files"]:
-        full_path = os.path.join(_workspace["root"], rel)
+    for rel in files:
+        full_path = os.path.join(root, rel)
         try:
             with open(full_path, "r", encoding="utf-8", errors="replace") as f:
                 source = f.read()
@@ -558,8 +570,71 @@ def quality_report(payload: dict = None): # type: ignore
     # Pass source texts so generate_repo_report can apply cross-file dead-code
     # detection: functions imported by other files are NOT flagged as dead.
     repo_report = generate_repo_report(file_reports, sources=all_sources)
-    repo_report["repo_name"] = _workspace["repo_name"]
-    return {"type": "repository", "report": repo_report}
+    repo_report["repo_name"] = repo_name
+    return repo_report
+
+
+# ── 5b. Isolated snapshot analysis ───────────────────────────────────────────
+
+@app.post("/api/analyze-snapshot")
+async def analyze_snapshot(file: UploadFile = File(...), repo_name: str = Form("")):
+    """
+    Analyse one uploaded repository snapshot WITHOUT touching the active workspace.
+
+    Used by the DIWO orchestrator for GitHub pull requests: every request gets
+    its own temporary directory, which is deleted before the response is sent,
+    so concurrent analyses cannot see each other's files and a developer's
+    interactively loaded repository is left exactly as it was.
+
+    Same safety rules as /api/upload-zip (size cap, Zip Slip prevention), same
+    report shape and whole-repository coverage as /api/quality-report. Source code is parsed
+    statically; nothing from the archive is executed.
+
+    Returns { type: "repository", report: {...}, snapshot: {top_level_dir,
+    files_found, files_analyzed} }.
+    """
+    if not file.filename or not file.filename.endswith(".zip"):
+        raise HTTPException(400, "Only .zip files are supported.")
+
+    tmp_dir = tempfile.mkdtemp(prefix="cuqa_snapshot_")
+    try:
+        zip_path = os.path.join(tmp_dir, "snapshot.zip")
+        total_bytes = 0
+        with open(zip_path, "wb") as f:
+            while chunk := await file.read(1024 * 1024):
+                total_bytes += len(chunk)
+                if total_bytes > MAX_ZIP_SIZE_BYTES:
+                    raise HTTPException(413, f"ZIP file exceeds the {MAX_ZIP_SIZE_MB}MB size limit.")
+                f.write(chunk)
+
+        extract_dir = os.path.join(tmp_dir, "extracted")
+        os.makedirs(extract_dir, exist_ok=True)
+        try:
+            with zipfile.ZipFile(zip_path, "r") as z:
+                _safe_extract_zip(z, extract_dir)  # SEC-FIX: Zip Slip prevention
+        except zipfile.BadZipFile:
+            raise HTTPException(400, "Invalid or corrupted ZIP file.")
+
+        top_level_dir = None
+        entries = os.listdir(extract_dir)
+        if len(entries) == 1 and os.path.isdir(os.path.join(extract_dir, entries[0])):
+            top_level_dir = entries[0]
+            extract_dir = os.path.join(extract_dir, entries[0])
+
+        source_files = _find_source_files(extract_dir)
+        name = repo_name.strip() or file.filename[:-4]
+        report = _build_repo_report(extract_dir, source_files, name)
+        return {
+            "type": "repository",
+            "report": report,
+            "snapshot": {
+                "top_level_dir": top_level_dir,
+                "files_found": len(source_files),
+                "files_analyzed": len(source_files),
+            },
+        }
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
 # ── 5b. ML Smell Detection ───────────────────────────────────────────────────

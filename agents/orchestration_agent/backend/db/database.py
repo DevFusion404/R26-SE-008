@@ -117,6 +117,123 @@ def init_db(app):
             accepted            INTEGER NOT NULL DEFAULT 0,
             timestamp           TEXT NOT NULL
         );
+
+        -- GitHub webhook events accepted for background processing
+        -- (db/github_job_repository.py). delivery_id is UNIQUE because GitHub
+        -- reuses it on redelivery: that constraint IS the duplicate check.
+        CREATE TABLE IF NOT EXISTS github_analysis_jobs (
+            id                  TEXT PRIMARY KEY,
+            delivery_id         TEXT NOT NULL UNIQUE,
+            event               TEXT NOT NULL,
+            action              TEXT,
+            installation_id     INTEGER NOT NULL,
+            repo_owner          TEXT NOT NULL,
+            repo_name           TEXT NOT NULL,
+            repo_full_name      TEXT NOT NULL,
+            pr_number           INTEGER NOT NULL,
+            head_sha            TEXT NOT NULL,
+            head_repo_full_name TEXT,
+            is_fork             INTEGER NOT NULL DEFAULT 0,
+            status              TEXT NOT NULL DEFAULT 'queued',
+            attempts            INTEGER NOT NULL DEFAULT 0,
+            max_attempts        INTEGER NOT NULL DEFAULT 5,
+            next_attempt_at     TEXT NOT NULL,
+            locked_by           TEXT,
+            locked_at           TEXT,
+            check_run_id        INTEGER,
+            last_error          TEXT,
+            superseded_by       TEXT,
+            created_at          TEXT NOT NULL,
+            updated_at          TEXT NOT NULL,
+            completed_at        TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_github_jobs_claim
+            ON github_analysis_jobs (status, next_attempt_at);
+        CREATE INDEX IF NOT EXISTS idx_github_jobs_pr
+            ON github_analysis_jobs (repo_full_name, pr_number, created_at);
+
+        -- One row per analysed PR COMMIT (db/github_pr_workflow_repository.py).
+        -- Commit-specific on purpose: a result for an older head SHA can never
+        -- be mistaken for the current one, and a second delivery for the same
+        -- commit reuses its row instead of creating a second workflow.
+        CREATE TABLE IF NOT EXISTS github_pr_workflows (
+            id                   TEXT PRIMARY KEY,
+            repository_owner     TEXT NOT NULL,
+            repository_name      TEXT NOT NULL,
+            repository_full_name TEXT NOT NULL,
+            pr_number            INTEGER NOT NULL,
+            head_sha             TEXT NOT NULL,
+            installation_id      INTEGER NOT NULL,
+            workflow_id          TEXT,
+            analysis_status      TEXT NOT NULL DEFAULT 'pending',
+            job_id               TEXT,
+            check_run_id         INTEGER,
+            smell_count          INTEGER,
+            files_analyzed       INTEGER,
+            error                TEXT,
+            created_at           TEXT NOT NULL,
+            updated_at           TEXT NOT NULL,
+            UNIQUE (repository_full_name, pr_number, head_sha)
+        );
+        CREATE INDEX IF NOT EXISTS idx_github_pr_workflows_workflow
+            ON github_pr_workflows (workflow_id);
+
+        -- One proposed change per FILE of one SCTVA run on a PR commit
+        -- (db/github_review_repository.py). Holds the exact original and
+        -- refactored text the developer reviews, their hashes (what is
+        -- committed must be what was reviewed), SCTVA's real validation and
+        -- the developer's final decision.
+        CREATE TABLE IF NOT EXISTS github_pr_transformations (
+            id                 TEXT PRIMARY KEY,
+            workflow_id        TEXT NOT NULL,
+            mapping_id         TEXT NOT NULL,
+            run_id             TEXT NOT NULL,
+            display_id         TEXT NOT NULL,
+            head_sha           TEXT NOT NULL,
+            file_path          TEXT NOT NULL,
+            original_blob_sha  TEXT,
+            original_sha256    TEXT NOT NULL,
+            refactored_sha256  TEXT,
+            original_content   TEXT,
+            refactored_content TEXT,
+            diff               TEXT,
+            refactorings_json  TEXT,
+            validation_json    TEXT,
+            confidence         REAL,
+            validation_passed  INTEGER NOT NULL DEFAULT 0,
+            coupled            INTEGER NOT NULL DEFAULT 0,
+            status             TEXT NOT NULL,
+            status_reason      TEXT,
+            decided_by         TEXT,
+            decided_at         TEXT,
+            applied_commit_sha TEXT,
+            applied_at         TEXT,
+            created_at         TEXT NOT NULL,
+            updated_at         TEXT NOT NULL,
+            UNIQUE (workflow_id, run_id, file_path)
+        );
+        CREATE INDEX IF NOT EXISTS idx_github_pr_transformations_workflow
+            ON github_pr_transformations (workflow_id, run_id);
+
+        -- One commit DIWO makes (or refuses to make) on a PR branch.
+        -- idempotency_key = hash(base SHA + accepted transformation ids): the
+        -- same acceptance can never produce two commits.
+        CREATE TABLE IF NOT EXISTS github_pr_writebacks (
+            id                     TEXT PRIMARY KEY,
+            workflow_id            TEXT NOT NULL,
+            mapping_id             TEXT NOT NULL,
+            idempotency_key        TEXT NOT NULL UNIQUE,
+            base_sha               TEXT NOT NULL,
+            branch                 TEXT,
+            transformation_ids_json TEXT NOT NULL,
+            status                 TEXT NOT NULL,
+            commit_sha             TEXT,
+            requested_by           TEXT,
+            error                  TEXT,
+            created_at             TEXT NOT NULL,
+            updated_at             TEXT NOT NULL,
+            committed_at           TEXT
+        );
         """)
 
         # Lightweight schema migration for older prototype databases.
@@ -160,6 +277,29 @@ def init_db(app):
             """CREATE INDEX IF NOT EXISTS idx_feedback_step
                ON feedback_entries (workflow_id, action, step_key)"""
         )
+
+        # Milestone 4: where the developer review of a PR commit stands, and
+        # who made the last decision on it.
+        mapping_cols = {
+            row[1]
+            for row in conn.execute("PRAGMA table_info(github_pr_workflows)").fetchall()
+        }
+        for column in ("review_status", "reviewed_by", "reviewed_at",
+                       # Interactive GitHub review: the shared draft state
+                       # GitHub commands and DIWO both read and write.
+                       "draft_selection_json", "draft_plan_decisions_json",
+                       "pending_confirmation", "status_comment_id",
+                       "origin_writeback_id"):
+            if column not in mapping_cols:
+                conn.execute(f"ALTER TABLE github_pr_workflows ADD COLUMN {column} TEXT")
+
+        # PR-comment and requested-action jobs carry the parsed command.
+        job_cols = {
+            row[1]
+            for row in conn.execute("PRAGMA table_info(github_analysis_jobs)").fetchall()
+        }
+        if "command_json" not in job_cols:
+            conn.execute("ALTER TABLE github_analysis_jobs ADD COLUMN command_json TEXT")
 
     print(f"[DIWO] Database initialized (SQLite: {DB_PATH}).")
 

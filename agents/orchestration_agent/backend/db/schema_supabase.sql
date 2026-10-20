@@ -118,6 +118,140 @@ create index if not exists idx_feedback_step
     on public.feedback_entries (workflow_id, action, step_key);
 
 
+-- ── GitHub webhook jobs (db/github_job_repository.py) ──────────────────────
+-- One row per accepted GitHub webhook delivery, processed by github_worker.py.
+-- delivery_id is UNIQUE because GitHub reuses it on redelivery: the constraint
+-- is the duplicate check. Added for the GitHub App integration (Milestone 1);
+-- on an existing project, re-running this whole file adds just this table.
+create table if not exists public.github_analysis_jobs (
+    id                  text primary key,
+    delivery_id         text    not null unique,
+    event               text    not null,
+    action              text,
+    installation_id     bigint  not null,
+    repo_owner          text    not null,
+    repo_name           text    not null,
+    repo_full_name      text    not null,
+    pr_number           integer not null,
+    head_sha            text    not null,
+    head_repo_full_name text,
+    is_fork             smallint not null default 0,
+    status              text    not null default 'queued',
+    attempts            integer not null default 0,
+    max_attempts        integer not null default 5,
+    next_attempt_at     text    not null,
+    locked_by           text,
+    locked_at           text,
+    check_run_id        bigint,
+    last_error          text,
+    superseded_by       text,
+    created_at          text    not null,
+    updated_at          text    not null,
+    completed_at        text
+);
+
+create index if not exists idx_github_jobs_claim
+    on public.github_analysis_jobs (status, next_attempt_at);
+create index if not exists idx_github_jobs_pr
+    on public.github_analysis_jobs (repo_full_name, pr_number, created_at);
+
+
+-- ── GitHub PR commit <-> DIWO workflow (db/github_pr_workflow_repository.py) ─
+-- One row per analysed PR COMMIT. Commit-specific so a stale result can never
+-- be mistaken for the current one, and so a repeated delivery for the same
+-- commit reuses its row instead of creating a second workflow. Added for
+-- GitHub integration Milestones 2-3; re-running this file adds just this table.
+create table if not exists public.github_pr_workflows (
+    id                   text    primary key,
+    repository_owner     text    not null,
+    repository_name      text    not null,
+    repository_full_name text    not null,
+    pr_number            integer not null,
+    head_sha             text    not null,
+    installation_id      bigint  not null,
+    workflow_id          text,
+    analysis_status      text    not null default 'pending',
+    job_id               text,
+    check_run_id         bigint,
+    smell_count          integer,
+    files_analyzed       integer,
+    error                text,
+    created_at           text    not null,
+    updated_at           text    not null,
+    constraint github_pr_workflows_commit_unique
+        unique (repository_full_name, pr_number, head_sha)
+);
+
+create index if not exists idx_github_pr_workflows_workflow
+    on public.github_pr_workflows (workflow_id);
+
+-- Milestone 4: developer review state of the PR commit (who decided last, when).
+alter table public.github_pr_workflows add column if not exists review_status text;
+alter table public.github_pr_workflows add column if not exists reviewed_by   text;
+alter table public.github_pr_workflows add column if not exists reviewed_at   text;
+
+-- Interactive GitHub review (PR comment commands): shared draft state.
+alter table public.github_pr_workflows add column if not exists draft_selection_json      text;
+alter table public.github_pr_workflows add column if not exists draft_plan_decisions_json text;
+alter table public.github_pr_workflows add column if not exists pending_confirmation      text;
+alter table public.github_pr_workflows add column if not exists status_comment_id         text;
+alter table public.github_pr_workflows add column if not exists origin_writeback_id       text;
+alter table public.github_analysis_jobs add column if not exists command_json             text;
+
+
+-- ── Proposed changes per file of one SCTVA run on a PR commit ─────────────
+create table if not exists public.github_pr_transformations (
+    id                 text primary key,
+    workflow_id        text not null,
+    mapping_id         text not null,
+    run_id             text not null,
+    display_id         text not null,
+    head_sha           text not null,
+    file_path          text not null,
+    original_blob_sha  text,
+    original_sha256    text not null,
+    refactored_sha256  text,
+    original_content   text,
+    refactored_content text,
+    diff               text,
+    refactorings_json  text,
+    validation_json    text,
+    confidence         double precision,
+    validation_passed  smallint not null default 0,
+    coupled            smallint not null default 0,
+    status             text not null,
+    status_reason      text,
+    decided_by         text,
+    decided_at         text,
+    applied_commit_sha text,
+    applied_at         text,
+    created_at         text not null,
+    updated_at         text not null,
+    constraint github_pr_transformations_unique unique (workflow_id, run_id, file_path)
+);
+create index if not exists idx_github_pr_transformations_workflow
+    on public.github_pr_transformations (workflow_id, run_id);
+
+
+-- ── Commits DIWO makes (or refuses) on PR branches; idempotent ────────────
+create table if not exists public.github_pr_writebacks (
+    id                      text primary key,
+    workflow_id             text not null,
+    mapping_id              text not null,
+    idempotency_key         text not null unique,
+    base_sha                text not null,
+    branch                  text,
+    transformation_ids_json text not null,
+    status                  text not null,
+    commit_sha              text,
+    requested_by            text,
+    error                   text,
+    created_at              text not null,
+    updated_at              text not null,
+    committed_at            text
+);
+
+
 -- ============================================================================
 -- ROW-LEVEL SECURITY
 --
@@ -141,3 +275,7 @@ alter table public.workflows        enable row level security;
 alter table public.audit_logs       enable row level security;
 alter table public.smell_impacts    enable row level security;
 alter table public.feedback_entries enable row level security;
+alter table public.github_analysis_jobs enable row level security;
+alter table public.github_pr_workflows  enable row level security;
+alter table public.github_pr_transformations enable row level security;
+alter table public.github_pr_writebacks      enable row level security;

@@ -157,15 +157,23 @@ def resolve_selection(all_smells: list, selected_ids: list,
 # Workflow creation
 # ─────────────────────────────────────────────────────────────────────────────
 
+def new_workflow_id() -> str:
+    return f"wf_{uuid.uuid4().hex[:10]}"
+
+
 def persist_new_workflow(target: str, language: str, smells: list,
-                          source: str = "client", cuqa_report: Optional[dict] = None):
+                          source: str = "client", cuqa_report: Optional[dict] = None,
+                          wf_id: Optional[str] = None):
     """Create the workflow row, seed metrics_before, and log the start event.
 
     `cuqa_report` is stored verbatim when the workflow was seeded from the CUQA
     agent, so the updated report can later be produced by filtering it instead
     of rebuilding one from the flattened smells.
+
+    `wf_id` lets a caller choose the id up front (the GitHub PR pipeline
+    records it before creating the workflow, so a retry reuses it).
     """
-    wf_id          = f"wf_{uuid.uuid4().hex[:10]}"
+    wf_id          = wf_id or new_workflow_id()
     metrics_before = compute_metrics_before(smells)
 
     create_workflow(wf_id, target, language, smells)
@@ -247,13 +255,17 @@ def build_smell_selection_payload(wf, selected_ids, selected_files=None):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def commit_smell_selection(wf, selected_ids, selected_files, selection_mode,
-                           feedback, replanning):
+                           feedback, replanning, source_provider=None):
     """Persist the developer's smell selection and plan against it.
 
     Steps 4 -> 7 of the DIWO workflow, and the reason the filtering happens
     here rather than in the route: the report forwarded to the RDP agent is
     the *updated* one, so a smell the developer rejected is gone before the
     planner ever sees it.
+
+    `source_provider(selected)` -> (source_files, warning) optionally supplies
+    file source for RDP. GitHub-linked workflows pass one that reads the PR
+    commit; nothing here ever reads CUQA's shared workspace.
     """
     payload = build_smell_selection_payload(wf, selected_ids, selected_files)
     selected = payload["selected"]
@@ -298,15 +310,25 @@ def commit_smell_selection(wf, selected_ids, selected_files, selection_mode,
 
     # Forward the updated report — every file, but only the smells the
     # developer kept — to the RDP agent, which owns plan generation.
+    source_files, source_warning = (source_provider(selected) if source_provider
+                                    else (None, None))
     plan, trace, plan_source, plan_warning = plan_from_rdp(
-        payload["updated_report"], selected, wf["target"], wf_id=wf["id"]
+        payload["updated_report"], selected, wf["target"], wf_id=wf["id"],
+        source_files=source_files,
     )
+    if source_warning:
+        log_event(wf["id"], "plan_approval", "rdp_source_partial",
+                  {"warning": source_warning}, actor="system")
+        plan_warning = f"{plan_warning} {source_warning}" if plan_warning else source_warning
 
     # Stage 2 gets an explainable recommendation per step rather than a bare
     # Approve/Reject pair. This adds `decision_support` alongside RDP's own
     # fields — it never replaces them — and is done here so the stored plan,
     # the response and the rollback copy all carry the same assessment.
     plan = enrich_plan_with_recommendations(wf, plan, plan_source=plan_source)
+    # Recorded on the plan itself, so whoever reads it later (DIWO, a GitHub
+    # command, the Check Run) can tell a real RDP plan from the offline fallback.
+    plan.setdefault("plan_source", plan_source)
 
     # plan_full_json keeps the agent's plan before approval trims it down to the
     # approved steps, so a rollback from transformation can offer every step for
@@ -491,12 +513,16 @@ def _recommendation_overrides(steps, decisions):
     }
 
 
-def apply_plan_decision(wf, decision, data):
+def apply_plan_decision(wf, decision, data, run_transformation=True):
     """Record the developer's verdict on the refactoring plan.
 
     'modify' and 'approve' both reduce the plan to the approved steps, so the
     report that leaves this function - and that Stage 3 forwards to SCTVA -
     can never contain a step the developer rejected.
+
+    `run_transformation=False` (GitHub-linked workflows) records the approval
+    exactly as usual and stops at 'plan_approved': no transformation, not even
+    the simulated one, runs on pull-request code in this milestone.
     """
     feedback = data.get("feedback", {})
     plan     = parse_json_field(wf, "plan_json") or {}
@@ -623,6 +649,22 @@ def apply_plan_decision(wf, decision, data):
         reason=feedback.get("reason"),
         step_reasons=feedback.get("step_reasons"),
     )
+
+    if not run_transformation:
+        update_workflow(wf["id"], status="plan_approved")
+        log_event(wf["id"], "plan_approval", "plan_awaiting_transformation", {
+            "plan_id": plan.get("plan_id"),
+            "approved_steps": len(plan.get("steps") or []),
+            "note": "GitHub-linked workflow: the approved plan is recorded; no "
+                    "transformation has been run and no code has been changed.",
+        }, actor="system")
+        return {
+            "status":        "plan_approved",
+            "approved_plan": plan,
+            "transformation_result": None,
+            "message": "Plan approved and recorded. Transformation of pull-request code "
+                       "is not enabled yet, so no code has been changed.",
+        }
 
     tr             = simulate_transformation(plan, wf["language"])
     metrics_before = parse_json_field(wf, "metrics_before_json") or {}
