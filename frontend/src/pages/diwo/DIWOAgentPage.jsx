@@ -41,6 +41,7 @@ import {
 import { api, fetchGithubWorkflow } from "./services/diwoApi";
 import GithubPrBanner from "./components/GithubPrBanner";
 import GithubTransformationReview from "./components/GithubTransformationReview";
+import { buildSessionReport } from "../../utils/sessionReports";
 
 // ─── GitHub-linked workflows ──────────────────────────────────────────────────
 // A RefactorIQ / DIWO Check Run links to <frontend>/?diwo_workflow=<id>. Such a
@@ -113,7 +114,18 @@ function buildBackendSmells() {
 
 // ─── Component ────────────────────────────────────────────────────────────────
 export default function DIWOAgentPage({ onWorkflowComplete } = {}) {
+  // How far the workflow has progressed.
   const [phase, setPhase]         = useState(0);
+  // A completed stage the developer opened from the step bar to review, or
+  // null to show the stage in progress. Review is read-only: going back to
+  // change a stage is a separate, confirmed action (redoFromStage).
+  const [viewPhase, setViewPhase] = useState(null);
+  const [prevPhase, setPrevPhase] = useState(phase);
+  if (phase !== prevPhase) {
+    setPrevPhase(phase);
+    setViewPhase(null);
+  }
+  const shownPhase = viewPhase !== null && viewPhase < phase ? viewPhase : phase;
   const [workflowId, setWorkflowId]           = useState(null);
   const [workflowLanguage, setWorkflowLanguage] = useState("java");
   const [workflowTarget, setWorkflowTarget]   = useState(null);
@@ -1120,6 +1132,29 @@ export default function DIWOAgentPage({ onWorkflowComplete } = {}) {
     else setPhase(0);
   };
 
+  // ── Redo a completed stage ───────────────────────────────────────────────
+  /**
+   * Reopen a completed stage for editing, from its read-only review. This is
+   * the same move as the stages' own "back" buttons — the backend is reset to
+   * that stage and everything after it is discarded — so it is confirmed first.
+   */
+  const redoFromStage = async (stage) => {
+    const later = PHASE_TITLES.slice(stage + 1, phase + 1).join(", ");
+    if (!window.confirm(
+      `Change ${PHASE_TITLES[stage]}? The progress made after it (${later}) ` +
+      "will be discarded and you will continue from this stage."
+    )) return;
+
+    if (stage === 0) {
+      await handleFallbackToSmellReview();
+      setTransformationData(null);
+      setMetricsAfterApi(null);
+    } else if (stage === 1) {
+      if (phase === 3) await handleRollback();
+      else await handleBackToPlanApproval();
+    }
+  };
+
   // ── Restart ───────────────────────────────────────────────────────────────
   const handleRestart = () => {
     addLog("New refactoring session initiated.", "info");
@@ -1154,7 +1189,26 @@ export default function DIWOAgentPage({ onWorkflowComplete } = {}) {
 
       <div className="diwo-body" style={{ display: "flex", height: "calc(100vh - 56px)" }}>
         <div className="diwo-main" style={{ flex: 1, overflow: "auto", padding: "28px 32px" }}>
-          <StepBar current={phase} />
+          <StepBar
+            current={phase}
+            viewing={shownPhase}
+            onSelect={(i) => setViewPhase(i === phase ? null : i)}
+          />
+
+          {shownPhase < phase && (
+            <ReviewBanner
+              stageTitle={PHASE_TITLES[shownPhase]}
+              currentTitle={PHASE_TITLES[phase]}
+              onReturn={() => setViewPhase(null)}
+              // Changing a stage is offered where a stage has a way back:
+              // smell selection and plan decisions, up to the results review.
+              // After the results are accepted the files are written, so the
+              // finished run is only reviewed.
+              onRedo={shownPhase <= 1 && phase <= 3 && !backendBusy
+                ? () => redoFromStage(shownPhase)
+                : undefined}
+            />
+          )}
 
           {(githubContext || githubError) && (
             <GithubPrBanner
@@ -1167,18 +1221,31 @@ export default function DIWOAgentPage({ onWorkflowComplete } = {}) {
           )}
 
           <div style={{ marginBottom: 20 }}>
-            <div style={{ fontSize: 20, fontWeight: 800, color: C.text, marginBottom: 4 }}>{PHASE_TITLES[phase]}</div>
-            <div style={{ fontSize: 13, color: C.textMuted }}>{PHASE_DESCRIPTIONS[phase]}</div>
+            <div style={{ fontSize: 20, fontWeight: 800, color: C.text, marginBottom: 4 }}>{PHASE_TITLES[shownPhase]}</div>
+            <div style={{ fontSize: 13, color: C.textMuted }}>{PHASE_DESCRIPTIONS[shownPhase]}</div>
           </div>
+
+          {/* Every stage the workflow has reached stays MOUNTED, and only the
+              one on screen is visible. Remounting would lose what the stage
+              holds — the smell selection, the per-step plan decisions — and
+              the Transformation stage runs SCTVA on mount, so reopening it
+              would run the transformation a second time. Stages after the
+              current one unmount on their own when the workflow goes back. */}
 
           {/* A GitHub link shows Stage 1 only once ITS workflow has loaded:
               mounting earlier would let Stage 1 fetch CUQA's shared workspace,
               i.e. some other repository. */}
-          {phase === 0 && !(linkedWorkflowId && !githubContext) && (
+          {!(linkedWorkflowId && !githubContext) && (
+            <StageSlot index={0} phase={phase} shown={shownPhase}>
             <CodeSmellApprovalPage
               workflowId={workflowId}
               onProceed={handleSmellsSelected}
-              reportData={workflow?.updated_report || cuqaReport || null}
+              // Held at the full report once the selection is made: a changed
+              // report resets Stage 1's selection, and the review should show
+              // what was selected, not an empty page.
+              reportData={phase === 0
+                ? (workflow?.updated_report || cuqaReport || null)
+                : (cuqaReport || null)}
               onReportLoaded={handleCuqaReportLoaded}
               // Re-analyze re-seeds the workflow rather than only refreshing
               // what Stage 1 displays — see bootstrapWorkflow. A GitHub-linked
@@ -1191,10 +1258,13 @@ export default function DIWOAgentPage({ onWorkflowComplete } = {}) {
               smellDisplayIds={githubShared?.smellIds || null}
               initialSelectedIds={githubShared?.draftSelection || null}
             />
+            </StageSlot>
           )}
-          {phase === 1 && (
+          <StageSlot index={1} phase={phase} shown={shownPhase}>
             <RefactoringPlanApprovalPage
-              planData={planData}
+              // Approval trims planData to the approved steps; the review of
+              // this stage shows the plan as it was decided.
+              planData={phase > 1 ? (preApprovalPlan || planData) : planData}
               planMeta={planMeta}
               loading={backendBusy && !planData}
               onDecisionChange={handlePlanDecisionChange}
@@ -1204,25 +1274,27 @@ export default function DIWOAgentPage({ onWorkflowComplete } = {}) {
               onDismissSubmitError={() => setPlanSubmitError(null)}
               onFallback={handleFallbackToSmellReview}
             />
-          )}
-          {phase === 2 && linkedWorkflowId && githubContext && (
-            <GithubTransformationReview
-              workflowId={workflowId}
-              github={githubContext}
-              onChanged={refreshGithubContext}
-            />
-          )}
-          {phase === 2 && !linkedWorkflowId && (
-            <TransformationApprovalPage
-              plan={approvedPlan || planData}
-              workflowId={workflowId}
-              language={workflowLanguage}
-              transformationData={transformationData}
-              onComplete={handleTransformComplete}
-              onBackToPlan={handleBackToPlanApproval}
-            />
-          )}
-          {phase === 3 && (
+          </StageSlot>
+          <StageSlot index={2} phase={phase} shown={shownPhase}>
+            {linkedWorkflowId && githubContext && (
+              <GithubTransformationReview
+                workflowId={workflowId}
+                github={githubContext}
+                onChanged={refreshGithubContext}
+              />
+            )}
+            {!linkedWorkflowId && (
+              <TransformationApprovalPage
+                plan={approvedPlan || planData}
+                workflowId={workflowId}
+                language={workflowLanguage}
+                transformationData={transformationData}
+                onComplete={handleTransformComplete}
+                onBackToPlan={handleBackToPlanApproval}
+              />
+            )}
+          </StageSlot>
+          <StageSlot index={3} phase={phase} shown={shownPhase}>
             <ResultsApprovalPage
               onRestart={handleRestart}
               onRollback={handleRollback}
@@ -1233,8 +1305,8 @@ export default function DIWOAgentPage({ onWorkflowComplete } = {}) {
               sctva={workflow?.sctva}
               projectContext={projectContext}
             />
-          )}
-          {phase === 4 && (
+          </StageSlot>
+          {phase === 4 && shownPhase === 4 && (
             <ComparisonView
                 workflow={workflow}
                 workflowId={workflowId}
@@ -1270,6 +1342,53 @@ export default function DIWOAgentPage({ onWorkflowComplete } = {}) {
           refreshing={auditRefreshing}
         />
       </div>
+    </div>
+  );
+}
+
+// ─── Stage navigation ────────────────────────────────────────────────────────
+
+/**
+ * Holds one stage's page. Mounted once the workflow reaches the stage, hidden
+ * while another stage is on screen, and inert while it is shown as a completed
+ * stage under review — the controls are visible, but nothing on a finished
+ * stage can be clicked into a second submission.
+ */
+function StageSlot({ index, phase, shown, children }) {
+  if (index > phase) return null;
+  return (
+    <div style={index === shown ? undefined : { display: "none" }} inert={index < phase}>
+      {children}
+    </div>
+  );
+}
+
+/** Shown above a completed stage opened from the step bar. */
+function ReviewBanner({ stageTitle, currentTitle, onReturn, onRedo }) {
+  return (
+    <div role="note" style={{
+      display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap",
+      marginBottom: 20, padding: "10px 14px", borderRadius: 10,
+      background: C.infoGlow, border: `1px solid color-mix(in srgb, ${C.info} 35%, transparent)`,
+    }}>
+      <div style={{ flex: 1, minWidth: 220, fontSize: 12.5, color: C.text, lineHeight: 1.5 }}>
+        <b>Reviewing {stageTitle}</b> — this stage is complete and shown read-only.
+        Your workflow is at <b>{currentTitle}</b>.
+      </div>
+      {onRedo && (
+        <button type="button" onClick={onRedo} style={{
+          padding: "7px 14px", borderRadius: 8, fontSize: 12, fontWeight: 700, cursor: "pointer",
+          background: "transparent", color: C.warn, border: `1px solid color-mix(in srgb, ${C.warn} 45%, transparent)`,
+        }}>
+          Change this stage
+        </button>
+      )}
+      <button type="button" onClick={onReturn} style={{
+        padding: "7px 14px", borderRadius: 8, fontSize: 12, fontWeight: 700, cursor: "pointer",
+        background: C.accent, color: "#000", border: "none",
+      }}>
+        Return to {currentTitle} →
+      </button>
     </div>
   );
 }
