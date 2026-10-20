@@ -54,8 +54,15 @@ create table if not exists public.workflows (
     plan_full_json              jsonb,
     transformation_result_json  jsonb,
     metrics_before_json         jsonb,
-    metrics_after_json          jsonb
+    metrics_after_json          jsonb,
+    -- The selected files' source, read once at smell selection, so the
+    -- transformation does not depend on CUQA's shared workspace still holding
+    -- this repository when several users share the hosted CUQA.
+    source_snapshot_json        jsonb
 );
+
+-- Existing databases: add the snapshot column (safe to re-run).
+alter table public.workflows add column if not exists source_snapshot_json jsonb;
 
 create index if not exists idx_workflows_created
     on public.workflows (created_at desc);
