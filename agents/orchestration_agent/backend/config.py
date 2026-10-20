@@ -234,3 +234,293 @@ def cors_origins():
     if CORS_ORIGINS.strip() == "*":
         return "*"
     return [origin.strip() for origin in CORS_ORIGINS.split(",") if origin.strip()]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# GitHub App integration
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# OFF BY DEFAULT. Nothing GitHub-related runs until GITHUB_INTEGRATION_ENABLED
+# is true, and once it is, github_config_problems() names every missing value.
+#
+# Every value is read per call rather than frozen at import, so a container can
+# be reconfigured by a restart and a test can flip the integration on and off.
+# None of these helpers ever returns a secret inside an error message.
+
+GITHUB_API_URL = "https://api.github.com"
+
+#: The REST API version DIWO was written and tested against. It is sent as
+#: X-GitHub-Api-Version and can be overridden with GITHUB_API_VERSION rather
+#: than edited here, so moving to a newer supported version is a config change.
+DEFAULT_GITHUB_API_VERSION = "2022-11-28"
+
+#: L0: every refactoring change requires an explicit developer approval. It is
+#: the only level implemented; higher levels are rejected by validation rather
+#: than silently treated as L0.
+SUPPORTED_AUTONOMY_LEVELS = ("L0",)
+
+#: Name of the Check Run DIWO publishes on each pull request.
+GITHUB_CHECK_NAME = "RefactorIQ / DIWO"
+
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    value = os.environ.get(name)
+    if value is None or not value.strip():
+        return default
+    return value.strip().lower() in ("1", "true", "yes", "on")
+
+
+def github_integration_enabled() -> bool:
+    return _env_flag("GITHUB_INTEGRATION_ENABLED", False)
+
+
+def github_app_id() -> str:
+    return os.environ.get("GITHUB_APP_ID", "").strip()
+
+
+def github_webhook_secret() -> str:
+    return os.environ.get("GITHUB_WEBHOOK_SECRET", "")
+
+
+def github_api_version() -> str:
+    return os.environ.get("GITHUB_API_VERSION", "").strip() or DEFAULT_GITHUB_API_VERSION
+
+
+def github_autonomy_level() -> str:
+    return os.environ.get("GITHUB_AUTONOMY_LEVEL", "L0").strip().upper() or "L0"
+
+
+def github_private_key_path() -> Path | None:
+    """GITHUB_PRIVATE_KEY_PATH, with a relative path resolved against backend/.
+
+    Resolving against BACKEND_DIR rather than the working directory means
+    `./secrets/github-app.pem` names the same file whether the process was
+    started from backend/, the repository root, or gunicorn in /app.
+    """
+    raw = os.environ.get("GITHUB_PRIVATE_KEY_PATH", "").strip()
+    if not raw:
+        return None
+    path = Path(raw).expanduser()
+    if not path.is_absolute():
+        path = BACKEND_DIR / path
+    return path.resolve()
+
+
+def github_private_key() -> str:
+    """The App's PEM private key, or "" when none is configured.
+
+    GITHUB_PRIVATE_KEY_PEM wins when set — that is how a Container Apps secret
+    arrives. Escaped newlines are restored, because a PEM pasted into a
+    single-line secret field usually arrives with literal "\\n" sequences.
+    """
+    pem = os.environ.get("GITHUB_PRIVATE_KEY_PEM", "").replace("\\n", "\n").strip()
+    if pem:
+        return pem
+
+    path = github_private_key_path()
+    if path is not None and path.is_file():
+        return path.read_text(encoding="utf-8")
+    return ""
+
+
+def github_config_problems() -> list:
+    """Every reason the enabled integration cannot run, or [] when it can.
+
+    Names settings, never their values.
+    """
+    problems = []
+    if not github_app_id():
+        problems.append("GITHUB_APP_ID is not set.")
+    if not github_webhook_secret():
+        problems.append("GITHUB_WEBHOOK_SECRET is not set.")
+    if not os.environ.get("GITHUB_PRIVATE_KEY_PEM", "").strip():
+        path = github_private_key_path()
+        if path is None:
+            problems.append(
+                "No private key: set GITHUB_PRIVATE_KEY_PEM or GITHUB_PRIVATE_KEY_PATH."
+            )
+        elif not path.is_file():
+            problems.append(
+                "GITHUB_PRIVATE_KEY_PATH does not point to a readable file."
+            )
+    if github_autonomy_level() not in SUPPORTED_AUTONOMY_LEVELS:
+        problems.append(
+            f"GITHUB_AUTONOMY_LEVEL must be one of {', '.join(SUPPORTED_AUTONOMY_LEVELS)}; "
+            "higher autonomy levels are not implemented."
+        )
+    return problems
+
+
+# ── PR analysis (Milestones 2-3) ─────────────────────────────────────────────
+
+def diwo_frontend_url() -> str:
+    """Public base URL of the React frontend, e.g. https://refactoriq.example.org.
+
+    Used for the "Open in DIWO" link on GitHub Check Runs. Never guessed: when
+    DIWO_FRONTEND_URL is unset the Check Run simply carries no link.
+    """
+    url = os.environ.get("DIWO_FRONTEND_URL", "").strip().rstrip("/")
+    if url.startswith("https://") or url.startswith(("http://localhost", "http://127.0.0.1")):
+        return url
+    return ""
+
+
+def github_snapshot_max_bytes() -> int:
+    """Largest PR snapshot archive DIWO will download (compressed)."""
+    return max(1, int(os.environ.get("GITHUB_SNAPSHOT_MAX_MB", "100"))) * 1024 * 1024
+
+
+def github_cuqa_timeout_seconds() -> int:
+    return max(10, int(os.environ.get("GITHUB_CUQA_TIMEOUT_SECONDS", "300")))
+
+
+def github_cuqa_allow_shared_workspace() -> bool:
+    """Fall back to CUQA's shared workspace when /api/analyze-snapshot is missing.
+
+    OFF by default. The fallback uploads the PR snapshot through
+    /api/upload-zip, which REPLACES the repository a developer has loaded
+    interactively in CUQA. It is serialized and the report is verified to
+    belong to the uploaded snapshot, but enable it only for a CUQA deployment
+    that has not yet been updated with /api/analyze-snapshot.
+    """
+    return _env_flag("GITHUB_CUQA_ALLOW_SHARED_WORKSPACE", False)
+
+
+# ── Access to GitHub-linked workflows ────────────────────────────────────────
+#
+# A workflow created from a GitHub PR describes code in a (possibly private)
+# repository, so its id must not work as a bearer capability. Every route that
+# names such a workflow requires a signed-in DIWO user (the Supabase access
+# token the frontend already holds). Workflows created in the DIWO UI are
+# unaffected.
+
+def supabase_jwt_secret() -> str:
+    """Supabase JWT secret (Project Settings -> API -> JWT secret).
+
+    When set, access tokens are verified locally (HS256). When unset, they are
+    verified by asking Supabase Auth, which needs SUPABASE_URL and a key.
+    """
+    return os.environ.get("SUPABASE_JWT_SECRET", "").strip()
+
+
+def github_workflow_allowed_emails() -> set:
+    """Optional allow-list of user e-mails for GitHub-linked workflows.
+
+    Empty means any authenticated DIWO user.
+    """
+    raw = os.environ.get("GITHUB_WORKFLOW_ALLOWED_EMAILS", "")
+    return {e.strip().lower() for e in raw.split(",") if e.strip()}
+
+
+# ── Repository authorization for approvals (Milestone 4) ─────────────────────
+#
+# Reading a GitHub-linked workflow needs a signed-in user. APPROVING anything on
+# it (smell selection, plan decisions) additionally needs a grant for that
+# repository, from either source:
+#
+#   GITHUB_REPO_REVIEWERS   explicit grants:
+#                           "octo-org/demo=dev@x.org|lead@x.org;octo-org/*=lead@x.org"
+#   GITHUB_USER_LOGINS      DIWO e-mail -> GitHub login, verified LIVE against
+#                           the repository: the login must have write, maintain
+#                           or admin permission ("dev@x.org=octocat,...")
+#
+# With neither configured for a repository, approvals are refused unless
+# GITHUB_REQUIRE_REPO_AUTHORIZATION=false (local demos only).
+
+def _parse_pairs(raw: str, item_sep: str, kv_sep: str) -> list:
+    pairs = []
+    for item in (raw or "").split(item_sep):
+        if kv_sep in item:
+            key, value = item.split(kv_sep, 1)
+            if key.strip() and value.strip():
+                pairs.append((key.strip(), value.strip()))
+    return pairs
+
+
+def github_repo_reviewers() -> dict:
+    """{"owner/repo" or "owner/*": {emails}} from GITHUB_REPO_REVIEWERS."""
+    grants = {}
+    for repo, emails in _parse_pairs(os.environ.get("GITHUB_REPO_REVIEWERS", ""), ";", "="):
+        grants.setdefault(repo.lower(), set()).update(
+            e.strip().lower() for e in emails.split("|") if e.strip())
+    return grants
+
+
+def github_user_logins() -> dict:
+    """{email: github_login} from GITHUB_USER_LOGINS."""
+    return {email.lower(): login
+            for email, login in _parse_pairs(os.environ.get("GITHUB_USER_LOGINS", ""), ",", "=")}
+
+
+def github_require_repo_authorization() -> bool:
+    return _env_flag("GITHUB_REQUIRE_REPO_AUTHORIZATION", True)
+
+
+def github_rdp_attach_sources() -> bool:
+    """Send RDP the PR-commit source of the selected files (for Move Method)."""
+    return _env_flag("GITHUB_RDP_ATTACH_SOURCES", True)
+
+
+# ── Interactive GitHub refactoring (commands, SCTVA, write-back) ─────────────
+
+def github_commands_enabled() -> bool:
+    """React to /refactoriq PR comments and Check Run buttons."""
+    return _env_flag("GITHUB_COMMANDS_ENABLED", True)
+
+
+def github_pr_transformation_enabled() -> bool:
+    """Run SCTVA on pull-request code after the developer approves a plan.
+
+    OFF BY DEFAULT, for a security reason rather than a functional one:
+    SCTVA's behavioural validation EXECUTES the code it validates (Python via
+    exec, Java/C by compiling and running). PR code is untrusted, so enable
+    this only when SCTVA runs in an isolated container — no secrets, no
+    access to internal services, restricted egress, resource limits. DIWO
+    never sends SCTVA any GitHub credential.
+    """
+    return _env_flag("GITHUB_PR_TRANSFORMATION_ENABLED", False)
+
+
+def github_pr_writeback_enabled() -> bool:
+    """Commit developer-ACCEPTED, validated changes to the PR branch.
+
+    OFF BY DEFAULT. Even when on, nothing is committed without a recorded
+    final developer acceptance and an explicit submit. Requires the App's
+    Contents: Read and write permission.
+    """
+    return _env_flag("GITHUB_PR_WRITEBACK_ENABLED", False)
+
+
+def github_confirmation_ttl_seconds() -> int:
+    """How long a "submit … confirm" request stays valid after the prompt."""
+    return max(60, int(os.environ.get("GITHUB_CONFIRMATION_TTL_SECONDS", "1800")))
+
+
+# ── Background job processing ────────────────────────────────────────────────
+
+def github_job_max_attempts() -> int:
+    """How many times a job is tried before it is recorded as failed."""
+    return max(1, int(os.environ.get("GITHUB_JOB_MAX_ATTEMPTS", "5")))
+
+
+def github_job_lock_timeout_seconds() -> int:
+    """How long a claimed job may run before another worker may reclaim it.
+
+    This is what stops a worker crash from losing an accepted job: its claim
+    simply expires and the job is picked up again.
+    """
+    return max(30, int(os.environ.get("GITHUB_JOB_LOCK_TIMEOUT_SECONDS", "600")))
+
+
+def github_worker_poll_seconds() -> float:
+    return max(1.0, float(os.environ.get("GITHUB_WORKER_POLL_SECONDS", "5")))
+
+
+def github_embedded_worker_enabled() -> bool:
+    """Run the job worker as a thread inside the web process.
+
+    A convenience for local development and single-container demos only. The
+    jobs are durable either way, but production should run github_worker.py as
+    its own process so web traffic and job processing scale and fail apart.
+    """
+    return _env_flag("GITHUB_EMBEDDED_WORKER", False)

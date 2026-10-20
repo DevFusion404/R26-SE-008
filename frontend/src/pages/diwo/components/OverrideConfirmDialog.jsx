@@ -31,7 +31,13 @@ import { useEffect, useState } from "react";
 import { OVERRIDE_REASONS, categoryStyle, MANUAL_ONLY } from "../utils/planningDecisionSupport";
 import { T, tint } from "../codeSmellTheme.js";
 
-export default function OverrideConfirmDialog({ step, support, reason, onReason, onConfirm, onCancel }) {
+export default function OverrideConfirmDialog({
+  step, support, reason, onReason, onConfirm, onCancel,
+  // How many steps a bulk approval queued, this one included. Above one, the
+  // dialog offers to confirm the whole queue at once.
+  queued = 1,
+  onConfirmAll,
+}) {
   const [picked, setPicked] = useState(reason || "");
 
   useEffect(() => {
@@ -58,6 +64,10 @@ export default function OverrideConfirmDialog({ step, support, reason, onReason,
     onConfirm?.(step.step_id);
   };
 
+  // The picked reason is applied to every queued step.
+  const confirmAll = () => onConfirmAll?.(picked);
+  const showAll = queued > 1 && onConfirmAll;
+
   return (
     <div
       onClick={onCancel}
@@ -83,6 +93,11 @@ export default function OverrideConfirmDialog({ step, support, reason, onReason,
           <span style={{ fontSize: 14, fontWeight: 800, color: style.color }}>
             DIWO marked this step {style.label}
           </span>
+          {queued > 1 && (
+            <span style={{ marginLeft: "auto", fontSize: 11, color: T.text3, fontWeight: 600 }}>
+              {queued} steps waiting
+            </span>
+          )}
         </div>
 
         <div style={{ fontSize: 12.5, color: T.text, lineHeight: 1.6, marginBottom: 12 }}>
@@ -192,6 +207,20 @@ export default function OverrideConfirmDialog({ step, support, reason, onReason,
           >
             {isManual ? "Force automatic anyway" : "Approve anyway"}
           </button>
+          {showAll && (
+            <button
+              type="button"
+              onClick={confirmAll}
+              title={`Confirm this and the other ${queued - 1} queued step${queued > 2 ? "s" : ""}`}
+              style={{
+                padding: "9px 18px", borderRadius: 8, fontSize: 12, fontWeight: 700,
+                cursor: "pointer", border: "none",
+                background: style.color, color: T.surface,
+              }}
+            >
+              Accept all ({queued})
+            </button>
+          )}
         </div>
 
         <div style={{ marginTop: 11, fontSize: 10.5, color: T.text3, lineHeight: 1.5 }}>

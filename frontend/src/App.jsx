@@ -91,10 +91,14 @@ export default function App() {
     () => !UserService.isAuthenticated() && localStorage.getItem('is_guest') === 'true'
   );
 
-  // Persist active page across refreshes
-  const [page, setPage] = useState(
-    () => localStorage.getItem('rfiq_active_page') || 'overview'
-  );
+  // Persist active page across refreshes. A RefactorIQ / DIWO Check Run link
+  // (?diwo_workflow=<id>) opens the DIWO page on that workflow; the sign-in
+  // gate below still applies first, and the backend checks access again.
+  const [page, setPage] = useState(() => (
+    new URLSearchParams(window.location.search).has('diwo_workflow')
+      ? 'orchestrate'
+      : localStorage.getItem('rfiq_active_page') || 'overview'
+  ));
   const [repoLoaded,    setRepoLoaded]    = useState(false);
   const [repoMeta,      setRepoMeta]      = useState(null);
   const [repoConfig,    setRepoConfig]    = useState(null);  // threshold, filters, mode from RepositoryInput
@@ -107,6 +111,13 @@ export default function App() {
   const [navOpen,       setNavOpen]       = useState(false);
   const [focusSessionId, setFocusSessionId] = useState(null);
   const { toggleTheme, isDark } = useTheme();
+  // The DIWO page stays mounted once opened, so leaving it for another menu
+  // and coming back resumes the workflow at the stage it reached instead of
+  // starting again from Code Smell Review. The key starts a fresh session when
+  // a new repository is loaded or the previous workflow was completed.
+  const [diwoOpened, setDiwoOpened] = useState(page === 'orchestrate');
+  const [diwoSession, setDiwoSession] = useState(0);
+  if (page === 'orchestrate' && !diwoOpened) setDiwoOpened(true);
 
   async function handleLogout() {
     await UserService.logout();
@@ -115,6 +126,8 @@ export default function App() {
     localStorage.removeItem('is_guest');
     localStorage.setItem('rfiq_active_page', 'overview');
     setPage('overview');
+    setDiwoOpened(false);
+    setDiwoSession(n => n + 1);
   }
 
   function handleProfileUpdate(updatedUser) {
@@ -132,6 +145,9 @@ export default function App() {
   function handleRepoLoaded(data) {
     setRepoLoaded(true);
     setRepoMeta(data);
+    // A DIWO workflow belongs to the repository it was seeded from.
+    setDiwoOpened(false);
+    setDiwoSession(n => n + 1);
     // Persist the analysis config (threshold, filters, mode, language) from RepositoryInput
     if (data.config) setRepoConfig(data.config);
     // Auto-navigate to CUQA agent after load
@@ -172,6 +188,9 @@ export default function App() {
     setFocusSessionId(saved.id);
     localStorage.setItem('rfiq_active_page', 'reports');
     setPage('reports');
+    // The workflow is closed; the next visit starts a new one.
+    setDiwoOpened(false);
+    setDiwoSession(n => n + 1);
   }
 
   const AGENT_PAGES = ['cuqa', 'rdp', 'transform', 'orchestrate'];
@@ -217,7 +236,7 @@ export default function App() {
         />
       );
       case 'transform':   return <SCTVAAgentPage />;
-      case 'orchestrate': return <DIWOAgentPage onWorkflowComplete={handleWorkflowComplete} />;
+      case 'orchestrate': return null; // rendered persistently below
       case 'reports':     return <Reports focusSessionId={focusSessionId} />;
       case 'evaluation':  return <Evaluation />;
       case 'settings':    return <Settings />;
@@ -467,6 +486,11 @@ export default function App() {
           </div>
         )}
         {renderPage()}
+        {diwoOpened && (
+          <div style={page === 'orchestrate' ? undefined : { display: 'none' }}>
+            <DIWOAgentPage key={diwoSession} onWorkflowComplete={handleWorkflowComplete} />
+          </div>
+        )}
       </main>
 
     </div>

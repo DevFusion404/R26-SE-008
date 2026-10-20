@@ -55,6 +55,12 @@ RUN python -m pip install --no-cache-dir \
     "sentencepiece>=0.1.99" \
     "gunicorn>=21.0.0"
 
+# Bundle CodeBERT during the image build so request-time scoring does not
+# depend on Azure egress or Hugging Face availability.
+ENV HF_HOME=/opt/huggingface
+RUN PYTHONPATH=/install/packages/lib/python3.11/site-packages \
+    python -c "from huggingface_hub import snapshot_download; snapshot_download('microsoft/codebert-base')"
+
 
 # ------------------------------------------------------------
 # Stage 2 - Runtime
@@ -102,8 +108,8 @@ COPY --chown=rdp:rdp config.yaml ./
 # CodeBERT model cache
 ENV HF_HOME=/home/rdp/.cache/huggingface
 
-# Allow downloading CodeBERT when it is not already cached
-ENV TRANSFORMERS_OFFLINE=0
+# The model is bundled during the builder stage.
+ENV TRANSFORMERS_OFFLINE=1
 
 # Avoid unnecessary tokenizer parallel worker warnings
 ENV TOKENIZERS_PARALLELISM=false
@@ -134,6 +140,8 @@ ENV PORT=5000
 # ------------------------------------------------------------
 RUN mkdir -p /home/rdp/.cache/huggingface && \
     chown -R rdp:rdp /home/rdp/.cache
+COPY --from=builder /opt/huggingface/ /home/rdp/.cache/huggingface/
+RUN chown -R rdp:rdp /home/rdp/.cache
 
 
 # ------------------------------------------------------------

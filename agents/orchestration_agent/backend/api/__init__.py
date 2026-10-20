@@ -10,6 +10,7 @@ responsibility:
     integration_routes.py  CUQA / RDP / SCTVA reachability and the CUQA proxy
     git_routes.py          clone, branch, apply, commit, push
     feedback_routes.py     audit logs and the feedback training export
+    github_routes.py       GitHub App webhook receiver and integration status
 
 Every one of them is still mounted at /api, and no endpoint URL, method,
 request body or response body changed in the split — the frontend talks to
@@ -56,11 +57,17 @@ def register_blueprints(app, url_prefix: str = "/api"):
 
     from api.feedback_routes import feedback_bp
     from api.git_routes import git_bp
+    from api.github_routes import github_bp
     from api.integration_routes import integration_bp
     from api.workflow_routes import workflow_bp
 
-    for blueprint in (workflow_bp, integration_bp, git_bp, feedback_bp):
+    for blueprint in (workflow_bp, integration_bp, git_bp, feedback_bp, github_bp):
         app.register_blueprint(blueprint, url_prefix=url_prefix)
+
+    # Any route that names a workflow by <wf_id> requires a signed-in user when
+    # that workflow came from a GitHub PR. Other workflows are untouched.
+    from services.access_service import require_github_workflow_access
+    app.before_request(require_github_workflow_access)
 
     # A service raising is answered exactly as the old inline `return _err(...)`
     # was, so moving the logic out of the handlers changed no status code.
