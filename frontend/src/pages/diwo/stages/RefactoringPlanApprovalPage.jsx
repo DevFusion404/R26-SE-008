@@ -385,7 +385,7 @@ export default function RefactoringPlanApprovalPage({
 
   return (
     <div>
-      <SourceBanner origin={origin} meta={planMeta} />
+      <SourceBanner key={planKey} origin={origin} meta={planMeta} />
 
       <PlanApprovalHeader
         plan={currentPlan}
@@ -593,22 +593,42 @@ function preferencesFor(goal) {
  * that its recommendations were computed without RDP's scoring evidence.
  */
 function SourceBanner({ origin, meta }) {
+  // Dismissed for the plan on screen only: the banner is keyed by plan below,
+  // so a new plan with the same problem warns again.
+  const [dismissed, setDismissed] = useState(false);
+
   const warnings = [];
   if (meta?.plan_warning) warnings.push(`RDP agent unavailable: ${meta.plan_warning}`);
   if (origin === "sample") warnings.push("Sample plan (bundled data) — the RDP agent is unavailable.");
   if (origin !== "rdp") warnings.push("Recommendations for this plan were computed without RDP's scoring evidence.");
-  if (warnings.length === 0) return null;
+  if (warnings.length === 0 || dismissed) return null;
 
   return (
     <div role="note" style={{
+      display: "flex", alignItems: "flex-start", gap: 12,
       marginBottom: 14, padding: "9px 14px", borderRadius: 10,
       background: tint(T.medium, 8), border: `1px solid ${tint(T.medium, 35)}`,
     }}>
-      {warnings.map((w) => (
-        <div key={w} style={{ fontSize: 12, color: T.text, lineHeight: 1.6 }}>
-          <span aria-hidden="true" style={{ color: T.medium }}>⚠ </span>{w}
-        </div>
-      ))}
+      <div style={{ flex: 1, minWidth: 0 }}>
+        {warnings.map((w) => (
+          <div key={w} style={{ fontSize: 12, color: T.text, lineHeight: 1.6 }}>
+            <span aria-hidden="true" style={{ color: T.medium }}>⚠ </span>{w}
+          </div>
+        ))}
+      </div>
+      <button
+        type="button"
+        onClick={() => setDismissed(true)}
+        className="dw-focus"
+        title="Hide these warnings for this plan"
+        style={{
+          flexShrink: 0, padding: "5px 12px", borderRadius: 7, cursor: "pointer",
+          fontSize: 12, fontWeight: 700, whiteSpace: "nowrap",
+          background: T.surface, color: T.text, border: `1px solid ${tint(T.medium, 45)}`,
+        }}
+      >
+        ✕ Dismiss all
+      </button>
     </div>
   );
 }
