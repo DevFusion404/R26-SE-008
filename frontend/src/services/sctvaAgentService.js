@@ -5,12 +5,10 @@ const DEFAULT_OPTIONS = {
   enable_behavior_tests: true,
   timeout_seconds: 10,
   require_compilation: false,
-  // The instruction-tuned local model is the primary candidate generator.
-  // SCTVA's existing validators
-  // still decide whether to retain the candidate and the deterministic
-  // transformers remain the safety fallback.
+  // Deterministic transformers run first. Qwen is only attempted when a rule
+  // cannot safely apply the requested RDP action.
   enable_qwen: true,
-  qwen_mode: 'primary',
+  qwen_mode: 'fallback',
   qwen_device: 'auto',
   qwen_backend: 'auto',
   qwen_openvino_model_path: '',
@@ -70,6 +68,9 @@ const SCTVAAgentService = {
         DEFAULT_OPTIONS.qwen_max_generation_seconds_per_request
       );
     }
+    // Migrate saved browser options from the former model-first default and
+    // keep production transformations rule-first.
+    options.qwen_mode = DEFAULT_OPTIONS.qwen_mode;
     options.qwen_model_id = DEFAULT_OPTIONS.qwen_model_id;
     return options;
   },

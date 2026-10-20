@@ -18,11 +18,12 @@ SCTVA is a safety-first execution agent that consumes source code plus a structu
 
 SCTVA accepts the existing RDP JSON plan unchanged. The planner adapter first
 normalizes that plan and SCTVA resolves the target against the current source.
-In `primary` mode the configured local model proposes the first candidate; in
-`fallback` mode it
-is attempted only when the native transformer produces no change. Every model
-proposal is still subject to SCTVA's syntax, structural, behavioral, invariant,
-and rollback checks.
+In `primary` mode the configured local model proposes the first candidate. In
+the default `fallback` mode SCTVA first completes the deterministic rule-based
+transformation and runs the full syntax, structural, behavioral, invariant, and
+rollback checks. Qwen is attempted only when that complete rule-based output
+fails final validation, and it retries from the original source. Every model
+proposal remains subject to the same SCTVA checks.
 
 The local-model adapter uses only `Qwen/Qwen2.5-Coder-0.5B-Instruct`, an
 instruction-tuned checkpoint for source-transformation requests. When a
@@ -82,7 +83,7 @@ Enable it per request; the RDP plan format is not changed:
     "qwen_runtime_cache": true,
     "qwen_allow_unsupported_actions": false,
     "max_parallel_files": 3,
-    "qwen_mode": "primary"
+    "qwen_mode": "fallback"
   }
 }
 ```
@@ -93,12 +94,14 @@ receive generic safety validation, but do not claim a method-specific
 structural proof. The model never changes files directly and SCTVA rejects its
 candidate on any failed validation.
 
-`qwen_mode` defaults to `primary`: the configured model is attempted first and the
-existing rule-based transformer is used when the model cannot provide a
-syntax-safe candidate. Set it to `fallback` to preserve the earlier behavior
-where deterministic transformations are attempted first.
+`qwen_mode` defaults to `fallback`: the deterministic rule transformer is
+attempted first and the complete result is validated before Qwen is considered.
+Qwen is invoked only when the validated rule-based output must be rolled back.
+This avoids model inference for successful rule transformations while keeping
+the normal candidate validation gates for model fallbacks. Set it to `primary`
+only for explicit model-first experiments.
 
-In primary mode SCTVA resolves the current RDP file, symbol, and line metadata
+When Qwen is invoked, SCTVA resolves the current RDP file, symbol, and line metadata
 before inference. It generates one model candidate for one RDP action at a
 time, using that action's exact target span. This avoids mixing independent
 refactoring contracts into one prompt, which reduced local-model candidate
@@ -148,7 +151,7 @@ of changing the RDP JSON:
 
 ```text
 SCTVA_ENABLE_QWEN=true
-SCTVA_QWEN_MODE=primary
+SCTVA_QWEN_MODE=fallback
 SCTVA_QWEN_DEVICE=cpu
 SCTVA_QWEN_BACKEND=auto
 SCTVA_QWEN_OPENVINO_MODEL_PATH=C:\models\qwen25-coder-05b-openvino
@@ -306,6 +309,47 @@ curl -X POST http://localhost:8002/sctva/execute \
 ```bash
 pytest tests -q
 ```
+
+## Model Evaluation Benchmark
+
+Run Qwen against the included isolated Java, Python, and C RDP-style cases:
+
+```powershell
+python run_model_evaluation.py
+```
+
+The command writes JSON and panel-ready Markdown reports to `evaluation_reports`.
+The report separates language metrics and counts only model output retained after
+final SCTVA validation. Rule-based fallback is reported but never credited as a
+model success. For a quick smoke benchmark, run one case per language:
+
+```powershell
+python run_model_evaluation.py --limit-per-language 1
+```
+
+Run the balanced RDP-aligned benchmark covering every refactoring technique in
+the RDP knowledge base across its supported Java, Python, and C combinations:
+
+```powershell
+python run_model_evaluation.py --suite rdp-full --samples-per-action 1
+```
+
+This generates reproducible positive and invalid-target negative cases using
+seed `26008`, writes separate datasets for Java, Python, and C, and reports
+model-only TP/FP/TN/FN, Accuracy, Precision, Recall, Specificity, and F1. A
+prediction counts as positive only when Qwen output survives final SCTVA
+validation. Rule-based fallback is never credited to the model.
+
+Generate and inspect the datasets without loading Qwen:
+
+```powershell
+python run_model_evaluation.py --suite rdp-full --dataset-only --seed 26008
+```
+
+The RDP 120k CSV is recorded as metadata-distribution evidence. Because that
+CSV contains no source code and no C rows, executable source fixtures are
+seeded synthetic cases based on the RDP knowledge catalog and SCTVA contracts.
+Do not present these scores as an external real-world benchmark.
 
 ## Example Payloads
 

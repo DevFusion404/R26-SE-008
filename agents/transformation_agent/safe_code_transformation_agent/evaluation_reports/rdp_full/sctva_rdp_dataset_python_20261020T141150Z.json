@@ -1,0 +1,568 @@
+[
+  {
+    "case_id": "python_extract_python_class_1_r5222_positive",
+    "language": "python",
+    "file_name": "benchmark/python/extract-python-class_R5222.py",
+    "source_code": "class BaseR5222:\n    def base_value(self):\n        return 1\n\n\nclass HelperR5222:\n    def apply(self, value):\n        return value * 2\n\n\nclass AccountR5222(BaseR5222):\n    def __init__(self):\n        self.amount = 760\n        self.helper = HelperR5222()\n\n    def calculate(self, value, tax, discount):\n        subtotal = value + tax\n        adjusted = subtotal - discount\n        total = adjusted + self.base_value()\n        return total\n\n    def process(self, value, tax, discount, fee):\n        return value + tax - discount + fee\n\n    def delegated(self, value):\n        return self.helper.apply(value)\n\n    def category_fee(self, kind):\n        if kind == \"premium\":\n            return self.amount * 2\n        return self.amount\n\n    def nested(self, value):\n        if value > 0:\n            if value < 100:\n                return value\n        return 0\n\n    def parse(self, text):\n        try:\n            return int(text)\n        except:\n            return 0\n\n    def unused_R5222(self):\n        return -1\n\n\nclass ChildR5222(BaseR5222):\n    def shared_R5222(self, value):\n        return value + self.base_value()\n",
+    "action": {
+      "action_type": "extract_python_class",
+      "source_refactoring": "Extract Class",
+      "parameters": {
+        "source_file": "benchmark/python/extract-python-class_R5222.py",
+        "source_class": "AccountR5222",
+        "new_class_name": "AccountDetailsR5222",
+        "methods_to_extract": [
+          "delegated"
+        ]
+      }
+    },
+    "ground_truth": {
+      "model_should_accept": true,
+      "label": "positive"
+    },
+    "dataset_split": "positive",
+    "provenance": "rdp_catalog_seeded_synthetic"
+  },
+  {
+    "case_id": "python_extract_python_class_1_r5222_negative",
+    "language": "python",
+    "file_name": "benchmark/python/extract-python-class_R5222.py",
+    "source_code": "class BaseR5222:\n    def base_value(self):\n        return 1\n\n\nclass HelperR5222:\n    def apply(self, value):\n        return value * 2\n\n\nclass AccountR5222(BaseR5222):\n    def __init__(self):\n        self.amount = 760\n        self.helper = HelperR5222()\n\n    def calculate(self, value, tax, discount):\n        subtotal = value + tax\n        adjusted = subtotal - discount\n        total = adjusted + self.base_value()\n        return total\n\n    def process(self, value, tax, discount, fee):\n        return value + tax - discount + fee\n\n    def delegated(self, value):\n        return self.helper.apply(value)\n\n    def category_fee(self, kind):\n        if kind == \"premium\":\n            return self.amount * 2\n        return self.amount\n\n    def nested(self, value):\n        if value > 0:\n            if value < 100:\n                return value\n        return 0\n\n    def parse(self, text):\n        try:\n            return int(text)\n        except:\n            return 0\n\n    def unused_R5222(self):\n        return -1\n\n\nclass ChildR5222(BaseR5222):\n    def shared_R5222(self, value):\n        return value + self.base_value()\n",
+    "action": {
+      "action_type": "extract_python_class",
+      "source_refactoring": "Extract Class",
+      "parameters": {
+        "source_file": "benchmark/python/extract-python-class_R5222.py",
+        "source_class": "MissingR5222",
+        "new_class_name": "AccountDetailsR5222",
+        "methods_to_extract": [
+          "MissingR5222"
+        ]
+      }
+    },
+    "ground_truth": {
+      "model_should_accept": false,
+      "label": "negative"
+    },
+    "dataset_split": "negative",
+    "provenance": "rdp_catalog_seeded_synthetic"
+  },
+  {
+    "case_id": "python_extract_method_1_r4609_positive",
+    "language": "python",
+    "file_name": "benchmark/python/extract-method_R4609.py",
+    "source_code": "class BaseR4609:\n    def base_value(self):\n        return 1\n\n\nclass HelperR4609:\n    def apply(self, value):\n        return value * 2\n\n\nclass AccountR4609(BaseR4609):\n    def __init__(self):\n        self.amount = 697\n        self.helper = HelperR4609()\n\n    def calculate(self, value, tax, discount):\n        subtotal = value + tax\n        adjusted = subtotal - discount\n        total = adjusted + self.base_value()\n        return total\n\n    def process(self, value, tax, discount, fee):\n        return value + tax - discount + fee\n\n    def delegated(self, value):\n        return self.helper.apply(value)\n\n    def category_fee(self, kind):\n        if kind == \"premium\":\n            return self.amount * 2\n        return self.amount\n\n    def nested(self, value):\n        if value > 0:\n            if value < 100:\n                return value\n        return 0\n\n    def parse(self, text):\n        try:\n            return int(text)\n        except:\n            return 0\n\n    def unused_R4609(self):\n        return -1\n\n\nclass ChildR4609(BaseR4609):\n    def shared_R4609(self, value):\n        return value + self.base_value()\n",
+    "action": {
+      "action_type": "extract_method",
+      "source_refactoring": "Extract Method",
+      "parameters": {
+        "source_file": "benchmark/python/extract-method_R4609.py",
+        "source_method": "calculate",
+        "method": "calculate",
+        "source_class": "AccountR4609",
+        "start_line": 17,
+        "end_line": 20,
+        "new_method_name": "calculate_core_R4609"
+      }
+    },
+    "ground_truth": {
+      "model_should_accept": true,
+      "label": "positive"
+    },
+    "dataset_split": "positive",
+    "provenance": "rdp_catalog_seeded_synthetic"
+  },
+  {
+    "case_id": "python_extract_method_1_r4609_negative",
+    "language": "python",
+    "file_name": "benchmark/python/extract-method_R4609.py",
+    "source_code": "class BaseR4609:\n    def base_value(self):\n        return 1\n\n\nclass HelperR4609:\n    def apply(self, value):\n        return value * 2\n\n\nclass AccountR4609(BaseR4609):\n    def __init__(self):\n        self.amount = 697\n        self.helper = HelperR4609()\n\n    def calculate(self, value, tax, discount):\n        subtotal = value + tax\n        adjusted = subtotal - discount\n        total = adjusted + self.base_value()\n        return total\n\n    def process(self, value, tax, discount, fee):\n        return value + tax - discount + fee\n\n    def delegated(self, value):\n        return self.helper.apply(value)\n\n    def category_fee(self, kind):\n        if kind == \"premium\":\n            return self.amount * 2\n        return self.amount\n\n    def nested(self, value):\n        if value > 0:\n            if value < 100:\n                return value\n        return 0\n\n    def parse(self, text):\n        try:\n            return int(text)\n        except:\n            return 0\n\n    def unused_R4609(self):\n        return -1\n\n\nclass ChildR4609(BaseR4609):\n    def shared_R4609(self, value):\n        return value + self.base_value()\n",
+    "action": {
+      "action_type": "extract_method",
+      "source_refactoring": "Extract Method",
+      "parameters": {
+        "source_file": "benchmark/python/extract-method_R4609.py",
+        "source_method": "MissingR4609",
+        "method": "MissingR4609",
+        "source_class": "MissingR4609",
+        "start_line": 151,
+        "end_line": 152,
+        "new_method_name": "calculate_core_R4609"
+      }
+    },
+    "ground_truth": {
+      "model_should_accept": false,
+      "label": "negative"
+    },
+    "dataset_split": "negative",
+    "provenance": "rdp_catalog_seeded_synthetic"
+  },
+  {
+    "case_id": "python_hide_delegate_1_r2664_positive",
+    "language": "python",
+    "file_name": "benchmark/python/hide-delegate_R2664.py",
+    "source_code": "class BaseR2664:\n    def base_value(self):\n        return 1\n\n\nclass HelperR2664:\n    def apply(self, value):\n        return value * 2\n\n\nclass AccountR2664(BaseR2664):\n    def __init__(self):\n        self.amount = 961\n        self.helper = HelperR2664()\n\n    def calculate(self, value, tax, discount):\n        subtotal = value + tax\n        adjusted = subtotal - discount\n        total = adjusted + self.base_value()\n        return total\n\n    def process(self, value, tax, discount, fee):\n        return value + tax - discount + fee\n\n    def delegated(self, value):\n        return self.helper.apply(value)\n\n    def category_fee(self, kind):\n        if kind == \"premium\":\n            return self.amount * 2\n        return self.amount\n\n    def nested(self, value):\n        if value > 0:\n            if value < 100:\n                return value\n        return 0\n\n    def parse(self, text):\n        try:\n            return int(text)\n        except:\n            return 0\n\n    def unused_R2664(self):\n        return -1\n\n\nclass ChildR2664(BaseR2664):\n    def shared_R2664(self, value):\n        return value + self.base_value()\n",
+    "action": {
+      "action_type": "hide_delegate",
+      "source_refactoring": "Hide Delegate",
+      "parameters": {
+        "source_file": "benchmark/python/hide-delegate_R2664.py",
+        "source_class": "AccountR2664",
+        "method": "delegated",
+        "source_method": "delegated"
+      }
+    },
+    "ground_truth": {
+      "model_should_accept": true,
+      "label": "positive"
+    },
+    "dataset_split": "positive",
+    "provenance": "rdp_catalog_seeded_synthetic"
+  },
+  {
+    "case_id": "python_hide_delegate_1_r2664_negative",
+    "language": "python",
+    "file_name": "benchmark/python/hide-delegate_R2664.py",
+    "source_code": "class BaseR2664:\n    def base_value(self):\n        return 1\n\n\nclass HelperR2664:\n    def apply(self, value):\n        return value * 2\n\n\nclass AccountR2664(BaseR2664):\n    def __init__(self):\n        self.amount = 961\n        self.helper = HelperR2664()\n\n    def calculate(self, value, tax, discount):\n        subtotal = value + tax\n        adjusted = subtotal - discount\n        total = adjusted + self.base_value()\n        return total\n\n    def process(self, value, tax, discount, fee):\n        return value + tax - discount + fee\n\n    def delegated(self, value):\n        return self.helper.apply(value)\n\n    def category_fee(self, kind):\n        if kind == \"premium\":\n            return self.amount * 2\n        return self.amount\n\n    def nested(self, value):\n        if value > 0:\n            if value < 100:\n                return value\n        return 0\n\n    def parse(self, text):\n        try:\n            return int(text)\n        except:\n            return 0\n\n    def unused_R2664(self):\n        return -1\n\n\nclass ChildR2664(BaseR2664):\n    def shared_R2664(self, value):\n        return value + self.base_value()\n",
+    "action": {
+      "action_type": "hide_delegate",
+      "source_refactoring": "Hide Delegate",
+      "parameters": {
+        "source_file": "benchmark/python/hide-delegate_R2664.py",
+        "source_class": "MissingR2664",
+        "method": "MissingR2664",
+        "source_method": "MissingR2664"
+      }
+    },
+    "ground_truth": {
+      "model_should_accept": false,
+      "label": "negative"
+    },
+    "dataset_split": "negative",
+    "provenance": "rdp_catalog_seeded_synthetic"
+  },
+  {
+    "case_id": "python_inline_python_class_1_r5414_positive",
+    "language": "python",
+    "file_name": "benchmark/python/inline-python-class_R5414.py",
+    "source_code": "class BaseR5414:\n    def base_value(self):\n        return 1\n\n\nclass HelperR5414:\n    def apply(self, value):\n        return value * 2\n\n\nclass AccountR5414(BaseR5414):\n    def __init__(self):\n        self.amount = 621\n        self.helper = HelperR5414()\n\n    def calculate(self, value, tax, discount):\n        subtotal = value + tax\n        adjusted = subtotal - discount\n        total = adjusted + self.base_value()\n        return total\n\n    def process(self, value, tax, discount, fee):\n        return value + tax - discount + fee\n\n    def delegated(self, value):\n        return self.helper.apply(value)\n\n    def category_fee(self, kind):\n        if kind == \"premium\":\n            return self.amount * 2\n        return self.amount\n\n    def nested(self, value):\n        if value > 0:\n            if value < 100:\n                return value\n        return 0\n\n    def parse(self, text):\n        try:\n            return int(text)\n        except:\n            return 0\n\n    def unused_R5414(self):\n        return -1\n\n\nclass ChildR5414(BaseR5414):\n    def shared_R5414(self, value):\n        return value + self.base_value()\n",
+    "action": {
+      "action_type": "inline_python_class",
+      "source_refactoring": "Inline Class",
+      "parameters": {
+        "source_file": "benchmark/python/inline-python-class_R5414.py",
+        "source_class": "AccountR5414",
+        "class_to_inline": "HelperR5414",
+        "target_class": "HelperR5414"
+      }
+    },
+    "ground_truth": {
+      "model_should_accept": true,
+      "label": "positive"
+    },
+    "dataset_split": "positive",
+    "provenance": "rdp_catalog_seeded_synthetic"
+  },
+  {
+    "case_id": "python_inline_python_class_1_r5414_negative",
+    "language": "python",
+    "file_name": "benchmark/python/inline-python-class_R5414.py",
+    "source_code": "class BaseR5414:\n    def base_value(self):\n        return 1\n\n\nclass HelperR5414:\n    def apply(self, value):\n        return value * 2\n\n\nclass AccountR5414(BaseR5414):\n    def __init__(self):\n        self.amount = 621\n        self.helper = HelperR5414()\n\n    def calculate(self, value, tax, discount):\n        subtotal = value + tax\n        adjusted = subtotal - discount\n        total = adjusted + self.base_value()\n        return total\n\n    def process(self, value, tax, discount, fee):\n        return value + tax - discount + fee\n\n    def delegated(self, value):\n        return self.helper.apply(value)\n\n    def category_fee(self, kind):\n        if kind == \"premium\":\n            return self.amount * 2\n        return self.amount\n\n    def nested(self, value):\n        if value > 0:\n            if value < 100:\n                return value\n        return 0\n\n    def parse(self, text):\n        try:\n            return int(text)\n        except:\n            return 0\n\n    def unused_R5414(self):\n        return -1\n\n\nclass ChildR5414(BaseR5414):\n    def shared_R5414(self, value):\n        return value + self.base_value()\n",
+    "action": {
+      "action_type": "inline_python_class",
+      "source_refactoring": "Inline Class",
+      "parameters": {
+        "source_file": "benchmark/python/inline-python-class_R5414.py",
+        "source_class": "MissingR5414",
+        "class_to_inline": "MissingR5414",
+        "target_class": "MissingR5414"
+      }
+    },
+    "ground_truth": {
+      "model_should_accept": false,
+      "label": "negative"
+    },
+    "dataset_split": "negative",
+    "provenance": "rdp_catalog_seeded_synthetic"
+  },
+  {
+    "case_id": "python_introduce_constant_1_r4422_positive",
+    "language": "python",
+    "file_name": "benchmark/python/introduce-constant_R4422.py",
+    "source_code": "class BaseR4422:\n    def base_value(self):\n        return 1\n\n\nclass HelperR4422:\n    def apply(self, value):\n        return value * 2\n\n\nclass AccountR4422(BaseR4422):\n    def __init__(self):\n        self.amount = 824\n        self.helper = HelperR4422()\n\n    def calculate(self, value, tax, discount):\n        subtotal = value + tax\n        adjusted = subtotal - discount\n        total = adjusted + self.base_value()\n        return total\n\n    def process(self, value, tax, discount, fee):\n        return value + tax - discount + fee\n\n    def delegated(self, value):\n        return self.helper.apply(value)\n\n    def category_fee(self, kind):\n        if kind == \"premium\":\n            return self.amount * 2\n        return self.amount\n\n    def nested(self, value):\n        if value > 0:\n            if value < 100:\n                return value\n        return 0\n\n    def parse(self, text):\n        try:\n            return int(text)\n        except:\n            return 0\n\n    def unused_R4422(self):\n        return -1\n\n\nclass ChildR4422(BaseR4422):\n    def shared_R4422(self, value):\n        return value + self.base_value()\n",
+    "action": {
+      "action_type": "introduce_constant",
+      "source_refactoring": "Introduce Constant",
+      "parameters": {
+        "source_file": "benchmark/python/introduce-constant_R4422.py",
+        "literal_value": 824,
+        "constant_name": "DEFAULT_AMOUNT_R4422",
+        "source_line": 13,
+        "source_class": "AccountR4422",
+        "field_name": "",
+        "source_method": "__init__"
+      }
+    },
+    "ground_truth": {
+      "model_should_accept": true,
+      "label": "positive"
+    },
+    "dataset_split": "positive",
+    "provenance": "rdp_catalog_seeded_synthetic"
+  },
+  {
+    "case_id": "python_introduce_constant_1_r4422_negative",
+    "language": "python",
+    "file_name": "benchmark/python/introduce-constant_R4422.py",
+    "source_code": "class BaseR4422:\n    def base_value(self):\n        return 1\n\n\nclass HelperR4422:\n    def apply(self, value):\n        return value * 2\n\n\nclass AccountR4422(BaseR4422):\n    def __init__(self):\n        self.amount = 824\n        self.helper = HelperR4422()\n\n    def calculate(self, value, tax, discount):\n        subtotal = value + tax\n        adjusted = subtotal - discount\n        total = adjusted + self.base_value()\n        return total\n\n    def process(self, value, tax, discount, fee):\n        return value + tax - discount + fee\n\n    def delegated(self, value):\n        return self.helper.apply(value)\n\n    def category_fee(self, kind):\n        if kind == \"premium\":\n            return self.amount * 2\n        return self.amount\n\n    def nested(self, value):\n        if value > 0:\n            if value < 100:\n                return value\n        return 0\n\n    def parse(self, text):\n        try:\n            return int(text)\n        except:\n            return 0\n\n    def unused_R4422(self):\n        return -1\n\n\nclass ChildR4422(BaseR4422):\n    def shared_R4422(self, value):\n        return value + self.base_value()\n",
+    "action": {
+      "action_type": "introduce_constant",
+      "source_refactoring": "Introduce Constant",
+      "parameters": {
+        "source_file": "benchmark/python/introduce-constant_R4422.py",
+        "literal_value": 900005,
+        "constant_name": "DEFAULT_AMOUNT_R4422",
+        "source_line": 151,
+        "source_class": "MissingR4422",
+        "field_name": "",
+        "source_method": "MissingR4422"
+      }
+    },
+    "ground_truth": {
+      "model_should_accept": false,
+      "label": "negative"
+    },
+    "dataset_split": "negative",
+    "provenance": "rdp_catalog_seeded_synthetic"
+  },
+  {
+    "case_id": "python_introduce_python_parameter_object_1_r5881_positive",
+    "language": "python",
+    "file_name": "benchmark/python/introduce-python-parameter-object_R5881.py",
+    "source_code": "class BaseR5881:\n    def base_value(self):\n        return 1\n\n\nclass HelperR5881:\n    def apply(self, value):\n        return value * 2\n\n\nclass AccountR5881(BaseR5881):\n    def __init__(self):\n        self.amount = 725\n        self.helper = HelperR5881()\n\n    def calculate(self, value, tax, discount):\n        subtotal = value + tax\n        adjusted = subtotal - discount\n        total = adjusted + self.base_value()\n        return total\n\n    def process(self, value, tax, discount, fee):\n        return value + tax - discount + fee\n\n    def delegated(self, value):\n        return self.helper.apply(value)\n\n    def category_fee(self, kind):\n        if kind == \"premium\":\n            return self.amount * 2\n        return self.amount\n\n    def nested(self, value):\n        if value > 0:\n            if value < 100:\n                return value\n        return 0\n\n    def parse(self, text):\n        try:\n            return int(text)\n        except:\n            return 0\n\n    def unused_R5881(self):\n        return -1\n\n\nclass ChildR5881(BaseR5881):\n    def shared_R5881(self, value):\n        return value + self.base_value()\n",
+    "action": {
+      "action_type": "introduce_python_parameter_object",
+      "source_refactoring": "Introduce Parameter Object",
+      "parameters": {
+        "source_file": "benchmark/python/introduce-python-parameter-object_R5881.py",
+        "source_class": "AccountR5881",
+        "source_method": "process",
+        "method": "process",
+        "parameter_object_name": "ProcessParamsR5881",
+        "parameter_name": "params"
+      }
+    },
+    "ground_truth": {
+      "model_should_accept": true,
+      "label": "positive"
+    },
+    "dataset_split": "positive",
+    "provenance": "rdp_catalog_seeded_synthetic"
+  },
+  {
+    "case_id": "python_introduce_python_parameter_object_1_r5881_negative",
+    "language": "python",
+    "file_name": "benchmark/python/introduce-python-parameter-object_R5881.py",
+    "source_code": "class BaseR5881:\n    def base_value(self):\n        return 1\n\n\nclass HelperR5881:\n    def apply(self, value):\n        return value * 2\n\n\nclass AccountR5881(BaseR5881):\n    def __init__(self):\n        self.amount = 725\n        self.helper = HelperR5881()\n\n    def calculate(self, value, tax, discount):\n        subtotal = value + tax\n        adjusted = subtotal - discount\n        total = adjusted + self.base_value()\n        return total\n\n    def process(self, value, tax, discount, fee):\n        return value + tax - discount + fee\n\n    def delegated(self, value):\n        return self.helper.apply(value)\n\n    def category_fee(self, kind):\n        if kind == \"premium\":\n            return self.amount * 2\n        return self.amount\n\n    def nested(self, value):\n        if value > 0:\n            if value < 100:\n                return value\n        return 0\n\n    def parse(self, text):\n        try:\n            return int(text)\n        except:\n            return 0\n\n    def unused_R5881(self):\n        return -1\n\n\nclass ChildR5881(BaseR5881):\n    def shared_R5881(self, value):\n        return value + self.base_value()\n",
+    "action": {
+      "action_type": "introduce_python_parameter_object",
+      "source_refactoring": "Introduce Parameter Object",
+      "parameters": {
+        "source_file": "benchmark/python/introduce-python-parameter-object_R5881.py",
+        "source_class": "MissingR5881",
+        "source_method": "MissingR5881",
+        "method": "MissingR5881",
+        "parameter_object_name": "ProcessParamsR5881",
+        "parameter_name": "params"
+      }
+    },
+    "ground_truth": {
+      "model_should_accept": false,
+      "label": "negative"
+    },
+    "dataset_split": "negative",
+    "provenance": "rdp_catalog_seeded_synthetic"
+  },
+  {
+    "case_id": "python_move_python_method_1_r2949_positive",
+    "language": "python",
+    "file_name": "benchmark/python/move-python-method_R2949.py",
+    "source_code": "class BaseR2949:\n    def base_value(self):\n        return 1\n\n\nclass HelperR2949:\n    def apply(self, value):\n        return value * 2\n\n\nclass AccountR2949(BaseR2949):\n    def __init__(self):\n        self.amount = 569\n        self.helper = HelperR2949()\n\n    def calculate(self, value, tax, discount):\n        subtotal = value + tax\n        adjusted = subtotal - discount\n        total = adjusted + self.base_value()\n        return total\n\n    def process(self, value, tax, discount, fee):\n        return value + tax - discount + fee\n\n    def delegated(self, value):\n        return self.helper.apply(value)\n\n    def category_fee(self, kind):\n        if kind == \"premium\":\n            return self.amount * 2\n        return self.amount\n\n    def nested(self, value):\n        if value > 0:\n            if value < 100:\n                return value\n        return 0\n\n    def parse(self, text):\n        try:\n            return int(text)\n        except:\n            return 0\n\n    def unused_R2949(self):\n        return -1\n\n\nclass ChildR2949(BaseR2949):\n    def shared_R2949(self, value):\n        return value + self.base_value()\n",
+    "action": {
+      "action_type": "move_python_method",
+      "source_refactoring": "Move Method",
+      "parameters": {
+        "source_file": "benchmark/python/move-python-method_R2949.py",
+        "source_class": "AccountR2949",
+        "destination_class": "HelperR2949",
+        "source_method": "delegated",
+        "method": "delegated",
+        "destination_parameter": "helper"
+      }
+    },
+    "ground_truth": {
+      "model_should_accept": true,
+      "label": "positive"
+    },
+    "dataset_split": "positive",
+    "provenance": "rdp_catalog_seeded_synthetic"
+  },
+  {
+    "case_id": "python_move_python_method_1_r2949_negative",
+    "language": "python",
+    "file_name": "benchmark/python/move-python-method_R2949.py",
+    "source_code": "class BaseR2949:\n    def base_value(self):\n        return 1\n\n\nclass HelperR2949:\n    def apply(self, value):\n        return value * 2\n\n\nclass AccountR2949(BaseR2949):\n    def __init__(self):\n        self.amount = 569\n        self.helper = HelperR2949()\n\n    def calculate(self, value, tax, discount):\n        subtotal = value + tax\n        adjusted = subtotal - discount\n        total = adjusted + self.base_value()\n        return total\n\n    def process(self, value, tax, discount, fee):\n        return value + tax - discount + fee\n\n    def delegated(self, value):\n        return self.helper.apply(value)\n\n    def category_fee(self, kind):\n        if kind == \"premium\":\n            return self.amount * 2\n        return self.amount\n\n    def nested(self, value):\n        if value > 0:\n            if value < 100:\n                return value\n        return 0\n\n    def parse(self, text):\n        try:\n            return int(text)\n        except:\n            return 0\n\n    def unused_R2949(self):\n        return -1\n\n\nclass ChildR2949(BaseR2949):\n    def shared_R2949(self, value):\n        return value + self.base_value()\n",
+    "action": {
+      "action_type": "move_python_method",
+      "source_refactoring": "Move Method",
+      "parameters": {
+        "source_file": "benchmark/python/move-python-method_R2949.py",
+        "source_class": "MissingR2949",
+        "destination_class": "HelperR2949",
+        "source_method": "MissingR2949",
+        "method": "MissingR2949",
+        "destination_parameter": "helper"
+      }
+    },
+    "ground_truth": {
+      "model_should_accept": false,
+      "label": "negative"
+    },
+    "dataset_split": "negative",
+    "provenance": "rdp_catalog_seeded_synthetic"
+  },
+  {
+    "case_id": "python_remove_dead_code_1_r9379_positive",
+    "language": "python",
+    "file_name": "benchmark/python/remove-dead-code_R9379.py",
+    "source_code": "class BaseR9379:\n    def base_value(self):\n        return 1\n\n\nclass HelperR9379:\n    def apply(self, value):\n        return value * 2\n\n\nclass AccountR9379(BaseR9379):\n    def __init__(self):\n        self.amount = 701\n        self.helper = HelperR9379()\n\n    def calculate(self, value, tax, discount):\n        subtotal = value + tax\n        adjusted = subtotal - discount\n        total = adjusted + self.base_value()\n        return total\n\n    def process(self, value, tax, discount, fee):\n        return value + tax - discount + fee\n\n    def delegated(self, value):\n        return self.helper.apply(value)\n\n    def category_fee(self, kind):\n        if kind == \"premium\":\n            return self.amount * 2\n        return self.amount\n\n    def nested(self, value):\n        if value > 0:\n            if value < 100:\n                return value\n        return 0\n\n    def parse(self, text):\n        try:\n            return int(text)\n        except:\n            return 0\n\n    def unused_R9379(self):\n        return -1\n\n\nclass ChildR9379(BaseR9379):\n    def shared_R9379(self, value):\n        return value + self.base_value()\n",
+    "action": {
+      "action_type": "remove_dead_code",
+      "source_refactoring": "Remove Dead Code",
+      "parameters": {
+        "source_file": "benchmark/python/remove-dead-code_R9379.py",
+        "source_class": "AccountR9379",
+        "source_method": "unused_R9379",
+        "method": "unused_R9379",
+        "target_name": "unused_R9379",
+        "target_kind": "method"
+      }
+    },
+    "ground_truth": {
+      "model_should_accept": true,
+      "label": "positive"
+    },
+    "dataset_split": "positive",
+    "provenance": "rdp_catalog_seeded_synthetic"
+  },
+  {
+    "case_id": "python_remove_dead_code_1_r9379_negative",
+    "language": "python",
+    "file_name": "benchmark/python/remove-dead-code_R9379.py",
+    "source_code": "class BaseR9379:\n    def base_value(self):\n        return 1\n\n\nclass HelperR9379:\n    def apply(self, value):\n        return value * 2\n\n\nclass AccountR9379(BaseR9379):\n    def __init__(self):\n        self.amount = 701\n        self.helper = HelperR9379()\n\n    def calculate(self, value, tax, discount):\n        subtotal = value + tax\n        adjusted = subtotal - discount\n        total = adjusted + self.base_value()\n        return total\n\n    def process(self, value, tax, discount, fee):\n        return value + tax - discount + fee\n\n    def delegated(self, value):\n        return self.helper.apply(value)\n\n    def category_fee(self, kind):\n        if kind == \"premium\":\n            return self.amount * 2\n        return self.amount\n\n    def nested(self, value):\n        if value > 0:\n            if value < 100:\n                return value\n        return 0\n\n    def parse(self, text):\n        try:\n            return int(text)\n        except:\n            return 0\n\n    def unused_R9379(self):\n        return -1\n\n\nclass ChildR9379(BaseR9379):\n    def shared_R9379(self, value):\n        return value + self.base_value()\n",
+    "action": {
+      "action_type": "remove_dead_code",
+      "source_refactoring": "Remove Dead Code",
+      "parameters": {
+        "source_file": "benchmark/python/remove-dead-code_R9379.py",
+        "source_class": "MissingR9379",
+        "source_method": "MissingR9379",
+        "method": "MissingR9379",
+        "target_name": "MissingR9379",
+        "target_kind": "method"
+      }
+    },
+    "ground_truth": {
+      "model_should_accept": false,
+      "label": "negative"
+    },
+    "dataset_split": "negative",
+    "provenance": "rdp_catalog_seeded_synthetic"
+  },
+  {
+    "case_id": "python_rename_method_1_r1293_positive",
+    "language": "python",
+    "file_name": "benchmark/python/rename-method_R1293.py",
+    "source_code": "class BaseR1293:\n    def base_value(self):\n        return 1\n\n\nclass HelperR1293:\n    def apply(self, value):\n        return value * 2\n\n\nclass AccountR1293(BaseR1293):\n    def __init__(self):\n        self.amount = 592\n        self.helper = HelperR1293()\n\n    def calculate(self, value, tax, discount):\n        subtotal = value + tax\n        adjusted = subtotal - discount\n        total = adjusted + self.base_value()\n        return total\n\n    def process(self, value, tax, discount, fee):\n        return value + tax - discount + fee\n\n    def delegated(self, value):\n        return self.helper.apply(value)\n\n    def category_fee(self, kind):\n        if kind == \"premium\":\n            return self.amount * 2\n        return self.amount\n\n    def nested(self, value):\n        if value > 0:\n            if value < 100:\n                return value\n        return 0\n\n    def parse(self, text):\n        try:\n            return int(text)\n        except:\n            return 0\n\n    def unused_R1293(self):\n        return -1\n\n\nclass ChildR1293(BaseR1293):\n    def shared_R1293(self, value):\n        return value + self.base_value()\n",
+    "action": {
+      "action_type": "rename_method",
+      "source_refactoring": "Rename Method",
+      "parameters": {
+        "source_file": "benchmark/python/rename-method_R1293.py",
+        "source_class": "AccountR1293",
+        "source_method": "calculate",
+        "method": "calculate",
+        "old_name": "calculate",
+        "new_name": "compute_r1293"
+      }
+    },
+    "ground_truth": {
+      "model_should_accept": true,
+      "label": "positive"
+    },
+    "dataset_split": "positive",
+    "provenance": "rdp_catalog_seeded_synthetic"
+  },
+  {
+    "case_id": "python_rename_method_1_r1293_negative",
+    "language": "python",
+    "file_name": "benchmark/python/rename-method_R1293.py",
+    "source_code": "class BaseR1293:\n    def base_value(self):\n        return 1\n\n\nclass HelperR1293:\n    def apply(self, value):\n        return value * 2\n\n\nclass AccountR1293(BaseR1293):\n    def __init__(self):\n        self.amount = 592\n        self.helper = HelperR1293()\n\n    def calculate(self, value, tax, discount):\n        subtotal = value + tax\n        adjusted = subtotal - discount\n        total = adjusted + self.base_value()\n        return total\n\n    def process(self, value, tax, discount, fee):\n        return value + tax - discount + fee\n\n    def delegated(self, value):\n        return self.helper.apply(value)\n\n    def category_fee(self, kind):\n        if kind == \"premium\":\n            return self.amount * 2\n        return self.amount\n\n    def nested(self, value):\n        if value > 0:\n            if value < 100:\n                return value\n        return 0\n\n    def parse(self, text):\n        try:\n            return int(text)\n        except:\n            return 0\n\n    def unused_R1293(self):\n        return -1\n\n\nclass ChildR1293(BaseR1293):\n    def shared_R1293(self, value):\n        return value + self.base_value()\n",
+    "action": {
+      "action_type": "rename_method",
+      "source_refactoring": "Rename Method",
+      "parameters": {
+        "source_file": "benchmark/python/rename-method_R1293.py",
+        "source_class": "MissingR1293",
+        "source_method": "MissingR1293",
+        "method": "MissingR1293",
+        "old_name": "MissingR1293",
+        "new_name": "compute_r1293"
+      }
+    },
+    "ground_truth": {
+      "model_should_accept": false,
+      "label": "negative"
+    },
+    "dataset_split": "negative",
+    "provenance": "rdp_catalog_seeded_synthetic"
+  },
+  {
+    "case_id": "python_narrow_exception_handler_1_r1935_positive",
+    "language": "python",
+    "file_name": "benchmark/python/narrow-exception-handler_R1935.py",
+    "source_code": "class BaseR1935:\n    def base_value(self):\n        return 1\n\n\nclass HelperR1935:\n    def apply(self, value):\n        return value * 2\n\n\nclass AccountR1935(BaseR1935):\n    def __init__(self):\n        self.amount = 617\n        self.helper = HelperR1935()\n\n    def calculate(self, value, tax, discount):\n        subtotal = value + tax\n        adjusted = subtotal - discount\n        total = adjusted + self.base_value()\n        return total\n\n    def process(self, value, tax, discount, fee):\n        return value + tax - discount + fee\n\n    def delegated(self, value):\n        return self.helper.apply(value)\n\n    def category_fee(self, kind):\n        if kind == \"premium\":\n            return self.amount * 2\n        return self.amount\n\n    def nested(self, value):\n        if value > 0:\n            if value < 100:\n                return value\n        return 0\n\n    def parse(self, text):\n        try:\n            return int(text)\n        except:\n            return 0\n\n    def unused_R1935(self):\n        return -1\n\n\nclass ChildR1935(BaseR1935):\n    def shared_R1935(self, value):\n        return value + self.base_value()\n",
+    "action": {
+      "action_type": "narrow_exception_handler",
+      "source_refactoring": "Replace Bare Except with Specific Exception",
+      "parameters": {
+        "source_file": "benchmark/python/narrow-exception-handler_R1935.py",
+        "source_class": "AccountR1935",
+        "source_method": "parse",
+        "method": "parse",
+        "source_line": 42,
+        "target_exception_type": "ValueError",
+        "replacement_exception": "ValueError"
+      }
+    },
+    "ground_truth": {
+      "model_should_accept": true,
+      "label": "positive"
+    },
+    "dataset_split": "positive",
+    "provenance": "rdp_catalog_seeded_synthetic"
+  },
+  {
+    "case_id": "python_narrow_exception_handler_1_r1935_negative",
+    "language": "python",
+    "file_name": "benchmark/python/narrow-exception-handler_R1935.py",
+    "source_code": "class BaseR1935:\n    def base_value(self):\n        return 1\n\n\nclass HelperR1935:\n    def apply(self, value):\n        return value * 2\n\n\nclass AccountR1935(BaseR1935):\n    def __init__(self):\n        self.amount = 617\n        self.helper = HelperR1935()\n\n    def calculate(self, value, tax, discount):\n        subtotal = value + tax\n        adjusted = subtotal - discount\n        total = adjusted + self.base_value()\n        return total\n\n    def process(self, value, tax, discount, fee):\n        return value + tax - discount + fee\n\n    def delegated(self, value):\n        return self.helper.apply(value)\n\n    def category_fee(self, kind):\n        if kind == \"premium\":\n            return self.amount * 2\n        return self.amount\n\n    def nested(self, value):\n        if value > 0:\n            if value < 100:\n                return value\n        return 0\n\n    def parse(self, text):\n        try:\n            return int(text)\n        except:\n            return 0\n\n    def unused_R1935(self):\n        return -1\n\n\nclass ChildR1935(BaseR1935):\n    def shared_R1935(self, value):\n        return value + self.base_value()\n",
+    "action": {
+      "action_type": "narrow_exception_handler",
+      "source_refactoring": "Replace Bare Except with Specific Exception",
+      "parameters": {
+        "source_file": "benchmark/python/narrow-exception-handler_R1935.py",
+        "source_class": "MissingR1935",
+        "source_method": "MissingR1935",
+        "method": "MissingR1935",
+        "source_line": 151,
+        "target_exception_type": "ValueError",
+        "replacement_exception": "ValueError"
+      }
+    },
+    "ground_truth": {
+      "model_should_accept": false,
+      "label": "negative"
+    },
+    "dataset_split": "negative",
+    "provenance": "rdp_catalog_seeded_synthetic"
+  },
+  {
+    "case_id": "python_replace_conditional_with_polymorphism_1_r1376_positive",
+    "language": "python",
+    "file_name": "benchmark/python/replace-conditional-with-polymorphism_R1376.py",
+    "source_code": "class BaseR1376:\n    def base_value(self):\n        return 1\n\n\nclass HelperR1376:\n    def apply(self, value):\n        return value * 2\n\n\nclass AccountR1376(BaseR1376):\n    def __init__(self):\n        self.amount = 175\n        self.helper = HelperR1376()\n\n    def calculate(self, value, tax, discount):\n        subtotal = value + tax\n        adjusted = subtotal - discount\n        total = adjusted + self.base_value()\n        return total\n\n    def process(self, value, tax, discount, fee):\n        return value + tax - discount + fee\n\n    def delegated(self, value):\n        return self.helper.apply(value)\n\n    def category_fee(self, kind):\n        if kind == \"premium\":\n            return self.amount * 2\n        return self.amount\n\n    def nested(self, value):\n        if value > 0:\n            if value < 100:\n                return value\n        return 0\n\n    def parse(self, text):\n        try:\n            return int(text)\n        except:\n            return 0\n\n    def unused_R1376(self):\n        return -1\n\n\nclass ChildR1376(BaseR1376):\n    def shared_R1376(self, value):\n        return value + self.base_value()\n",
+    "action": {
+      "action_type": "replace_conditional_with_polymorphism",
+      "source_refactoring": "Replace Conditional with Polymorphism",
+      "parameters": {
+        "source_file": "benchmark/python/replace-conditional-with-polymorphism_R1376.py",
+        "source_class": "AccountR1376",
+        "source_method": "category_fee",
+        "method": "category_fee"
+      }
+    },
+    "ground_truth": {
+      "model_should_accept": true,
+      "label": "positive"
+    },
+    "dataset_split": "positive",
+    "provenance": "rdp_catalog_seeded_synthetic"
+  },
+  {
+    "case_id": "python_replace_conditional_with_polymorphism_1_r1376_negative",
+    "language": "python",
+    "file_name": "benchmark/python/replace-conditional-with-polymorphism_R1376.py",
+    "source_code": "class BaseR1376:\n    def base_value(self):\n        return 1\n\n\nclass HelperR1376:\n    def apply(self, value):\n        return value * 2\n\n\nclass AccountR1376(BaseR1376):\n    def __init__(self):\n        self.amount = 175\n        self.helper = HelperR1376()\n\n    def calculate(self, value, tax, discount):\n        subtotal = value + tax\n        adjusted = subtotal - discount\n        total = adjusted + self.base_value()\n        return total\n\n    def process(self, value, tax, discount, fee):\n        return value + tax - discount + fee\n\n    def delegated(self, value):\n        return self.helper.apply(value)\n\n    def category_fee(self, kind):\n        if kind == \"premium\":\n            return self.amount * 2\n        return self.amount\n\n    def nested(self, value):\n        if value > 0:\n            if value < 100:\n                return value\n        return 0\n\n    def parse(self, text):\n        try:\n            return int(text)\n        except:\n            return 0\n\n    def unused_R1376(self):\n        return -1\n\n\nclass ChildR1376(BaseR1376):\n    def shared_R1376(self, value):\n        return value + self.base_value()\n",
+    "action": {
+      "action_type": "replace_conditional_with_polymorphism",
+      "source_refactoring": "Replace Conditional with Polymorphism",
+      "parameters": {
+        "source_file": "benchmark/python/replace-conditional-with-polymorphism_R1376.py",
+        "source_class": "MissingR1376",
+        "source_method": "MissingR1376",
+        "method": "MissingR1376"
+      }
+    },
+    "ground_truth": {
+      "model_should_accept": false,
+      "label": "negative"
+    },
+    "dataset_split": "negative",
+    "provenance": "rdp_catalog_seeded_synthetic"
+  },
+  {
+    "case_id": "python_replace_nested_conditional_with_guard_clauses_1_r8330_positive",
+    "language": "python",
+    "file_name": "benchmark/python/replace-nested-conditional-with-guard-clauses_R8330.py",
+    "source_code": "class BaseR8330:\n    def base_value(self):\n        return 1\n\n\nclass HelperR8330:\n    def apply(self, value):\n        return value * 2\n\n\nclass AccountR8330(BaseR8330):\n    def __init__(self):\n        self.amount = 598\n        self.helper = HelperR8330()\n\n    def calculate(self, value, tax, discount):\n        subtotal = value + tax\n        adjusted = subtotal - discount\n        total = adjusted + self.base_value()\n        return total\n\n    def process(self, value, tax, discount, fee):\n        return value + tax - discount + fee\n\n    def delegated(self, value):\n        return self.helper.apply(value)\n\n    def category_fee(self, kind):\n        if kind == \"premium\":\n            return self.amount * 2\n        return self.amount\n\n    def nested(self, value):\n        if value > 0:\n            if value < 100:\n                return value\n        return 0\n\n    def parse(self, text):\n        try:\n            return int(text)\n        except:\n            return 0\n\n    def unused_R8330(self):\n        return -1\n\n\nclass ChildR8330(BaseR8330):\n    def shared_R8330(self, value):\n        return value + self.base_value()\n",
+    "action": {
+      "action_type": "replace_nested_conditional_with_guard_clauses",
+      "source_refactoring": "Replace Nested Conditional with Guard Clauses",
+      "parameters": {
+        "source_file": "benchmark/python/replace-nested-conditional-with-guard-clauses_R8330.py",
+        "source_class": "AccountR8330",
+        "source_method": "nested",
+        "method": "nested"
+      }
+    },
+    "ground_truth": {
+      "model_should_accept": true,
+      "label": "positive"
+    },
+    "dataset_split": "positive",
+    "provenance": "rdp_catalog_seeded_synthetic"
+  },
+  {
+    "case_id": "python_replace_nested_conditional_with_guard_clauses_1_r8330_negative",
+    "language": "python",
+    "file_name": "benchmark/python/replace-nested-conditional-with-guard-clauses_R8330.py",
+    "source_code": "class BaseR8330:\n    def base_value(self):\n        return 1\n\n\nclass HelperR8330:\n    def apply(self, value):\n        return value * 2\n\n\nclass AccountR8330(BaseR8330):\n    def __init__(self):\n        self.amount = 598\n        self.helper = HelperR8330()\n\n    def calculate(self, value, tax, discount):\n        subtotal = value + tax\n        adjusted = subtotal - discount\n        total = adjusted + self.base_value()\n        return total\n\n    def process(self, value, tax, discount, fee):\n        return value + tax - discount + fee\n\n    def delegated(self, value):\n        return self.helper.apply(value)\n\n    def category_fee(self, kind):\n        if kind == \"premium\":\n            return self.amount * 2\n        return self.amount\n\n    def nested(self, value):\n        if value > 0:\n            if value < 100:\n                return value\n        return 0\n\n    def parse(self, text):\n        try:\n            return int(text)\n        except:\n            return 0\n\n    def unused_R8330(self):\n        return -1\n\n\nclass ChildR8330(BaseR8330):\n    def shared_R8330(self, value):\n        return value + self.base_value()\n",
+    "action": {
+      "action_type": "replace_nested_conditional_with_guard_clauses",
+      "source_refactoring": "Replace Nested Conditional with Guard Clauses",
+      "parameters": {
+        "source_file": "benchmark/python/replace-nested-conditional-with-guard-clauses_R8330.py",
+        "source_class": "MissingR8330",
+        "source_method": "MissingR8330",
+        "method": "MissingR8330"
+      }
+    },
+    "ground_truth": {
+      "model_should_accept": false,
+      "label": "negative"
+    },
+    "dataset_split": "negative",
+    "provenance": "rdp_catalog_seeded_synthetic"
+  }
+]

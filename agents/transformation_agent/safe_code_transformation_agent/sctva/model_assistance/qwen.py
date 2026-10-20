@@ -118,7 +118,7 @@ class QwenSettings:
             allow_unsupported_actions=bool(
                 getattr(options, "qwen_allow_unsupported_actions", False)
             ),
-            mode=str(getattr(options, "qwen_mode", "primary") or "primary").strip().lower(),
+            mode=str(getattr(options, "qwen_mode", "fallback") or "fallback").strip().lower(),
             allow_download=bool(getattr(options, "qwen_allow_download", False)),
         )
 
@@ -1228,6 +1228,45 @@ class QwenCandidateTransformer:
                     0.0,
                 ),
             }
+
+    def clone_for_mode(self, mode: str) -> "QwenCandidateTransformer":
+        """Create an isolated attempt view without changing the configured mode.
+
+        Rule-first execution does not consume a model budget.  When its final
+        validation fails, SCTVA creates this primary-mode view for the one
+        model retry.  The process-level runtime cache remains shared, while
+        attempt accounting is merged back into the configured instance after
+        the retry completes.
+        """
+
+        return QwenCandidateTransformer(
+            replace(self.settings, mode=str(mode or "primary").strip().lower()),
+            generator=self._generator,
+        )
+
+    def absorb_usage_from(self, attempt: "QwenCandidateTransformer") -> None:
+        """Merge a completed isolated retry into this request's model budget."""
+
+        if attempt is self:
+            return
+
+        with attempt._lock:
+            attempts = attempt._attempt_count
+            file_attempts = dict(attempt._file_attempt_counts)
+            generation_seconds = attempt._generation_seconds_used
+            file_generation_seconds = dict(attempt._file_generation_seconds)
+
+        with self._lock:
+            self._attempt_count += attempts
+            self._generation_seconds_used += generation_seconds
+            for file_key, count in file_attempts.items():
+                self._file_attempt_counts[file_key] = (
+                    self._file_attempt_counts.get(file_key, 0) + count
+                )
+            for file_key, elapsed in file_generation_seconds.items():
+                self._file_generation_seconds[file_key] = (
+                    self._file_generation_seconds.get(file_key, 0.0) + elapsed
+                )
 
     def _bounded_generation_timeout(
         self,
@@ -2870,16 +2909,14 @@ class QwenCandidateTransformer:
             attempt_number = self._attempt_count
             try:
                 self._load()
-                prompt = self.build_prompt(
-                    language=language,
-                    source_code=source_code,
-                    action=action,
-                    current_file_name=current_file_name,
-                )
-                encoded, input_tokens = self._encode_prompt(prompt)
                 context: QwenTargetContext | None = None
                 context_mode = "full_file"
-                full_file_input_tokens = input_tokens
+                # Do not tokenize a complete file before using its resolved
+                # target span. Tokenizing a large source is expensive on CPU,
+                # and the full-file prompt is never sent to the model when a
+                # replaceable target is available.
+                full_file_input_tokens = self._rough_token_count(source_code)
+                full_file_input_tokens_estimated = True
                 resolved_context = self.resolve_target_context(
                     language=language,
                     source_code=source_code,
@@ -2896,7 +2933,11 @@ class QwenCandidateTransformer:
                     return QwenCandidate(
                         reason="QWEN_TARGET_CONTEXT_NOT_RESOLVED",
                         metadata={
-                            "input_tokens": input_tokens,
+                            "input_tokens": full_file_input_tokens,
+                            "full_file_input_tokens": full_file_input_tokens,
+                            "full_file_input_tokens_estimated": (
+                                full_file_input_tokens_estimated
+                            ),
                             "configured_max_input_tokens": self.settings.max_input_tokens,
                             "model_max_input_tokens": self._effective_max_input_tokens,
                             "context_mode": "target_span_unresolved",
@@ -2909,7 +2950,11 @@ class QwenCandidateTransformer:
                         return QwenCandidate(
                             reason="QWEN_TARGET_CONTEXT_NOT_RESOLVED",
                             metadata={
-                                "input_tokens": input_tokens,
+                                "input_tokens": full_file_input_tokens,
+                                "full_file_input_tokens": full_file_input_tokens,
+                                "full_file_input_tokens_estimated": (
+                                    full_file_input_tokens_estimated
+                                ),
                                 "configured_max_input_tokens": self.settings.max_input_tokens,
                                 "model_max_input_tokens": self._effective_max_input_tokens,
                                 "context_mode": "target_span_unresolved",
@@ -2941,6 +2986,9 @@ class QwenCandidateTransformer:
                             metadata={
                                 "input_tokens": input_tokens,
                                 "full_file_input_tokens": full_file_input_tokens,
+                                "full_file_input_tokens_estimated": (
+                                    full_file_input_tokens_estimated
+                                ),
                                 "configured_max_input_tokens": self.settings.max_input_tokens,
                                 "model_max_input_tokens": self._effective_max_input_tokens,
                                 "context_mode": "target_span",
@@ -2951,6 +2999,16 @@ class QwenCandidateTransformer:
                             },
                         )
                     context_mode = "target_span"
+                else:
+                    prompt = self.build_prompt(
+                        language=language,
+                        source_code=source_code,
+                        action=action,
+                        current_file_name=current_file_name,
+                    )
+                    encoded, input_tokens = self._encode_prompt(prompt)
+                    full_file_input_tokens = input_tokens
+                    full_file_input_tokens_estimated = False
 
                 if self._generator is not None:
                     generation_started = time.monotonic()
@@ -3083,6 +3141,7 @@ class QwenCandidateTransformer:
                     ),
                     "input_tokens": input_tokens,
                     "full_file_input_tokens": full_file_input_tokens,
+                    "full_file_input_tokens_estimated": full_file_input_tokens_estimated,
                     "context_mode": context_mode,
                     "source_sha256": hashlib.sha256(source_code.encode("utf-8")).hexdigest(),
                     "candidate_sha256": hashlib.sha256(candidate.encode("utf-8")).hexdigest() if candidate else "",

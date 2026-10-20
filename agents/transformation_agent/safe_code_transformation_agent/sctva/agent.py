@@ -47,6 +47,7 @@ from .constants import (
 )
 from .models import SCTVAResult, TransformationLogEntry, ValidationStepResult
 from .model_assistance import QwenCandidateTransformer
+from .model_assistance.evaluation import build_model_evaluation
 from .reporting.safety_reporter import SafetyReporter
 from .rollback.rollback_manager import RollbackManager
 from .scoring.confidence_scorer import ConfidenceScorer
@@ -530,7 +531,7 @@ class SafeCodeTransformationValidationAgent:
             and str(result.get("hybrid_strategy") or "").strip()
         })
         configured_model_mode = str(
-            getattr(request.execution_options, "qwen_mode", "primary") or "primary"
+            getattr(request.execution_options, "qwen_mode", "fallback") or "fallback"
         ).strip().lower()
         hybrid_strategy = (
             hybrid_strategies[0]
@@ -734,6 +735,16 @@ class SafeCodeTransformationValidationAgent:
             "file_results": file_results,
             "transformed_workspace_files": all_workspace_files,
         }
+        res_dict["model_evaluation"] = build_model_evaluation(
+            model_attempt_count=res_dict["model_attempt_count"],
+            model_candidate_count=res_dict["model_candidate_count"],
+            model_action_count=res_dict["model_action_count"],
+            model_generation_seconds=res_dict["model_generation_seconds"],
+            model_validated_accuracy=res_dict["model_validated_accuracy"],
+            model_output_retained=res_dict["model_output_retained"],
+            model_used=res_dict["model_used"],
+            model_candidates=res_dict["model_candidates"],
+        )
         if target_res and isinstance(target_res, dict):
             res_dict["file_name"] = target_res.get("file_name")
             res_dict["source_mode"] = target_res.get("source_mode")
@@ -770,6 +781,17 @@ class SafeCodeTransformationValidationAgent:
         allow_model_validation_repair: bool = True,
     ) -> Dict[str, Any]:
         language = (file_entry.language or request.language).strip().lower()
+        rule_first_model_fallback = bool(
+            model_assistant is not None
+            and model_assistant.settings.mode == "fallback"
+        )
+        # In fallback mode the initial pass is deliberately rule-only.  Qwen
+        # is eligible only after the complete rule output fails final SCTVA
+        # validation below; passing it into the engine here would invoke it
+        # early for a single action with zero replacements.
+        engine_model_assistant = (
+            None if rule_first_model_fallback else model_assistant
+        )
 
         source_is_reconstructed = file_entry.source_mode != "raw"
         executable_actions = [
@@ -802,7 +824,7 @@ class SafeCodeTransformationValidationAgent:
                 current_file_name=file_entry.file_name,
                 repository_complete=bool(request.source_files),
                 behavior_tests=request.refactoring_plan.behavior_tests,
-                model_assistant=model_assistant,
+                model_assistant=engine_model_assistant,
                 model_candidate_validator=(
                     lambda original, candidate, action: self._validate_model_action_candidate(
                         language=language,
@@ -816,7 +838,7 @@ class SafeCodeTransformationValidationAgent:
                         project_source_files=project_files,
                         current_file_name=file_entry.file_name,
                     )
-                    if model_assistant is not None
+                    if engine_model_assistant is not None
                     else None
                 ),
                 model_validation_feedback=model_validation_feedback,
@@ -1027,6 +1049,90 @@ class SafeCodeTransformationValidationAgent:
             transform_warnings.append(
                 "Selective rollback preserved independent accepted actions after an invalid Java Parameter Object action was removed."
             )
+
+        if rollback_occurred and rule_first_model_fallback and model_assistant is not None:
+            failed_validation_steps = [
+                step
+                for step in (
+                    syntax_step,
+                    structural_step,
+                    behavioral_step,
+                    invariant_step,
+                )
+                if not step.passed
+            ]
+            failed_steps = [step.name for step in failed_validation_steps]
+            failed_validation_details = [
+                {
+                    "name": step.name,
+                    "message": step.message,
+                    "score": step.score,
+                    "details": step.details,
+                }
+                for step in failed_validation_steps
+            ]
+            repair_summary = " | ".join(
+                self._model_validation_step_feedback(step)
+                for step in failed_validation_steps
+            )
+            retry_feedback = {
+                index: (
+                    "The deterministic rule-based transformation failed final SCTVA "
+                    "validation. Generate a complete safe replacement for this planned "
+                    "action. "
+                    + repair_summary
+                )
+                for index, action in enumerate(actions, start=1)
+                if action.action_type != ACTION_NOOP
+            }
+
+            # Retry from the original source, not from the rejected rule
+            # output. The clone keeps its own attempt counters while using the
+            # same loaded Qwen runtime cache; accounting is merged afterwards.
+            retry_assistant = model_assistant.clone_for_mode("primary")
+            try:
+                retry_result = self._execute_single_file(
+                    request=request,
+                    file_entry=file_entry,
+                    actions=actions,
+                    project_files=project_files,
+                    model_assistant=retry_assistant,
+                    model_validation_feedback=retry_feedback,
+                    allow_model_validation_repair=True,
+                )
+            finally:
+                model_assistant.absorb_usage_from(retry_assistant)
+
+            retry_result["hybrid_strategy"] = "RULE_FIRST_MODEL_FALLBACK"
+            retry_result["rule_validation_failed"] = True
+            retry_result["rule_validation_failure_steps"] = failed_steps
+            retry_result["rule_validation_failure_details"] = failed_validation_details
+            retry_result["model_fallback_details"] = {
+                "strategy": "RULE_FIRST_MODEL_FALLBACK",
+                "trigger": "RULE_FINAL_VALIDATION_FAILED",
+                "provider": model_assistant.provider,
+                "failed_validation_steps": failed_steps,
+                "failed_validation_details": failed_validation_details,
+                "failed_validation_summary": [
+                    f"{item['name']}: {item['message']}"
+                    for item in failed_validation_details
+                    if str(item.get("message") or "").strip()
+                ],
+                "rule_rollback_reason": str(rollback_reason or ""),
+                "accepted_output_engine": retry_result.get(
+                    "accepted_output_engine", "NO_CHANGE"
+                ),
+            }
+            retry_report = retry_result.get("safety_report")
+            if isinstance(retry_report, dict):
+                retry_report["model_fallback"] = retry_result["model_fallback_details"]
+                messages = retry_report.setdefault("human_messages", [])
+                if isinstance(messages, list):
+                    messages.append(
+                        "The rule-based output failed final SCTVA validation, so Qwen "
+                        "retried from the original source."
+                    )
+            return retry_result
 
         model_candidate_applied = any(
             entry.replacements_count > 0
@@ -1503,6 +1609,16 @@ class SafeCodeTransformationValidationAgent:
         result["origin"] = file_entry.origin
         result["confidence_components"] = confidence_details
         result.update(model_usage)
+        result["model_evaluation"] = build_model_evaluation(
+            model_attempt_count=result["model_attempt_count"],
+            model_candidate_count=result["model_candidate_count"],
+            model_action_count=result["model_action_count"],
+            model_generation_seconds=result["model_generation_seconds"],
+            model_validated_accuracy=result["model_validated_accuracy"],
+            model_output_retained=result["model_output_retained"],
+            model_used=result["model_used"],
+            model_candidates=result["model_candidates"],
+        )
         # Report only transformations that were actually accepted for this
         # file.  The earlier fixed five-family summary made every unrelated
         # family look like PASS whenever its requested count was zero.
@@ -5355,7 +5471,7 @@ class SafeCodeTransformationValidationAgent:
         inferred_model_enabled = bool(
             model_enabled or model_used or attempted_entries or ineligible_entries or budget_entries
         )
-        normalized_mode = str(model_mode or "primary").strip().lower()
+        normalized_mode = str(model_mode or "fallback").strip().lower()
         hybrid_strategy = (
             "MODEL_FIRST_RULE_FALLBACK"
             if inferred_model_enabled and normalized_mode == "primary"

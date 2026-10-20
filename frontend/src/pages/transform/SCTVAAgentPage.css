@@ -820,6 +820,17 @@
   line-height: 1.45;
 }
 
+.sctva-transformation-source {
+  margin: 16px 0 0;
+  padding-top: 14px;
+  border-top: 1px solid rgba(110, 139, 180, 0.18);
+  color: #86efac;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.4;
+  text-align: left;
+}
+
 .sctva-model-metric {
   width: 100%;
   margin-top: 16px;
@@ -907,6 +918,56 @@
   color: #86efac;
   font-size: 11px;
   font-weight: 700;
+}
+
+.sctva-model-evaluation {
+  width: 100%;
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid rgba(110, 139, 180, 0.18);
+  text-align: left;
+}
+
+.sctva-model-evaluation h3 {
+  margin: 0 0 10px;
+  color: #dbeafe;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.sctva-model-evaluation-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.sctva-model-evaluation-grid > div {
+  min-height: 66px;
+  padding: 9px;
+  border: 1px solid rgba(110, 139, 180, 0.2);
+  border-radius: 6px;
+  background: rgba(15, 23, 42, 0.35);
+}
+
+.sctva-model-evaluation-grid > .sctva-model-evaluation-quality {
+  grid-column: 1 / -1;
+}
+
+.sctva-model-evaluation-grid span,
+.sctva-model-evaluation-grid em {
+  display: block;
+  color: #91a0b8;
+  font-size: 10px;
+  font-style: normal;
+  line-height: 1.35;
+}
+
+.sctva-model-evaluation-grid strong {
+  display: block;
+  margin: 3px 0;
+  color: #f8fafc;
+  font-size: 17px;
+  line-height: 1;
 }
 
 .sctva-model-details {
@@ -1361,10 +1422,36 @@
   border-top-color: #dbe3ee;
 }
 
+[data-theme="light"] .sctva-model-evaluation {
+  border-top-color: #dbe3ee;
+}
+
+[data-theme="light"] .sctva-model-evaluation h3 {
+  color: #0f172a;
+}
+
+[data-theme="light"] .sctva-model-evaluation-grid > div {
+  border-color: #dbe3ee;
+  background: #f8fafc;
+}
+
+[data-theme="light"] .sctva-model-evaluation-grid span,
+[data-theme="light"] .sctva-model-evaluation-grid em {
+  color: #64748b;
+}
+
+[data-theme="light"] .sctva-model-evaluation-grid strong {
+  color: #0f172a;
+}
+
 [data-theme="light"] .sctva-model-metric-head span,
 [data-theme="light"] .sctva-model-metric > p,
 [data-theme="light"] .sctva-model-details dt {
   color: #64748b;
+}
+
+[data-theme="light"] .sctva-transformation-source {
+  color: #15803d;
 }
 
 [data-theme="light"] .sctva-model-metric-head strong,

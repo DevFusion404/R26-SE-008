@@ -613,7 +613,7 @@ class ExecutionOptions:
     qwen_max_generation_seconds_per_request: int = 0
     qwen_runtime_cache: bool = True
     qwen_allow_unsupported_actions: bool = False
-    qwen_mode: str = "primary"
+    qwen_mode: str = "fallback"
     qwen_allow_download: bool = False
 
     @classmethod
@@ -744,7 +744,7 @@ class ExecutionOptions:
         qwen_mode = str(
             data.get("qwen_mode")
             or os.getenv("SCTVA_QWEN_MODE")
-            or "primary"
+            or "fallback"
         ).strip().lower()
         if qwen_mode not in {"primary", "fallback"}:
             raise ContractValidationError(

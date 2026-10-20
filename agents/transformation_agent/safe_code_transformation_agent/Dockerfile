@@ -100,11 +100,11 @@ ENV FLASK_APP=app.py
 ENV SCTVA_PORT=8002
 ENV PORT=8002
 
-# The model is attempted first; all candidates still pass SCTVA syntax,
-# structural, behavioral and invariant validation. Deterministic rules remain
-# the fallback whenever the model output cannot be proven safe.
+# Deterministic rules run and pass SCTVA validation first. Qwen is used only
+# after a rule-based result fails validation, and every Qwen candidate still
+# passes syntax, structural, behavioral and invariant validation.
 ENV SCTVA_ENABLE_QWEN=true
-ENV SCTVA_QWEN_MODE=primary
+ENV SCTVA_QWEN_MODE=fallback
 ENV SCTVA_QWEN_DEVICE=cpu
 ENV SCTVA_QWEN_MODEL_ID=Qwen/Qwen2.5-Coder-0.5B-Instruct
 ENV SCTVA_QWEN_MAX_NEW_TOKENS=256

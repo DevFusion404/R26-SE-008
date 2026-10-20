@@ -43,3 +43,32 @@ def test_confidence_excludes_unavailable_behavioral_runtime_fallback():
     assert details["excluded_components"] == ["behavioral"]
     assert "behavioral_component" not in details
     assert details["weights"] == {"syntax": 0.5, "structural": 0.5}
+
+
+def test_confidence_does_not_report_high_safety_when_structural_validation_fails():
+    scorer = ConfidenceScorer()
+    syntax = ValidationStepResult(name="syntax", passed=True, score=1.0, message="ok")
+    structural = ValidationStepResult(
+        name="structural",
+        passed=False,
+        score=0.99,
+        message="Extract Method structural validation failed.",
+    )
+    behavioral = ValidationStepResult(
+        name="behavioral", passed=True, score=1.0, message="ok"
+    )
+    invariant = ValidationStepResult(
+        name="invariant", passed=True, score=1.0, message="ok"
+    )
+
+    score, details = scorer.score(
+        syntax=syntax,
+        structural=structural,
+        behavioral=behavioral,
+        invariant=invariant,
+    )
+
+    assert score == 0.49
+    assert details["structural_component"] == 0.0
+    assert details["failed_components"] == ["structural"]
+    assert details["failure_confidence_cap"] == 0.49

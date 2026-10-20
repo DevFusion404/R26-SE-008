@@ -689,8 +689,9 @@ class TransformationEngine:
 
     Reading order:
     1. ``apply_actions`` is the public execution entry point.
-    2. Its phases are preflight, model-first generation, rule dispatch,
-       optional model fallback, and audit logging.
+    2. Its phases are preflight, optional model-primary generation, rule
+       dispatch, and audit logging. Full-file validation decides rule-first
+       model fallback in the SCTVA agent.
     3. The helpers below it support target recovery and action history; they
        do not execute a transformation on their own.
     """
@@ -711,6 +712,7 @@ class TransformationEngine:
             [str, str, RefactoringAction], Dict[str, Any]
         ] | None = None,
         model_validation_feedback: Dict[int, str] | None = None,
+        allow_per_action_model_fallback: bool = False,
     ) -> Tuple[str, List[TransformationLogEntry], List[str]]:
         # Phase 1: normalize plan targets and establish the current snapshot.
         current_code = source_code
@@ -3631,9 +3633,9 @@ class TransformationEngine:
                 if strict_mode:
                     raise
 
-            # Phase 3C: optional model fallback after a non-applicable rule action.
-            # The model is a fallback candidate generator, never a way around
-            # an explicit AST/data-flow safety decision made by SCTVA.
+            # Phase 3C is retained only for explicit legacy callers. Normal
+            # SCTVA requests decide model fallback after full-file validation
+            # in the agent, rather than after one rule action makes no change.
             model_status = str(action_metadata.get("status") or "").lower()
             model_may_try_unsupported = bool(
                 model_assistant
@@ -3642,6 +3644,7 @@ class TransformationEngine:
             )
             model_fallback_allowed = (
                 model_assistant is not None
+                and allow_per_action_model_fallback
                 and model_assistant.settings.mode == "fallback"
                 and not _model_action_ineligibility_reason(
                     language,
@@ -3665,6 +3668,7 @@ class TransformationEngine:
             )
             if (
                 model_assistant is not None
+                and allow_per_action_model_fallback
                 and model_assistant.settings.mode == "fallback"
                 and replacements == 0
                 and model_action_is_eligible

@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 
 import sctva.model_assistance.qwen as qwen_module
-from sctva.contracts import RefactoringAction, SCTVARequestContract
+from sctva.contracts import ExecutionOptions, RefactoringAction, SCTVARequestContract
 from sctva.agent import SafeCodeTransformationValidationAgent
 from sctva.model_assistance.qwen import (
     QwenCandidateTransformer,
@@ -42,6 +42,131 @@ def test_qwen_prompt_keeps_normalized_rdp_target_metadata():
     assert '"source_line":20' in prompt
     assert "ignored_nested_payload" not in prompt
     assert "class Student {}" in prompt
+
+
+def test_execution_options_default_to_rule_first_model_fallback(monkeypatch):
+    monkeypatch.delenv("SCTVA_QWEN_MODE", raising=False)
+
+    options = ExecutionOptions.from_dict({"enable_qwen": True})
+    settings = QwenSettings.from_execution_options(options)
+
+    assert options.qwen_mode == "fallback"
+    assert settings.mode == "fallback"
+
+
+def test_fallback_mode_does_not_call_qwen_when_rule_transform_succeeds():
+    prompts = []
+    assistant = QwenCandidateTransformer(
+        QwenSettings(enabled=True, mode="fallback"),
+        generator=lambda prompt: prompts.append(prompt) or "must not be used",
+    )
+    source = (
+        "public class Limits {\n"
+        "    int calculate(int value) {\n"
+        "        return value + 6;\n"
+        "    }\n"
+        "}\n"
+    )
+    action = RefactoringAction(
+        action_type="introduce_constant",
+        parameters={
+            "source_file": "Limits.java",
+            "source_line": 3,
+            "literal_value": 6,
+            "constant_name": "LIMIT",
+        },
+    )
+
+    transformed, logs, warnings = TransformationEngine().apply_actions(
+        language="java",
+        source_code=source,
+        actions=[action],
+        strict_mode=True,
+        current_file_name="Limits.java",
+        model_assistant=assistant,
+    )
+
+    assert not warnings
+    assert prompts == []
+    assert "private static final int LIMIT = 6;" in transformed
+    assert "return value + LIMIT;" in transformed
+    assert logs[0].metadata.get("model_assisted") is not True
+
+
+def test_fallback_mode_calls_qwen_only_after_rule_final_validation_fails(monkeypatch):
+    original = "int value(int input) { return input > 10; }\n"
+    request = SCTVARequestContract.from_dict({
+        "request_id": "rule-first-validation-fallback",
+        "language": "c",
+        "source_files": [{
+            "file_name": "value.c",
+            "language": "c",
+            "source_code": original,
+        }],
+        "refactoring_plan": {
+            "plan_id": "rule-first-validation-fallback-plan",
+            "actions": [{
+                "action_type": "introduce_constant",
+                "parameters": {
+                    "source_file": "value.c",
+                    "source_line": 1,
+                    "literal_value": 10,
+                    "constant_name": "MAX_VALUE",
+                },
+            }],
+            "behavior_tests": [],
+        },
+        "execution_options": {
+            "strict_mode": True,
+            "enable_behavior_tests": False,
+            "require_compilation": False,
+            "enable_sctva_auto_refactoring": False,
+            "qwen_mode": "fallback",
+        },
+    })
+    prompts = []
+    assistant = QwenCandidateTransformer(
+        QwenSettings(enabled=True, mode="fallback"),
+        generator=lambda prompt: prompts.append(prompt) or (
+            "#define MAX_VALUE 10\n\n"
+            "int value(int input) { return input > MAX_VALUE; }\n"
+        ),
+    )
+    agent = SafeCodeTransformationValidationAgent()
+    original_evaluate = agent.rollback_manager.evaluate
+    evaluate_calls = 0
+
+    def force_rule_validation_failure(*args, **kwargs):
+        nonlocal evaluate_calls
+        evaluate_calls += 1
+        if evaluate_calls == 1:
+            return True, "Forced rule final-validation failure."
+        return original_evaluate(*args, **kwargs)
+
+    monkeypatch.setattr(
+        agent.rollback_manager,
+        "evaluate",
+        force_rule_validation_failure,
+    )
+
+    result = agent._execute_single_file(
+        request=request,
+        file_entry=request.source_files[0],
+        actions=request.refactoring_plan.actions,
+        project_files=[request.source_files[0].to_dict()],
+        model_assistant=assistant,
+    )
+
+    assert evaluate_calls == 2
+    assert len(prompts) == 1
+    assert "deterministic rule-based transformation failed final SCTVA validation" in prompts[0]
+    assert result["success"] is True
+    assert result["rollback_occurred"] is False
+    assert result["hybrid_strategy"] == "RULE_FIRST_MODEL_FALLBACK"
+    assert result["accepted_output_engine"] == "QWEN_CODER"
+    assert result["model_output_retained"] is True
+    assert result["rule_validation_failed"] is True
+    assert "input > MAX_VALUE" in result["refactored_code"]
 
 
 def test_target_prompts_include_language_specific_accuracy_contracts():
@@ -557,6 +682,55 @@ def test_qwen_large_python_file_uses_ast_target_span_and_preserves_other_code():
     assert "    def untouched(self, value):" in candidate.source_code
     assert filler in candidate.source_code
     assert "        result = value + 1" in candidate.source_code
+
+
+def test_qwen_resolved_target_does_not_tokenize_the_full_large_file_first():
+    filler = "\n".join(f"UNRELATED_{index} = {index}" for index in range(240))
+    original = (
+        "class Calculator:\n"
+        "    def selected(self, value):\n"
+        "        return value + 1\n\n"
+        + filler
+        + "\n"
+    )
+    prompts = []
+    assistant = QwenCandidateTransformer(
+        QwenSettings(enabled=True, max_input_tokens=512),
+        generator=lambda prompt: (
+            prompts.append(prompt)
+            or "def selected(self, value):\n    return value + 2"
+        ),
+    )
+    recorded_prompts = []
+    original_encode_prompt = assistant._encode_prompt
+
+    def record_encode_prompt(prompt):
+        recorded_prompts.append(prompt)
+        return original_encode_prompt(prompt)
+
+    assistant._encode_prompt = record_encode_prompt
+    action = RefactoringAction(
+        action_type="extract_method",
+        source_refactoring="Extract Method",
+        parameters={
+            "source_file": "large.py",
+            "source_class": "Calculator",
+            "source_method": "selected",
+        },
+    )
+
+    candidate = assistant.propose(
+        language="python",
+        source_code=original,
+        action=action,
+        current_file_name="large.py",
+    )
+
+    assert candidate.status == "candidate_generated"
+    assert len(recorded_prompts) == 1
+    assert "<target-source>" in recorded_prompts[0]
+    assert filler not in recorded_prompts[0]
+    assert candidate.metadata["full_file_input_tokens_estimated"] is True
 
 
 def test_qwen_large_java_extract_method_uses_method_member_span_only():
@@ -3240,6 +3414,7 @@ def test_model_accuracy_is_positive_only_for_retained_qwen_output():
         validation_score=0.0,
         rollback_occurred=False,
         transformation_applied=True,
+        model_mode="primary",
     )
 
     assert summary["model_used"] is True
@@ -3271,6 +3446,7 @@ def test_rejected_model_attempt_reports_zero_and_rule_fallback():
         validation_score=0.99,
         rollback_occurred=False,
         transformation_applied=True,
+        model_mode="primary",
     )
 
     assert summary["model_attempted"] is True
