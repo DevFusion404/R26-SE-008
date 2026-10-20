@@ -15,7 +15,7 @@ I checked these limits in the code before picking anything:
 | Full pipeline (CUQA → RDP → SCTVA → DIWO) only for Java and Python | SCTVA rejects other languages | Use Java for the main demo. C works in CUQA only. |
 | Java parser is `javalang` (Java 8 syntax and older) | CUQA, ML model | Old Java 1.3–1.6 code is fine. |
 | Python parser is Python 3 `ast` | CUQA | Python 2 code does not parse, so no Python 2 era projects. |
-| Whole-repo quality report reads only the first 50 source files | `main.py`, `/api/quality-report` | Upload one module folder with 50 files or fewer, not the full repo. |
+| Whole-repo quality report reads every source file (50-file cap removed on 20 Oct 2026) | `main.py`, `/api/quality-report` | The full repo can be uploaded. OpenMRS (1,364 files) took about 45–60 s, so allow a minute for big repos. |
 | ZIP up to 500 MB, RDP upload 16 MB, SCTVA 5 MB per file | CUQA, RDP, SCTVA | Not a problem for module-sized ZIPs. |
 | K&R style C functions are not detected | CUQA C detector | Avoid old zlib as a main demo. |
 
@@ -72,7 +72,7 @@ Repo: [jbrains/trivia](https://github.com/jbrains/trivia), a codebase written on
 ## Already in `Testing repos`
 
 - Ant 1.8.4: still a fine Java test (the `taskdefs/email` package gives 7 smells). Ant itself is still maintained, so it is "old version" rather than end of life.
-- OpenMRS 1.9.12, curl 7.29, redis 2.8.24: far more than 50 files, so upload one package folder only.
+- OpenMRS 1.9.12, curl 7.29, redis 2.8.24: large repos. Since the 50-file cap was removed they can be uploaded whole (OpenMRS: 1,364 files analysed in about a minute), but a package folder is still quicker for a live demo.
 - zlib 1.2.8: uses K&R function definitions, which CUQA does not detect, so results look too clean.
 
 ## Not good picks (checked)

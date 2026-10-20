@@ -511,7 +511,7 @@ def quality_report(payload: dict = None): # type: ignore
     Generate a quality report for one or all files in the workspace.
 
     Body (optional): { "file_path": "relative/path/File.py", "detector": "rules" | "hybrid" | "ml" | "off" }
-    If file_path omitted, reports on all loaded files (capped at 50).
+    If file_path omitted, reports on every source file loaded from the repository.
     If detector omitted, the CUQA_SMELL_DETECTOR environment variable applies (default "rules").
     """
     if not _workspace["root"]:
@@ -532,13 +532,16 @@ def quality_report(payload: dict = None): # type: ignore
         report = generate_file_report(source, os.path.basename(full_path), detector=detector)
         return {"type": "file", "report": report}
 
-    # All files — cap at 50 to avoid timeout
-    # Collect (relative_filename, source_text) for every file so that
+    # All files in the repository — no cap, so the report covers the whole
+    # uploaded project.
+    # Collect (relative_path, source_text) for every file so that
     # generate_repo_report can build a cross-file name index for accurate
     # dead-code detection.  We read each file once and reuse the text.
+    # Keyed by relative path, not basename: a full repo has many files with
+    # the same name (__init__.py, utils.py) and each must keep its own source.
     file_reports = []
-    all_sources: list[tuple[str, str]] = []   # (basename, source) for repo index
-    for rel in _workspace["files"][:50]:
+    all_sources: list[tuple[str, str]] = []   # (relative_path, source) for repo index
+    for rel in _workspace["files"]:
         full_path = os.path.join(_workspace["root"], rel)
         try:
             with open(full_path, "r", encoding="utf-8", errors="replace") as f:
@@ -547,7 +550,7 @@ def quality_report(payload: dict = None): # type: ignore
             report["relative_path"] = rel.replace("\\", "/")
             # Collect Python sources for repo-wide dead-code index
             if os.path.splitext(full_path)[-1].lower() == ".py":
-                all_sources.append((os.path.basename(full_path), source))
+                all_sources.append((report["relative_path"], source))
         except Exception as exc:
             report = {"file": rel, "error": str(exc)}
         file_reports.append(report)

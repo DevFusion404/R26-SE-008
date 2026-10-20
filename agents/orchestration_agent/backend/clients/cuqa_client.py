@@ -105,8 +105,13 @@ def _request(method: str, path: str, body=None, timeout: int = 120) -> dict:
         ) from exc
 
 
-def fetch_quality_report(file_path: Optional[str] = None, timeout: int = 120) -> dict:
-    """Call POST /api/quality-report and return the raw CUQA payload."""
+def fetch_quality_report(file_path: Optional[str] = None, timeout: int = 600) -> dict:
+    """Call POST /api/quality-report and return the raw CUQA payload.
+
+    CUQA analyses every source file of the repository, so a whole-repo report
+    on a large project (about 1,300 Java files takes about a minute) needs
+    more than the 120 s the other calls use.
+    """
     body = {"file_path": file_path} if file_path else {}
     return _request("POST", QUALITY_REPORT_PATH, body=body, timeout=timeout)
 

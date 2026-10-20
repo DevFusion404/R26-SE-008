@@ -58,8 +58,9 @@ try:
         try:
             import tree_sitter_c as tsc  # type: ignore
             _C_LANGUAGE = Language(tsc.language())
-            _TS_PARSER = Parser()
-            _TS_PARSER.set_language(_C_LANGUAGE)
+            # Language(tsc.language()) needs tree-sitter >= 0.22, where the language
+            # is passed to Parser() (Parser.set_language was removed)
+            _TS_PARSER = Parser(_C_LANGUAGE)
             _TREE_SITTER_AVAILABLE = True
         except Exception:
             pass
@@ -173,6 +174,7 @@ def _mask_c_like(source: str, mask_comments: bool = True, mask_strings: bool = T
             out.append(_NOT_NEWLINE_RE.sub(" ", seg) if mask_comments else seg)
         else:
             body = (_DQ_BODY_RE if token == '"' else _SQ_BODY_RE).match(source, start + 1)
+            assert body is not None  # both patterns also match an empty body
             end = body.end()
             closed = end < n and source[end] == token
             if closed:
