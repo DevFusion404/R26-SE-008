@@ -21,6 +21,7 @@ requirements.txt and needs no extra install to talk to CUQA.
 import json
 import urllib.error
 import urllib.request
+import uuid
 from typing import Optional
 
 from config import cuqa_base_url
@@ -29,6 +30,8 @@ QUALITY_REPORT_PATH = "/api/quality-report"
 FILES_PATH = "/api/files"
 PROJECT_STRUCTURE_PATH = "/api/project-structure"
 SOURCE_FILES_PATH = "/api/source-files"
+ANALYZE_SNAPSHOT_PATH = "/api/analyze-snapshot"
+UPLOAD_ZIP_PATH = "/api/upload-zip"
 
 #: Paths per request to /api/source-files, so a whole-project archive of
 #: several thousand files is one call from the caller's point of view.
@@ -37,7 +40,7 @@ SOURCE_BATCH_SIZE = 400
 __all__ = [
     "CUQAError", "cuqa_base_url", "fetch_quality_report",
     "fetch_workspace_files", "fetch_project_structure", "fetch_source_files",
-    "probe_cuqa",
+    "probe_cuqa", "analyze_snapshot", "upload_workspace_zip",
 ]
 
 
@@ -56,14 +59,18 @@ class CUQAError(RuntimeError):
         self.detail = detail
 
 
-def _request(method: str, path: str, body=None, timeout: int = 120) -> dict:
+def _request(method: str, path: str, body=None, timeout: int = 120,
+             raw_body: Optional[bytes] = None, content_type: str = "application/json") -> dict:
     url = f"{cuqa_base_url()}{path}"
-    data = json.dumps(body).encode("utf-8") if body is not None else None
+    if raw_body is not None:
+        data = raw_body
+    else:
+        data = json.dumps(body).encode("utf-8") if body is not None else None
     req = urllib.request.Request(
         url,
         data=data,
         method=method,
-        headers={"Content-Type": "application/json", "Accept": "application/json"},
+        headers={"Content-Type": content_type, "Accept": "application/json"},
     )
 
     try:
@@ -105,8 +112,55 @@ def _request(method: str, path: str, body=None, timeout: int = 120) -> dict:
         ) from exc
 
 
-def fetch_quality_report(file_path: Optional[str] = None, timeout: int = 120) -> dict:
-    """Call POST /api/quality-report and return the raw CUQA payload."""
+def _request_multipart(path: str, fields: dict, file_field: str, filename: str,
+                       file_path, timeout: int = 300) -> dict:
+    """POST multipart/form-data with one file, through the same error mapping."""
+    boundary = f"diwo-{uuid.uuid4().hex}"
+    parts = []
+    for name, value in fields.items():
+        parts.append(
+            f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"\r\n\r\n'
+            f"{value}\r\n".encode("utf-8"))
+    with open(file_path, "rb") as handle:
+        content = handle.read()
+    parts.append(
+        f'--{boundary}\r\nContent-Disposition: form-data; name="{file_field}"; '
+        f'filename="{filename}"\r\nContent-Type: application/zip\r\n\r\n'.encode("utf-8")
+        + content + b"\r\n")
+    parts.append(f"--{boundary}--\r\n".encode("utf-8"))
+    return _request("POST", path, raw_body=b"".join(parts), timeout=timeout,
+                    content_type=f"multipart/form-data; boundary={boundary}")
+
+
+def analyze_snapshot(zip_path, filename: str, repo_name: str, timeout: int = 300) -> dict:
+    """POST /api/analyze-snapshot — analyse one archive in isolation.
+
+    CUQA extracts it into a private temporary directory, reports on it and
+    deletes it; the shared workspace a developer loaded is not touched. Returns
+    {type, report, snapshot: {top_level_dir, files_found, files_analyzed}}.
+    A CUQA build without this endpoint answers 404 (or 405).
+    """
+    return _request_multipart(ANALYZE_SNAPSHOT_PATH, {"repo_name": repo_name},
+                              "file", filename, zip_path, timeout=timeout)
+
+
+def upload_workspace_zip(zip_path, filename: str, timeout: int = 300) -> dict:
+    """POST /api/upload-zip — REPLACES CUQA's shared workspace.
+
+    Only the opt-in shared-workspace fallback uses this; see
+    config.github_cuqa_allow_shared_workspace().
+    """
+    return _request_multipart(UPLOAD_ZIP_PATH, {}, "file", filename, zip_path,
+                              timeout=timeout)
+
+
+def fetch_quality_report(file_path: Optional[str] = None, timeout: int = 600) -> dict:
+    """Call POST /api/quality-report and return the raw CUQA payload.
+
+    CUQA analyses every source file of the repository, so a whole-repo report
+    on a large project (about 1,300 Java files takes about a minute) needs
+    more than the 120 s the other calls use.
+    """
     body = {"file_path": file_path} if file_path else {}
     return _request("POST", QUALITY_REPORT_PATH, body=body, timeout=timeout)
 

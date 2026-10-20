@@ -37,7 +37,7 @@ from api import register_blueprints
 from db.database import init_db
 
 
-def create_app():
+def create_app(start_github_worker: bool = True):
     app = Flask(__name__)
     app.config["SECRET_KEY"] = config.SECRET_KEY
     app.config["DATABASE"] = str(config.database_path())
@@ -53,7 +53,32 @@ def create_app():
     def health():
         return {"status": "DIWO Agent Backend Running", "version": "1.0.0"}
 
+    configure_github_integration(app, start_github_worker)
+
     return app
+
+
+def configure_github_integration(app, start_worker: bool):
+    """Report the GitHub integration's state at boot, and start the embedded
+    worker when asked to.
+
+    Problems are printed by setting NAME, never value. The embedded worker is
+    for development and single-container demos; production runs
+    github_worker.py as its own process (see that file).
+    """
+    if not config.github_integration_enabled():
+        return
+
+    problems = config.github_config_problems()
+    if problems:
+        print("[DIWO] GitHub integration enabled but NOT configured: " + " ".join(problems))
+    else:
+        print(f"[DIWO] GitHub integration enabled (autonomy {config.github_autonomy_level()}).")
+
+    if start_worker and config.github_embedded_worker_enabled():
+        from services.github_job_service import start_embedded_worker
+        start_embedded_worker(app)
+        print("[DIWO] Embedded GitHub worker started (development mode).")
 
 
 def register_database_errors(app):

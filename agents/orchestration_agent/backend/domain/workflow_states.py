@@ -15,6 +15,10 @@ Stages:
   4. transformation      – Agent 3 (SCTVA) transforms; result shown for approval
   5. comparison          – Before/after metrics + audit log view
 
+GitHub-linked workflows (created from a pull request) stop at plan_approved
+after the developer approves the plan: transformation of PR code is a later
+milestone, and nothing — not even the simulated transformation — runs on it.
+
 Transitions are gated: each stage requires an explicit developer action.
 """
 
@@ -22,6 +26,7 @@ STAGES = [
     "smell_review",
     "smell_selection",
     "plan_approval",
+    "plan_approved",
     "transformation",
     "comparison",
     "completed",
@@ -32,6 +37,7 @@ STAGE_LABELS = {
     "smell_review":    "Code Smell Review",
     "smell_selection": "Developer Smell Selection",
     "plan_approval":   "Plan Review & Approval",
+    "plan_approved":   "Plan Approved (awaiting transformation)",
     "transformation":  "Refactor & Validation",
     "comparison":      "Comparison & Visualization",
     "completed":       "Completed",
