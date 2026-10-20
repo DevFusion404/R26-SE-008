@@ -206,6 +206,28 @@ def sctva_base_url() -> str:
     return os.environ.get("SCTVA_AGENT_URL", DEFAULT_SCTVA_URL).rstrip("/")
 
 
+def _seconds(name: str, default: int, minimum: int = 10) -> int:
+    try:
+        return max(minimum, int(os.environ.get(name, "").strip() or default))
+    except ValueError:
+        return default
+
+
+def sctva_execute_timeout() -> int:
+    """Seconds to wait for /sctva/execute (SCTVA_EXECUTE_TIMEOUT_SECONDS).
+
+    SCTVA parses, transforms and validates every planned file in one request,
+    so a large project needs minutes, not the 120 s the other agent calls use.
+    """
+    return _seconds("SCTVA_EXECUTE_TIMEOUT_SECONDS", 600)
+
+
+def source_fetch_timeout() -> int:
+    """Seconds to wait when reading the planned files' source text before the
+    transformation (DIWO_SOURCE_FETCH_TIMEOUT_SECONDS)."""
+    return _seconds("DIWO_SOURCE_FETCH_TIMEOUT_SECONDS", 180)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Flask application
 # ─────────────────────────────────────────────────────────────────────────────
