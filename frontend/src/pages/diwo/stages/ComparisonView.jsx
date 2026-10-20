@@ -424,16 +424,20 @@ export function ComparisonView({ workflow, workflowId: propWorkflowId, language:
           onClick={onBack}
           title="Go back to the Results Review stage"
           style={{
-            marginBottom: 14,
-            padding: "8px 16px",
-            borderRadius: 8,
-            border: "1px solid var(--border)",
-            background: "var(--bg-elevated)",
-            color: "var(--text-primary)",
-            fontSize: 12.5,
-            fontWeight: 700,
+            marginBottom: 16,
+            padding: "11px 22px",
+            borderRadius: 9,
+            border: "1px solid #dc2626",
+            background: "#ef4444",
+            color: "#fff",
+            fontSize: 14,
+            fontWeight: 800,
             cursor: "pointer",
+            boxShadow: "0 2px 10px rgba(239, 68, 68, 0.35)",
+            transition: "background 0.15s ease",
           }}
+          onMouseEnter={(e) => { e.currentTarget.style.background = "#dc2626"; }}
+          onMouseLeave={(e) => { e.currentTarget.style.background = "#ef4444"; }}
         >
           ← Back to Results Review
         </button>
@@ -673,13 +677,15 @@ export function ComparisonView({ workflow, workflowId: propWorkflowId, language:
     onClick={generateSummaryReport}
     disabled={loading}
     style={{
-      padding: "10px 18px",
+      padding: "13px 24px",
       borderRadius: 10,
-      border: "1px solid var(--border)",
-      background: "var(--bg-elevated)",
-      color: "var(--text-primary)",
-      fontWeight: 700,
-      cursor: "pointer"
+      border: "1px solid #1d4ed8",
+      background: loading ? "var(--bg-elevated)" : "#2563eb",
+      color: loading ? "var(--text-muted)" : "#ffffff",
+      fontSize: 15,
+      fontWeight: 800,
+      cursor: loading ? "not-allowed" : "pointer",
+      boxShadow: loading ? "none" : "0 2px 12px rgba(37,99,235,0.3)",
     }}
   >
     📄 Generate Summary Report
@@ -695,13 +701,15 @@ export function ComparisonView({ workflow, workflowId: propWorkflowId, language:
         : "Download the whole project as one ZIP — refactored files applied, everything else as-is."
     }
     style={{
-      padding: "10px 18px",
+      padding: "13px 24px",
       borderRadius: 10,
-      border: `1px solid ${downloadableFiles.length === 0 ? "var(--border)" : "rgba(34,197,94,0.45)"}`,
-      background: downloadableFiles.length === 0 ? "var(--bg-elevated)" : "linear-gradient(180deg, rgba(34,197,94,0.13), var(--bg-card))",
-      color: downloadableFiles.length === 0 ? "var(--text-muted)" : "var(--metric-green)",
-      fontWeight: 700,
+      border: `1px solid ${downloadableFiles.length === 0 ? "var(--border)" : "#0f766e"}`,
+      background: downloadableFiles.length === 0 ? "var(--bg-elevated)" : "#0d9488",
+      color: downloadableFiles.length === 0 ? "var(--text-muted)" : "#ffffff",
+      fontSize: 15,
+      fontWeight: 800,
       cursor: loading || zipping || downloadableFiles.length === 0 ? "not-allowed" : "pointer",
+      boxShadow: downloadableFiles.length === 0 ? "none" : "0 2px 12px rgba(13,148,136,0.3)",
     }}
   >
     {zipping ? (zipStatus || "Building archive…") : `⬇ Download Project (.zip)`}
@@ -714,12 +722,12 @@ export function ComparisonView({ workflow, workflowId: propWorkflowId, language:
     title="Close this workflow, write the final record to the audit trail and open the session report"
     style={{
       marginLeft: "auto",
-      padding: "11px 26px",
+      padding: "14px 30px",
       borderRadius: 10,
-      border: "none",
-      background: loading ? "var(--bg-elevated)" : "#22c55e",
-      color: loading ? "var(--text-muted)" : "#04210f",
-      fontSize: 13.5,
+      border: loading ? "none" : "1px solid #15803d",
+      background: loading ? "var(--bg-elevated)" : "#16a34a",
+      color: loading ? "var(--text-muted)" : "#ffffff",
+      fontSize: 15.5,
       fontWeight: 800,
       letterSpacing: 0.2,
       cursor: loading ? "wait" : "pointer",

@@ -21,6 +21,7 @@ override what is already set — so a container can override the checked-out
 """
 
 import os
+import sys
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -205,6 +206,28 @@ def sctva_base_url() -> str:
     return os.environ.get("SCTVA_AGENT_URL", DEFAULT_SCTVA_URL).rstrip("/")
 
 
+def _seconds(name: str, default: int, minimum: int = 10) -> int:
+    try:
+        return max(minimum, int(os.environ.get(name, "").strip() or default))
+    except ValueError:
+        return default
+
+
+def sctva_execute_timeout() -> int:
+    """Seconds to wait for /sctva/execute (SCTVA_EXECUTE_TIMEOUT_SECONDS).
+
+    SCTVA parses, transforms and validates every planned file in one request,
+    so a large project needs minutes, not the 120 s the other agent calls use.
+    """
+    return _seconds("SCTVA_EXECUTE_TIMEOUT_SECONDS", 600)
+
+
+def source_fetch_timeout() -> int:
+    """Seconds to wait when reading the planned files' source text before the
+    transformation (DIWO_SOURCE_FETCH_TIMEOUT_SECONDS)."""
+    return _seconds("DIWO_SOURCE_FETCH_TIMEOUT_SECONDS", 180)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Flask application
 # ─────────────────────────────────────────────────────────────────────────────
@@ -227,6 +250,30 @@ MAX_ARCHIVE_FILES = 2000
 MAX_ARCHIVE_BYTES = 50 * 1024 * 1024
 
 GIT_TIMEOUT = 300
+
+
+def git_push_token() -> str:
+    """Server-side GitHub token for clone / fetch / push (DIWO_GIT_PUSH_TOKEN).
+
+    A fine-grained personal access token (Contents: read & write) or a classic
+    token with `repo` scope. Needed on a hosted backend, which has no credential
+    helper and no one at a terminal to answer git's username prompt. Set it as
+    a secret, never in a committed .env.
+    """
+    return (os.environ.get("DIWO_GIT_PUSH_TOKEN") or os.environ.get("GITHUB_TOKEN") or "").strip()
+
+
+def open_github_desktop_enabled() -> bool:
+    """Whether apply-and-push launches GitHub Desktop (DIWO_OPEN_GITHUB_DESKTOP).
+
+    Only meaningful when the backend runs on the developer's own machine. A
+    container has no desktop to open it on, so the default is on for Windows
+    and macOS and off everywhere else.
+    """
+    value = os.environ.get("DIWO_OPEN_GITHUB_DESKTOP")
+    if value is None or not value.strip():
+        return os.name == "nt" or sys.platform == "darwin"
+    return value.strip().lower() in ("1", "true", "yes", "on")
 
 
 def cors_origins():

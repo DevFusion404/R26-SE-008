@@ -105,9 +105,10 @@ class TestGitArgumentInjection:
             "commit": False, "push": False,
         })
 
-        # git either refuses the ref name or treats it as one literal argument.
-        # Either is fine; what matters is that no shell ran it.
-        assert response.status_code in (200, 500)
+        # The branch-name rules refuse it up front (400), or git refuses the
+        # ref name / treats it as one literal argument. Any of these is fine;
+        # what matters is that no shell ran it.
+        assert response.status_code in (200, 400, 500)
 
         after = {p for p in tmp_path.rglob("*") if p.is_file()}
         surprises = {p.name for p in (after - before)} - {"a.txt"}
