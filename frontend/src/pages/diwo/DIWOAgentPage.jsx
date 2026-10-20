@@ -1303,6 +1303,7 @@ export default function DIWOAgentPage({ onWorkflowComplete } = {}) {
               diffRows={workflow?.diff_rows}
               files={workflow?.files}
               sctva={workflow?.sctva}
+              workflowId={workflowId}
               projectContext={projectContext}
             />
           </StageSlot>

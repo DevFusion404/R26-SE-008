@@ -21,6 +21,7 @@ override what is already set — so a container can override the checked-out
 """
 
 import os
+import sys
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -227,6 +228,30 @@ MAX_ARCHIVE_FILES = 2000
 MAX_ARCHIVE_BYTES = 50 * 1024 * 1024
 
 GIT_TIMEOUT = 300
+
+
+def git_push_token() -> str:
+    """Server-side GitHub token for clone / fetch / push (DIWO_GIT_PUSH_TOKEN).
+
+    A fine-grained personal access token (Contents: read & write) or a classic
+    token with `repo` scope. Needed on a hosted backend, which has no credential
+    helper and no one at a terminal to answer git's username prompt. Set it as
+    a secret, never in a committed .env.
+    """
+    return (os.environ.get("DIWO_GIT_PUSH_TOKEN") or os.environ.get("GITHUB_TOKEN") or "").strip()
+
+
+def open_github_desktop_enabled() -> bool:
+    """Whether apply-and-push launches GitHub Desktop (DIWO_OPEN_GITHUB_DESKTOP).
+
+    Only meaningful when the backend runs on the developer's own machine. A
+    container has no desktop to open it on, so the default is on for Windows
+    and macOS and off everywhere else.
+    """
+    value = os.environ.get("DIWO_OPEN_GITHUB_DESKTOP")
+    if value is None or not value.strip():
+        return os.name == "nt" or sys.platform == "darwin"
+    return value.strip().lower() in ("1", "true", "yes", "on")
 
 
 def cors_origins():

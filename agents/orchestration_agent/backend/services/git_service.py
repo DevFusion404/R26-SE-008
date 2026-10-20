@@ -4,7 +4,12 @@ Git repository operations
 R26-SE-008 | Bandara S M Y M | IT22277886
 
 Clone / fetch / checkout / branch / stage / commit / push, plus writing the
-refactored project into the working copy and opening GitHub Desktop on it.
+refactored project into the working copy and, on a local backend, opening
+GitHub Desktop on it.
+
+Remote operations authenticate with a token (see resolve_git_auth), so a
+hosted backend can clone private repositories and push without a credential
+helper or GitHub Desktop.
 
 Every git call goes through run_git(), which never raises — the caller reads
 (ok, stdout, stderr) and decides what to report. Behaviour is exactly what it
@@ -12,13 +17,23 @@ was inside diwo/routes.apply_and_push; only the clone root and the timeout now
 come from config.
 """
 
+import base64
+import logging
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
+from urllib.parse import urlparse
 
+import config
 from config import CLONE_ROOT, GIT_TIMEOUT
 from services.archive_service import safe_archive_path
+from services.branch_naming import (
+    generated_branch_name, next_free_branch_name, remote_branch_exists, validate_branch_name,
+)
+
+logger = logging.getLogger(__name__)
 
 
 class GitOperationError(RuntimeError):
@@ -34,24 +49,115 @@ class GitOperationError(RuntimeError):
         self.status = status
 
 
-def run_git(args, cwd=None, timeout=GIT_TIMEOUT):
-    """Run one git command. Returns (ok, stdout, stderr) and never raises."""
+class GitAuth:
+    """A token git sends for ONE command, as an HTTP Authorization header.
+
+    Passed with `-c http.<origin>/.extraheader=...`, so it is never written to
+    .git/config or embedded in the remote URL — a later `git remote -v` or a
+    copied clone does not carry it. `source` says where it came from, for the
+    response; the token itself is never returned or logged.
+    """
+
+    def __init__(self, token: str, source: str, host: str = "github.com"):
+        self.token = token
+        self.source = source
+        self.host = host
+
+    def config_args(self) -> list:
+        basic = base64.b64encode(f"x-access-token:{self.token}".encode("utf-8")).decode("ascii")
+        return ["-c", f"http.https://{self.host}/.extraheader=AUTHORIZATION: basic {basic}"]
+
+    def redact(self, text: str) -> str:
+        if not text:
+            return text
+        basic = base64.b64encode(f"x-access-token:{self.token}".encode("utf-8")).decode("ascii")
+        return text.replace(self.token, "***").replace(basic, "***")
+
+    def __repr__(self):
+        return f"<GitAuth source={self.source} host={self.host}>"
+
+
+def run_git(args, cwd=None, timeout=GIT_TIMEOUT, auth=None):
+    """Run one git command. Returns (ok, stdout, stderr) and never raises.
+
+    GIT_TERMINAL_PROMPT=0 makes a missing credential fail at once with a clear
+    error. Without it a hosted backend has no terminal to prompt on, and git
+    answers "could not read Username ... No such device or address".
+    """
+    env = {**os.environ, "GIT_TERMINAL_PROMPT": "0", "GCM_INTERACTIVE": "never"}
+    command = ["git", *(auth.config_args() if auth else []), *args]
     try:
         proc = subprocess.run(
-            ["git", *args],
+            command,
             cwd=str(cwd) if cwd else None,
             capture_output=True,
             timeout=timeout,
+            env=env,
         )
-        return (
-            proc.returncode == 0,
-            proc.stdout.decode("utf-8", errors="replace").strip(),
-            proc.stderr.decode("utf-8", errors="replace").strip(),
-        )
+        out = proc.stdout.decode("utf-8", errors="replace").strip()
+        err = proc.stderr.decode("utf-8", errors="replace").strip()
+        if auth:
+            out, err = auth.redact(out), auth.redact(err)
+        return proc.returncode == 0, out, err
     except FileNotFoundError:
         return False, "", "git is not installed or not on PATH."
     except subprocess.TimeoutExpired:
         return False, "", f"git {' '.join(args)} timed out after {timeout}s."
+
+
+# ── Credentials ──────────────────────────────────────────────────────────────
+
+_GITHUB_PATH_RE = re.compile(r"^/?([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+?)(?:\.git)?/?$")
+
+
+def github_repo_from_url(url: str):
+    """(host, owner, repo) for an https GitHub URL, else None."""
+    parsed = urlparse((url or "").strip())
+    if parsed.scheme != "https" or not parsed.hostname:
+        return None
+    match = _GITHUB_PATH_RE.match(parsed.path or "")
+    if not match:
+        return None
+    return parsed.hostname, match.group(1), match.group(2)
+
+
+def _app_installation_token(owner: str, repo: str) -> str:
+    """An installation token from the RefactorIQ GitHub App, when it is
+    configured and installed on owner/repo. "" on any failure — this is the
+    second of three credential sources, not a requirement."""
+    if not config.github_integration_enabled() or config.github_config_problems():
+        return ""
+    try:
+        from services.github_app_service import GitHubAppService
+        service = GitHubAppService.from_config()
+        installation_id = service.find_repo_installation(owner, repo)
+        return service.get_installation_token(installation_id) if installation_id else ""
+    except Exception as exc:  # noqa: BLE001 - fall through to the next source
+        logger.info("GitHub App token unavailable for %s/%s: %s", owner, repo, type(exc).__name__)
+        return ""
+
+
+def resolve_git_auth(clone_url: str, request_token: str = ""):
+    """The credential git should use for `clone_url`, or None.
+
+    In order: a token the developer typed on the Results page (used for this
+    request only, never stored), the server's DIWO_GIT_PUSH_TOKEN, then the
+    GitHub App's installation token for the repository. Only https GitHub URLs
+    take a token; an ssh or local remote keeps whatever git already has.
+    """
+    target = github_repo_from_url(clone_url)
+    if not target:
+        return None
+    host, owner, repo = target
+
+    if request_token:
+        return GitAuth(request_token, "request", host)
+    if config.git_push_token():
+        return GitAuth(config.git_push_token(), "server", host)
+    token = _app_installation_token(owner, repo)
+    if token:
+        return GitAuth(token, "github_app", host)
+    return None
 
 
 def is_remote_repo(value: str) -> bool:
@@ -84,6 +190,14 @@ def web_url_for_remote(url: str) -> str:
     if cleaned.endswith(".git"):
         cleaned = cleaned[:-4]
     return cleaned if cleaned.startswith("http") else ""
+
+
+def _is_credential_error(err: str) -> bool:
+    lowered = (err or "").lower()
+    return any(marker in lowered for marker in (
+        "could not read username", "terminal prompts disabled", "authentication failed",
+        "invalid username or password", "permission to", "403",
+    ))
 
 
 def default_remote_branch(repo_path: Path) -> str:
@@ -131,7 +245,7 @@ def open_github_desktop(repo_path: Path):
     return False, "; ".join(errors) or "GitHub Desktop could not be launched."
 
 
-def prepare_repository(repository: str):
+def prepare_repository(repository: str, auth=None):
     """Resolve the request's repository to a local working copy.
 
     A URL is cloned (once) into CLONE_ROOT and re-fetched on later runs; a
@@ -147,18 +261,19 @@ def prepare_repository(repository: str):
         repo_path = CLONE_ROOT / repo_name_from_url(repository)
 
         if (repo_path / ".git").exists():
-            ok, _, err = run_git(["fetch", "origin", "--prune"], cwd=repo_path)
+            ok, _, err = run_git(["fetch", "origin", "--prune"], cwd=repo_path, auth=auth)
             if not ok:
                 raise GitOperationError(
                     f"Could not fetch the existing clone at {repo_path}: {err}", 400)
         else:
             if repo_path.exists():
                 shutil.rmtree(repo_path, ignore_errors=True)
-            ok, _, err = run_git(["clone", repository, str(repo_path)])
+            ok, _, err = run_git(["clone", repository, str(repo_path)], auth=auth)
             if not ok:
                 raise GitOperationError(
                     f"Could not clone {repository}: {err} — check the URL, and that you have "
-                    "access to the repository (a private repo needs credentials configured for git).",
+                    "access to the repository (a private repo needs a GitHub token: set "
+                    "DIWO_GIT_PUSH_TOKEN on the server or enter one on the Results page).",
                     400)
 
         return repo_path, {"remote": True, "clone_url": repository, "base_branch": default_remote_branch(repo_path)}
@@ -195,38 +310,90 @@ def apply_and_push(data: dict) -> dict:
     """
     files = data.get("files") or []
     branch_name = str(data.get("branch_name") or "").strip()
+    run_id = str(data.get("run_id") or data.get("workflow_id") or "").strip()
+    # True when the name is DIWO's own suggestion: a taken suggestion is moved
+    # to the next free name. A name the developer typed is never changed.
+    branch_auto = bool(data.get("branch_auto")) or not branch_name
     repository = str(data.get("repository_path") or "").strip()
-    commit_message = str(data.get("commit_message") or "").strip() or (
-        f"refactor: DIWO agent changes on {branch_name or 'diwo branch'}"
-    )
     want_commit = data.get("commit", True) is not False
     want_push = data.get("push", True) is not False
+    # Optional, for this request only: never stored, logged or returned.
+    request_token = str(data.get("github_token") or "").strip()
 
     if not isinstance(files, list) or not files:
         raise GitOperationError("No files provided.", 400)
     if not branch_name:
-        raise GitOperationError("Branch name required.", 400)
+        if not run_id:
+            raise GitOperationError("Branch name required (or a run_id to generate one).", 400)
+        branch_name = generated_branch_name(run_id)
     if not repository:
         raise GitOperationError("Repository path or GitHub URL required.", 400)
 
-    repo_path, info = prepare_repository(repository)
+    errors = validate_branch_name(branch_name, run_git)
+    if errors:
+        raise GitOperationError(" ".join(errors), 400)
+
+    auth = resolve_git_auth(repository, request_token) if is_remote_repo(repository) else None
+    repo_path, info = prepare_repository(repository, auth=auth)
+    if auth is None and not info["remote"]:
+        # A local clone whose origin is a GitHub URL can be pushed with a token too.
+        auth = resolve_git_auth(info.get("clone_url") or "", request_token)
+
+    # ── Never overwrite an existing remote branch ────────────────────────────
+    has_origin, _, _ = run_git(["remote", "get-url", "origin"], cwd=repo_path)
+    renamed_from = ""
+    if has_origin:
+        def exists(name):
+            return remote_branch_exists("origin", name, run_git, cwd=repo_path, auth=auth)[0]
+
+        if exists(branch_name):
+            if branch_auto and run_id:
+                renamed_from = branch_name
+                branch_name = next_free_branch_name(run_id, exists)
+            else:
+                raise GitOperationError(
+                    f"Branch '{branch_name}' already exists on the remote repository. "
+                    "Choose another name — DIWO does not overwrite existing branches.", 409)
+
+    commit_message = str(data.get("commit_message") or "").strip() or (
+        f"refactor: DIWO agent changes on {branch_name}"
+    )
+
+    # ── Never write to the base branch ───────────────────────────────────────
+    # The refactoring always goes onto its own branch; main / master and the
+    # remote's default branch are only ever the starting point.
+    protected = {"main", "master"} | ({info["base_branch"]} if info.get("base_branch") else set())
+    if branch_name in protected:
+        raise GitOperationError(
+            f"'{branch_name}' is the repository's base branch. DIWO pushes the refactoring to a "
+            "new branch and never to the base branch — choose a different branch name.", 400)
 
     # ── Branch ───────────────────────────────────────────────────────────────
     if info["remote"]:
         # Cut the work branch from the remote's current head, so a second run
         # does not stack on top of the previous run's commit.
+        #
+        # --no-track: `checkout -B <branch> origin/main` otherwise records
+        # origin/main as the branch's upstream, and any push that follows the
+        # upstream — GitHub Desktop's Push button, a plain `git push` —
+        # would put the refactoring on main instead of on this branch.
         base = info["base_branch"]
-        ok, _, err = run_git(["checkout", "-B", branch_name, f"origin/{base}"], cwd=repo_path)
+        ok, _, err = run_git(["checkout", "--no-track", "-B", branch_name, f"origin/{base}"], cwd=repo_path)
         if not ok:
             ok, _, err = run_git(["checkout", "-B", branch_name], cwd=repo_path)
         if not ok:
             raise GitOperationError(f"Could not create branch '{branch_name}': {err}", 500)
     else:
         exists, _, _ = run_git(["rev-parse", "--verify", branch_name], cwd=repo_path)
-        ok, _, err = run_git(["checkout", branch_name] if exists else ["checkout", "-b", branch_name], cwd=repo_path)
+        ok, _, err = run_git(["checkout", branch_name] if exists
+                             else ["checkout", "--no-track", "-b", branch_name], cwd=repo_path)
         if not ok:
             raise GitOperationError(f"Could not check out branch '{branch_name}': {err} — commit or stash the "
                 "repository's current changes first.", 500)
+
+    # A branch reused from an earlier run may still carry an upstream of main
+    # (clones made before --no-track). Drop it; the push below sets the right one.
+    run_git(["branch", "--unset-upstream", branch_name], cwd=repo_path)
 
     # ── Write the project ────────────────────────────────────────────────────
     written_files = []
@@ -266,8 +433,18 @@ def apply_and_push(data: dict) -> dict:
     committed = False
     commit_sha = ""
     commit_error = ""
-    if want_commit and staged_files:
-        ok, _, err = run_git(["commit", "-m", commit_message], cwd=repo_path)
+    # Every run gets its own branch on the remote, even when the written files
+    # are identical to the base branch (the refactorings are already there).
+    # git cannot commit "no change", so that run is recorded as an EMPTY
+    # commit, which still gives the branch something to push.
+    no_changes = not staged_files
+    if want_commit:
+        commit_args = ["commit", "-m", commit_message]
+        if no_changes:
+            commit_args = ["commit", "--allow-empty", "-m", commit_message, "-m",
+                           "DIWO run with no file differences: every written file already "
+                           "matches the base branch."]
+        ok, _, err = run_git(commit_args, cwd=repo_path)
 
         # A machine with no git identity cannot commit at all. For a clone DIWO
         # created it can set one itself — scoped to that clone, never --global,
@@ -275,7 +452,7 @@ def apply_and_push(data: dict) -> dict:
         if not ok and info["remote"] and "user.email" in (err or "").lower():
             run_git(["config", "user.email", "diwo-agent@localhost"], cwd=repo_path)
             run_git(["config", "user.name", "DIWO Agent"], cwd=repo_path)
-            ok, _, err = run_git(["commit", "-m", commit_message], cwd=repo_path)
+            ok, _, err = run_git(commit_args, cwd=repo_path)
 
         if ok:
             committed = True
@@ -284,46 +461,106 @@ def apply_and_push(data: dict) -> dict:
             commit_error = err or "git commit failed."
 
     # ── Push ─────────────────────────────────────────────────────────────────
-    has_origin, _, _ = run_git(["remote", "get-url", "origin"], cwd=repo_path)
     pushed = False
     push_error = ""
     if want_push and committed and has_origin:
-        ok, _, err = run_git(["push", "-u", "origin", branch_name], cwd=repo_path)
+        # A plain push, never --force: the branch was checked to be new above,
+        # and if someone created it in the meantime git refuses the push rather
+        # than replacing their commits.
+        #
+        # The refspec names the destination in full — refs/heads/<branch> on
+        # the remote — so nothing (an upstream, push.default) can redirect the
+        # commit to main. -u then makes that same remote branch the upstream,
+        # so a later push from GitHub Desktop goes there too.
+        refspec = f"refs/heads/{branch_name}:refs/heads/{branch_name}"
+        ok, _, err = run_git(["push", "-u", "origin", refspec], cwd=repo_path, auth=auth)
         if ok:
-            pushed = True
-        else:
+            # Confirm the remote branch now holds exactly this commit.
+            _, local_sha, _ = run_git(["rev-parse", "HEAD"], cwd=repo_path)
+            _, remote_line, _ = run_git(["ls-remote", "origin", f"refs/heads/{branch_name}"],
+                                        cwd=repo_path, auth=auth)
+            pushed = bool(local_sha) and remote_line.split("\t", 1)[0] == local_sha
+            if not pushed:
+                push_error = (f"git reported success, but origin/{branch_name} does not hold "
+                              f"commit {local_sha[:7]} — check the repository on GitHub.")
+        elif "rejected" in (err or "").lower() or "fetch first" in (err or "").lower():
             push_error = (
-                f"{err} — the branch is committed locally, so you can push it from GitHub Desktop "
-                "once credentials are available."
+                f"Branch '{branch_name}' was created on the remote by someone else while DIWO "
+                "was writing it, so the push was refused rather than overwrite it. Push again "
+                "with a different branch name."
             )
+        elif auth is None and _is_credential_error(err):
+            push_error = (
+                "GitHub needs credentials to push, and this server has none. Set "
+                "DIWO_GIT_PUSH_TOKEN on the backend (a token with Contents: write), install the "
+                "RefactorIQ GitHub App on the repository, or enter a GitHub token on the Results "
+                "page. The branch is committed on the server."
+            )
+        elif _is_credential_error(err) or "403" in (err or ""):
+            push_error = (
+                f"GitHub rejected the push with the {auth.source if auth else ''} token: {err} — "
+                "check that the token has Contents: write access to this repository."
+            )
+        else:
+            push_error = f"{err} — the branch is committed on the server but was not pushed."
     elif want_push and not has_origin:
         push_error = "This repository has no 'origin' remote, so the branch stays local."
-    elif want_push and not committed:
+    elif want_push and not committed and (commit_error or staged_files):
         push_error = commit_error or "Nothing was committed, so there was nothing to push."
+    # No staged files is not a failure: the branch already holds this exact
+    # project, so there is nothing to push and nothing went wrong.
 
-    opened, launch_detail = open_github_desktop(repo_path)
+    # GitHub Desktop only makes sense when the backend runs on the developer's
+    # own machine. On a hosted backend the working copy is on the server, so
+    # launching it is skipped rather than reported as a failure.
+    if config.open_github_desktop_enabled() and data.get("open_github_desktop", True) is not False:
+        opened, launch_detail = open_github_desktop(repo_path)
+    else:
+        opened, launch_detail = False, "skipped"
 
     web_url = web_url_for_remote(info.get("clone_url") or "")
     branch_url = f"{web_url}/tree/{branch_name}" if (web_url and pushed) else ""
+    base = info.get("base_branch")
+    compare_url = (f"{web_url}/compare/{base}...{branch_name}?expand=1"
+                   if (web_url and pushed and base) else "")
 
-    if committed and pushed:
+    base_label = f"origin/{info['base_branch']}" if info.get("base_branch") else "the base branch"
+    if committed and pushed and no_changes:
+        message = (
+            f"Branch '{branch_name}' pushed to origin. Its files are identical to {base_label} "
+            "— these refactorings are already there — so the commit records the run with no "
+            "file changes."
+        )
+    elif committed and pushed:
         message = f"Branch '{branch_name}' committed and pushed to origin."
     elif committed:
-        message = f"Branch '{branch_name}' committed locally."
+        message = f"Branch '{branch_name}' committed, but not pushed to GitHub."
     elif staged_files:
-        message = f"Changes staged on '{branch_name}' — review and commit in GitHub Desktop."
+        message = f"Changes staged on '{branch_name}' but not committed."
     else:
-        message = f"Branch '{branch_name}' is up to date; the project already matches these files."
+        # Name the commit the files already match, so "nothing changed" points
+        # at where the changes are instead of reading like a failed push.
+        _, last = run_git(["log", "-1", "--format=%h %s"], cwd=repo_path)[:2]
+        message = (
+            f"Nothing committed: every written file is identical to {base_label}"
+            f"{f' (latest commit {last})' if last else ''}."
+        )
 
     return {
         "status": "success",
         "message": message,
         "branch": branch_name,
+        # Set when the suggested name was taken and DIWO picked the next one.
+        "branch_renamed_from": renamed_from,
         "base_branch": info.get("base_branch"),
         "repository": str(repo_path),
         "cloned": bool(info["remote"]),
         "clone_url": info.get("clone_url") or "",
         "branch_url": branch_url,
+        "compare_url": compare_url,
+        # The exact remote ref written — always the new branch, never the base.
+        "pushed_ref": f"refs/heads/{branch_name}" if pushed else "",
+        "auth_source": auth.source if auth else None,
         "written_files": written_files,
         "written_count": len(written_files),
         "staged_files": staged_files,
@@ -335,4 +572,71 @@ def apply_and_push(data: dict) -> dict:
         "push_error": push_error,
         "github_desktop_opened": opened,
         "github_desktop_detail": launch_detail,
+    }
+
+
+def check_branch(data: dict) -> dict:
+    """Suggest and validate a branch name before anything is written.
+
+    `data` is the body of POST /api/diwo/branch-name/check:
+
+      {
+        "run_id":          "wf_3f9a1c",          workflow / run id to name from
+        "branch_name":     "...",                optional; omitted -> suggest one
+        "repository_path": "https://github.com/user/repo" | "C:/path/to/repo",
+        "github_token":    "..."                 optional, this request only
+      }
+
+    The remote is asked directly (`git ls-remote`), so a URL is checked
+    without cloning it. Returns:
+
+      {
+        "branch_name": str,        the name checked (the suggestion if none given)
+        "valid":       bool,       passes the naming rules and git check-ref-format
+        "errors":      [str],
+        "exists":      bool|None,  on the remote; None when it could not be asked
+        "exists_error": str,
+        "suggestion":  str,        a free generated name for this run
+      }
+    """
+    run_id = str(data.get("run_id") or data.get("workflow_id") or "").strip()
+    name = str(data.get("branch_name") or "").strip()
+    repository = str(data.get("repository_path") or "").strip()
+    request_token = str(data.get("github_token") or "").strip()
+
+    if not name:
+        name = generated_branch_name(run_id or "run")
+
+    errors = validate_branch_name(name, run_git)
+
+    # Where to ask: the URL itself, or the local clone's origin.
+    remote, cwd, auth = None, None, None
+    if repository and is_remote_repo(repository):
+        remote, auth = repository, resolve_git_auth(repository, request_token)
+    elif repository:
+        path = Path(repository).expanduser()
+        if (path / ".git").exists():
+            ok, url, _ = run_git(["remote", "get-url", "origin"], cwd=path)
+            if ok:
+                remote, cwd = "origin", path
+                auth = resolve_git_auth(url, request_token)
+
+    exists, exists_error = None, ""
+    if remote and not errors:
+        exists, exists_error = remote_branch_exists(remote, name, run_git, cwd=cwd, auth=auth)
+
+    def probe(candidate):
+        if not remote:
+            return False
+        return remote_branch_exists(remote, candidate, run_git, cwd=cwd, auth=auth)[0]
+
+    suggestion = next_free_branch_name(run_id or "run", probe)
+
+    return {
+        "branch_name": name,
+        "valid": not errors,
+        "errors": errors,
+        "exists": exists,
+        "exists_error": exists_error,
+        "suggestion": suggestion,
     }

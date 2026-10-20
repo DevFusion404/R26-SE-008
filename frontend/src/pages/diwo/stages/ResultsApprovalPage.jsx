@@ -23,13 +23,14 @@
  * transformation log and the mined invariants.
  */
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Badge, C, Card, Pill } from "../diwoTheme.jsx";
 import { CodeBlock, CodeSurface, DiffBlock, DiffLegend } from "../components/DiffView.jsx";
 import { buildDiffRows } from "../utils/diffMapper";
 import { buildProjectArchive } from "../utils/projectArchive";
 import { createZip, downloadBlob } from "../utils/zipWriter";
-import { applyAndPush } from "../services/diwoApi";
+import { applyAndPush, checkBranchName } from "../services/diwoApi";
+import { branchNameErrors, suggestBranchName } from "../utils/branchName";
 
 const VALIDATION_LABELS = {
   syntax: ["Syntax Validation", "Compilation / parse check of the transformed source."],
@@ -340,6 +341,8 @@ export default function ResultsApprovalPage({
   files = [],
   sctva = null,
   repositoryPath = "",
+  // The workflow / run id, which names this run's branch.
+  workflowId = null,
   // { analysedReport, selectedReport, plan, approvedPlan } — everything the
   // earlier stages decided, so this page can account for every analysed file.
   projectContext = null,
@@ -351,12 +354,67 @@ export default function ResultsApprovalPage({
   const [selectedFileIndex, setSelectedFileIndex] = useState(0);
   const [view, setView] = useState("final");
   const [showActionChoice, setShowActionChoice] = useState(false);
-  const [branchName, setBranchName] = useState("refactoring/diwo-changes");
+  // A unique branch per run, named from the workflow id. `branchAuto` stays
+  // true while the name is DIWO's suggestion: a taken suggestion is replaced
+  // by the next free one, while a name the developer typed is never changed.
+  const [branchName, setBranchName] = useState(() => suggestBranchName(workflowId));
+  const [branchAuto, setBranchAuto] = useState(true);
+  // The server's verdict on the current name: git check-ref-format and
+  // whether the branch already exists on the remote.
+  const [branchCheck, setBranchCheck] = useState({ status: "idle" });
   const [repoPath, setRepoPath] = useState(repositoryPath || "");
   const [commitMessage, setCommitMessage] = useState("refactor: apply DIWO agent refactorings");
-  const [pushToOrigin, setPushToOrigin] = useState(true);
+  // Optional GitHub token for this push only — kept in memory, never stored.
+  // Needed only when the backend has no DIWO_GIT_PUSH_TOKEN / GitHub App access.
+  const [githubToken, setGithubToken] = useState("");
   const [pushStatus, setPushStatus] = useState("");
   const [isProcessing, setIsProcessing] = useState(false);
+
+  // ── Branch name validation ─────────────────────────────────────────────────
+  const trimmedBranch = branchName.trim();
+  const localBranchErrors = branchNameErrors(trimmedBranch);
+  const branchKey = `${trimmedBranch}|${repoPath.trim()}`;
+  // Only the verdict for the name and repository on screen counts.
+  const check = branchCheck.key === branchKey ? branchCheck : { status: "idle" };
+  const branchErrors = localBranchErrors.length ? localBranchErrors : (check.errors || []);
+  const branchTaken = check.exists === true;
+  const branchBlocked = branchErrors.length > 0 || (branchTaken && !branchAuto);
+
+  // Ask the backend once typing pauses: git's own check-ref-format, and
+  // whether the remote already has this branch. Skipped while the rules
+  // already reject the name — git would only agree.
+  useEffect(() => {
+    if (!showActionChoice || localBranchErrors.length) return undefined;
+    const controller = new AbortController();
+    const key = branchKey;
+    const timer = setTimeout(async () => {
+      setBranchCheck({ key, status: "checking" });
+      try {
+        const result = await checkBranchName({
+          run_id: workflowId || "",
+          branch_name: trimmedBranch,
+          repository_path: repoPath.trim(),
+          ...(githubToken.trim() ? { github_token: githubToken.trim() } : {}),
+        }, { signal: controller.signal });
+        // A suggestion that turned out to be taken moves on to the next free
+        // name by itself; a typed name is left for the developer to change.
+        if (branchAuto && result.exists && result.suggestion && result.suggestion !== trimmedBranch) {
+          setBranchName(result.suggestion);
+          return;
+        }
+        setBranchCheck({ key, status: "done", ...result });
+      } catch (e) {
+        if (e.name !== "AbortError") setBranchCheck({ key, status: "error", message: e.message });
+      }
+    }, 450);
+    return () => {
+      clearTimeout(timer);
+      controller.abort();
+    };
+    // githubToken is read at call time; re-checking on every token keystroke
+    // would send a half-typed token to the server.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showActionChoice, branchKey, workflowId, branchAuto]);
 
   // ── Resolve each file to the code that will actually be written ───────────
   const fileEntries = useMemo(() => {
@@ -535,8 +593,12 @@ export default function ResultsApprovalPage({
    * nothing about whether the branch was actually committed or pushed.
    */
   const handlePushToGitHub = async () => {
-    if (!branchName.trim()) {
-      alert("Please enter a branch name.");
+    if (branchErrors.length) {
+      alert(`Fix the branch name first:\n\n${branchErrors.join("\n")}`);
+      return;
+    }
+    if (branchTaken && !branchAuto) {
+      alert(`Branch '${trimmedBranch}' already exists on the remote repository. Choose another name — DIWO does not overwrite existing branches.`);
       return;
     }
     if (!repoPath.trim()) {
@@ -576,11 +638,14 @@ export default function ResultsApprovalPage({
       setPushStatus(`Writing ${payloadFiles.length} file(s) to '${branchName}'…`);
       const result = await applyAndPush({
         files: payloadFiles,
-        branch_name: branchName.trim(),
+        branch_name: trimmedBranch,
+        run_id: workflowId || "",
+        branch_auto: branchAuto,
         repository_path: repoPath.trim(),
-        commit_message: commitMessage.trim() || `refactor: DIWO agent changes (${branchName.trim()})`,
+        commit_message: commitMessage.trim() || `refactor: DIWO agent changes (${trimmedBranch})`,
         commit: true,
-        push: pushToOrigin,
+        push: true,
+        ...(githubToken.trim() ? { github_token: githubToken.trim() } : {}),
       });
 
       const lines = [
@@ -588,6 +653,9 @@ export default function ResultsApprovalPage({
         "",
         `Repository: ${result.repository}${result.cloned ? " (clone of your GitHub URL)" : ""}`,
         `Branch:     ${result.branch}${result.base_branch ? ` (from ${result.base_branch})` : ""}`,
+        ...(result.branch_renamed_from
+          ? [`            '${result.branch_renamed_from}' already existed, so the next free name was used.`]
+          : []),
         `Written:    ${result.written_count} file(s) — ${scope}`,
         `Changed:    ${(result.staged_files || []).length} file(s) differ from the branch`,
       ];
@@ -595,13 +663,23 @@ export default function ResultsApprovalPage({
       if (result.commit_error) lines.push(`Commit failed: ${result.commit_error}`);
       if (result.pushed) lines.push(`Pushed:     ${result.branch_url || "origin/" + result.branch}`);
       if (result.push_error) lines.push(`Not pushed: ${result.push_error}`);
-      lines.push(
-        result.github_desktop_opened
-          ? "\nGitHub Desktop is opening on this repository."
-          : `\nGitHub Desktop could not be launched (${result.github_desktop_detail || "not installed"}). Open the repository above manually.`
-      );
+      // GitHub Desktop is only launched by a backend running on this machine;
+      // a hosted backend skips it, and that is not worth a warning.
+      if (result.github_desktop_opened) {
+        lines.push("\nGitHub Desktop is opening on this repository.");
+      } else if (result.github_desktop_detail && result.github_desktop_detail !== "skipped") {
+        lines.push(`\nGitHub Desktop could not be launched (${result.github_desktop_detail}).`);
+      }
 
-      alert(lines.join("\n"));
+      if (result.pushed && result.compare_url) {
+        lines.push("\nOpen GitHub to review the branch and create a pull request?");
+        if (window.confirm(lines.join("\n"))) {
+          window.open(result.compare_url, "_blank", "noopener,noreferrer");
+        }
+      } else {
+        alert(lines.join("\n"));
+      }
+      setGithubToken("");
 
       setShowActionChoice(false);
       if (onAccept) onAccept({ ...decisionPayload(), githubResult: result });
@@ -1125,7 +1203,7 @@ export default function ResultsApprovalPage({
                     <div style={{ fontWeight: 700, color: C.text }}>Push to GitHub</div>
                     <div style={{ fontSize: 12, color: C.textMuted }}>
                       Writes the whole project — your accepted changes applied, every other file
-                      as-is — onto its own branch, commits it, and opens GitHub Desktop there.
+                      as-is — onto its own branch, commits it and pushes it to GitHub.
                     </div>
                   </div>
                 </div>
@@ -1142,20 +1220,91 @@ export default function ResultsApprovalPage({
                     style={{ width: "100%", padding: "8px 12px", borderRadius: 6, background: C.bg, border: `1px solid ${C.border}`, color: C.text, fontSize: 12, boxSizing: "border-box" }}
                   />
                   <div style={{ fontSize: 10, color: C.textMuted, marginTop: 4, lineHeight: 1.5 }}>
-                    A URL is cloned once into <span style={{ fontFamily: "monospace" }}>~/DIWO/repos/</span> and
-                    reused on later runs, so GitHub Desktop can open the same working copy.
+                    A URL is cloned once on the DIWO server and reused on later runs. A local path
+                    only works when the DIWO backend runs on this machine.
                   </div>
                 </div>
 
                 <div style={{ marginBottom: 10 }}>
-                  <label style={{ fontSize: 12, color: C.textMuted, display: "block", marginBottom: 4 }}>Branch name</label>
+                  <label style={{ fontSize: 12, color: C.textMuted, display: "block", marginBottom: 4 }}>
+                    GitHub token <span style={{ opacity: 0.8 }}>(optional)</span>
+                  </label>
                   <input
-                    type="text"
-                    value={branchName}
-                    onChange={(e) => setBranchName(e.target.value)}
-                    placeholder="e.g., refactoring/diwo-changes"
+                    type="password"
+                    autoComplete="off"
+                    value={githubToken}
+                    onChange={(e) => setGithubToken(e.target.value)}
+                    placeholder="github_pat_…  —  only if the server has no push access"
                     style={{ width: "100%", padding: "8px 12px", borderRadius: 6, background: C.bg, border: `1px solid ${C.border}`, color: C.text, fontSize: 12, boxSizing: "border-box" }}
                   />
+                  <div style={{ fontSize: 10, color: C.textMuted, marginTop: 4, lineHeight: 1.5 }}>
+                    A fine-grained token with <b>Contents: Read and write</b> on this repository. Used
+                    for this push only and never stored. Leave empty when the server already has a
+                    token configured.
+                  </div>
+                </div>
+
+                <div style={{ marginBottom: 10 }}>
+                  <div style={{ display: "flex", alignItems: "baseline", gap: 8, marginBottom: 4 }}>
+                    <label htmlFor="diwo-branch-name" style={{ fontSize: 12, color: C.textMuted }}>Branch name</label>
+                    <span style={{ fontSize: 10, color: C.textMuted }}>
+                      {branchAuto ? "suggested for this run" : "edited"}
+                    </span>
+                    {!branchAuto && (
+                      <button
+                        type="button"
+                        onClick={() => { setBranchName(suggestBranchName(workflowId)); setBranchAuto(true); }}
+                        style={{ marginLeft: "auto", background: "none", border: "none", padding: 0, color: C.accent, fontSize: 11, cursor: "pointer" }}
+                      >
+                        Use suggested name
+                      </button>
+                    )}
+                  </div>
+                  <input
+                    id="diwo-branch-name"
+                    type="text"
+                    value={branchName}
+                    onChange={(e) => { setBranchName(e.target.value); setBranchAuto(false); }}
+                    placeholder="e.g., refactoring/diwo-wf-3f9a1c"
+                    spellCheck={false}
+                    aria-invalid={branchBlocked}
+                    aria-describedby="diwo-branch-status"
+                    style={{ width: "100%", padding: "8px 12px", borderRadius: 6, background: C.bg, border: `1px solid ${branchErrors.length ? C.danger : branchTaken && !branchAuto ? C.warn : C.border}`, color: C.text, fontSize: 12, fontFamily: "monospace", boxSizing: "border-box" }}
+                  />
+                  <div id="diwo-branch-status" role="status" style={{ fontSize: 11, marginTop: 4, lineHeight: 1.5 }}>
+                    {branchErrors.length > 0 ? (
+                      branchErrors.map((msg) => (
+                        <div key={msg} style={{ color: C.danger }}>✕ {msg}</div>
+                      ))
+                    ) : branchTaken && !branchAuto ? (
+                      <div style={{ color: C.warn }}>
+                        ⚠ Branch <b style={{ fontFamily: "monospace" }}>{trimmedBranch}</b> already exists on the
+                        remote repository. DIWO will not overwrite it — choose another name
+                        {check.suggestion && (
+                          <>
+                            {" "}or{" "}
+                            <button
+                              type="button"
+                              onClick={() => { setBranchName(check.suggestion); setBranchAuto(true); }}
+                              style={{ background: "none", border: "none", padding: 0, color: C.accent, fontSize: 11, cursor: "pointer", fontFamily: "monospace", textDecoration: "underline" }}
+                            >
+                              use {check.suggestion}
+                            </button>
+                          </>
+                        )}.
+                      </div>
+                    ) : check.status === "checking" ? (
+                      <span style={{ color: C.textMuted }}>Checking the name with git and the remote…</span>
+                    ) : check.status === "done" && check.exists === false ? (
+                      <span style={{ color: C.low }}>✓ Valid, and not used on the remote yet.</span>
+                    ) : check.status === "done" && check.exists == null ? (
+                      <span style={{ color: C.textMuted }}>
+                        ✓ Valid name.{repoPath.trim() ? " The remote could not be checked; the push still refuses to overwrite an existing branch." : ""}
+                      </span>
+                    ) : check.status === "error" ? (
+                      <span style={{ color: C.textMuted }}>Could not check the name on the server ({check.message}).</span>
+                    ) : null}
+                  </div>
                 </div>
 
                 <div style={{ marginBottom: 10 }}>
@@ -1169,26 +1318,20 @@ export default function ResultsApprovalPage({
                   />
                 </div>
 
-                <label style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12, cursor: "pointer" }}>
-                  <input
-                    type="checkbox"
-                    checked={pushToOrigin}
-                    onChange={(e) => setPushToOrigin(e.target.checked)}
-                    style={{ accentColor: C.accent, cursor: "pointer" }}
-                  />
-                  <span style={{ fontSize: 12, color: C.textSub }}>
-                    Push the branch to <span style={{ fontFamily: "monospace" }}>origin</span> after committing
-                  </span>
-                </label>
+                <div style={{ fontSize: 11, color: C.textMuted, marginBottom: 12, lineHeight: 1.5 }}>
+                  The commit is pushed to the new branch{" "}
+                  <span style={{ fontFamily: "monospace", color: C.textSub }}>{trimmedBranch || "…"}</span>{" "}
+                  on GitHub — never to <span style={{ fontFamily: "monospace" }}>main</span>.
+                </div>
 
                 <button
                   onClick={handlePushToGitHub}
-                  disabled={isProcessing}
-                  style={{ width: "100%", padding: "8px 12px", borderRadius: 6, background: C.accent, color: "#000", border: "none", fontWeight: 700, fontSize: 12, cursor: isProcessing ? "not-allowed" : "pointer", opacity: isProcessing ? 0.6 : 1 }}
+                  disabled={isProcessing || branchBlocked}
+                  style={{ width: "100%", padding: "8px 12px", borderRadius: 6, background: C.accent, color: "#000", border: "none", fontWeight: 700, fontSize: 12, cursor: isProcessing || branchBlocked ? "not-allowed" : "pointer", opacity: isProcessing || branchBlocked ? 0.6 : 1 }}
                 >
                   {isProcessing
                     ? pushStatus || "Processing…"
-                    : `✓ Commit${pushToOrigin ? " & Push" : ""} Branch, then open GitHub Desktop`}
+                    : "✓ Commit & Push Branch to GitHub"}
                 </button>
               </div>
 
