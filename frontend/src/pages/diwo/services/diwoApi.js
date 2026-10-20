@@ -25,6 +25,7 @@
 
 import { detectPrimaryLanguage } from "../utils/cuqaReport";
 import { getEnv } from "../../../config/env";
+import UserService from "../../../services/userService";
 
 // ─── Base URLs ───────────────────────────────────────────────────────────────
 
@@ -44,6 +45,21 @@ export const CUQA_BASE = getEnv('VITE_CUQA_AGENT_API_URL', getEnv('VITE_CUQA_API
 
 // ─── Transport ───────────────────────────────────────────────────────────────
 
+/**
+ * The signed-in user's DIWO token, when there is one. Workflows created from
+ * a GitHub pull request require it (the backend answers 401 without it);
+ * every other workflow ignores it, so sending it everywhere changes nothing
+ * for them.
+ */
+export function authHeaders() {
+  const token = UserService.getToken();
+  return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
+function jsonHeaders() {
+  return { "Content-Type": "application/json", ...authHeaders() };
+}
+
 async function readJson(res) {
   try {
     return await res.json();
@@ -61,7 +77,7 @@ export const api = {
   async post(path, body) {
     const res = await fetch(`${DIWO_BASE}${path}`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: jsonHeaders(),
       body: JSON.stringify(body),
     });
     const json = await res.json();
@@ -69,7 +85,7 @@ export const api = {
     return json;
   },
   async get(path, { signal } = {}) {
-    const res = await fetch(`${DIWO_BASE}${path}`, { signal });
+    const res = await fetch(`${DIWO_BASE}${path}`, { signal, headers: authHeaders() });
     const json = await res.json();
     if (!res.ok) throw new Error(json.error || `HTTP ${res.status}`);
     return json;
@@ -106,7 +122,7 @@ export async function fetchQualityReport({ filePath = null, signal } = {}) {
   try {
     res = await fetch(`${DIWO_BASE}/cuqa/quality-report`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: jsonHeaders(),
       body: JSON.stringify(filePath ? { file_path: filePath } : {}),
       signal,
     });
@@ -198,7 +214,7 @@ export const completeWorkflow = (workflowId, notes = "") =>
 export async function previewSmellSelection(workflowId, body) {
   const response = await fetch(`${DIWO_BASE}/workflows/${workflowId}/smell-selection-pass`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: jsonHeaders(),
     body: JSON.stringify(body),
   });
 
@@ -327,7 +343,7 @@ export const submitTransformationDecision = (workflowId, body) =>
 export async function runTransformation(workflowId, body = {}, { signal } = {}) {
   const response = await fetch(`${DIWO_BASE}/workflows/${workflowId}/transform`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: jsonHeaders(),
     body: JSON.stringify(body),
     signal,
   });
@@ -424,7 +440,7 @@ export async function fetchFileSource(filePath, { signal } = {}) {
 export async function fetchWorkspaceSources(filePaths, { signal } = {}) {
   const res = await fetch(`${DIWO_BASE}/workspace/sources`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: jsonHeaders(),
     body: JSON.stringify({ file_paths: filePaths }),
     signal,
   });
@@ -462,7 +478,7 @@ export async function fetchWorkspaceSources(filePaths, { signal } = {}) {
 export async function applyAndPush(body) {
   const response = await fetch(`${DIWO_BASE}/diwo/apply-and-push`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: jsonHeaders(),
     body: JSON.stringify(body),
   });
 
@@ -471,4 +487,115 @@ export async function applyAndPush(body) {
     throw new Error(result.error || `HTTP ${response.status}: ${response.statusText}`);
   }
   return result;
+}
+
+// ─── GitHub-linked workflows ─────────────────────────────────────────────────
+
+/**
+ * GET /github/workflows/<id> — a workflow created from a GitHub pull request:
+ * its PR context (repository, PR number, analysed commit, whether that commit
+ * is still the PR head) and the CUQA report it was seeded with.
+ *
+ * Requires a signed-in DIWO user; the error carries the HTTP status so the
+ * page can ask the developer to sign in on 401.
+ */
+export async function fetchGithubWorkflow(workflowId, { signal } = {}) {
+  const res = await fetch(`${DIWO_BASE}/github/workflows/${encodeURIComponent(workflowId)}`, {
+    signal,
+    headers: authHeaders(),
+  });
+  const json = await readJson(res);
+  if (!res.ok) {
+    const error = new Error(json.error || `HTTP ${res.status}`);
+    error.status = res.status;
+    throw error;
+  }
+  return json;
+}
+
+/**
+ * POST /github/workflows/<id>/sources — original source of analysed files,
+ * read from GitHub AT THE ANALYSED COMMIT. Used instead of the CUQA workspace
+ * for GitHub-linked workflows, whose code CUQA's shared workspace does not
+ * hold. Same response shape as fetchWorkspaceSources.
+ */
+export async function fetchGithubSources(workflowId, filePaths, { signal } = {}) {
+  const res = await fetch(`${DIWO_BASE}/github/workflows/${encodeURIComponent(workflowId)}/sources`, {
+    method: "POST",
+    headers: jsonHeaders(),
+    body: JSON.stringify({ file_paths: filePaths }),
+    signal,
+  });
+  const json = await readJson(res);
+  if (!res.ok) {
+    const error = new Error(json.error || `The source could not be read (HTTP ${res.status}).`);
+    error.status = res.status;
+    throw error;
+  }
+  return { files: json.files || [], missing: json.missing || [] };
+}
+
+/** One analysed file of a GitHub-linked workflow, in fetchFileSource's shape. */
+export async function fetchGithubFileSource(workflowId, filePath, { signal } = {}) {
+  const { files, missing } = await fetchGithubSources(workflowId, [filePath], { signal });
+  const entry = files[0];
+  return {
+    path: filePath,
+    source: typeof entry?.source_code === "string" ? entry.source_code : null,
+    language: entry?.language || "",
+    missing: missing.includes(filePath) || !entry,
+  };
+}
+
+/** GET /github/workflows/<id>/transformations — SCTVA's proposed changes for
+ *  the analysed PR commit: original, refactored, diff, real validation, and
+ *  the decision recorded on each (shared with the /refactoriq commands). */
+export async function fetchGithubTransformations(workflowId, { signal } = {}) {
+  const res = await fetch(
+    `${DIWO_BASE}/github/workflows/${encodeURIComponent(workflowId)}/transformations`,
+    { signal, headers: authHeaders() });
+  const json = await readJson(res);
+  if (!res.ok) {
+    const error = new Error(json.error || `HTTP ${res.status}`);
+    error.status = res.status;
+    throw error;
+  }
+  return json;
+}
+
+/** POST .../transformations/decision — { T001: "accept" | "reject" }. */
+export async function decideGithubTransformations(workflowId, decisions) {
+  const res = await fetch(
+    `${DIWO_BASE}/github/workflows/${encodeURIComponent(workflowId)}/transformations/decision`,
+    { method: "POST", headers: jsonHeaders(), body: JSON.stringify({ decisions }) });
+  const json = await readJson(res);
+  if (!res.ok) throw new Error(json.error || `HTTP ${res.status}`);
+  return json;
+}
+
+/** POST .../submit-refactoring — commit the ACCEPTED changes (explicit confirm). */
+export async function submitGithubRefactoring(workflowId) {
+  const res = await fetch(
+    `${DIWO_BASE}/github/workflows/${encodeURIComponent(workflowId)}/submit-refactoring`,
+    { method: "POST", headers: jsonHeaders(), body: JSON.stringify({ confirm: true }) });
+  const json = await readJson(res);
+  if (!res.ok) throw new Error(json.error || `HTTP ${res.status}`);
+  return json;
+}
+
+/** GET .../patch — the accepted changes as a unified diff, saved as a file. */
+export async function downloadGithubPatch(workflowId) {
+  const res = await fetch(
+    `${DIWO_BASE}/github/workflows/${encodeURIComponent(workflowId)}/patch`,
+    { headers: authHeaders() });
+  if (!res.ok) {
+    const json = await readJson(res);
+    throw new Error(json.error || `HTTP ${res.status}`);
+  }
+  const url = URL.createObjectURL(await res.blob());
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = `refactoriq-${workflowId}.patch`;
+  link.click();
+  URL.revokeObjectURL(url);
 }

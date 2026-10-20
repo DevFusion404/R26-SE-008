@@ -35,7 +35,7 @@ __all__ = [
 
 
 def plan_from_rdp(updated_report: dict, selected: list, target: str,
-                  wf_id: Optional[str] = None):
+                  wf_id: Optional[str] = None, source_files: Optional[list] = None):
     """Generate the refactoring plan for the developer's smell selection.
 
     The updated report — every analysed file, but only the smells the developer
@@ -44,9 +44,16 @@ def plan_from_rdp(updated_report: dict, selected: list, target: str,
     the offline fallback, and the response always says which one produced the
     plan so a fallback is never mistaken for real RDP output.
 
+    `source_files` ({file_name, file_path, language, source_code}) is passed
+    through to RDP, whose Move Method resolver reads it. Only GitHub-linked
+    workflows send it, read from the analysed PR commit; ordinary workflows
+    send none, exactly as before.
+
     Returns (plan, trace, source, warning).
     """
     rdp_input = build_rdp_plan_input(updated_report)
+    if source_files:
+        rdp_input["source_files"] = source_files
 
     if not rdp_input["files"]:
         warning = (
@@ -83,6 +90,7 @@ def plan_from_rdp(updated_report: dict, selected: list, target: str,
             "steps":         plan["summary"]["total_steps"],
             "files_sent":    len(rdp_input["files"]),
             "smells_sent":   rdp_input["summary"]["total_code_smells"],
+            "source_files_sent": len(source_files or []),
             "smells_skipped": len(result["trace"].get("plan_generation", {}).get("skipped_smells", [])),
         }, actor="system")
 

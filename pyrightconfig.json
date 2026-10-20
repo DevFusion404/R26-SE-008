@@ -22,7 +22,7 @@
     },
     {
       "root": "agents/cuqa_agent",
-      "extraPaths": ["agents/cuqa_agent/src", "agents/cuqa_agent"]
+      "extraPaths": ["agents/cuqa_agent/src", "agents/cuqa_agent", "."]
     },
     {
       "root": "agents/rdp_agent",

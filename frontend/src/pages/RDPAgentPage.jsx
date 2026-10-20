@@ -286,13 +286,13 @@ export default function RDPAgentPage({ repoLoaded, repoMeta, preloadedReport, on
           {/* Banner header */}
           <div style={{
             padding: '12px 18px',
-            display: 'flex', alignItems: 'center', gap: 12,
+            display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap',
             borderBottom: '1px solid rgba(139,92,246,0.15)',
           }}>
             <span style={{ fontSize: 18 }}>
               {plan ? '✅' : loading ? '⚡' : '🔗'}
             </span>
-            <div style={{ flex: 1 }}>
+            <div style={{ flex: '1 1 220px', minWidth: 0 }}>
               <div style={{
                 fontSize: 14, fontWeight: 700,
                 color: plan ? 'var(--text-success)' : loading ? 'var(--color-rdp)' : 'var(--text-accent)',

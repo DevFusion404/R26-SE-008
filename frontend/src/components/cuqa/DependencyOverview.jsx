@@ -218,7 +218,7 @@ export default function DependencyOverview({ graph = {}, summary = {} }) {
 
       {/* High fan-in / fan-out summary */}
       {(high_fan_in.length > 0 || high_fan_out.length > 0) && (
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginTop: 12 }}>
+        <div className="rg-2" style={{ gap: 12, marginTop: 12 }}>
           {high_fan_in.length > 0 && (
             <div style={{ background: 'var(--bg-card)', borderRadius: 8, padding: '10px 12px', border: '1px solid var(--border)' }}>
               <div style={{ fontSize: 10, color: '#f59e0b', fontWeight: 700, marginBottom: 6 }}>

@@ -25,7 +25,7 @@ SPECIAL FUNCTION & ARCHITECTURAL OVERVIEW FOR CODE VIVA / PRESENTATION:
 """
 
 import os
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 # Safe import check for javalang library
 try:
@@ -33,6 +33,8 @@ try:
     JAVALANG_AVAILABLE = True
 except ImportError:
     JAVALANG_AVAILABLE = False
+    if TYPE_CHECKING:
+        raise  # never runs; tells the type checker javalang exists when the flag is True
 
 
 # ---------------------------------------------------------------------------

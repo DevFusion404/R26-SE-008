@@ -37,6 +37,9 @@ from domain.planning_recommendation import (
 )
 from domain.selection_optimizer import DEFAULT_BUDGET_MINUTES, PRESETS
 from domain.smell_taxonomy import build_taxonomy
+from services.access_service import current_github_context, filter_visible_workflows
+from services.github_review_service import (decide_plan, plan_for_selection,
+                                            publish_review_status)
 from services.archive_service import archive_path
 from services.planning_recommendation_service import enrich_plan_with_recommendations
 from services.planning_service import generate_updated_plan_report
@@ -56,7 +59,8 @@ workflow_bp = Blueprint("workflow", __name__)
 
 @workflow_bp.route("/workflows", methods=["GET"])
 def list_wf():
-    workflows = list_workflows()
+    # GitHub-linked workflows are listed only to signed-in users.
+    workflows = filter_visible_workflows(list_workflows())
     return jsonify([
         {
             "id":         wf["id"],
@@ -338,6 +342,9 @@ def reset_to_smell_review(wf_id):
     )
     log_event(wf_id, "smell_review", "reset_to_smell_review",
               {"from_stage": previous, "reason": reason})
+    identity, mapping = current_github_context()
+    if mapping:
+        publish_review_status(wf_id, "smell_review", identity, details={"reason": reason})
 
     return jsonify({
         "status": "smell_review",
@@ -497,6 +504,14 @@ def select_smells(wf_id):
 
     feedback = data.get("feedback", {})
 
+    # A GitHub-linked workflow plans from its own PR commit (RDP gets the
+    # selected files' source read from GitHub at that commit, never from
+    # CUQA's shared workspace) and shares its selection with GitHub commands.
+    identity, mapping = current_github_context()
+    if mapping:
+        return jsonify(plan_for_selection(wf, mapping, identity, selected_ids,
+                                          selected_files, selection_mode, feedback))
+
     payload = commit_smell_selection(
         wf, selected_ids, selected_files, selection_mode, feedback, replanning
     )
@@ -637,6 +652,9 @@ def reset_to_plan_approval(wf_id):
               {"from_stage": previous, "reason": reason,
                "restored_steps": len(plan.get("steps") or []),
                "restored_full_plan": bool(full_plan)})
+    identity, mapping = current_github_context()
+    if mapping:
+        publish_review_status(wf_id, "plan_ready", identity, plan=plan, details={"reason": reason})
 
     return jsonify({
         "status": "plan_approval",
@@ -671,6 +689,9 @@ def plan_decision(wf_id):
     if decision not in ("approve", "reject", "modify"):
         return err("'decision' must be one of: 'approve', 'reject', 'modify'.")
 
+    identity, mapping = current_github_context()
+    if mapping:
+        return jsonify(decide_plan(wf, mapping, identity, decision, data))
     return jsonify(apply_plan_decision(wf, decision, data))
 
 @workflow_bp.route("/workflows/<wf_id>/transform", methods=["POST"])

@@ -711,7 +711,7 @@ export function ComparisonView({ workflow, workflowId: propWorkflowId, language:
     className="primary-btn complete-btn"
     onClick={() => onComplete && onComplete(notes)}
     disabled={loading}
-    title="Close this workflow and write the final record to the audit trail"
+    title="Close this workflow, write the final record to the audit trail and open the session report"
     style={{
       marginLeft: "auto",
       padding: "11px 26px",
@@ -726,7 +726,7 @@ export function ComparisonView({ workflow, workflowId: propWorkflowId, language:
       boxShadow: loading ? "none" : "0 0 22px rgba(34,197,94,0.28)",
     }}
   >
-    {loading ? "Completing…" : "✓ Complete Workflow"}
+    {loading ? "Completing…" : "✓ Complete Workflow & View Report"}
   </button>
 </div>
 

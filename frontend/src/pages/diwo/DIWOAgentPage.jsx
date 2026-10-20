@@ -38,7 +38,28 @@ import {
 } from "./utils/planningSelection";
 // Every orchestration-backend call goes through this one client:
 //   DIWO stage -> diwoApi -> Orchestration Agent -> CUQA / RDP / SCTVA
-import { api } from "./services/diwoApi";
+import { api, fetchGithubWorkflow } from "./services/diwoApi";
+import GithubPrBanner from "./components/GithubPrBanner";
+import GithubTransformationReview from "./components/GithubTransformationReview";
+import { buildSessionReport } from "../../utils/sessionReports";
+
+// ─── GitHub-linked workflows ──────────────────────────────────────────────────
+// A RefactorIQ / DIWO Check Run links to <frontend>/?diwo_workflow=<id>. Such a
+// page opens THAT workflow — seeded by the backend from the PR commit — instead
+// of minting a new one from whatever CUQA's shared workspace holds.
+const WORKFLOW_ID_RE = /^wf_[a-z0-9]{1,32}$/i;
+
+function linkedWorkflowFromUrl() {
+  if (typeof window === "undefined") return null;
+  const id = new URLSearchParams(window.location.search).get("diwo_workflow");
+  return id && WORKFLOW_ID_RE.test(id) ? id : null;
+}
+
+function clearLinkedWorkflowFromUrl() {
+  const url = new URL(window.location.href);
+  url.searchParams.delete("diwo_workflow");
+  window.history.replaceState(null, "", url.toString());
+}
 
 // ─── Phase metadata ───────────────────────────────────────────────────────────
 const PHASE_TITLES = [
@@ -92,10 +113,22 @@ function buildBackendSmells() {
 }
 
 // ─── Component ────────────────────────────────────────────────────────────────
-export default function DIWOAgentPage() {
+export default function DIWOAgentPage({ onWorkflowComplete } = {}) {
+  // How far the workflow has progressed.
   const [phase, setPhase]         = useState(0);
+  // A completed stage the developer opened from the step bar to review, or
+  // null to show the stage in progress. Review is read-only: going back to
+  // change a stage is a separate, confirmed action (redoFromStage).
+  const [viewPhase, setViewPhase] = useState(null);
+  const [prevPhase, setPrevPhase] = useState(phase);
+  if (phase !== prevPhase) {
+    setPrevPhase(phase);
+    setViewPhase(null);
+  }
+  const shownPhase = viewPhase !== null && viewPhase < phase ? viewPhase : phase;
   const [workflowId, setWorkflowId]           = useState(null);
   const [workflowLanguage, setWorkflowLanguage] = useState("java");
+  const [workflowTarget, setWorkflowTarget]   = useState(null);
   const [cuqaReport, setCuqaReport]           = useState(null);   // live Agent 1 report
   const [planData, setPlanData]               = useState(null);
   // Which agent produced planData, where, and why — straight from the
@@ -103,6 +136,9 @@ export default function DIWOAgentPage() {
   const [planMeta, setPlanMeta]               = useState(null);
   // Only the steps the developer approved — this is what Stage 3 sends to SCTVA.
   const [approvedPlan, setApprovedPlan]       = useState(null);
+  // The developer's per-step verdicts at approval, kept for the session report.
+  const [planDecisions, setPlanDecisions]     = useState(null);
+  const [completing, setCompleting]           = useState(false);
   // The plan as Stage 2 rendered it, kept so a rollback from Stage 3 can offer
   // every step again — approval trims planData down to the approved ones.
   const [preApprovalPlan, setPreApprovalPlan] = useState(null);
@@ -114,6 +150,13 @@ export default function DIWOAgentPage() {
   // itself — the log panel alone left the click looking like it did nothing.
   const [planSubmitError, setPlanSubmitError] = useState(null);
   const [workflow, setWorkflow]               = useState(null);
+  // Set when the page was opened from a GitHub Check Run link.
+  const [linkedWorkflowId, setLinkedWorkflowId] = useState(linkedWorkflowFromUrl);
+  const [githubContext, setGithubContext]       = useState(null);
+  const [githubStatus, setGithubStatus]         = useState(null);
+  const [githubError, setGithubError]           = useState(null);
+  // Shared with the /refactoriq PR commands: S-ids and the draft selection.
+  const [githubShared, setGithubShared]         = useState(null);
   const [auditLog, setAuditLog]               = useState([
     { id: `local-init`, time: new Date().toLocaleTimeString(), event: "Session initialized", type: "info" },
   ]);
@@ -214,6 +257,7 @@ export default function DIWOAgentPage() {
         const res = await api.post("/workflows/from-cuqa", {});
         setWorkflowId(res.workflow_id);
         setWorkflowLanguage(res.language || "java");
+        setWorkflowTarget(res.target || null);
         setMetricsBeforeApi(res.metrics_before || null);
         setCuqaReport(res.report || null);
         addLog(
@@ -245,6 +289,7 @@ export default function DIWOAgentPage() {
       });
       setWorkflowId(res.workflow_id);
       setWorkflowLanguage("java");
+      setWorkflowTarget("ECommerceSystem.java");
       setMetricsBeforeApi(res.metrics_before || null);
       addLog(`Backend workflow created from sample report: ${res.workflow_id}`, "warn");
       return res;
@@ -256,16 +301,101 @@ export default function DIWOAgentPage() {
     }
   }, []);
 
+  /**
+   * Open the GitHub-linked workflow named in the URL. Its smells and CUQA
+   * report come from the backend, which analysed the exact PR commit — no CUQA
+   * call is made here, and nothing is auto-selected. On failure the page says
+   * why (sign in, no access, unknown id) rather than quietly starting a new
+   * workflow for some other repository.
+   */
+  const loadLinkedWorkflow = useCallback(async (id) => {
+    setBackendBusy(true);
+    setGithubError(null);
+    try {
+      const res = await fetchGithubWorkflow(id);
+      setWorkflowId(res.workflow_id);
+      setWorkflowLanguage(res.language || "java");
+      setMetricsBeforeApi(res.metrics_before || null);
+      setCuqaReport(res.report || null);
+      setGithubContext(res.github || null);
+      setGithubStatus(res.status || null);
+      setGithubShared({
+        smellIds: res.smell_ids || null,
+        draftSelection: res.draft_selection || null,
+        transformationEnabled: Boolean(res.transformation_enabled),
+      });
+      // Reopen at the stage the review reached: the plan from Stage 2 on, the
+      // proposed changes once a plan has been approved.
+      if (res.plan && res.status === "plan_approval") {
+        setPlanData(res.plan);
+        setPreApprovalPlan(res.plan_full || res.plan);
+        setApprovedPlan(null);
+        setPhase(1);
+      } else if (res.plan && ["plan_approved", "transformation", "completed"].includes(res.status)) {
+        setPlanData(res.plan);
+        setApprovedPlan(res.plan);
+        setPhase(2);
+      } else {
+        setPhase(0);
+      }
+      addLog(
+        `Opened GitHub-linked workflow ${res.workflow_id}: ${res.github?.repository} ` +
+        `#${res.github?.pr_number} @ ${res.github?.head_sha?.slice(0, 7)} — ` +
+        `${(res.smells || []).length} smell(s) from CUQA`,
+        "success"
+      );
+      return res;
+    } catch (e) {
+      setGithubError(e);
+      addLog(`GitHub-linked workflow could not be opened: ${e.message}`, "danger");
+      throw e;
+    } finally {
+      setBackendBusy(false);
+    }
+  }, []);
+
+  /** Re-read the PR review state (status, who decided, can I decide) only. */
+  const refreshGithubContext = useCallback(async () => {
+    if (!linkedWorkflowId) return;
+    try {
+      const res = await fetchGithubWorkflow(linkedWorkflowId);
+      setGithubContext(res.github || null);
+      setGithubStatus(res.status || null);
+      setGithubShared((prev) => ({ ...(prev || {}), draftSelection: res.draft_selection || null }));
+    } catch {
+      /* The banner keeps what it had; the decision itself already succeeded. */
+    }
+  }, [linkedWorkflowId]);
+
+  /** Leave the PR view and fall back to the ordinary CUQA-workspace session. */
+  const leaveLinkedWorkflow = useCallback(() => {
+    clearLinkedWorkflowFromUrl();
+    setLinkedWorkflowId(null);
+    setGithubContext(null);
+    setGithubStatus(null);
+    setGithubError(null);
+    setCuqaReport(null);
+    setWorkflowId(null);
+    bootstrapWorkflow({ reason: "reload" }).catch(() => {});
+  }, [bootstrapWorkflow]);
+
   // Nothing is set synchronously in the effect body: the yield below moves the
   // whole bootstrap — including its first setState — off the render pass.
   useEffect(() => {
     let cancelled = false;
     (async () => {
       await Promise.resolve();
-      if (!cancelled) await bootstrapWorkflow({ reason: "mount" }).catch(() => {});
+      if (cancelled) return;
+      if (linkedWorkflowId) {
+        await loadLinkedWorkflow(linkedWorkflowId).catch(() => {});
+      } else {
+        await bootstrapWorkflow({ reason: "mount" }).catch(() => {});
+      }
     })();
     return () => { cancelled = true; };
-  }, [bootstrapWorkflow]);
+    // Runs once per page: leaving the PR view bootstraps explicitly.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   /**
    * Stage 1 fetched (or re-analyzed) the CUQA report on its own — either
@@ -383,6 +513,7 @@ export default function DIWOAgentPage() {
           "success"
         );
         applyPlanResponse(res);
+        refreshGithubContext();
         setWorkflow((prev) => ({
           ...(prev || {}),
           updated_report: res.updated_report || report,
@@ -427,6 +558,7 @@ export default function DIWOAgentPage() {
         feedback: { reason: "Selected in DIWO frontend" },
       });
       applyPlanResponse(res);
+      refreshGithubContext();
       setWorkflow((prev) => ({
         ...(prev || {}),
         updated_report: res.updated_report || prev?.updated_report,
@@ -563,6 +695,7 @@ export default function DIWOAgentPage() {
       // plan as reviewed: rolling back from Stage 3 restores it and the
       // developer can re-approve a step they rejected on the first pass.
       setPreApprovalPlan(activePlan);
+      setPlanDecisions(decisions || null);
 
       // The backend derives the approved-only plan from the decisions and
       // persists it, so the report Stage 3 posts to /sctva/execute is the same
@@ -604,6 +737,27 @@ export default function DIWOAgentPage() {
         },
       });
       if (approveRes.approved_plan) approvedReport = approveRes.approved_plan;
+
+      // GitHub-linked workflows: the approval is recorded and shown on the
+      // pull request. SCTVA then runs server-side on the PR commit (when
+      // enabled), never the simulated transformation; Stage 3 shows its
+      // proposed changes for the final decision.
+      if (approveRes.status === "plan_approved") {
+        setApprovedPlan(approvedReport);
+        setPlanData(approvedReport);
+        setGithubStatus("plan_approved");
+        addLog(
+          `Plan approved for ${githubContext?.repository} #${githubContext?.pr_number} ` +
+          `(${(approvedReport.steps || []).length} step(s)). ` +
+          (approveRes.transformation?.queued
+            ? "SCTVA transformation queued on the pull-request commit."
+            : "Recorded on the pull request; no code has been changed."),
+          "success"
+        );
+        await refreshGithubContext();
+        setPhase(2);
+        return;
+      }
 
       const forwarded = (approvedReport.steps || []).length;
       addLog(
@@ -865,8 +1019,16 @@ export default function DIWOAgentPage() {
           feedback: { reason: "Fallback from plan approval" },
         });
         addLog("Workflow reset to smell review in backend.", "info");
+        refreshGithubContext();
       } catch (e) {
         addLog(`Backend reset failed: ${e.message}`, "warn");
+        // A GitHub-linked workflow refuses decisions it cannot authorize or
+        // that target an outdated commit; moving the UI anyway would show a
+        // state the backend never entered.
+        if (linkedWorkflowId) {
+          setPlanSubmitError(e.message);
+          return;
+        }
       }
     }
 
@@ -921,6 +1083,78 @@ export default function DIWOAgentPage() {
     [cuqaReport, workflow?.updated_report, preApprovalPlan, planData, approvedPlan]
   );
 
+  // ── Stage 4: Complete → session report ───────────────────────────────────
+  /**
+   * Close the workflow on the backend, re-read the trail so the report carries
+   * the completion event, then hand the whole session to the Reports page.
+   * The report is still produced when the backend refuses (stage guard, offline),
+   * and records why.
+   */
+  const handleComplete = async (notes) => {
+    if (completing) return;
+    setCompleting(true);
+    let completedOnBackend = false;
+    let completeError = null;
+
+    if (workflowId) {
+      try {
+        await api.post(`/workflows/${workflowId}/complete`, { notes: notes || "" });
+        completedOnBackend = true;
+      } catch (e) {
+        completeError = e.message;
+        addLog(`Complete workflow failed: ${e.message}`, "warn");
+      }
+    }
+    const rows = workflowId ? await refreshAuditTrail(workflowId) : [];
+    addLog("Comparison completed. Session closed.", "success");
+
+    const report = buildSessionReport({
+      workflowId,
+      language: workflowLanguage,
+      target: workflowTarget,
+      cuqaReport,
+      workflow,
+      plan: preApprovalPlan || planData,
+      planMeta,
+      decisions: planDecisions,
+      // The backend's own figures only — not the display fallback above.
+      metricsBefore: metricsBeforeApi,
+      metricsAfter: metricsAfterApi,
+      auditRows: rows.length ? rows : backendLog,
+      sessionLog: auditLog,
+      notes,
+      completedOnBackend,
+      completeError,
+    });
+    setCompleting(false);
+
+    if (onWorkflowComplete) onWorkflowComplete(report);
+    else setPhase(0);
+  };
+
+  // ── Redo a completed stage ───────────────────────────────────────────────
+  /**
+   * Reopen a completed stage for editing, from its read-only review. This is
+   * the same move as the stages' own "back" buttons — the backend is reset to
+   * that stage and everything after it is discarded — so it is confirmed first.
+   */
+  const redoFromStage = async (stage) => {
+    const later = PHASE_TITLES.slice(stage + 1, phase + 1).join(", ");
+    if (!window.confirm(
+      `Change ${PHASE_TITLES[stage]}? The progress made after it (${later}) ` +
+      "will be discarded and you will continue from this stage."
+    )) return;
+
+    if (stage === 0) {
+      await handleFallbackToSmellReview();
+      setTransformationData(null);
+      setMetricsAfterApi(null);
+    } else if (stage === 1) {
+      if (phase === 3) await handleRollback();
+      else await handleBackToPlanApproval();
+    }
+  };
+
   // ── Restart ───────────────────────────────────────────────────────────────
   const handleRestart = () => {
     addLog("New refactoring session initiated.", "info");
@@ -933,8 +1167,8 @@ export default function DIWOAgentPage() {
   return (
     <div style={{ background: C.bg, minHeight: "100vh", color: C.text, fontFamily: "'DM Sans', 'Segoe UI', sans-serif" }}>
       {/* Header */}
-      <div style={{ background: C.panel, borderBottom: `1px solid ${C.border}`, padding: "0 32px", display: "flex", alignItems: "center", justifyContent: "space-between", height: 56 }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+      <div className="diwo-header" style={{ background: C.panel, borderBottom: `1px solid ${C.border}`, padding: "0 32px", display: "flex", alignItems: "center", justifyContent: "space-between", height: 56 }}>
+        <div className="diwo-header-title" style={{ display: "flex", alignItems: "center", gap: 12 }}>
           <div style={{ width: 28, height: 28, borderRadius: 6, background: C.gradient, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 14, fontWeight: 900, color: "#000" }}>D</div>
           <span style={{ fontSize: 14, fontWeight: 700, letterSpacing: 0.3 }}>DIWO Agent</span>
           <span style={{ fontSize: 11, color: C.textMuted, padding: "2px 8px", background: C.bg, borderRadius: 4, border: `1px solid ${C.border}` }}>Developer Interaction & Workflow Orchestration</span>
@@ -953,29 +1187,84 @@ export default function DIWOAgentPage() {
         </div>
       </div>
 
-      <div style={{ display: "flex", height: "calc(100vh - 56px)" }}>
-        <div style={{ flex: 1, overflow: "auto", padding: "28px 32px" }}>
-          <StepBar current={phase} />
+      <div className="diwo-body" style={{ display: "flex", height: "calc(100vh - 56px)" }}>
+        <div className="diwo-main" style={{ flex: 1, overflow: "auto", padding: "28px 32px" }}>
+          <StepBar
+            current={phase}
+            viewing={shownPhase}
+            onSelect={(i) => setViewPhase(i === phase ? null : i)}
+          />
+
+          {shownPhase < phase && (
+            <ReviewBanner
+              stageTitle={PHASE_TITLES[shownPhase]}
+              currentTitle={PHASE_TITLES[phase]}
+              onReturn={() => setViewPhase(null)}
+              // Changing a stage is offered where a stage has a way back:
+              // smell selection and plan decisions, up to the results review.
+              // After the results are accepted the files are written, so the
+              // finished run is only reviewed.
+              onRedo={shownPhase <= 1 && phase <= 3 && !backendBusy
+                ? () => redoFromStage(shownPhase)
+                : undefined}
+            />
+          )}
+
+          {(githubContext || githubError) && (
+            <GithubPrBanner
+              github={githubContext}
+              workflowStatus={githubStatus}
+              transformationEnabled={githubShared?.transformationEnabled}
+              error={githubError}
+              onLeave={leaveLinkedWorkflow}
+            />
+          )}
 
           <div style={{ marginBottom: 20 }}>
-            <div style={{ fontSize: 20, fontWeight: 800, color: C.text, marginBottom: 4 }}>{PHASE_TITLES[phase]}</div>
-            <div style={{ fontSize: 13, color: C.textMuted }}>{PHASE_DESCRIPTIONS[phase]}</div>
+            <div style={{ fontSize: 20, fontWeight: 800, color: C.text, marginBottom: 4 }}>{PHASE_TITLES[shownPhase]}</div>
+            <div style={{ fontSize: 13, color: C.textMuted }}>{PHASE_DESCRIPTIONS[shownPhase]}</div>
           </div>
 
-          {phase === 0 && (
+          {/* Every stage the workflow has reached stays MOUNTED, and only the
+              one on screen is visible. Remounting would lose what the stage
+              holds — the smell selection, the per-step plan decisions — and
+              the Transformation stage runs SCTVA on mount, so reopening it
+              would run the transformation a second time. Stages after the
+              current one unmount on their own when the workflow goes back. */}
+
+          {/* A GitHub link shows Stage 1 only once ITS workflow has loaded:
+              mounting earlier would let Stage 1 fetch CUQA's shared workspace,
+              i.e. some other repository. */}
+          {!(linkedWorkflowId && !githubContext) && (
+            <StageSlot index={0} phase={phase} shown={shownPhase}>
             <CodeSmellApprovalPage
               workflowId={workflowId}
               onProceed={handleSmellsSelected}
-              reportData={workflow?.updated_report || cuqaReport || null}
+              // Held at the full report once the selection is made: a changed
+              // report resets Stage 1's selection, and the review should show
+              // what was selected, not an empty page.
+              reportData={phase === 0
+                ? (workflow?.updated_report || cuqaReport || null)
+                : (cuqaReport || null)}
               onReportLoaded={handleCuqaReportLoaded}
               // Re-analyze re-seeds the workflow rather than only refreshing
-              // what Stage 1 displays — see bootstrapWorkflow.
-              onReloadWorkspace={() => bootstrapWorkflow({ reason: "reload" })}
+              // what Stage 1 displays — see bootstrapWorkflow. A GitHub-linked
+              // workflow reloads ITSELF instead: its findings belong to one PR
+              // commit, never to CUQA's current workspace.
+              onReloadWorkspace={linkedWorkflowId
+                ? () => loadLinkedWorkflow(linkedWorkflowId)
+                : () => bootstrapWorkflow({ reason: "reload" })}
+              githubContext={githubContext}
+              smellDisplayIds={githubShared?.smellIds || null}
+              initialSelectedIds={githubShared?.draftSelection || null}
             />
+            </StageSlot>
           )}
-          {phase === 1 && (
+          <StageSlot index={1} phase={phase} shown={shownPhase}>
             <RefactoringPlanApprovalPage
-              planData={planData}
+              // Approval trims planData to the approved steps; the review of
+              // this stage shows the plan as it was decided.
+              planData={phase > 1 ? (preApprovalPlan || planData) : planData}
               planMeta={planMeta}
               loading={backendBusy && !planData}
               onDecisionChange={handlePlanDecisionChange}
@@ -985,18 +1274,27 @@ export default function DIWOAgentPage() {
               onDismissSubmitError={() => setPlanSubmitError(null)}
               onFallback={handleFallbackToSmellReview}
             />
-          )}
-          {phase === 2 && (
-            <TransformationApprovalPage
-              plan={approvedPlan || planData}
-              workflowId={workflowId}
-              language={workflowLanguage}
-              transformationData={transformationData}
-              onComplete={handleTransformComplete}
-              onBackToPlan={handleBackToPlanApproval}
-            />
-          )}
-          {phase === 3 && (
+          </StageSlot>
+          <StageSlot index={2} phase={phase} shown={shownPhase}>
+            {linkedWorkflowId && githubContext && (
+              <GithubTransformationReview
+                workflowId={workflowId}
+                github={githubContext}
+                onChanged={refreshGithubContext}
+              />
+            )}
+            {!linkedWorkflowId && (
+              <TransformationApprovalPage
+                plan={approvedPlan || planData}
+                workflowId={workflowId}
+                language={workflowLanguage}
+                transformationData={transformationData}
+                onComplete={handleTransformComplete}
+                onBackToPlan={handleBackToPlanApproval}
+              />
+            )}
+          </StageSlot>
+          <StageSlot index={3} phase={phase} shown={shownPhase}>
             <ResultsApprovalPage
               onRestart={handleRestart}
               onRollback={handleRollback}
@@ -1007,8 +1305,8 @@ export default function DIWOAgentPage() {
               sctva={workflow?.sctva}
               projectContext={projectContext}
             />
-          )}
-          {phase === 4 && (
+          </StageSlot>
+          {phase === 4 && shownPhase === 4 && (
             <ComparisonView
                 workflow={workflow}
                 workflowId={workflowId}
@@ -1017,17 +1315,7 @@ export default function DIWOAgentPage() {
               // Comparison is a read-only view of a finished run, so stepping
               // back to Results costs nothing and decides nothing.
               onBack={() => setPhase(3)}
-              onComplete={async (notes) => {
-                if (workflowId) {
-                  try {
-                    await api.post(`/workflows/${workflowId}/complete`, { notes: notes || "" });
-                  } catch (e) {
-                    addLog(`Complete workflow failed: ${e.message}`, "warn");
-                  }
-                }
-                addLog("Comparison completed. Session closed.", "success");
-                setPhase(0);
-              }}
+              onComplete={handleComplete}
               onLoadLogs={async () => {
                 // Loads the structured rows as they are. The previous version
                 // flattened each one to "[stage] action (actor)" and appended
@@ -1041,7 +1329,7 @@ export default function DIWOAgentPage() {
                   rows.length ? "success" : "warn",
                 );
               }}
-              loading={false}
+              loading={completing}
             />
           )}
         </div>
@@ -1054,6 +1342,53 @@ export default function DIWOAgentPage() {
           refreshing={auditRefreshing}
         />
       </div>
+    </div>
+  );
+}
+
+// ─── Stage navigation ────────────────────────────────────────────────────────
+
+/**
+ * Holds one stage's page. Mounted once the workflow reaches the stage, hidden
+ * while another stage is on screen, and inert while it is shown as a completed
+ * stage under review — the controls are visible, but nothing on a finished
+ * stage can be clicked into a second submission.
+ */
+function StageSlot({ index, phase, shown, children }) {
+  if (index > phase) return null;
+  return (
+    <div style={index === shown ? undefined : { display: "none" }} inert={index < phase}>
+      {children}
+    </div>
+  );
+}
+
+/** Shown above a completed stage opened from the step bar. */
+function ReviewBanner({ stageTitle, currentTitle, onReturn, onRedo }) {
+  return (
+    <div role="note" style={{
+      display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap",
+      marginBottom: 20, padding: "10px 14px", borderRadius: 10,
+      background: C.infoGlow, border: `1px solid color-mix(in srgb, ${C.info} 35%, transparent)`,
+    }}>
+      <div style={{ flex: 1, minWidth: 220, fontSize: 12.5, color: C.text, lineHeight: 1.5 }}>
+        <b>Reviewing {stageTitle}</b> — this stage is complete and shown read-only.
+        Your workflow is at <b>{currentTitle}</b>.
+      </div>
+      {onRedo && (
+        <button type="button" onClick={onRedo} style={{
+          padding: "7px 14px", borderRadius: 8, fontSize: 12, fontWeight: 700, cursor: "pointer",
+          background: "transparent", color: C.warn, border: `1px solid color-mix(in srgb, ${C.warn} 45%, transparent)`,
+        }}>
+          Change this stage
+        </button>
+      )}
+      <button type="button" onClick={onReturn} style={{
+        padding: "7px 14px", borderRadius: 8, fontSize: 12, fontWeight: 700, cursor: "pointer",
+        background: C.accent, color: "#000", border: "none",
+      }}>
+        Return to {currentTitle} →
+      </button>
     </div>
   );
 }

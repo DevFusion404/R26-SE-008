@@ -81,6 +81,8 @@ COPY --chown=diwo:diwo domain/     ./domain/
 COPY --chown=diwo:diwo services/   ./services/
 COPY --chown=diwo:diwo app.py      ./
 COPY --chown=diwo:diwo config.py   ./
+# GitHub job worker - same image, started with: python github_worker.py
+COPY --chown=diwo:diwo github_worker.py ./
 
 
 # ------------------------------------------------------------

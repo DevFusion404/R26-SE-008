@@ -474,6 +474,25 @@ export default function RefactoringPlanApprovalPage({
             setDecisions((prev) => ({ ...prev, [id]: APPROVE }));
             setConfirmQueue((queue) => queue.slice(1));
           }}
+          queued={confirmQueue.length}
+          // Accept all: approve every queued step at once, recording the picked
+          // reason on each so the overrides still reach the audit trail.
+          onConfirmAll={(reason) => {
+            const ids = confirmQueue;
+            setDecisions((prev) => {
+              const next = { ...prev };
+              ids.forEach((id) => { next[id] = APPROVE; });
+              return next;
+            });
+            if (reason) {
+              setOverrideReasons((prev) => {
+                const next = { ...prev };
+                ids.forEach((id) => { next[id] = reason; });
+                return next;
+              });
+            }
+            setConfirmQueue([]);
+          }}
           // Cancelling leaves THIS step undecided and moves on to the next one
           // a bulk approval queued.
           onCancel={() => setConfirmQueue((queue) => queue.slice(1))}

@@ -279,6 +279,12 @@ function FindingCard({
         <div style={{ flex: 1, minWidth: 0 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
             <SeverityTag severity={smell.severity} compact />
+            {row.displayId && (
+              <span title="The ID /refactoriq commands use for this finding"
+                style={{ fontSize: 11, fontFamily: T.mono, fontWeight: 700, color: T.text2 }}>
+                {row.displayId}
+              </span>
+            )}
             <span style={{ fontSize: 12.5, fontWeight: 700, color: T.text }}>
               {smell.type || "Finding"}
             </span>

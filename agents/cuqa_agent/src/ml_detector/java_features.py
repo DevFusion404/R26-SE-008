@@ -18,6 +18,7 @@ import bisect
 import hashlib
 import re
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 try:
     import javalang
@@ -26,6 +27,8 @@ try:
     JAVALANG_AVAILABLE = True
 except ImportError:
     JAVALANG_AVAILABLE = False
+    if TYPE_CHECKING:
+        raise  # never runs; tells the type checker the names above exist when the flag is True
 
 
 METHOD_FEATURES: tuple[str, ...] = (

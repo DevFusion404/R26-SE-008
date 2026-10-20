@@ -61,7 +61,8 @@ class TransformationError(RuntimeError):
 def run_transformation(plan: dict, language: Optional[str] = None,
                        request_id: Optional[str] = None,
                        execution_options: Optional[dict] = None,
-                       wf_id: Optional[str] = None) -> dict:
+                       wf_id: Optional[str] = None,
+                       source_loader=None) -> dict:
     """Run the approved plan through SCTVA and return the normalized result.
 
     Only the approved plan is ever passed in - the rejected steps were dropped
@@ -75,6 +76,10 @@ def run_transformation(plan: dict, language: Optional[str] = None,
          HTTP, already shaped for the `source_files` field.
       2. ACTIONS. domain/sctva_mapper.py translates each approved step into
          the action vocabulary SCTVA executes.
+
+    `source_loader(paths)` replaces the workspace read: GitHub-linked
+    workflows pass one that reads the analysed PR commit, so SCTVA never
+    transforms whatever happens to be loaded in the shared workspace.
 
     Returns { result, request, sources, mapping, sctva_url, executed_at }.
     `request` is the exact payload that was posted, kept so the stage can show
@@ -94,7 +99,7 @@ def run_transformation(plan: dict, language: Optional[str] = None,
         )
 
     try:
-        sources = fetch_workspace_sources(paths)
+        sources = (source_loader or fetch_workspace_sources)(paths)
     except SCTVAError as exc:
         if wf_id:
             # Named paths, because "could not read 3 files" is not fixable.

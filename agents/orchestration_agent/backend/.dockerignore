@@ -31,6 +31,11 @@ runtime/
 .env.*
 !.env.example
 
+# GitHub App private keys - inject GITHUB_PRIVATE_KEY_PEM as a Container Apps
+# secret instead of copying a .pem into the image
+secrets/
+*.pem
+
 # Git clone root - populated at runtime by git_service.py
 repos/
 
