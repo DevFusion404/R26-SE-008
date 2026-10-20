@@ -273,7 +273,7 @@ def prepare_repository(repository: str, auth=None):
                 raise GitOperationError(
                     f"Could not clone {repository}: {err} — check the URL, and that you have "
                     "access to the repository (a private repo needs a GitHub token: set "
-                    "DIWO_GIT_PUSH_TOKEN on the server or enter one on the Results page).",
+                    "DIWO_GIT_PUSH_TOKEN on the server, or install the RefactorIQ GitHub App on it).",
                     400)
 
         return repo_path, {"remote": True, "clone_url": repository, "base_branch": default_remote_branch(repo_path)}
@@ -492,9 +492,8 @@ def apply_and_push(data: dict) -> dict:
         elif auth is None and _is_credential_error(err):
             push_error = (
                 "GitHub needs credentials to push, and this server has none. Set "
-                "DIWO_GIT_PUSH_TOKEN on the backend (a token with Contents: write), install the "
-                "RefactorIQ GitHub App on the repository, or enter a GitHub token on the Results "
-                "page. The branch is committed on the server."
+                "DIWO_GIT_PUSH_TOKEN on the backend (a token with Contents: write) or install the "
+                "RefactorIQ GitHub App on the repository. The branch is committed on the server."
             )
         elif _is_credential_error(err) or "403" in (err or ""):
             push_error = (

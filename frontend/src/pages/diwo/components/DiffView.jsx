@@ -25,7 +25,9 @@ export function CodeSurface({ children, maxHeight = 460, style = {} }) {
         border: `1px solid ${C.border}`,
         borderRadius: 10,
         overflow: "auto",
-        fontFamily: "Fira Code, Courier New, monospace",
+        // A clear, heavier monospace first; Courier New (the old fallback on
+        // most machines) is thin and hard to read at small sizes.
+        fontFamily: "'JetBrains Mono', 'Cascadia Code', Consolas, 'Fira Code', Menlo, monospace",
         fontSize: 11,
         lineHeight: 1.6,
         padding: "8px 0",
@@ -130,7 +132,7 @@ function DiffGroup({ rows, kind, note }) {
           alignItems: "baseline",
           gap: 8,
           flexWrap: "wrap",
-          fontSize: 9,
+          fontSize: 10.5,
           fontWeight: 700,
           letterSpacing: 1,
           textTransform: "uppercase",
@@ -193,11 +195,13 @@ export function DiffBlock({
                   key={row.key}
                   style={{ display: "grid", gridTemplateColumns: "56px 24px 1fr", padding: "1px 0" }}
                 >
-                  <span style={{ color: "#3f4a5f", textAlign: "right", paddingRight: 8, userSelect: "none" }}>
+                  <span style={{ color: "var(--text-muted)", textAlign: "right", paddingRight: 8, userSelect: "none" }}>
                     {row.lineNo}
                   </span>
-                  <span style={{ color: "#3f4a5f", textAlign: "center", userSelect: "none" }}>·</span>
-                  <span style={{ whiteSpace: "pre", color: "#8a97ab", padding: "0 12px 0 6px" }}>
+                  <span style={{ color: "var(--text-muted)", textAlign: "center", userSelect: "none" }}>·</span>
+                  {/* Unchanged context: the theme's secondary text, readable in
+                      both modes (the fixed greys faded out on a light page). */}
+                  <span style={{ whiteSpace: "pre", color: "var(--text-secondary)", padding: "0 12px 0 6px" }}>
                     {row.text || " "}
                   </span>
                 </div>
@@ -223,7 +227,7 @@ export function DiffBlock({
                 gap: 10,
                 padding: "5px 12px",
                 background: "rgba(148,163,184,0.08)",
-                fontSize: 10,
+                fontSize: 11.5,
                 fontWeight: 700,
                 letterSpacing: 0.6,
                 color: C.textSub,

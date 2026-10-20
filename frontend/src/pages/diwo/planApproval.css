@@ -147,7 +147,6 @@
   --sd-heading: #0F172A;
   --sd-muted: #475569;
   --sd-dim: #64748B;
-  --sd-line-no: #94A3B8;
   --sd-neutral: #64748B;
   --sd-focus: #0D9488;
 
@@ -157,6 +156,10 @@
   --sd-red-2: #B91C1C;
   --sd-amber: #B45309;
   --sd-blue: #1D4ED8;
+
+  /* Code reads in black on the light page. */
+  --sd-code-text: #000000;
+  --sd-line-no: #64748B;
 
   --sd-good-bg: #ECFDF5;   --sd-good-border: #A7F3D0;
   --sd-warn-bg: #FFFBEB;   --sd-warn-border: #FCD34D;
@@ -169,11 +172,11 @@
   --sd-skel-a: #E2E8F0;
   --sd-skel-b: #F1F5F9;
 
-  --sd-tok-keyword: #7C3AED;
-  --sd-tok-type: #1D4ED8;
-  --sd-tok-function: #A16207;
-  --sd-tok-number: #B91C1C;
-  --sd-tok-comment: #64748B;
+  --sd-tok-keyword: #6D28D9;
+  --sd-tok-type: #1E40AF;
+  --sd-tok-function: #854D0E;
+  --sd-tok-number: #991B1B;
+  --sd-tok-comment: #4B5563;
 
   --sd-tip-bg: #0F172A;
   --sd-tip-fg: #F8FAFC;
@@ -300,7 +303,8 @@
 .sd-code-inner { min-width: max-content; padding: 8px 0; }
 .sd-line {
   display: grid; grid-template-columns: 52px 20px auto;
-  font-family: var(--sd-mono); font-size: 14px; line-height: 26px; white-space: pre; color: var(--sd-text);
+  font-family: var(--sd-mono); font-size: 15.5px; line-height: 28px; white-space: pre;
+  color: var(--sd-code-text, var(--sd-text));
 }
 .sd-line-no { text-align: right; color: var(--sd-line-no); user-select: none; }
 .sd-line-mark { text-align: center; user-select: none; }
@@ -312,12 +316,20 @@
 .sd-line--modified .sd-line-no, .sd-line--modified .sd-line-mark { color: var(--sd-teal-2); }
 .sd-line--affected { background: var(--sd-warn-bg); }
 .sd-line--affected .sd-line-no, .sd-line--affected .sd-line-mark { color: var(--sd-amber); }
+
+/* Changed lines stand out from the unchanged ones: bold code, a bold +/-
+   marker and line number, and a coloured rail down the left edge. */
+.sd-line--removed, .sd-line--added, .sd-line--modified, .sd-line--affected { font-weight: 700; }
+.sd-line--removed  { box-shadow: inset 4px 0 0 var(--sd-red); }
+.sd-line--added, .sd-line--modified { box-shadow: inset 4px 0 0 var(--sd-teal); }
+.sd-line--affected { box-shadow: inset 4px 0 0 var(--sd-amber); }
+.sd-line--removed .sd-line-code { text-decoration: line-through; text-decoration-color: color-mix(in srgb, var(--sd-red) 55%, transparent); }
 .sd-tok-keyword { color: var(--sd-tok-keyword); }
 .sd-tok-type { color: var(--sd-tok-type); }
 .sd-tok-function { color: var(--sd-tok-function); }
 .sd-tok-number, .sd-tok-string { color: var(--sd-tok-number); }
 .sd-tok-comment { color: var(--sd-tok-comment); font-style: italic; }
-.sd-code-gap { padding-left: 52px; color: var(--sd-dim); font-family: var(--sd-mono); line-height: 22px; }
+.sd-code-gap { padding-left: 52px; color: var(--sd-dim); font-family: var(--sd-mono); font-size: 14px; line-height: 24px; }
 .sd-code-more {
   display: block; width: 100%; min-height: 36px; padding-left: 72px; text-align: left;
   background: var(--sd-card); border: none; border-top: 1px dashed var(--sd-border); border-bottom: 1px dashed var(--sd-border);

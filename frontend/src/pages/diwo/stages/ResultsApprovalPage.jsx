@@ -240,7 +240,7 @@ function TreeNode({ node, depth = 0, onSelect, selectedPath }) {
           <div style={{
             display: "flex", alignItems: "center", gap: 6,
             padding: "3px 4px", paddingLeft: 4 + depth * 14,
-            fontSize: 11, color: C.textMuted, fontFamily: "monospace",
+            fontSize: 14.5, color: C.textSub, fontFamily: "monospace",
           }}>
             <span>📁</span>
             <span style={{ fontWeight: 700 }}>{dir.name}</span>
@@ -259,10 +259,11 @@ function TreeNode({ node, depth = 0, onSelect, selectedPath }) {
             onClick={onSelect ? () => onSelect(file) : undefined}
             style={{
               display: "flex", alignItems: "center", gap: 8,
-              padding: "4px 6px", paddingLeft: 4 + depth * 14,
+              padding: "5px 8px", paddingLeft: 4 + depth * 16,
               marginLeft: 2, marginBottom: 2, borderRadius: 5,
               cursor: onSelect ? "pointer" : "default",
-              background: isSelected ? `${C.accent}14` : file.smells > 0 ? `${outcome.color}0c` : "transparent",
+              // Strong enough to read on a white background in light mode.
+              background: isSelected ? `${C.accent}33` : file.smells > 0 ? `${outcome.color}22` : "transparent",
               // Every file that CUQA flagged carries a red rail, whatever
               // happened to it afterwards; the badge says how it ended up.
               borderLeft: `3px solid ${file.smells > 0 ? C.danger : "transparent"}`,
@@ -271,15 +272,16 @@ function TreeNode({ node, depth = 0, onSelect, selectedPath }) {
               borderBottom: `1px solid ${isSelected ? C.accent : "transparent"}`,
             }}
           >
-            <span style={{ fontSize: 10 }}>{file.smells > 0 ? "🔴" : "📄"}</span>
+            <span style={{ fontSize: 13 }}>{file.smells > 0 ? "🔴" : "📄"}</span>
             <span style={{
-              fontSize: 11, fontFamily: "monospace", color: file.smells > 0 ? C.text : C.textMuted,
+              fontSize: 14.5, fontFamily: "monospace", color: file.smells > 0 ? C.text : C.textSub,
+              fontWeight: file.smells > 0 ? 600 : 400,
               overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flexShrink: 1, minWidth: 0,
             }}>
               {file.name}
             </span>
             {file.smells > 0 && (
-              <span style={{ fontSize: 9, color: C.danger, flexShrink: 0 }}>
+              <span style={{ fontSize: 12, fontWeight: 700, color: C.danger, flexShrink: 0 }}>
                 {file.smells} smell{file.smells > 1 ? "s" : ""}
               </span>
             )}
@@ -307,21 +309,21 @@ function TreePanel({ title, subtitle, color, rows, empty, onSelect, selectedPath
       overflow: "hidden", display: "flex", flexDirection: "column", minWidth: 0,
     }}>
       <div style={{
-        padding: "10px 14px", background: `${color}12`,
+        padding: "12px 16px", background: `${color}22`,
         borderBottom: `2px solid ${color}`, borderLeft: `4px solid ${color}`,
       }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-          <span style={{ fontSize: 13, fontWeight: 800, color: C.text }}>{title}</span>
+          <span style={{ fontSize: 15, fontWeight: 800, color: C.text }}>{title}</span>
           <Badge label={`${rows.length} file${rows.length === 1 ? "" : "s"}`} color={color} />
         </div>
         {subtitle && (
-          <div style={{ fontSize: 11, color: C.textMuted, marginTop: 4, lineHeight: 1.5 }}>{subtitle}</div>
+          <div style={{ fontSize: 12.5, color: C.textSub, marginTop: 4, lineHeight: 1.5 }}>{subtitle}</div>
         )}
       </div>
 
       <div style={{ padding: 8, overflow: "auto", maxHeight }}>
         {rows.length === 0 ? (
-          <div style={{ fontSize: 11, color: C.textMuted, padding: "14px 8px", textAlign: "center" }}>
+          <div style={{ fontSize: 12.5, color: C.textMuted, padding: "14px 8px", textAlign: "center" }}>
             {empty}
           </div>
         ) : (
@@ -364,9 +366,6 @@ export default function ResultsApprovalPage({
   const [branchCheck, setBranchCheck] = useState({ status: "idle" });
   const [repoPath, setRepoPath] = useState(repositoryPath || "");
   const [commitMessage, setCommitMessage] = useState("refactor: apply DIWO agent refactorings");
-  // Optional GitHub token for this push only — kept in memory, never stored.
-  // Needed only when the backend has no DIWO_GIT_PUSH_TOKEN / GitHub App access.
-  const [githubToken, setGithubToken] = useState("");
   const [pushStatus, setPushStatus] = useState("");
   const [isProcessing, setIsProcessing] = useState(false);
 
@@ -394,7 +393,6 @@ export default function ResultsApprovalPage({
           run_id: workflowId || "",
           branch_name: trimmedBranch,
           repository_path: repoPath.trim(),
-          ...(githubToken.trim() ? { github_token: githubToken.trim() } : {}),
         }, { signal: controller.signal });
         // A suggestion that turned out to be taken moves on to the next free
         // name by itself; a typed name is left for the developer to change.
@@ -411,8 +409,7 @@ export default function ResultsApprovalPage({
       clearTimeout(timer);
       controller.abort();
     };
-    // githubToken is read at call time; re-checking on every token keystroke
-    // would send a half-typed token to the server.
+    // branchKey already covers the branch name and repository it reads.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [showActionChoice, branchKey, workflowId, branchAuto]);
 
@@ -645,7 +642,6 @@ export default function ResultsApprovalPage({
         commit_message: commitMessage.trim() || `refactor: DIWO agent changes (${trimmedBranch})`,
         commit: true,
         push: true,
-        ...(githubToken.trim() ? { github_token: githubToken.trim() } : {}),
       });
 
       const lines = [
@@ -679,7 +675,6 @@ export default function ResultsApprovalPage({
       } else {
         alert(lines.join("\n"));
       }
-      setGithubToken("");
 
       setShowActionChoice(false);
       if (onAccept) onAccept({ ...decisionPayload(), githubResult: result });
@@ -1031,8 +1026,8 @@ export default function ResultsApprovalPage({
       {/* ── Refactored code ───────────────────────────────────────────────── */}
       {activeTab === "code" && (
         <div style={{ display: "flex", gap: 12, alignItems: "flex-start" }}>
-          <div style={{ width: 270, flexShrink: 0, maxHeight: 460, overflow: "auto", background: C.panel, border: `1px solid ${C.border}`, borderRadius: 8, padding: 8 }}>
-            <div style={{ fontSize: 11, color: C.textMuted, textTransform: "uppercase", letterSpacing: 1, marginBottom: 8, padding: "0 4px" }}>
+          <div style={{ width: 300, flexShrink: 0, maxHeight: 560, overflow: "auto", background: C.panel, border: `1px solid ${C.border}`, borderRadius: 8, padding: 8 }}>
+            <div style={{ fontSize: 12, color: C.textMuted, textTransform: "uppercase", letterSpacing: 1, marginBottom: 8, padding: "0 4px" }}>
               Files ({fileEntries.length})
             </div>
             {fileEntries.length === 0 && (
@@ -1056,10 +1051,10 @@ export default function ResultsApprovalPage({
                     borderLeft: `3px solid ${rail}`,
                   }}
                 >
-                  <div style={{ fontSize: 12, fontWeight: 700, color: C.text }}>
+                  <div style={{ fontSize: 14, fontWeight: 700, color: C.text }}>
                     {f.path.split("/").pop()}
                   </div>
-                  <div style={{ fontSize: 10, color: C.textMuted, marginTop: 3, wordBreak: "break-all" }}>
+                  <div style={{ fontSize: 12, color: C.textSub, marginTop: 3, wordBreak: "break-all" }}>
                     {f.path}
                   </div>
                   <div style={{ marginTop: 6, display: "flex", gap: 6, flexWrap: "wrap" }}>
@@ -1121,7 +1116,9 @@ export default function ResultsApprovalPage({
               </div>
             )}
 
-            <CodeSurface>
+            {/* Larger than the shared 11px default: this is the final code the
+                developer reads before committing it. */}
+            <CodeSurface maxHeight={560} style={{ fontSize: 13.5, lineHeight: 1.65 }}>
               {view === "diff" ? (
                 <DiffBlock rows={activeFile?.diff_rows} />
               ) : (
@@ -1225,24 +1222,6 @@ export default function ResultsApprovalPage({
                   </div>
                 </div>
 
-                <div style={{ marginBottom: 10 }}>
-                  <label style={{ fontSize: 12, color: C.textMuted, display: "block", marginBottom: 4 }}>
-                    GitHub token <span style={{ opacity: 0.8 }}>(optional)</span>
-                  </label>
-                  <input
-                    type="password"
-                    autoComplete="off"
-                    value={githubToken}
-                    onChange={(e) => setGithubToken(e.target.value)}
-                    placeholder="github_pat_…  —  only if the server has no push access"
-                    style={{ width: "100%", padding: "8px 12px", borderRadius: 6, background: C.bg, border: `1px solid ${C.border}`, color: C.text, fontSize: 12, boxSizing: "border-box" }}
-                  />
-                  <div style={{ fontSize: 10, color: C.textMuted, marginTop: 4, lineHeight: 1.5 }}>
-                    A fine-grained token with <b>Contents: Read and write</b> on this repository. Used
-                    for this push only and never stored. Leave empty when the server already has a
-                    token configured.
-                  </div>
-                </div>
 
                 <div style={{ marginBottom: 10 }}>
                   <div style={{ display: "flex", alignItems: "baseline", gap: 8, marginBottom: 4 }}>

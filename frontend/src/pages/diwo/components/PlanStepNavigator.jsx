@@ -64,10 +64,13 @@ export default function PlanStepNavigator({
       }}
     >
       {/* ── Bulk ticks and expansion ───────────────────────────────────── */}
+      {/* Row 1: Select recommended (and expand / collapse).
+          Row 2: Approve All · Reject All, side by side at equal width. */}
       <div style={{
-        padding: "9px 12px", borderBottom: `1px solid ${T.border}`, background: T.sunken,
-        display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center",
+        padding: "10px 12px", borderBottom: `1px solid ${T.border}`, background: T.sunken,
+        display: "flex", flexDirection: "column", gap: 8,
       }}>
+      <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
         <button
           type="button"
           onClick={() => onBulk(recommendedIds, APPROVE)}
@@ -78,6 +81,22 @@ export default function PlanStepNavigator({
         >
           Select recommended ({recommendedIds.length})
         </button>
+        <button
+          type="button"
+          onClick={anyExpanded ? onCollapseAll : onExpandAll}
+          disabled={!sections.length}
+          aria-label={anyExpanded ? "Collapse all refactoring methods" : "Expand all refactoring methods to show their files"}
+          className="dw-focus dw-hover"
+          style={ghostButton(sections.length > 0, { padding: "5px 10px", fontSize: 11.5, marginLeft: "auto" })}
+        >
+          <span aria-hidden="true" style={{
+            display: "inline-block", fontSize: 9,
+            transform: anyExpanded ? "rotate(90deg)" : "none", transition: "transform 0.15s",
+          }}>▶</span>
+          {anyExpanded ? "Collapse all" : "Expand all"}
+        </button>
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
         <GroupActionButton
           tone={T.accent}
           text={T.accentText}
@@ -100,20 +119,7 @@ export default function PlanStepNavigator({
         >
           ✕ Reject All
         </GroupActionButton>
-        <button
-          type="button"
-          onClick={anyExpanded ? onCollapseAll : onExpandAll}
-          disabled={!sections.length}
-          aria-label={anyExpanded ? "Collapse all refactoring methods" : "Expand all refactoring methods to show their files"}
-          className="dw-focus dw-hover"
-          style={ghostButton(sections.length > 0, { padding: "5px 10px", fontSize: 11.5, marginLeft: "auto" })}
-        >
-          <span aria-hidden="true" style={{
-            display: "inline-block", fontSize: 9,
-            transform: anyExpanded ? "rotate(90deg)" : "none", transition: "transform 0.15s",
-          }}>▶</span>
-          {anyExpanded ? "Collapse all" : "Expand all"}
-        </button>
+      </div>
       </div>
 
       {/* ── Method cards ───────────────────────────────────────────────── */}
@@ -387,8 +393,8 @@ const FILLED = { approve: "#15803d", reject: "#dc2626", recommend: "#2563eb" };
  * read as the list's main actions. An applied verdict adds a white inner ring.
  */
 const solidButton = (enabled, color, applied = false) => ({
-  display: "inline-flex", alignItems: "center", gap: 6,
-  padding: "8px 14px", borderRadius: 8, fontSize: 12.5, fontWeight: 800, whiteSpace: "nowrap",
+  display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 6,
+  padding: "10px 18px", borderRadius: 9, fontSize: 14, fontWeight: 800, whiteSpace: "nowrap",
   cursor: enabled ? "pointer" : "not-allowed", opacity: enabled ? 1 : 0.5,
   background: color, color: "#ffffff", border: `1px solid ${color}`,
   boxShadow: applied ? "inset 0 0 0 2px rgba(255, 255, 255, 0.85)" : T.shadowSm,
@@ -422,7 +428,7 @@ function GroupActionButton({ tone, text, filled = false, disabled = false, onCli
       title={label}
       className="dw-focus"
       style={{
-        padding: "5px 10px", borderRadius: 8, fontSize: 11.5, fontWeight: 700,
+        padding: "8px 15px", borderRadius: 8, fontSize: 13, fontWeight: 800,
         cursor: disabled ? "not-allowed" : "pointer", opacity: disabled ? 0.5 : 1,
         background: filled ? solid : tint(tone, 10),
         color: filled ? "#ffffff" : text,
