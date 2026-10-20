@@ -21,14 +21,16 @@ export const ML_MODEL = {
   ],
 };
 
-// F1 on the same test repositories: existing CUQA rule, best single-metric threshold, ML model.
+// F1 on the same test repositories: CUQA rule, best single-metric threshold, ML model.
+// The Data Class and Feature Envy rules (Lanza and Marinescu strategies, java_rules.py) were
+// added after the model; their F1 comes from results/combined_detector.md.
 export const ML_VS_BASELINES = {
-  source: 'agents/cuqa_agent/training/results/evaluation_tables.md',
+  source: 'agents/cuqa_agent/training/results/evaluation_tables.md, results/combined_detector.md',
   rows: [
     { smell: 'Long Method',        rule: 0.684, threshold: 0.750, thresholdName: 'loc ≥ 30',       ml: 0.734 },
     { smell: 'Blob (Large Class)', rule: 0.404, threshold: 0.515, thresholdName: 'sloc ≥ 156',     ml: 0.524 },
-    { smell: 'Data Class',         rule: null,  threshold: 0.571, thresholdName: 'accessor ratio ≥ 0.52', ml: 0.708 },
-    { smell: 'Feature Envy',       rule: null,  threshold: 0.263, thresholdName: 'calls on locals ≥ 7', ml: 0.211 },
+    { smell: 'Data Class',         rule: 0.444, threshold: 0.571, thresholdName: 'accessor ratio ≥ 0.52', ml: 0.708 },
+    { smell: 'Feature Envy',       rule: 0.129, threshold: 0.263, thresholdName: 'calls on locals ≥ 7', ml: 0.211 },
   ],
 };
 

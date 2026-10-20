@@ -79,24 +79,31 @@ every finding is reported on its real line.
 ## ML Code Smell Detection (Java)
 
 Besides the rules, CUQA has a trained model that detects code smells in Java
-without hand-set thresholds. It lives in `src/ml_detector/` and is trained on the
-MLCQ dataset (expert-reviewed Java classes and methods from open-source projects).
+without hand-set thresholds. It lives in `src/ml_detector/` and is trained on two
+labelled datasets: MLCQ (expert-reviewed Java classes and methods) and DACOS
+(human-annotated Java snippets).
 
-| Smell (MLCQ name) | CUQA type | Level | Shipped | Test precision | Test recall | Test F1 |
-|---|---|---|---|---:|---:|---:|
-| Long Method | `LongMethod` | method | yes | 0.83 | 0.66 | 0.73 |
-| Data Class | `DataClass` | class | yes | 0.70 | 0.71 | 0.71 |
-| Blob | `LargeClass` | class | yes | 0.46 | 0.61 | 0.52 |
-| Feature Envy | `FeatureEnvy` | method | no (experimental) | 0.15 | 0.33 | 0.21 |
+| Smell | CUQA type | Data | Level | Shipped | Test precision | Test recall | Test F1 |
+|---|---|---|---|---|---:|---:|---:|
+| Long Method | `LongMethod` | MLCQ | method | yes | 0.83 | 0.66 | 0.73 |
+| Data Class | `DataClass` | MLCQ | class | yes | 0.70 | 0.71 | 0.71 |
+| Blob | `LargeClass` | MLCQ | class | yes | 0.46 | 0.61 | 0.52 |
+| Feature Envy | `FeatureEnvy` | MLCQ | method | no (experimental) | 0.15 | 0.33 | 0.21 |
+| Complex Method | `ComplexMethod` | DACOS | method | no (experimental) | 0.60 | 0.94 | 0.73 |
+| Long Parameter List | `TooManyParameters` | DACOS | method | no (experimental) | 0.48 | 0.83 | 0.61 |
+| Multifaceted Abstraction | `MultifacetedAbstraction` | DACOS | class | no (experimental) | 0.81 | 0.74 | 0.77 |
 
-The numbers are from 100 repositories that were not used for training. Method,
-confidence intervals, baselines and discussion are in
-[`training/MODEL_EVALUATION.md`](training/MODEL_EVALUATION.md).
+MLCQ numbers are from 100 repositories that were not used for training. DACOS
+numbers are from 2 unseen repositories, on the human-annotated borderline
+samples; there, flagging every sample scores higher (F1 0.76, 0.67 and 0.90), so
+the DACOS smells are switched off. Method, baselines and discussion are in
+[`training/MODEL_EVALUATION.md`](training/MODEL_EVALUATION.md); the whole
+detector per mode is in `training/results/combined_detector.md`.
 
 **How it works.** `java_features.py` measures every class and method (size,
 complexity, coupling, cohesion, accessor usage). A small gradient-boosted tree
 model per smell turns the measurements into a probability. The model is stored
-as JSON (`artifacts/smell_model.json`, about 175 KB) and scored in pure Python,
+as JSON (`artifacts/smell_model.json`, about 300 KB) and scored in pure Python,
 so the service needs no extra dependency.
 
 **Scope.** Java only. Python and C files are analysed by the rules as before,
@@ -107,13 +114,22 @@ because there is no labeled data for them.
 | Mode | `code_smells` contains | When to use |
 |---|---|---|
 | `rules` (default) | Rule-based smells only. ML findings are attached under `ml_analysis`. | Existing behaviour, nothing changes for RDP. |
-| `hybrid` | Rule-based smells plus ML smells. Agreement is one entry with `detected_by: "rule+ml"`. | Send ML findings to RDP as well. |
-| `ml` | ML smells for `LongMethod`, `LargeClass`, `DataClass`. Other types still from rules. | Replace the hand-set thresholds with the model. |
+| `hybrid` | For Java, the model decides the smell types it learned and that are enabled; the rules decide every other type. | Use the model where it was measured, the rules everywhere else. |
+| `ml` | Only the smells the model finds (Java). | See what the model alone reports. |
 | `off` | Rule-based smells only. The model is not run and no `ml_analysis` is added. | Exactly the output and speed from before the model was added. |
 
+Every entry in `code_smells` has `"detected_by": "rule"` or `"detected_by": "model"`.
 Set the mode per request with `"detector"` or for the whole service with the
 `CUQA_SMELL_DETECTOR` environment variable. Set `CUQA_ML_INCLUDE_EXPERIMENTAL=1`
-to also report Feature Envy.
+to also report the smells the model has switched off.
+
+The Java rules are in `report_generator.py` (Long Method, Too Many Parameters,
+Large Class, Magic Number, Comments, Message Chains, Switch Statements, Dead
+Code, Duplicate Code, Data Clumps, Global Variable) and `java_rules.py`
+(Complex Method, Deep Nesting, Feature Envy, Data Class). The `java_rules.py`
+rules are thresholds on the same metrics the model reads, so the training
+scripts score them on the labelled data exactly as they run here
+(`training/evaluate_detectors.py`).
 
 ```bash
 # Model description: version, thresholds, test metrics
@@ -139,7 +155,7 @@ curl -X POST http://localhost:8080/api/quality-report \
   "entity": "runExec",
   "start_line": 348,
   "end_line": 499,
-  "detected_by": "ml",
+  "detected_by": "model",
   "confidence": 0.992,
   "evidence": {"loc": 152, "n_tokens": 928, "sloc": 134, "n_branches": 23, "n_operators": 97},
   "parameter_count": 1,

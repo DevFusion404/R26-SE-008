@@ -266,6 +266,10 @@
   background: color-mix(in srgb, var(--color-rdp) 12%, transparent);
   vertical-align: middle;
 }
+.cuqa-ml-tag.rule {
+  color: var(--text-secondary); border-color: var(--border-color, color-mix(in srgb, var(--text-secondary) 35%, transparent));
+  background: transparent; font-weight: 700;
+}
 
 /* ── Quality assessment ─────────────────────────────────────── */
 .cuqa-quality { display: grid; grid-template-columns: 260px minmax(0, 1fr); gap: 14px; }

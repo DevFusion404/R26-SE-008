@@ -114,7 +114,7 @@ class TestQualityReportDetectorOption:
         report = res.json()["report"]
         assert report["detection_mode"] == "rules"
         assert report["ml_analysis"]["status"] == "ok"
-        assert all("detected_by" not in s for s in report["code_smells"])
+        assert {s["detected_by"] for s in report["code_smells"]} == {"rule"}
 
     def test_hybrid_detector(self, client: TestClient, load_mixed_repo):
         res = client.post("/api/quality-report",
@@ -122,7 +122,9 @@ class TestQualityReportDetectorOption:
         assert res.status_code == 200
         report = res.json()["report"]
         assert report["detection_mode"] == "hybrid"
-        assert any(s.get("detected_by") == "rule+ml" for s in report["code_smells"])
+        by_type = {s["type"]: s["detected_by"] for s in report["code_smells"]}
+        assert by_type["LongMethod"] == "model"
+        assert by_type["MagicNumber"] == "rule"
 
     def test_repository_report_with_ml_detector(self, client: TestClient, load_mixed_repo):
         res = client.post("/api/quality-report", json={"detector": "ml"})

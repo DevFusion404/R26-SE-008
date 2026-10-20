@@ -4,8 +4,8 @@ model.py
 Loads the trained smell model and scores feature vectors in pure Python.
 
 The model is a set of small gradient-boosted tree ensembles, one per smell,
-trained offline with scikit-learn (see training/train_model.py) and exported
-to JSON. Scoring only needs the standard library, so the CUQA service does not
+trained offline with scikit-learn (see training/train_model.py for the MLCQ
+smells and training/train_dacos.py for the DACOS smells) and exported to JSON. Scoring only needs the standard library, so the CUQA service does not
 depend on scikit-learn or numpy at runtime and no pickle file is loaded.
 """
 
@@ -49,6 +49,7 @@ class SmellClassifier:
         self.threshold = float(spec["threshold"])
         self.severity = spec.get("severity", "medium")
         self.display_name = spec.get("display_name", smell_type)
+        self.dataset = spec.get("dataset", "MLCQ")
         self.feature_names = list(spec["features"])
         self.evidence_features = list(spec.get("evidence_features", []))
         self.init_score = float(spec["init_score"])
@@ -105,6 +106,7 @@ class SmellModel:
             "smells": {
                 smell_type: {
                     "display_name": clf.display_name,
+                    "dataset": clf.dataset,
                     "entity": clf.entity,
                     "enabled": clf.enabled,
                     "threshold": clf.threshold,

@@ -17,7 +17,7 @@ const PIPELINE = [
 
 const LANG_ICON = { Python: '🐍', Java: '☕', C: '⚙️' };
 
-const MODE_LABEL = { rules: 'Rules', hybrid: 'Rules + ML', ml: 'ML model', off: 'Rules (ML off)' };
+const MODE_LABEL = { rules: 'Rules', hybrid: 'Rules + ML', ml: 'ML model only', off: 'Rules (ML off)' };
 
 export default function CuqaIdentityHeader({
   repoMeta,

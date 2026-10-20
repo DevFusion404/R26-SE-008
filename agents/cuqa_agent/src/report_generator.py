@@ -91,6 +91,19 @@ except ImportError:
         except ImportError:
             _ml_detector = None
 
+# Java rules decided on the shared Java metrics (ComplexMethod, DeepNesting,
+# FeatureEnvy, DataClass). Optional in the same way as the ML detector.
+try:
+    import java_rules as _java_rules
+except ImportError:
+    try:
+        from . import java_rules as _java_rules
+    except ImportError:
+        try:
+            from agents.cuqa_agent.src import java_rules as _java_rules
+        except ImportError:
+            _java_rules = None
+
 
 
 # ---------------------------------------------------------------------------
@@ -112,6 +125,7 @@ SMELL_CATEGORY_MAP: dict[str, tuple[str, str]] = {
     # Code that has grown excessively large and is hard to work with.
     "LongMethod":           ("Bloaters", "critical"),
     "LongFunction":         ("Bloaters", "critical"),  # C alias
+    "ComplexMethod":        ("Bloaters", "critical"),
     "LargeClass":           ("Bloaters", "critical"),
     "TooManyParameters":    ("Bloaters", "critical"),
     "PrimitiveObsession":   ("Bloaters", "critical"),
@@ -131,6 +145,7 @@ SMELL_CATEGORY_MAP: dict[str, tuple[str, str]] = {
     "DivergentChange":                      ("Change Preventers", "critical"),
     "ShotgunSurgery":                       ("Change Preventers", "critical"),
     "ParallelInheritanceHierarchies":       ("Change Preventers", "critical"),
+    "MultifacetedAbstraction":              ("Change Preventers", "critical"),  # a class with several responsibilities
 
     # ── Dispensables ─────────────────────────────────────────────────────────
     # Pointless things whose absence would make the code cleaner.
@@ -1389,6 +1404,233 @@ def _java_literal_is_not_magic(literal, value, ancestors: list) -> bool:
     return False
 
 
+_JAVA_GETTER_RE = re.compile(r"^(?:get|is)[A-Z_]")
+_JAVA_MESSAGE_CHAIN_LIMIT = 3     # same limit as the Python rule
+_JAVA_SWITCH_LABEL_LIMIT = 5      # case labels in one switch
+_JAVA_ELSE_IF_LIMIT = 4           # same limit as the Python rule's elif branches
+# Called by the JVM during serialization, never by name in the source
+_JAVA_SERIALIZATION_METHODS = {"writeObject", "readObject", "readObjectNoData", "writeReplace", "readResolve"}
+# Lombok annotations that generate accessors, so private fields are used without a reference
+_LOMBOK_ACCESSOR_ANNOTATIONS = {"Data", "Getter", "Setter", "Value", "Builder", "ToString", "EqualsAndHashCode"}
+
+
+def _java_line(node) -> int | None:
+    pos = getattr(node, "position", None)
+    return getattr(pos, "line", None) if pos else None
+
+
+def _java_getter_chain(node) -> int:
+    """Longest run of consecutive getter calls in one call chain: a.getB().getC().getD() -> 3.
+
+    Only get*/is* calls count, so fluent APIs (builders, streams, StringBuilder)
+    are not mistaken for a walk through other objects.
+    """
+    calls = [node.member] if isinstance(node, javalang.tree.MethodInvocation) else []
+    for selector in getattr(node, "selectors", None) or []:
+        calls.append(selector.member if isinstance(selector, javalang.tree.MethodInvocation) else None)
+    longest = run = 0
+    for name in calls:
+        run = run + 1 if name and _JAVA_GETTER_RE.match(name) else 0
+        longest = max(longest, run)
+    return longest
+
+
+def _java_statement_count(method) -> int:
+    """Statements and local variable declarations inside a method body."""
+    return sum(
+        1 for stmt in (method.body or []) for _, n in stmt
+        if (isinstance(n, javalang.tree.Statement) and not isinstance(n, javalang.tree.BlockStatement))
+        or isinstance(n, javalang.tree.LocalVariableDeclaration)
+    )
+
+
+def _java_body_signature(method) -> str:
+    """Structure of a method body with the names of the methods it calls and its literals.
+
+    Local variable and field names are left out, so a copy that only renames
+    variables still matches. Used for DuplicateCode.
+    """
+    parts = []
+    for stmt in method.body or []:
+        for _, n in stmt:
+            part = type(n).__name__
+            if isinstance(n, javalang.tree.MethodInvocation):
+                part += ":" + (n.member or "")
+            elif isinstance(n, javalang.tree.Literal):
+                part += ":" + str(n.value)
+            parts.append(part)
+    return "|".join(parts)
+
+
+def _java_design_smells(tree) -> list[dict]:
+    """
+    Java smells found on the javalang tree.
+
+      MessageChains     3+ getter calls in one chain                         [low]
+      SwitchStatements  a switch with 5+ case labels, or 4+ else-if branches [medium]
+      DeadCode          a private method never called / private field never
+                        used in the file (private members are file-scoped)   [low]
+      DuplicateCode     methods with the same body structure, 3+ statements  [medium]
+      DataClumps        the same 3+ parameters (type and name) in two methods [medium]
+      GlobalVariable    a public static field that is not final              [medium]
+    """
+    jt = javalang.tree
+    smells: list[dict] = []
+    called: set[str] = set()       # method names invoked or referenced (Foo::bar) in the file
+    referenced: set[str] = set()   # member names read or written in the file
+    private_methods: list = []
+    private_fields: list[tuple] = []   # (field name, line, class name)
+    methods: list = []
+    reported: set[tuple] = set()
+
+    for path, node in tree:
+        ancestors = [p for p in (path or []) if isinstance(p, jt.Node)]
+        method = next((a for a in reversed(ancestors)
+                       if isinstance(a, (jt.MethodDeclaration, jt.ConstructorDeclaration))), None)
+        owner = next((a for a in reversed(ancestors) if isinstance(a, jt.TypeDeclaration)), None)
+
+        if isinstance(node, jt.MethodInvocation):
+            called.add(node.member)
+        elif isinstance(node, jt.MemberReference):
+            referenced.add(node.member)
+            called.add(node.member)  # the method part of a method reference (this::helper)
+
+        if isinstance(node, (jt.MethodDeclaration, jt.ConstructorDeclaration)) and node.body is not None:
+            methods.append(node)
+            if (isinstance(node, jt.MethodDeclaration) and "private" in (node.modifiers or ())
+                    and not node.annotations and node.name not in _JAVA_SERIALIZATION_METHODS):
+                private_methods.append(node)
+
+        if isinstance(node, jt.FieldDeclaration):
+            modifiers = node.modifiers or set()
+            names = [d.name for d in (node.declarators or [])]
+            if "private" in modifiers and not node.annotations:
+                owner_annotations = {a.name for a in (getattr(owner, "annotations", None) or [])}
+                if not owner_annotations & _LOMBOK_ACCESSOR_ANNOTATIONS:
+                    private_fields += [(n, _java_line(node), getattr(owner, "name", ""))
+                                       for n in names if n != "serialVersionUID"]
+            if ("public" in modifiers and "static" in modifiers and "final" not in modifiers
+                    and isinstance(owner, jt.ClassDeclaration)):
+                for name in names:
+                    smells.append({
+                        "type": "GlobalVariable",
+                        "message": (f"Public static field '{name}' is mutable global state — "
+                                    "consider Encapsulate Field or making it final"),
+                        "line": _java_line(node),
+                        "severity": "medium",
+                        "entity": name,
+                    })
+
+        if method is None:
+            continue
+        method_key = id(method)
+
+        if getattr(node, "selectors", None) and ("MessageChains", method_key) not in reported:
+            depth = _java_getter_chain(node)
+            if depth >= _JAVA_MESSAGE_CHAIN_LIMIT:
+                reported.add(("MessageChains", method_key))
+                smells.append({
+                    "type": "MessageChains",
+                    "message": (f"Getter chain of length {depth} in '{method.name}' — "
+                                "consider Hide Delegate"),
+                    "line": _java_line(node) or _java_line(method),
+                    "severity": "low",
+                    "entity": method.name,
+                    "chain_length": depth,
+                })
+
+        if ("SwitchStatements", method_key) in reported:
+            continue
+        detail = None
+        if isinstance(node, jt.SwitchStatement):
+            labels = sum(len(c.case or []) for c in (node.cases or []))
+            if labels >= _JAVA_SWITCH_LABEL_LIMIT:
+                detail = f"a switch with {labels} case labels (>={_JAVA_SWITCH_LABEL_LIMIT})"
+        elif isinstance(node, jt.IfStatement):
+            parent = ancestors[-1] if ancestors else None
+            if not (isinstance(parent, jt.IfStatement) and parent.else_statement is node):
+                else_ifs, current = 0, node.else_statement
+                while isinstance(current, jt.IfStatement):
+                    else_ifs += 1
+                    current = current.else_statement
+                if else_ifs >= _JAVA_ELSE_IF_LIMIT:
+                    detail = f"an if/else-if chain with {else_ifs} else-if branches (>={_JAVA_ELSE_IF_LIMIT})"
+        if detail:
+            reported.add(("SwitchStatements", method_key))
+            smells.append({
+                "type": "SwitchStatements",
+                "message": (f"Method '{method.name}' has {detail} — "
+                            "consider Replace Conditional with Polymorphism"),
+                "line": _java_line(node) or _java_line(method),
+                "severity": "medium",
+                "entity": method.name,
+            })
+
+    for m in private_methods:
+        if m.name not in called:
+            smells.append({
+                "type": "DeadCode",
+                "message": f"Private method '{m.name}' is never called in this file — consider Remove Dead Code",
+                "line": _java_line(m),
+                "severity": "low",
+                "entity": m.name,
+            })
+    for name, line, owner_name in private_fields:
+        if name not in referenced:
+            smells.append({
+                "type": "DeadCode",
+                "message": (f"Private field '{name}' of '{owner_name}' is never used in this file — "
+                            "consider Remove Dead Code"),
+                "line": line,
+                "severity": "low",
+                "entity": name,
+            })
+
+    # DuplicateCode — same body structure in two or more methods
+    by_signature: dict[str, list] = defaultdict(list)
+    for m in methods:
+        if _java_statement_count(m) >= 3:
+            by_signature[_java_body_signature(m)].append(m)
+    for group in by_signature.values():
+        if len(group) < 2:
+            continue
+        names = [m.name for m in group]
+        smells.append({
+            "type": "DuplicateCode",
+            "message": (f"Methods {names} have structurally identical bodies — "
+                        "consider Extract Method or Pull Up Method"),
+            "line": _java_line(group[0]),
+            "severity": "medium",
+            "entity": group[0].name,
+            "duplicate_group": names,
+        })
+
+    # DataClumps — the same 3+ parameters (type and name) in methods with different names
+    param_sets = []
+    for m in methods:
+        params = frozenset((getattr(p.type, "name", ""), p.name) for p in (m.parameters or []))
+        if len(params) >= 3:
+            param_sets.append((m.name, _java_line(m), params))
+    clumps: dict[frozenset, tuple[str, int | None]] = {}
+    for i, (name, line, params) in enumerate(param_sets):
+        for other_name, _, other_params in param_sets[i + 1:]:
+            common = params & other_params
+            if name != other_name and len(common) >= 3:
+                clumps.setdefault(frozenset(common), (name, line))
+    for common, (name, line) in clumps.items():
+        parameter_names = sorted(p for _, p in common)
+        smells.append({
+            "type": "DataClumps",
+            "message": (f"Parameter group {parameter_names} appears together in multiple "
+                        "methods — consider Introduce Parameter Object"),
+            "line": line,
+            "severity": "medium",
+            "entity": name,
+            "clump_parameters": parameter_names,
+        })
+    return smells
+
+
 def _analyze_java_smells(source: str) -> list[dict]:
     smells = []
     if not JAVALANG_AVAILABLE:
@@ -1532,6 +1774,18 @@ def _analyze_java_smells(source: str) -> list[dict]:
                 "severity": "low",
                 "entity": entity,
             })
+
+    # Design smells on the javalang tree, then the rules on the shared Java metrics.
+    # Each is an addition and must never take the report down.
+    try:
+        smells.extend(_java_design_smells(tree))
+    except Exception:
+        pass
+    if _java_rules is not None:
+        try:
+            smells.extend(_java_rules.detect_metric_smells(source))
+        except Exception:
+            pass
 
     return smells
 
@@ -1922,6 +2176,12 @@ def _is_test_file(filename: str) -> bool:
     return low.startswith("test_") or low.endswith(("_test", "_tests")) or low in ("conftest", "tests")
 
 
+def _tag_rule_smells(smells: list[dict]) -> None:
+    """Mark every smell that has no detector tag yet as found by the rules."""
+    for smell in smells:
+        smell.setdefault("detected_by", "rule")
+
+
 def _enrich_smells_with_category(smells: list[dict]) -> None:
     """Stamp each smell dict in-place with 'category' and 'category_priority'.
 
@@ -2006,8 +2266,9 @@ def generate_file_report(
        detection checks across the entire repository — functions/classes imported by other files are never
        flagged.  Without the index (single-file mode), detection is scoped to the file itself.
     6. ML Smell Detection (Java only): the trained model in `ml_detector` scores every class and method.
-       Its findings are always attached under `ml_analysis`.  They are merged into `code_smells` only
-       when the detection mode is "hybrid" or "ml", so the default rule-based output is unchanged.
+       Its findings are always attached under `ml_analysis`.  In "hybrid" mode the model decides the
+       smell types it learned and the rules decide the rest; in "ml" mode only model smells are kept.
+       Every smell in `code_smells` says who found it: "detected_by" is "rule" or "model".
     -------------------------------------------------------------------------
 
     Args:
@@ -2052,6 +2313,7 @@ def generate_file_report(
         comments_smell = _comments_smell(source, language, filename, metrics.get("lines_of_code", 0))
         if comments_smell:
             smells.append(comments_smell)
+    _tag_rule_smells(smells)
 
     # ML smell detection (Java only) — additive unless the mode is "hybrid" or "ml"
     ml_analysis = None
@@ -2160,6 +2422,7 @@ def generate_repo_report(
                 comments_smell = _comments_smell(src, "python", fname, metrics.get("lines_of_code", 0))
                 if comments_smell:
                     accurate_smells.append(comments_smell)
+                _tag_rule_smells(accurate_smells)
                 _enrich_smells_with_category(accurate_smells)
                 severity_counts = {"high": 0, "medium": 0, "low": 0}
                 for smell in accurate_smells:

@@ -161,13 +161,14 @@ export default function Evaluation() {
               </div>
               <Source>
                 {live.state === 'live' ? <>live <code>GET /api/ml-model</code> (model {live.info.model_version})</> : <code>{ML_MODEL.source}</code>}
-                {' '}· gradient-boosted trees trained on MLCQ, {ML_MODEL.trainRepos} training / {ML_MODEL.testRepos} test repositories.
+                {' '}· gradient-boosted trees. MLCQ smells: {ML_MODEL.trainRepos} training / {ML_MODEL.testRepos} test repositories.
+                {' '}DACOS smells: 8 training / 2 test repositories, scored on the human-annotated test samples.
               </Source>
             </div>
           </div>
 
           <div className="card">
-            <div className="card-header"><span className="card-title">ML model against simple detectors (F1)</span></div>
+            <div className="card-header"><span className="card-title">ML model against simple detectors (F1, MLCQ)</span></div>
             <div style={{ padding: 16, display: 'flex', flexDirection: 'column', gap: 14 }}>
               {ML_VS_BASELINES.rows.map((r) => (
                 <div key={r.smell}>
@@ -188,7 +189,8 @@ export default function Evaluation() {
               <p style={{ fontSize: 12.5, color: 'var(--text-secondary)', lineHeight: 1.5 }}>
                 The model scores higher than the CUQA rules for Long Method and Large Class, but the test set is too small to call
                 those gaps significant, and a plain <code>loc ≥ 30</code> threshold does as well for Long Method. The clear gain is
-                Data Class, which had no rule. Feature Envy stays off because no detector did well on it.
+                Data Class, where the model beats both the Lanza–Marinescu rule and the best single threshold. Feature Envy stays
+                off in the model because no detector did well on it; in hybrid mode the rule covers it.
               </p>
               <Source><code>{ML_VS_BASELINES.source}</code></Source>
             </div>

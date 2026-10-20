@@ -12,13 +12,15 @@ Detection modes (environment variable CUQA_SMELL_DETECTOR or the `detector`
 argument of generate_file_report):
     rules   Rule-based smells only. ML results are attached separately under
             "ml_analysis". This is the default and keeps existing output unchanged.
-    hybrid  Rule-based smells plus the smells found by the model.
-    ml      The model replaces the rules for the smell types it has learned.
-            Smell types it has not learned still come from the rules.
+    hybrid  The model decides the smell types it has learned and that are
+            enabled. The rules decide every other smell type.
+    ml      Only the smells the model finds. No rule smells.
     off     The model is not run at all. Output and speed are exactly as before
             the model was added.
 
-Only Java is supported because the training data (MLCQ) is Java only.
+Every smell in a report carries "detected_by": "model" or "rule".
+
+Only Java is supported because the training data (MLCQ and DACOS) is Java only.
 """
 
 from __future__ import annotations
@@ -99,7 +101,7 @@ def _build_smell(clf, entity, probability: float) -> dict:
         "entity": entity.name,
         "start_line": entity.start_line,
         "end_line": entity.end_line,
-        "detected_by": "ml",
+        "detected_by": "model",
         "confidence": round(probability, 3),
         "evidence": {name: entity.features.get(name) for name in clf.evidence_features},
     }
@@ -161,30 +163,12 @@ def detect_smells(source: str, include_experimental: bool | None = None) -> dict
 def merge_with_rule_smells(rule_smells: list[dict], ml_smells: list[dict], mode: str) -> list[dict]:
     """Combine rule-based and model-based smells for the 'hybrid' and 'ml' modes.
 
-    hybrid: every rule smell is kept. A model smell on the same entity and of the
-            same type is folded into the rule smell instead of being listed twice.
-    ml:     rule smells of a type the model has learned are dropped, the model
-            decides those. All other rule smells are kept.
+    hybrid: rule smells of a type the model has learned (and that is enabled)
+            are dropped, the model decides those. All other rule smells are kept.
+    ml:     only the model's smells.
     """
     if mode == MODE_ML:
-        learned = learned_smell_types()
-        merged = [dict(s, detected_by="rule") for s in rule_smells if s.get("type") not in learned]
-        return merged + [dict(s) for s in ml_smells]
-
-    merged = [dict(s, detected_by="rule") for s in rule_smells]
-    for ml_smell in ml_smells:
-        match = None
-        for rule_smell in merged:
-            line = rule_smell.get("line")
-            if (rule_smell.get("type") == ml_smell["type"]
-                    and rule_smell.get("entity") == ml_smell["entity"]
-                    and line is not None
-                    and ml_smell["start_line"] <= line <= ml_smell["end_line"]):
-                match = rule_smell
-                break
-        if match is None:
-            merged.append(dict(ml_smell))
-        else:
-            match["detected_by"] = "rule+ml"
-            match["confidence"] = ml_smell["confidence"]
-    return merged
+        return [dict(s) for s in ml_smells]
+    learned = learned_smell_types()
+    merged = [dict(s, detected_by="rule") for s in rule_smells if s.get("type") not in learned]
+    return merged + [dict(s) for s in ml_smells]

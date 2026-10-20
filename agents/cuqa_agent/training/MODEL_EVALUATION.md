@@ -34,8 +34,14 @@ The main findings are:
 4. **Feature Envy** could not be learned from this data. It is trained and
    evaluated, but switched off in the shipped model.
 
-The model file is 174 KB and is scored in pure Python. The CUQA service needs no
-new dependency.
+The model file is scored in pure Python. The CUQA service needs no new
+dependency.
+
+Three more smells were trained later on a second dataset, DACOS: Complex Method,
+Long Parameter List and Multifaceted Abstraction. They are in the model file but
+switched off, because on the human-annotated cases they do no better than
+flagging every case. Section 11 has the details and Section 12 scores the whole
+Java detector (rules and model together).
 
 ## 2. Why the 120k dataset was not used
 
@@ -368,8 +374,9 @@ before.
 
 - **Java only.** MLCQ contains only Java. The model is not applied to Python or
   C files. Those are still analysed by the rules.
-- **Four smells, three shipped.** The rules cover more smell types than the
-  model. The model does not replace the whole rule set.
+- **Seven smells, three shipped.** Four MLCQ smells and three DACOS smells are
+  trained; Long Method, Blob and Data Class are switched on. The rules cover
+  more smell types than the model. The model does not replace the whole rule set.
 - **Small number of positive test samples.** There are 44 to 56 positive test
   samples per shipped smell. The confidence intervals are wide for this reason,
   especially for Blob.
@@ -400,9 +407,11 @@ before.
 The detector is in `src/ml_detector/`. The default behavior of CUQA is
 unchanged: `code_smells`, the quality score and the summary are still produced
 by the rules. Each Java file report gets an additional `ml_analysis` block with
-the model's findings. The modes `hybrid` and `ml` merge the findings into
-`code_smells`. The mode `off` skips the model. See the CUQA `README.md` for the
-API.
+the model's findings. In `hybrid` mode the model decides the smell types it
+learned and that are switched on, and the rules decide every other type. In
+`ml` mode only the model's findings are kept. The mode `off` skips the model.
+Every smell in `code_smells` has `detected_by` set to `"rule"` or `"model"`.
+See the CUQA `README.md` for the API.
 
 All 297 tests that existed before still pass. 75 tests were added for the
 feature extractor, the model, the detector and the API, which gives 372 in total.
@@ -420,8 +429,120 @@ All random steps use fixed seeds. The dataset was built twice and the training
 was run several times. The feature tables, the metrics and the model file were
 identical each time.
 
+## 11. DACOS smells
+
+All numbers in this section come from `results/dacos/evaluation_tables.md`,
+written by `train_dacos.py`.
+
+**Data.** DACOS [2] labels three smells in ten open-source Java projects. It
+has two kinds of labels. *Human* labels: two people annotated each snippet whose
+metric value is in the range where the smell is a judgement call (cyclomatic
+complexity about 5 to 10, 4 to 6 parameters, class LCOM 0.4 to 1.0). *Threshold*
+labels: the DACOS authors labelled the clear cases outside that range as smelly
+or benign with metric thresholds. `build_dacos_dataset.py` keeps the source of
+every label. A sample is positive when more than half of its annotators marked
+the smell, the same rule as for MLCQ. The features are the same CUQA features;
+methods are measured inside their enclosing class snippet.
+
+| Smell | Human-annotated (positive) | Threshold-labelled (positive) | Annotator kappa |
+|---|---:|---:|---:|
+| Complex Method | 2,271 (1,299) | 83,485 (378) | 0.60 |
+| Long Parameter List | 1,555 (731) | 83,044 (131) | 0.52 |
+| Multifaceted Abstraction | 1,340 (1,137) | 9,839 (579) | 0.10 |
+
+**Protocol.** The same as Section 5: an 80/20 split by repository with the same
+seed (8 training and 2 test repositories), model comparison and threshold
+tuning on repository-grouped cross-validation of the training repositories, one
+evaluation on the test repositories. Two changes, both because of how DACOS was
+built. Every result is given for the human-annotated samples and for all
+samples, because the threshold-labelled samples are easy by construction. And
+because two test repositories are too few for a repository bootstrap, a
+leave-one-repository-out run over all ten repositories is added.
+
+A smell is switched on only if its cross-validated F1 on the human-annotated
+training samples is at least 0.5 *and* higher than the F1 of flagging every
+human-annotated sample. About half of the Complex Method and Long Parameter
+List samples and 85% of the Multifaceted Abstraction samples are positive, so
+flagging all of them already gives a high F1.
+
+**Results on the human-annotated samples of the two test repositories:**
+
+| Smell | Model F1 | Flag-all F1 | Best single threshold F1 | CUQA rule F1 | Model ROC-AUC | Model MCC |
+|---|---:|---:|---:|---:|---:|---:|
+| Complex Method | 0.729 | 0.755 | 0.716 (`n_branches ≥ 3`) | 0.201 (complexity > 10) | 0.53 | −0.10 |
+| Long Parameter List | 0.606 | 0.673 | 0.606 (`n_params ≥ 3`) | 0.000 (parameters > 5) | 0.56 | −0.16 |
+| Multifaceted Abstraction | 0.775 | 0.904 | 0.894 | no rule | 0.42 | −0.06 |
+
+On all labelled test samples the model reaches F1 0.748, 0.534 and 0.666, and
+the CUQA rules 0.423 and 0.405.
+
+Figures: `results/dacos/model_vs_baselines.png`, `results/dacos/roc_curves.png`,
+`results/dacos/pr_curves.png`, `results/dacos/confusion_matrices.png`,
+`results/dacos/feature_importance.png`.
+
+**What this means.** Inside the judgement-call range the model cannot tell the
+annotators' yes from their no: ROC-AUC is near 0.5 and MCC is slightly negative
+for all three smells. The annotators agree with each other moderately for
+Complex Method and Long Parameter List (kappa 0.60 and 0.52), so the labels are
+not random. The CUQA metrics simply do not hold what the annotators based their
+decision on inside that range. Outside the range the model learns the DACOS
+cut-offs, which is why it beats the CUQA rules on all samples: DACOS calls a
+method complex or its parameter list long at lower values (about 3 branches, 3
+parameters) than the CUQA rules (complexity over 10, over 5 parameters). A
+single threshold does the same. In the leave-one-repository-out run the model is
+slightly better than the best single threshold for Complex Method (F1 +0.035,
+95% interval +0.01 to +0.08), equal for Long Parameter List (−0.009, −0.06 to
++0.03) and clearly worse for Multifaceted Abstraction (−0.178, −0.24 to −0.14).
+All three smells are therefore switched off. They can be turned on with
+`CUQA_ML_INCLUDE_EXPERIMENTAL=1`; Section 12 shows what that changes.
+
+Figure: `results/dacos/leave_one_repository_out.png` (one dot per held-out
+repository).
+
+## 12. The whole Java detector
+
+`evaluate_detectors.py` scores the CUQA Java detector as a whole on the test
+repositories of both datasets, in each mode (`results/combined_detector.md`).
+The rules are the CUQA rules as they run in the service. Long Method and Large
+Class come from `report_generator.py`; Feature Envy, Data Class and Complex
+Method from `java_rules.py`, which uses the Feature Envy and Data Class
+strategies of Lanza and Marinescu [3] and McCabe's complexity limit of 10 [4].
+Only smells with labelled data are scored; Magic Number, Dead Code, Message
+Chains and the other rule-only smells are not part of these numbers.
+
+| Test set | Mode | Precision | Recall | Micro F1 | Macro F1 |
+|---|---|---:|---:|---:|---:|
+| MLCQ, 4 smells | rules | 0.489 | 0.436 | 0.461 [0.37, 0.53] | 0.416 |
+| MLCQ, 4 smells | hybrid | 0.576 | 0.628 | 0.601 [0.53, 0.67] | 0.524 |
+| DACOS human, 3 smells | rules / hybrid | 0.628 | 0.046 | 0.085 | 0.067 |
+| DACOS human, 3 smells | hybrid + switched-off smells | 0.615 | 0.838 | 0.709 | 0.703 |
+| DACOS all, 3 smells | rules / hybrid | 0.863 | 0.156 | 0.264 | 0.276 |
+| DACOS all, 3 smells | hybrid + switched-off smells | 0.531 | 0.856 | 0.655 | 0.649 |
+
+Micro F1 joins every (sample, smell) decision into one confusion matrix; the
+interval resamples the MLCQ test repositories. On MLCQ, `hybrid` raises the
+micro F1 from 0.46 to 0.60, and the two intervals overlap only slightly. The
+new rule-based Feature Envy detector is weak (F1 0.13 on MLCQ), as were all
+Feature Envy detectors in Section 6. On DACOS, `hybrid` equals `rules` because
+the DACOS smells are switched off. Turning them on raises the agreement with the
+DACOS labels a lot, but, as Section 11 shows, a single lower threshold would do
+the same.
+
+Figures: `results/combined_detector.png` (micro F1 per mode),
+`results/combined_per_smell.png` (F1 per smell and mode).
+
 ## References
 
 [1] L. Madeyski and T. Lewowski, "MLCQ: Industry-Relevant Code Smell Data Set,"
 in Proceedings of the Evaluation and Assessment in Software Engineering
 conference (EASE), 2020.
+
+[2] H. Nandani, M. Saad and T. Sharma, "DACOS—A Manually Annotated Dataset of
+Code Smells," in Proceedings of the 20th International Conference on Mining
+Software Repositories (MSR), Data and Tool Showcase Track, 2023.
+Data: https://doi.org/10.5281/zenodo.7570428 (CC BY 4.0).
+
+[3] M. Lanza and R. Marinescu, *Object-Oriented Metrics in Practice*. Springer, 2006.
+
+[4] T. J. McCabe, "A Complexity Measure," *IEEE Transactions on Software
+Engineering*, vol. SE-2, no. 4, pp. 308–320, 1976.
