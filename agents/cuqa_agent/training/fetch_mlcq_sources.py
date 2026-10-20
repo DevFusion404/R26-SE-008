@@ -25,6 +25,7 @@ from pathlib import Path
 from urllib.parse import quote
 
 import requests
+from requests.adapters import HTTPAdapter
 
 TRAINING_DIR = Path(__file__).resolve().parent
 REPO_ROOT = TRAINING_DIR.parents[2]
@@ -150,7 +151,7 @@ def main() -> int:
     print(f"Unique files to fetch: {len(records)}")
     session = requests.Session()
     session.headers.update({"User-Agent": USER_AGENT})
-    adapter = requests.adapters.HTTPAdapter(pool_connections=args.workers, pool_maxsize=args.workers)
+    adapter = HTTPAdapter(pool_connections=args.workers, pool_maxsize=args.workers)
     session.mount("https://", adapter)
 
     results: list[dict] = []

@@ -136,6 +136,25 @@ def _safe_extract_zip(zip_file: zipfile.ZipFile, extract_dir: str) -> None:
     zip_file.extractall(extract_dir)
 
 
+def _long_path(path: str) -> str:
+    """
+    Allow workspace paths longer than 260 characters on Windows.
+
+    VIVA NOTE: Windows rejects paths over 260 characters unless long paths are
+    switched on for the whole machine. Deep Java packages inside an extracted
+    repository easily pass that limit. The `\\\\?\\` prefix tells Windows to accept
+    long paths for this workspace, and every path joined onto it keeps the prefix.
+    """
+    if os.name != "nt":
+        return path
+    path = os.path.abspath(path)
+    if path.startswith("\\\\?\\"):
+        return path
+    if path.startswith("\\\\"):  # network share: \\server\share -> \\?\UNC\server\share
+        return "\\\\?\\UNC\\" + path[2:]
+    return "\\\\?\\" + path
+
+
 def _safe_resolve_path(workspace_root: str, rel_path: str) -> str:
     """
     SPECIAL SECURITY FUNCTION: Prevent Arbitrary File Access / Directory Traversal.
@@ -300,7 +319,7 @@ async def upload_zip(file: UploadFile = File(...)):
     if _workspace["root"] and os.path.exists(_workspace["root"]):
         shutil.rmtree(_workspace["root"], ignore_errors=True)
 
-    tmp_dir = tempfile.mkdtemp(prefix="cuqa_")
+    tmp_dir = _long_path(tempfile.mkdtemp(prefix="cuqa_"))
     zip_path = os.path.join(tmp_dir, "upload.zip")
 
     total_bytes = 0
@@ -325,6 +344,9 @@ async def upload_zip(file: UploadFile = File(...)):
     except HTTPException:
         shutil.rmtree(tmp_dir, ignore_errors=True)
         raise
+    except OSError as exc:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        raise HTTPException(500, f"Could not extract the ZIP file: {exc}")
 
     # If ZIP has a single top-level folder, go inside it
     entries = os.listdir(extract_dir)
@@ -392,7 +414,7 @@ def load_github_repo(request: GitHubRepoRequest):  # Use Pydantic model
     if _workspace["root"] and os.path.exists(_workspace["root"]):
         shutil.rmtree(_workspace["root"], ignore_errors=True)
 
-    tmp_dir = tempfile.mkdtemp(prefix="cuqa_gh_")
+    tmp_dir = _long_path(tempfile.mkdtemp(prefix="cuqa_gh_"))
     zip_path = os.path.join(tmp_dir, "repo.zip")
 
     total_bytes = 0
@@ -418,6 +440,9 @@ def load_github_repo(request: GitHubRepoRequest):  # Use Pydantic model
     except HTTPException:
         shutil.rmtree(tmp_dir, ignore_errors=True)
         raise
+    except OSError as exc:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        raise HTTPException(500, f"Could not extract the downloaded archive: {exc}")
 
     entries = os.listdir(extract_dir)
     if len(entries) == 1 and os.path.isdir(os.path.join(extract_dir, entries[0])):
