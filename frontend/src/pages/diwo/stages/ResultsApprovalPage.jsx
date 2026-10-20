@@ -366,6 +366,12 @@ export default function ResultsApprovalPage({
   const [branchCheck, setBranchCheck] = useState({ status: "idle" });
   const [repoPath, setRepoPath] = useState(repositoryPath || "");
   const [commitMessage, setCommitMessage] = useState("refactor: apply DIWO agent refactorings");
+  // The developer's own GitHub fine-grained token (Contents: Read and write on
+  // the target repository). React state ONLY: never written to localStorage,
+  // sessionStorage, the URL or a log, sent only with the push / branch-check
+  // request over HTTPS, and cleared once the push succeeds.
+  const [githubToken, setGithubToken] = useState("");
+  const [showToken, setShowToken] = useState(false);
   const [pushStatus, setPushStatus] = useState("");
   const [isProcessing, setIsProcessing] = useState(false);
 
@@ -393,6 +399,9 @@ export default function ResultsApprovalPage({
           run_id: workflowId || "",
           branch_name: trimmedBranch,
           repository_path: repoPath.trim(),
+          // Read at call time so a private repository can be checked too;
+          // not a dependency, so a half-typed token is never sent.
+          ...(githubToken.trim() ? { github_token: githubToken.trim() } : {}),
         }, { signal: controller.signal });
         // A suggestion that turned out to be taken moves on to the next free
         // name by itself; a typed name is left for the developer to change.
@@ -642,6 +651,9 @@ export default function ResultsApprovalPage({
         commit_message: commitMessage.trim() || `refactor: DIWO agent changes (${trimmedBranch})`,
         commit: true,
         push: true,
+        // Replaces the server's token for this one request; the backend never
+        // stores or logs it.
+        ...(githubToken.trim() ? { github_token: githubToken.trim() } : {}),
       });
 
       const lines = [
@@ -676,6 +688,9 @@ export default function ResultsApprovalPage({
         alert(lines.join("\n"));
       }
 
+      // Pushed: drop the token from memory. On failure it is kept, so the
+      // developer can fix the problem and retry without pasting it again.
+      if (result.pushed) setGithubToken("");
       setShowActionChoice(false);
       if (onAccept) onAccept({ ...decisionPayload(), githubResult: result });
     } catch (error) {
@@ -1160,9 +1175,28 @@ export default function ResultsApprovalPage({
       </div>
 
       {showActionChoice && (
-        <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000 }}>
-          <div style={{ background: C.bg, border: `1px solid ${C.border}`, borderRadius: 12, padding: 24, maxWidth: 480, boxShadow: "0 20px 60px rgba(0,0,0,0.3)" }}>
-            <h2 style={{ marginTop: 0, color: C.text, marginBottom: 12 }}>How would you like to proceed?</h2>
+        <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000, padding: 16 }}>
+          {/* Scrolls inside the window: the download and push options together
+              are taller than most screens. The title stays pinned at the top
+              and Cancel at the bottom while the options scroll between them. */}
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-label="How would you like to proceed?"
+            style={{
+              background: C.bg, border: `1px solid ${C.border}`, borderRadius: 12,
+              padding: "0 24px", width: "min(520px, 100%)", maxHeight: "calc(100vh - 32px)",
+              overflowY: "auto", overscrollBehavior: "contain",
+              boxShadow: "0 20px 60px rgba(0,0,0,0.3)",
+            }}
+          >
+            <h2 style={{
+              position: "sticky", top: 0, zIndex: 1, background: C.bg,
+              margin: "0 -24px 12px", padding: "20px 24px 12px",
+              borderBottom: `1px solid ${C.border}`, color: C.text,
+            }}>
+              How would you like to proceed?
+            </h2>
             <p style={{ color: C.textSub, marginBottom: 8 }}>
               {stagedEntries.length} file(s) will be written.
             </p>
@@ -1219,6 +1253,41 @@ export default function ResultsApprovalPage({
                   <div style={{ fontSize: 10, color: C.textMuted, marginTop: 4, lineHeight: 1.5 }}>
                     A URL is cloned once on the DIWO server and reused on later runs. A local path
                     only works when the DIWO backend runs on this machine.
+                  </div>
+                </div>
+
+                <div style={{ marginBottom: 10 }}>
+                  <label htmlFor="diwo-github-token" style={{ fontSize: 12, color: C.textMuted, display: "block", marginBottom: 4 }}>
+                    GitHub personal access token
+                  </label>
+                  <div style={{ display: "flex", gap: 6 }}>
+                    <input
+                      id="diwo-github-token"
+                      type={showToken ? "text" : "password"}
+                      name="diwo-github-token"
+                      // Keep the browser from saving or autofilling it.
+                      autoComplete="new-password"
+                      spellCheck={false}
+                      value={githubToken}
+                      onChange={(e) => setGithubToken(e.target.value)}
+                      placeholder="github_pat_…"
+                      style={{ flex: 1, minWidth: 0, padding: "8px 12px", borderRadius: 6, background: C.bg, border: `1px solid ${C.border}`, color: C.text, fontSize: 12, fontFamily: "monospace", boxSizing: "border-box" }}
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowToken((v) => !v)}
+                      aria-pressed={showToken}
+                      style={{ padding: "0 12px", borderRadius: 6, background: C.bg, border: `1px solid ${C.border}`, color: C.textSub, fontSize: 11, fontWeight: 700, cursor: "pointer" }}
+                    >
+                      {showToken ? "Hide" : "Show"}
+                    </button>
+                  </div>
+                  <div style={{ fontSize: 10.5, color: C.textMuted, marginTop: 4, lineHeight: 1.55 }}>
+                    Create a <b>fine-grained token</b> on GitHub (Settings → Developer settings →
+                    Fine-grained tokens) for <b>this repository only</b>, with <b>Contents: Read and
+                    write</b>. It is sent over HTTPS with this push only, kept in memory, and never
+                    saved — not in the database, the audit log, the commit or your browser.
+                    Requires an <span style={{ fontFamily: "monospace" }}>https://github.com/…</span> repository URL.
                   </div>
                 </div>
 
@@ -1314,12 +1383,18 @@ export default function ResultsApprovalPage({
                 </button>
               </div>
 
-              <button
-                onClick={() => setShowActionChoice(false)}
-                style={{ width: "100%", padding: "8px 12px", borderRadius: 6, background: C.border, color: C.text, border: "none", fontWeight: 700, fontSize: 12, cursor: "pointer" }}
-              >
-                Cancel
-              </button>
+              <div style={{
+                position: "sticky", bottom: 0, zIndex: 1, background: C.bg,
+                margin: "0 -24px", padding: "12px 24px 20px",
+                borderTop: `1px solid ${C.border}`,
+              }}>
+                <button
+                  onClick={() => setShowActionChoice(false)}
+                  style={{ width: "100%", padding: "10px 12px", borderRadius: 6, background: C.border, color: C.text, border: "none", fontWeight: 700, fontSize: 13, cursor: "pointer" }}
+                >
+                  Cancel
+                </button>
+              </div>
             </div>
           </div>
         </div>

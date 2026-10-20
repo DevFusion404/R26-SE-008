@@ -19,6 +19,7 @@ which one produced the plan so a fallback is never mistaken for RDP output.
 
 from typing import Optional
 
+import config
 from clients.rdp_client import (
     RDPError, generate_plan as rdp_generate_plan, rdp_base_url,
 )
@@ -62,7 +63,9 @@ def plan_from_rdp(updated_report: dict, selected: list, target: str,
         return generate_refactoring_plan(selected, target), {}, "diwo_local_fallback", warning
 
     try:
-        result = rdp_generate_plan(rdp_input)
+        # A large selection takes RDP minutes to score; the 120 s client
+        # default cut those runs off and fell back to the local plan.
+        result = rdp_generate_plan(rdp_input, timeout=config.rdp_generate_timeout())
     except RDPError as exc:
         if wf_id:
             log_event(wf_id, "plan_approval", "rdp_plan_failed",

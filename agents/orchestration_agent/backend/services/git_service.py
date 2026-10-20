@@ -137,11 +137,27 @@ def _app_installation_token(owner: str, repo: str) -> str:
         return ""
 
 
+def require_https_for_token(repository: str, request_token: str) -> None:
+    """A developer's token is only ever sent to an https:// GitHub URL.
+
+    Refused outright rather than silently ignored: a token typed for an
+    http://, ssh or file URL would otherwise be dropped and the push would fail
+    later with a misleading "no credentials" message.
+    """
+    if request_token and is_remote_repo(repository) and not github_repo_from_url(repository):
+        raise GitOperationError(
+            "A GitHub token can only be used with an https://github.com/<owner>/<repo> URL. "
+            "Use the repository's HTTPS URL, or leave the token empty.", 400)
+
+
 def resolve_git_auth(clone_url: str, request_token: str = ""):
     """The credential git should use for `clone_url`, or None.
 
-    In order: a token the developer typed on the Results page (used for this
-    request only, never stored), the server's DIWO_GIT_PUSH_TOKEN, then the
+    In order: the developer's own token from the Results page (their
+    fine-grained PAT; it replaces the server's token for this request, lives
+    only in memory for it, and is never written to the database, the audit
+    trail, the clone's .git/config, a commit or a response), the server's
+    DIWO_GIT_PUSH_TOKEN, then the
     GitHub App's installation token for the repository. Only https GitHub URLs
     take a token; an ssh or local remote keeps whatever git already has.
     """
@@ -272,8 +288,8 @@ def prepare_repository(repository: str, auth=None):
             if not ok:
                 raise GitOperationError(
                     f"Could not clone {repository}: {err} — check the URL, and that you have "
-                    "access to the repository (a private repo needs a GitHub token: set "
-                    "DIWO_GIT_PUSH_TOKEN on the server, or install the RefactorIQ GitHub App on it).",
+                    "access to the repository (a private repo needs a GitHub token: enter your "
+                    "fine-grained token on the Results page).",
                     400)
 
         return repo_path, {"remote": True, "clone_url": repository, "base_branch": default_remote_branch(repo_path)}
@@ -332,6 +348,7 @@ def apply_and_push(data: dict) -> dict:
     errors = validate_branch_name(branch_name, run_git)
     if errors:
         raise GitOperationError(" ".join(errors), 400)
+    require_https_for_token(repository, request_token)
 
     auth = resolve_git_auth(repository, request_token) if is_remote_repo(repository) else None
     repo_path, info = prepare_repository(repository, auth=auth)
@@ -491,14 +508,16 @@ def apply_and_push(data: dict) -> dict:
             )
         elif auth is None and _is_credential_error(err):
             push_error = (
-                "GitHub needs credentials to push, and this server has none. Set "
-                "DIWO_GIT_PUSH_TOKEN on the backend (a token with Contents: write) or install the "
-                "RefactorIQ GitHub App on the repository. The branch is committed on the server."
+                "GitHub needs credentials to push. Enter your GitHub fine-grained token "
+                "(Contents: Read and write on this repository) on the Results page and push "
+                "again. The branch is committed on the server."
             )
         elif _is_credential_error(err) or "403" in (err or ""):
             push_error = (
-                f"GitHub rejected the push with the {auth.source if auth else ''} token: {err} — "
-                "check that the token has Contents: write access to this repository."
+                f"GitHub rejected the push"
+                f"{' with your token' if auth and auth.source == 'request' else ''}: {err} — "
+                "check that the token has Contents: Read and write access to this repository "
+                "and has not expired."
             )
         else:
             push_error = f"{err} — the branch is committed on the server but was not pushed."
