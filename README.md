@@ -165,7 +165,7 @@ Returns a structured AST JSON with stable IDs for the React tree renderer, plus 
 ```json
 { "file_path": "src/utils.py" }
 ```
-Omit `file_path` for a full repository report (capped at 50 files).
+Omit `file_path` for a full repository report (every source file in the repository).
 
 **Response fields:**
 

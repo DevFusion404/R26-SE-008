@@ -511,7 +511,7 @@ def quality_report(payload: dict = None): # type: ignore
     Generate a quality report for one or all files in the workspace.
 
     Body (optional): { "file_path": "relative/path/File.py", "detector": "rules" | "hybrid" | "ml" | "off" }
-    If file_path omitted, reports on all loaded files (capped at 50).
+    If file_path omitted, reports on every source file loaded from the repository.
     If detector omitted, the CUQA_SMELL_DETECTOR environment variable applies (default "rules").
     """
     if not _workspace["root"]:
@@ -537,25 +537,23 @@ def quality_report(payload: dict = None): # type: ignore
     return {"type": "repository", "report": repo_report}
 
 
-#: Files analysed per repository report — the cap /api/quality-report has
-#: always applied, shared with /api/analyze-snapshot so both agree.
-MAX_REPORT_FILES = 50
-
-
 def _build_repo_report(root: str, files: list[str], repo_name: Optional[str],
                        detector: Optional[str] = None) -> dict:
-    """Repository quality report for `files` under `root` (first 50 files).
+    """Repository quality report for every file in `files` under `root`.
 
     Shared by /api/quality-report (the global workspace) and
     /api/analyze-snapshot (a private, per-request directory).
     """
-    # All files — cap at 50 to avoid timeout
-    # Collect (relative_filename, source_text) for every file so that
+    # All files in the repository — no cap, so the report covers the whole
+    # uploaded project.
+    # Collect (relative_path, source_text) for every file so that
     # generate_repo_report can build a cross-file name index for accurate
     # dead-code detection.  We read each file once and reuse the text.
+    # Keyed by relative path, not basename: a full repo has many files with
+    # the same name (__init__.py, utils.py) and each must keep its own source.
     file_reports = []
-    all_sources: list[tuple[str, str]] = []   # (basename, source) for repo index
-    for rel in files[:MAX_REPORT_FILES]:
+    all_sources: list[tuple[str, str]] = []   # (relative_path, source) for repo index
+    for rel in files:
         full_path = os.path.join(root, rel)
         try:
             with open(full_path, "r", encoding="utf-8", errors="replace") as f:
@@ -564,7 +562,7 @@ def _build_repo_report(root: str, files: list[str], repo_name: Optional[str],
             report["relative_path"] = rel.replace("\\", "/")
             # Collect Python sources for repo-wide dead-code index
             if os.path.splitext(full_path)[-1].lower() == ".py":
-                all_sources.append((os.path.basename(full_path), source))
+                all_sources.append((report["relative_path"], source))
         except Exception as exc:
             report = {"file": rel, "error": str(exc)}
         file_reports.append(report)
@@ -589,7 +587,7 @@ async def analyze_snapshot(file: UploadFile = File(...), repo_name: str = Form("
     interactively loaded repository is left exactly as it was.
 
     Same safety rules as /api/upload-zip (size cap, Zip Slip prevention), same
-    report shape and 50-file cap as /api/quality-report. Source code is parsed
+    report shape and whole-repository coverage as /api/quality-report. Source code is parsed
     statically; nothing from the archive is executed.
 
     Returns { type: "repository", report: {...}, snapshot: {top_level_dir,
@@ -632,7 +630,7 @@ async def analyze_snapshot(file: UploadFile = File(...), repo_name: str = Form("
             "snapshot": {
                 "top_level_dir": top_level_dir,
                 "files_found": len(source_files),
-                "files_analyzed": min(len(source_files), MAX_REPORT_FILES),
+                "files_analyzed": len(source_files),
             },
         }
     finally:

@@ -13,13 +13,18 @@ import re
 import ast as pyast
 import hashlib
 from collections import defaultdict, deque
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
+# Optional imports: at runtime a missing package only sets its *_AVAILABLE flag
+# to False. The `if TYPE_CHECKING: raise` lines never run; they tell the type
+# checker that the imported names exist wherever the flag is True.
 try:
     import javalang
     JAVALANG_AVAILABLE = True
 except ImportError:
     JAVALANG_AVAILABLE = False
+    if TYPE_CHECKING:
+        raise
 
 # Import shared regex helpers from c_ast_parser (no duplication)
 try:
@@ -71,6 +76,8 @@ except ImportError:
             _C_HELPERS_AVAILABLE = True
         except ImportError:
             _C_HELPERS_AVAILABLE = False
+            if TYPE_CHECKING:
+                raise
 
 # ML smell detector for Java (optional — reports stay rule-based when it is missing)
 try:
@@ -647,7 +654,7 @@ def _python_literal_is_not_magic(node: pyast.Constant) -> bool:
     direct = getattr(node, "parent", None)
     if isinstance(direct, pyast.UnaryOp):
         direct = getattr(direct, "parent", None)
-    if abs(node.value) in _UNIT_FACTORS:
+    if isinstance(node.value, (int, float)) and abs(node.value) in _UNIT_FACTORS:
         if isinstance(direct, pyast.BinOp) and isinstance(direct.op, (pyast.Mult, pyast.Div, pyast.FloorDiv, pyast.Mod)):
             return True
         if isinstance(direct, pyast.AugAssign) and isinstance(direct.op, (pyast.Mult, pyast.Div, pyast.FloorDiv, pyast.Mod)):
@@ -723,7 +730,7 @@ class _PythonSmellVisitor(pyast.NodeVisitor):
         self.smells.append(smell)
 
     # ── Long method / Too many parameters ────────────────────────────────────
-    def visit_FunctionDef(self, node: pyast.FunctionDef):
+    def visit_FunctionDef(self, node: pyast.FunctionDef | pyast.AsyncFunctionDef):
         self._func_stack.append(node.name)
 
         end_line = node.end_lineno or node.lineno
@@ -816,8 +823,8 @@ class _PythonSmellVisitor(pyast.NodeVisitor):
         self.generic_visit(node)
         self._func_stack.pop()
 
-    # pyrefly: ignore [bad-override]
-    visit_AsyncFunctionDef = visit_FunctionDef
+    def visit_AsyncFunctionDef(self, node: pyast.AsyncFunctionDef):
+        self.visit_FunctionDef(node)
 
     # ── Large class / Lazy class / Phase 4 class-level detectors ─────────────
     def visit_ClassDef(self, node: pyast.ClassDef):
@@ -2050,7 +2057,7 @@ def generate_file_report(
     ml_analysis = None
     detection_mode = "rules"
     requested_mode = _ml_detector.resolve_mode(detector) if _ml_detector is not None else "off"
-    if language == "java" and requested_mode != "off":
+    if _ml_detector is not None and language == "java" and requested_mode != "off":
         ml_analysis = _ml_detector.detect_smells(source)
         if requested_mode != "rules" and ml_analysis["status"] == "ok":
             smells = _ml_detector.merge_with_rule_smells(
@@ -2139,7 +2146,9 @@ def generate_repo_report(
                 fname = report.get("file", "")
                 if os.path.splitext(fname)[-1].lower() != ".py":
                     continue
-                src = source_map.get(fname)
+                # /api/quality-report keys sources by relative path so files
+                # that share a basename do not overwrite each other.
+                src = source_map.get(report.get("relative_path", fname))
                 if src is None:
                     continue
                 # Re-detect smells with full cross-file context
