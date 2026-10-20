@@ -46,6 +46,7 @@ from services.planning_service import generate_updated_plan_report
 from services.impact_service import (
     analyse_selection, compute_workflow_impacts, optimise_selection,
 )
+from services.source_snapshot import snapshot_source_loader
 from services.transformation_service import run_transformation
 from services.workflow_service import (
     apply_plan_decision, apply_transformation_decision,
@@ -738,6 +739,10 @@ def transform(wf_id):
         request_id=data.get("request_id"),
         execution_options=execution_options,
         wf_id=wf_id,
+        # The source kept at smell selection, so another user's upload to the
+        # shared CUQA workspace since then cannot make the files unreadable.
+        # None (no snapshot) keeps the live CUQA read.
+        source_loader=snapshot_source_loader(wf),
     )
 
     return jsonify({
