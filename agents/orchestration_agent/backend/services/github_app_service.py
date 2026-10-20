@@ -177,6 +177,18 @@ class GitHubAppService:
             logger.info("Obtained installation token for installation %s", installation_id)
             return token
 
+    def find_repo_installation(self, owner: str, repo: str):
+        """The App's installation id on owner/repo, or None when not installed."""
+        what = "Repository installation lookup"
+        response = self._send(
+            "GET", f"{self._api_url}/repos/{owner}/{repo}/installation",
+            headers=self._headers(self.generate_jwt()), what=what)
+        if response.status_code == 404:
+            return None
+        if response.status_code != 200:
+            raise _error_from_response(response, what)
+        return response.json().get("id")
+
     def invalidate_token(self, installation_id: int) -> None:
         with self._lock:
             self._tokens.pop(int(installation_id), None)

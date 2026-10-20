@@ -316,6 +316,19 @@ export default function RefactoringPlanApprovalPage({
   const counts = countDecisions(steps, decisions);
   const breakdown = groupBreakdown(steps);
   const recommendedIds = steps.filter((s) => categoryOf(s) === RECOMMENDED).map((s) => s.step_id);
+
+  /**
+   * "Select recommended": approve every step DIWO recommends and reject every
+   * other step, so one click leaves the whole plan decided the way DIWO
+   * advised. Recommended steps never need the override confirmation, and a
+   * rejection never sends anything to SCTVA. Each step can still be flipped
+   * afterwards.
+   */
+  const selectRecommended = () => {
+    const recommended = new Set(recommendedIds);
+    recommendedIds.forEach((id) => decide(id, APPROVE));
+    steps.filter((s) => !recommended.has(s.step_id)).forEach((s) => decide(s.step_id, REJECT));
+  };
   const fileCount = groupStepsByFile(steps).length;
   const forcedManual = forcedManualOnlySteps(steps, decisions).length;
 
@@ -417,6 +430,7 @@ export default function RefactoringPlanApprovalPage({
             activeId={activeStep?.step_id ?? null}
             onActivate={setActiveId}
             recommendedIds={recommendedIds}
+            onSelectRecommended={selectRecommended}
             visibleIds={visibleIds}
             onBulk={bulkDecide}
             expanded={expanded}

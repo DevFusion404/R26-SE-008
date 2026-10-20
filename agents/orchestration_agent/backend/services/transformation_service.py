@@ -24,6 +24,7 @@ import random
 from datetime import datetime, timezone
 from typing import Optional
 
+import config
 from clients.sctva_client import (
     SCTVAError, execute_transformation as sctva_execute,
     sctva_base_url,
@@ -99,7 +100,8 @@ def run_transformation(plan: dict, language: Optional[str] = None,
         )
 
     try:
-        sources = (source_loader or fetch_workspace_sources)(paths)
+        sources = (source_loader(paths) if source_loader
+                   else fetch_workspace_sources(paths, timeout=config.source_fetch_timeout()))
     except SCTVAError as exc:
         if wf_id:
             # Named paths, because "could not read 3 files" is not fixable.
@@ -140,7 +142,9 @@ def run_transformation(plan: dict, language: Optional[str] = None,
     }
 
     try:
-        raw = sctva_execute(request)
+        # A large project takes SCTVA minutes; the 120 s client default cut
+        # those runs off before any result came back.
+        raw = sctva_execute(request, timeout=config.sctva_execute_timeout())
     except SCTVAError as exc:
         if wf_id:
             log_event(wf_id, "transformation", "sctva_execute_failed",
