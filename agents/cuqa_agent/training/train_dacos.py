@@ -220,7 +220,7 @@ def leave_one_repository_out(X, y, groups, human, rule_pred, names, seed: int) -
     runs = Parallel(n_jobs=-1)(
         delayed(_held_out_repository)(X, y, groups, repo, names, seed) for repo in sorted(set(groups))
     )
-    for repo, model_pred, single_pred in runs:
+    for repo, model_pred, single_pred in runs: # type: ignore
         test = groups == repo
         pooled["model"][test] = model_pred
         pooled["single"][test] = single_pred
