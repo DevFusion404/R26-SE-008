@@ -4,7 +4,7 @@ ast_visualizer.py
 AST Visualization & Tree Enrichment Module for the CUQA Agent.
 
 ===============================================================================
-SPECIAL FUNCTION & ARCHITECTURAL OVERVIEW FOR CODE VIVA / PRESENTATION:
+SPECIAL FUNCTION & ARCHITECTURAL OVERVIEW FOR CODE 
 ===============================================================================
 1. PURPOSE:
    Transforms raw, deeply nested CUQA AST JSON trees into display-ready, enriched
