@@ -489,6 +489,27 @@ export async function applyAndPush(body) {
   return result;
 }
 
+/**
+ * POST /diwo/branch-name/check — validate a branch name with git itself and
+ * ask the remote whether it already exists. Read-only.
+ *
+ * Returns { branch_name, valid, errors[], exists (true|false|null),
+ * exists_error, suggestion }.
+ */
+export async function checkBranchName(body, { signal } = {}) {
+  const response = await fetch(`${DIWO_BASE}/diwo/branch-name/check`, {
+    method: "POST",
+    headers: jsonHeaders(),
+    body: JSON.stringify(body),
+    signal,
+  });
+  const result = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(result.error || `HTTP ${response.status}: ${response.statusText}`);
+  }
+  return result;
+}
+
 // ─── GitHub-linked workflows ─────────────────────────────────────────────────
 
 /**

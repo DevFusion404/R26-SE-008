@@ -152,7 +152,7 @@ CMD ["python", "-m", "gunicorn", \
      "--bind", "0.0.0.0:5001", \
      "--workers", "1", \
      "--threads", "4", \
-     "--timeout", "300", \
+     "--timeout", "900", \
      "--access-logfile", "-", \
      "--error-logfile", "-", \
      "--capture-output", \

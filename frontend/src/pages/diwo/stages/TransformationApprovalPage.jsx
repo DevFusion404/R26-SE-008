@@ -66,12 +66,39 @@ const BLANK_RUN = { stage: "mapping", progress: 0, run: null, error: null };
 const pct = (value) =>
   typeof value === "number" && Number.isFinite(value) ? `${(value * 100).toFixed(1)}%` : "—";
 
+/**
+ * Accept / Reject colours. Solid green / red with white text once chosen, and
+ * the theme's own success / danger text colour before — those variables are
+ * dark in light mode, where the old bright accent (#00d4aa) all but vanished
+ * on a white background.
+ */
+const DECISION_TONE = {
+  accept: { solid: "#15803d", text: "var(--text-success)" },
+  reject: { solid: "#dc2626", text: "var(--text-danger)" },
+};
+
+function decisionButtonStyle(kind, active, { padding, fontSize }) {
+  const tone = DECISION_TONE[kind];
+  return {
+    padding,
+    borderRadius: 7,
+    fontSize,
+    fontWeight: 800,
+    cursor: "pointer",
+    whiteSpace: "nowrap",
+    border: `1px solid ${active ? tone.solid : `color-mix(in srgb, ${tone.solid} 45%, transparent)`}`,
+    background: active ? tone.solid : `color-mix(in srgb, ${tone.solid} 10%, transparent)`,
+    color: active ? "#ffffff" : tone.text,
+  };
+}
+
 /** Accept / Reject pair for one changed file. */
 function DecisionButtons({ decision, onDecide, size = "sm" }) {
-  const pad = size === "sm" ? "4px 10px" : "7px 16px";
-  const font = size === "sm" ? 10 : 12;
+  const sizing = size === "sm"
+    ? { padding: "6px 13px", fontSize: 12.5 }
+    : { padding: "9px 18px", fontSize: 13.5 };
 
-  const button = (value, label, color) => {
+  const button = (value, label) => {
     const active = decision === value;
     return (
       <button
@@ -79,16 +106,8 @@ function DecisionButtons({ decision, onDecide, size = "sm" }) {
           e.stopPropagation();
           onDecide(active ? null : value);
         }}
-        style={{
-          padding: pad,
-          borderRadius: 6,
-          fontSize: font,
-          fontWeight: 700,
-          cursor: "pointer",
-          border: `1px solid ${active ? color : C.border}`,
-          background: active ? color : "transparent",
-          color: active ? "#000" : color,
-        }}
+        aria-pressed={active}
+        style={decisionButtonStyle(value, active, sizing)}
       >
         {label}
       </button>
@@ -97,8 +116,8 @@ function DecisionButtons({ decision, onDecide, size = "sm" }) {
 
   return (
     <div style={{ display: "flex", gap: 6 }}>
-      {button("accept", "✓ Accept", C.accent)}
-      {button("reject", "✕ Reject", C.danger)}
+      {button("accept", "✓ Accept")}
+      {button("reject", "✕ Reject")}
     </div>
   );
 }
@@ -132,19 +151,11 @@ function BulkDecisionBar({ total, accepted, rejected, pending, onAcceptAll, onRe
           ? "This refactored file still needs a decision."
           : `${pending} of ${total} refactored files still need a decision.`;
 
-  const bulkButton = (label, color, active, onClick) => (
+  const bulkButton = (label, kind, active, onClick) => (
     <button
       onClick={onClick}
-      style={{
-        padding: "8px 18px",
-        borderRadius: 8,
-        fontSize: 12,
-        fontWeight: 700,
-        cursor: "pointer",
-        border: `1px solid ${active ? color : C.border}`,
-        background: active ? color : "transparent",
-        color: active ? "#000" : color,
-      }}
+      aria-pressed={active}
+      style={decisionButtonStyle(kind, active, { padding: "10px 20px", fontSize: 14 })}
     >
       {label}
     </button>
@@ -177,8 +188,8 @@ function BulkDecisionBar({ total, accepted, rejected, pending, onAcceptAll, onRe
         <div style={{ fontSize: 12, color: railColor }}>{message}</div>
       </div>
       <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-        {bulkButton("✓ Accept All", C.accent, allAccepted, onAcceptAll)}
-        {bulkButton("✕ Reject All", C.danger, allRejected, onRejectAll)}
+        {bulkButton("✓ Accept All", "accept", allAccepted, onAcceptAll)}
+        {bulkButton("✕ Reject All", "reject", allRejected, onRejectAll)}
         {accepted + rejected > 0 && (
           <button
             onClick={onClear}
@@ -221,10 +232,16 @@ function BackToPlanButton({ onBackToPlan, label = "← Rollback to Plan Approval
         fontWeight: 700,
         fontSize: 13,
         cursor: "pointer",
-        background: `${C.warn}15`,
-        color: C.warn,
-        border: `1px solid ${C.warn}40`,
+        // Solid amber so it reads as a real action in both themes; the old
+        // 8% tint left it looking like plain text on a light page.
+        background: "#d97706",
+        color: "#ffffff",
+        border: "1px solid #b45309",
+        boxShadow: "0 2px 10px rgba(217, 119, 6, 0.35)",
+        transition: "background 0.15s ease",
       }}
+      onMouseEnter={(e) => { e.currentTarget.style.background = "#b45309"; }}
+      onMouseLeave={(e) => { e.currentTarget.style.background = "#d97706"; }}
     >
       {label}
     </button>
@@ -877,11 +894,11 @@ export default function TransformationApprovalPage({
                 }`,
               }}
             >
-              <div style={{ fontSize: 12, color: C.textSub }}>
+              <div style={{ fontSize: 13.5, color: C.textSub }}>
                 {decisions[activeFile.path] === "accept" ? (
-                  <span style={{ color: C.accent, fontWeight: 700 }}>✓ Accepted — this file will be carried forward</span>
+                  <span style={{ color: DECISION_TONE.accept.text, fontWeight: 700 }}>✓ Accepted — this file will be carried forward</span>
                 ) : decisions[activeFile.path] === "reject" ? (
-                  <span style={{ color: C.danger, fontWeight: 700 }}>✕ Rejected — this file is marked as not adopted</span>
+                  <span style={{ color: DECISION_TONE.reject.text, fontWeight: 700 }}>✕ Rejected — this file is marked as not adopted</span>
                 ) : (
                   <span>Accept or reject the refactoring of this file.</span>
                 )}
@@ -904,7 +921,9 @@ export default function TransformationApprovalPage({
 
           {view === "diff" && <DiffLegend />}
 
-          <CodeSurface>
+          {/* Larger than the shared 11px default: the developer reads every
+              changed line here before accepting it. */}
+          <CodeSurface maxHeight={560} style={{ fontSize: 13.5, lineHeight: 1.65 }} changeMap={view === "diff"}>
             {view === "diff" ? (
               <DiffBlock
                 rows={activeFile?.diff_rows}
