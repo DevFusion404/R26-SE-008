@@ -168,6 +168,7 @@ def test_c_introduce_parameter_object_executes_successfully():
                         "action_type": "introduce_parameter_object",
                         "parameters": {
                             "method": "total",
+                            "source_class": "PlannerStyleClassName",
                             "parameter_object_name": "TotalParams",
                         },
                     }

@@ -35,6 +35,9 @@ def build_model_evaluation(
     after final validation; it is not a benchmark-wide model accuracy claim.
     """
 
+    # Keep candidate-generation metrics separate from rule-based fallback
+    # outcomes so the frontend reports actual model retention honestly.
+
     attempts = max(0, int(model_attempt_count or 0))
     candidate_count = max(0, int(model_candidate_count or 0))
     accepted_actions = max(0, int(model_action_count or 0))

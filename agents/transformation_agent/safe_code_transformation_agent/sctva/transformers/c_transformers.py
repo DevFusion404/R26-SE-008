@@ -155,6 +155,20 @@ _C_NUMERIC_TOKEN_RE = re.compile(
 )
 
 
+def _c_numeric_token_matches_literal(token: str, literal_value: Any) -> bool:
+    """Match a planner number to a C token while retaining C type suffixes."""
+
+    token_value = _c_numeric_literal_value(token)
+    if token_value is None or isinstance(literal_value, bool):
+        return False
+    if not isinstance(literal_value, (int, float)):
+        return False
+    magnitude = abs(literal_value)
+    if isinstance(token_value, int) and isinstance(magnitude, int):
+        return token_value == magnitude
+    return float(token_value) == float(magnitude)
+
+
 def _inside_square_brackets(masked_source: str, index: int) -> bool:
     """Return whether ``index`` is inside an array/indexing expression."""
 
@@ -394,7 +408,7 @@ def _symbolic_numeric_context_for_literal(
     contexts: list[str] = []
     for match in _C_NUMERIC_TOKEN_RE.finditer(masked):
         start, end = match.span()
-        if source_code[start:end] != magnitude:
+        if not _c_numeric_token_matches_literal(source_code[start:end], literal_value):
             continue
         if sign:
             sign_index = start - 1
@@ -603,7 +617,7 @@ def _find_c_numeric_literals(
     for match in _C_NUMERIC_TOKEN_RE.finditer(masked):
         start, end = match.span()
         token = source_code[start:end]
-        if token != magnitude:
+        if not _c_numeric_token_matches_literal(token, literal_value):
             continue
         if sign:
             sign_index = start - 1
@@ -769,11 +783,18 @@ def _leading_comment_insert_position(source_code: str) -> int:
     return offset
 
 
-def _insert_define(source_code: str, constant_name: str, literal_value: Any) -> str:
+def _insert_define(
+    source_code: str,
+    constant_name: str,
+    literal_value: Any,
+    *,
+    source_literal: str = "",
+) -> str:
     if constant_name in _existing_define_names(source_code):
         return source_code
 
-    define_line = f"#define {constant_name} {_to_c_literal(literal_value)}\n"
+    macro_value = source_literal.strip() or _to_c_literal(literal_value)
+    define_line = f"#define {constant_name} {macro_value}\n"
 
     # In a guarded header, keep the constant inside the guard.  This avoids
     # leaking implementation macros into translation units that intentionally
@@ -876,6 +897,9 @@ def apply_introduce_constant(
     literal exists in the current source; otherwise it asks for review rather
     than changing the wrong token.
     """
+
+    # Resolve the exact numeric token, choose a legal macro insertion point,
+    # and return metadata explaining replacements or a safe review decision.
 
     planned_literal = literal_value
     literal_value = normalize_planned_numeric_literal(literal_value)
@@ -1071,10 +1095,26 @@ def apply_introduce_constant(
         _c_numeric_context(source_code, masked, start, end)
         for start, end in selected_spans
     ]
+    source_literals = {source_code[start:end] for start, end in selected_spans}
+    if len(source_literals) != 1:
+        metadata.update({
+            "status": "review_required",
+            "reason": "C_LITERAL_REPRESENTATION_AMBIGUOUS",
+            "final_status": "REVIEW_REQUIRED",
+            "final_decision": "REVIEW_REQUIRED",
+            "target_resolution": resolution,
+        })
+        return source_code, 0, metadata
+    source_literal = next(iter(source_literals))
     transformed, replacements = _replace_numeric_spans(
         source_code, selected_spans, preferred_name
     )
-    transformed = _insert_define(transformed, preferred_name, literal_value)
+    transformed = _insert_define(
+        transformed,
+        preferred_name,
+        literal_value,
+        source_literal=source_literal,
+    )
 
     # Ensure the plan's original source really referenced the same literal when
     # it is available.  This catches accidental handoff corruption while still
@@ -1089,6 +1129,7 @@ def apply_introduce_constant(
         "final_decision": "ACCEPT",
         "target_context": contexts[0] if len(set(contexts)) == 1 else "MIXED_SAFE_C_NUMERIC_CONTEXT",
         "target_contexts": contexts,
+        "source_literal": source_literal,
         "target_resolution": resolution,
         "eligible_occurrences_before": len(selected_spans),
         "eligible_occurrences_after": 0,

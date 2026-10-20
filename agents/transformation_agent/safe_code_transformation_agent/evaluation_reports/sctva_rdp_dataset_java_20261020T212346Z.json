@@ -1,0 +1,341 @@
+[
+  {
+    "case_id": "java_extract_java_class_1_r4549_positive",
+    "language": "java",
+    "file_name": "benchmark/java/extract-java-class_R4549.java",
+    "source_code": "class BaseR4549 {\n    protected int baseValue() { return 1; }\n}\n\nclass HelperR4549 {\n    int apply(int value) { return value * 2; }\n}\n\nclass ContactR4549 {\n    String getEmail() { return \"accountR4549@example.test\"; }\n}\n\nclass AccountR4549 extends BaseR4549 {\n    private int amount = 818;\n    private final HelperR4549 helper = new HelperR4549();\n    private final ContactR4549 contact = new ContactR4549();\n    private int metricA = 0;\n    private int metricB = 0;\n    private int metricC = 0;\n    private int metricD = 0;\n    private int metricE = 0;\n    private int metricF = 0;\n    private int metricG = 0;\n    private int metricH = 0;\n    private int metricI = 0;\n    private int metricJ = 0;\n    private int metricK = 0;\n    private int metricL = 0;\n\n    public int calculate(int input, int tax, int discount) {\n        int subtotal = input + tax;\n        int adjusted = subtotal - discount;\n        int total = adjusted + baseValue();\n        return total;\n    }\n\n    public int process(int value, int tax, int discount, int fee) {\n        return value + tax - discount + fee;\n    }\n\n    public int delegated(int value) { return helper.apply(value); }\n\n    public int delegatedTwice(int value) { return helper.apply(value) + helper.apply(value); }\n\n    public ContactR4549 getContact() { return contact; }\n\n    public int fee(String kind) {\n        if (\"premium\".equals(kind)) { return amount * 2; }\n        return amount;\n    }\n\n    private int unusedR4549() { return -1; }\n}\n\nclass AccountClientR4549 {\n    int emailLength(AccountR4549 account) {\n        return account.getContact().getEmail().length();\n    }\n}\n\nclass ChildR4549 extends BaseR4549 {\n    public int sharedR4549(int value) { return value + baseValue(); }\n}\n",
+    "action": {
+      "action_type": "extract_java_class",
+      "source_refactoring": "Extract Class",
+      "parameters": {
+        "source_file": "benchmark/java/extract-java-class_R4549.java",
+        "source_class": "AccountR4549",
+        "new_class_name": "AccountDetailsR4549",
+        "methods_to_extract": [
+          "delegated",
+          "delegatedTwice"
+        ]
+      }
+    },
+    "ground_truth": {
+      "model_should_accept": true,
+      "label": "positive"
+    },
+    "dataset_split": "positive",
+    "provenance": "rdp_catalog_seeded_synthetic"
+  },
+  {
+    "case_id": "java_extract_java_class_1_r4549_negative",
+    "language": "java",
+    "file_name": "benchmark/java/extract-java-class_R4549.java",
+    "source_code": "class BaseR4549 {\n    protected int baseValue() { return 1; }\n}\n\nclass HelperR4549 {\n    int apply(int value) { return value * 2; }\n}\n\nclass ContactR4549 {\n    String getEmail() { return \"accountR4549@example.test\"; }\n}\n\nclass AccountR4549 extends BaseR4549 {\n    private int amount = 818;\n    private final HelperR4549 helper = new HelperR4549();\n    private final ContactR4549 contact = new ContactR4549();\n    private int metricA = 0;\n    private int metricB = 0;\n    private int metricC = 0;\n    private int metricD = 0;\n    private int metricE = 0;\n    private int metricF = 0;\n    private int metricG = 0;\n    private int metricH = 0;\n    private int metricI = 0;\n    private int metricJ = 0;\n    private int metricK = 0;\n    private int metricL = 0;\n\n    public int calculate(int input, int tax, int discount) {\n        int subtotal = input + tax;\n        int adjusted = subtotal - discount;\n        int total = adjusted + baseValue();\n        return total;\n    }\n\n    public int process(int value, int tax, int discount, int fee) {\n        return value + tax - discount + fee;\n    }\n\n    public int delegated(int value) { return helper.apply(value); }\n\n    public int delegatedTwice(int value) { return helper.apply(value) + helper.apply(value); }\n\n    public ContactR4549 getContact() { return contact; }\n\n    public int fee(String kind) {\n        if (\"premium\".equals(kind)) { return amount * 2; }\n        return amount;\n    }\n\n    private int unusedR4549() { return -1; }\n}\n\nclass AccountClientR4549 {\n    int emailLength(AccountR4549 account) {\n        return account.getContact().getEmail().length();\n    }\n}\n\nclass ChildR4549 extends BaseR4549 {\n    public int sharedR4549(int value) { return value + baseValue(); }\n}\n",
+    "action": {
+      "action_type": "extract_java_class",
+      "source_refactoring": "Extract Class",
+      "parameters": {
+        "source_file": "benchmark/java/extract-java-class_R4549.java",
+        "source_class": "MissingR4549",
+        "new_class_name": "AccountDetailsR4549",
+        "methods_to_extract": [
+          "MissingR4549"
+        ]
+      }
+    },
+    "ground_truth": {
+      "model_should_accept": false,
+      "label": "negative"
+    },
+    "dataset_split": "negative",
+    "provenance": "rdp_catalog_seeded_synthetic"
+  },
+  {
+    "case_id": "java_extract_method_1_r4547_positive",
+    "language": "java",
+    "file_name": "benchmark/java/extract-method_R4547.java",
+    "source_code": "class BaseR4547 {\n    protected int baseValue() { return 1; }\n}\n\nclass HelperR4547 {\n    int apply(int value) { return value * 2; }\n}\n\nclass ContactR4547 {\n    String getEmail() { return \"accountR4547@example.test\"; }\n}\n\nclass AccountR4547 extends BaseR4547 {\n    private int amount = 221;\n    private final HelperR4547 helper = new HelperR4547();\n    private final ContactR4547 contact = new ContactR4547();\n    private int metricA = 0;\n    private int metricB = 0;\n    private int metricC = 0;\n    private int metricD = 0;\n    private int metricE = 0;\n    private int metricF = 0;\n    private int metricG = 0;\n    private int metricH = 0;\n    private int metricI = 0;\n    private int metricJ = 0;\n    private int metricK = 0;\n    private int metricL = 0;\n\n    public int calculate(int input, int tax, int discount) {\n        int subtotal = input + tax;\n        int adjusted = subtotal - discount;\n        int total = adjusted + baseValue();\n        return total;\n    }\n\n    public int process(int value, int tax, int discount, int fee) {\n        return value + tax - discount + fee;\n    }\n\n    public int delegated(int value) { return helper.apply(value); }\n\n    public int delegatedTwice(int value) { return helper.apply(value) + helper.apply(value); }\n\n    public ContactR4547 getContact() { return contact; }\n\n    public int fee(String kind) {\n        if (\"premium\".equals(kind)) { return amount * 2; }\n        return amount;\n    }\n\n    private int unusedR4547() { return -1; }\n}\n\nclass AccountClientR4547 {\n    int emailLength(AccountR4547 account) {\n        return account.getContact().getEmail().length();\n    }\n}\n\nclass ChildR4547 extends BaseR4547 {\n    public int sharedR4547(int value) { return value + baseValue(); }\n}\n",
+    "action": {
+      "action_type": "extract_method",
+      "source_refactoring": "Extract Method",
+      "parameters": {
+        "source_file": "benchmark/java/extract-method_R4547.java",
+        "source_method": "calculate",
+        "method": "calculate",
+        "source_class": "AccountR4547",
+        "start_line": 31,
+        "end_line": 34,
+        "new_method_name": "calculate_core_R4547"
+      }
+    },
+    "ground_truth": {
+      "model_should_accept": true,
+      "label": "positive"
+    },
+    "dataset_split": "positive",
+    "provenance": "rdp_catalog_seeded_synthetic"
+  },
+  {
+    "case_id": "java_extract_method_1_r4547_negative",
+    "language": "java",
+    "file_name": "benchmark/java/extract-method_R4547.java",
+    "source_code": "class BaseR4547 {\n    protected int baseValue() { return 1; }\n}\n\nclass HelperR4547 {\n    int apply(int value) { return value * 2; }\n}\n\nclass ContactR4547 {\n    String getEmail() { return \"accountR4547@example.test\"; }\n}\n\nclass AccountR4547 extends BaseR4547 {\n    private int amount = 221;\n    private final HelperR4547 helper = new HelperR4547();\n    private final ContactR4547 contact = new ContactR4547();\n    private int metricA = 0;\n    private int metricB = 0;\n    private int metricC = 0;\n    private int metricD = 0;\n    private int metricE = 0;\n    private int metricF = 0;\n    private int metricG = 0;\n    private int metricH = 0;\n    private int metricI = 0;\n    private int metricJ = 0;\n    private int metricK = 0;\n    private int metricL = 0;\n\n    public int calculate(int input, int tax, int discount) {\n        int subtotal = input + tax;\n        int adjusted = subtotal - discount;\n        int total = adjusted + baseValue();\n        return total;\n    }\n\n    public int process(int value, int tax, int discount, int fee) {\n        return value + tax - discount + fee;\n    }\n\n    public int delegated(int value) { return helper.apply(value); }\n\n    public int delegatedTwice(int value) { return helper.apply(value) + helper.apply(value); }\n\n    public ContactR4547 getContact() { return contact; }\n\n    public int fee(String kind) {\n        if (\"premium\".equals(kind)) { return amount * 2; }\n        return amount;\n    }\n\n    private int unusedR4547() { return -1; }\n}\n\nclass AccountClientR4547 {\n    int emailLength(AccountR4547 account) {\n        return account.getContact().getEmail().length();\n    }\n}\n\nclass ChildR4547 extends BaseR4547 {\n    public int sharedR4547(int value) { return value + baseValue(); }\n}\n",
+    "action": {
+      "action_type": "extract_method",
+      "source_refactoring": "Extract Method",
+      "parameters": {
+        "source_file": "benchmark/java/extract-method_R4547.java",
+        "source_method": "MissingR4547",
+        "method": "MissingR4547",
+        "source_class": "MissingR4547",
+        "start_line": 163,
+        "end_line": 164,
+        "new_method_name": "calculate_core_R4547"
+      }
+    },
+    "ground_truth": {
+      "model_should_accept": false,
+      "label": "negative"
+    },
+    "dataset_split": "negative",
+    "provenance": "rdp_catalog_seeded_synthetic"
+  },
+  {
+    "case_id": "java_hide_delegate_1_r2794_positive",
+    "language": "java",
+    "file_name": "benchmark/java/hide-delegate_R2794.java",
+    "source_code": "class BaseR2794 {\n    protected int baseValue() { return 1; }\n}\n\nclass HelperR2794 {\n    int apply(int value) { return value * 2; }\n}\n\nclass ContactR2794 {\n    String getEmail() { return \"accountR2794@example.test\"; }\n}\n\nclass AccountR2794 extends BaseR2794 {\n    private int amount = 671;\n    private final HelperR2794 helper = new HelperR2794();\n    private final ContactR2794 contact = new ContactR2794();\n    private int metricA = 0;\n    private int metricB = 0;\n    private int metricC = 0;\n    private int metricD = 0;\n    private int metricE = 0;\n    private int metricF = 0;\n    private int metricG = 0;\n    private int metricH = 0;\n    private int metricI = 0;\n    private int metricJ = 0;\n    private int metricK = 0;\n    private int metricL = 0;\n\n    public int calculate(int input, int tax, int discount) {\n        int subtotal = input + tax;\n        int adjusted = subtotal - discount;\n        int total = adjusted + baseValue();\n        return total;\n    }\n\n    public int process(int value, int tax, int discount, int fee) {\n        return value + tax - discount + fee;\n    }\n\n    public int delegated(int value) { return helper.apply(value); }\n\n    public int delegatedTwice(int value) { return helper.apply(value) + helper.apply(value); }\n\n    public ContactR2794 getContact() { return contact; }\n\n    public int fee(String kind) {\n        if (\"premium\".equals(kind)) { return amount * 2; }\n        return amount;\n    }\n\n    private int unusedR2794() { return -1; }\n}\n\nclass AccountClientR2794 {\n    int emailLength(AccountR2794 account) {\n        return account.getContact().getEmail().length();\n    }\n}\n\nclass ChildR2794 extends BaseR2794 {\n    public int sharedR2794(int value) { return value + baseValue(); }\n}\n",
+    "action": {
+      "action_type": "hide_delegate",
+      "source_refactoring": "Hide Delegate",
+      "parameters": {
+        "source_file": "benchmark/java/hide-delegate_R2794.java",
+        "source_class": "AccountR2794",
+        "delegate_member": "contact",
+        "delegated_member": "email",
+        "new_method_name": "getEmail"
+      }
+    },
+    "ground_truth": {
+      "model_should_accept": true,
+      "label": "positive"
+    },
+    "dataset_split": "positive",
+    "provenance": "rdp_catalog_seeded_synthetic"
+  },
+  {
+    "case_id": "java_hide_delegate_1_r2794_negative",
+    "language": "java",
+    "file_name": "benchmark/java/hide-delegate_R2794.java",
+    "source_code": "class BaseR2794 {\n    protected int baseValue() { return 1; }\n}\n\nclass HelperR2794 {\n    int apply(int value) { return value * 2; }\n}\n\nclass ContactR2794 {\n    String getEmail() { return \"accountR2794@example.test\"; }\n}\n\nclass AccountR2794 extends BaseR2794 {\n    private int amount = 671;\n    private final HelperR2794 helper = new HelperR2794();\n    private final ContactR2794 contact = new ContactR2794();\n    private int metricA = 0;\n    private int metricB = 0;\n    private int metricC = 0;\n    private int metricD = 0;\n    private int metricE = 0;\n    private int metricF = 0;\n    private int metricG = 0;\n    private int metricH = 0;\n    private int metricI = 0;\n    private int metricJ = 0;\n    private int metricK = 0;\n    private int metricL = 0;\n\n    public int calculate(int input, int tax, int discount) {\n        int subtotal = input + tax;\n        int adjusted = subtotal - discount;\n        int total = adjusted + baseValue();\n        return total;\n    }\n\n    public int process(int value, int tax, int discount, int fee) {\n        return value + tax - discount + fee;\n    }\n\n    public int delegated(int value) { return helper.apply(value); }\n\n    public int delegatedTwice(int value) { return helper.apply(value) + helper.apply(value); }\n\n    public ContactR2794 getContact() { return contact; }\n\n    public int fee(String kind) {\n        if (\"premium\".equals(kind)) { return amount * 2; }\n        return amount;\n    }\n\n    private int unusedR2794() { return -1; }\n}\n\nclass AccountClientR2794 {\n    int emailLength(AccountR2794 account) {\n        return account.getContact().getEmail().length();\n    }\n}\n\nclass ChildR2794 extends BaseR2794 {\n    public int sharedR2794(int value) { return value + baseValue(); }\n}\n",
+    "action": {
+      "action_type": "hide_delegate",
+      "source_refactoring": "Hide Delegate",
+      "parameters": {
+        "source_file": "benchmark/java/hide-delegate_R2794.java",
+        "source_class": "MissingR2794",
+        "delegate_member": "contact",
+        "delegated_member": "email",
+        "new_method_name": "getEmail"
+      }
+    },
+    "ground_truth": {
+      "model_should_accept": false,
+      "label": "negative"
+    },
+    "dataset_split": "negative",
+    "provenance": "rdp_catalog_seeded_synthetic"
+  },
+  {
+    "case_id": "java_introduce_constant_1_r9901_positive",
+    "language": "java",
+    "file_name": "benchmark/java/introduce-constant_R9901.java",
+    "source_code": "class BaseR9901 {\n    protected int baseValue() { return 1; }\n}\n\nclass HelperR9901 {\n    int apply(int value) { return value * 2; }\n}\n\nclass ContactR9901 {\n    String getEmail() { return \"accountR9901@example.test\"; }\n}\n\nclass AccountR9901 extends BaseR9901 {\n    private int amount = 560;\n    private final HelperR9901 helper = new HelperR9901();\n    private final ContactR9901 contact = new ContactR9901();\n    private int metricA = 0;\n    private int metricB = 0;\n    private int metricC = 0;\n    private int metricD = 0;\n    private int metricE = 0;\n    private int metricF = 0;\n    private int metricG = 0;\n    private int metricH = 0;\n    private int metricI = 0;\n    private int metricJ = 0;\n    private int metricK = 0;\n    private int metricL = 0;\n\n    public int calculate(int input, int tax, int discount) {\n        int subtotal = input + tax;\n        int adjusted = subtotal - discount;\n        int total = adjusted + baseValue();\n        return total;\n    }\n\n    public int process(int value, int tax, int discount, int fee) {\n        return value + tax - discount + fee;\n    }\n\n    public int delegated(int value) { return helper.apply(value); }\n\n    public int delegatedTwice(int value) { return helper.apply(value) + helper.apply(value); }\n\n    public ContactR9901 getContact() { return contact; }\n\n    public int fee(String kind) {\n        if (\"premium\".equals(kind)) { return amount * 2; }\n        return amount;\n    }\n\n    private int unusedR9901() { return -1; }\n}\n\nclass AccountClientR9901 {\n    int emailLength(AccountR9901 account) {\n        return account.getContact().getEmail().length();\n    }\n}\n\nclass ChildR9901 extends BaseR9901 {\n    public int sharedR9901(int value) { return value + baseValue(); }\n}\n",
+    "action": {
+      "action_type": "introduce_constant",
+      "source_refactoring": "Introduce Constant",
+      "parameters": {
+        "source_file": "benchmark/java/introduce-constant_R9901.java",
+        "literal_value": 560,
+        "constant_name": "DEFAULT_AMOUNT_R9901",
+        "source_line": 14,
+        "source_class": "AccountR9901",
+        "field_name": "amount",
+        "source_method": ""
+      }
+    },
+    "ground_truth": {
+      "model_should_accept": true,
+      "label": "positive"
+    },
+    "dataset_split": "positive",
+    "provenance": "rdp_catalog_seeded_synthetic"
+  },
+  {
+    "case_id": "java_introduce_constant_1_r9901_negative",
+    "language": "java",
+    "file_name": "benchmark/java/introduce-constant_R9901.java",
+    "source_code": "class BaseR9901 {\n    protected int baseValue() { return 1; }\n}\n\nclass HelperR9901 {\n    int apply(int value) { return value * 2; }\n}\n\nclass ContactR9901 {\n    String getEmail() { return \"accountR9901@example.test\"; }\n}\n\nclass AccountR9901 extends BaseR9901 {\n    private int amount = 560;\n    private final HelperR9901 helper = new HelperR9901();\n    private final ContactR9901 contact = new ContactR9901();\n    private int metricA = 0;\n    private int metricB = 0;\n    private int metricC = 0;\n    private int metricD = 0;\n    private int metricE = 0;\n    private int metricF = 0;\n    private int metricG = 0;\n    private int metricH = 0;\n    private int metricI = 0;\n    private int metricJ = 0;\n    private int metricK = 0;\n    private int metricL = 0;\n\n    public int calculate(int input, int tax, int discount) {\n        int subtotal = input + tax;\n        int adjusted = subtotal - discount;\n        int total = adjusted + baseValue();\n        return total;\n    }\n\n    public int process(int value, int tax, int discount, int fee) {\n        return value + tax - discount + fee;\n    }\n\n    public int delegated(int value) { return helper.apply(value); }\n\n    public int delegatedTwice(int value) { return helper.apply(value) + helper.apply(value); }\n\n    public ContactR9901 getContact() { return contact; }\n\n    public int fee(String kind) {\n        if (\"premium\".equals(kind)) { return amount * 2; }\n        return amount;\n    }\n\n    private int unusedR9901() { return -1; }\n}\n\nclass AccountClientR9901 {\n    int emailLength(AccountR9901 account) {\n        return account.getContact().getEmail().length();\n    }\n}\n\nclass ChildR9901 extends BaseR9901 {\n    public int sharedR9901(int value) { return value + baseValue(); }\n}\n",
+    "action": {
+      "action_type": "introduce_constant",
+      "source_refactoring": "Introduce Constant",
+      "parameters": {
+        "source_file": "benchmark/java/introduce-constant_R9901.java",
+        "literal_value": 900005,
+        "constant_name": "DEFAULT_AMOUNT_R9901",
+        "source_line": 163,
+        "source_class": "MissingR9901",
+        "field_name": "MissingR9901",
+        "source_method": ""
+      }
+    },
+    "ground_truth": {
+      "model_should_accept": false,
+      "label": "negative"
+    },
+    "dataset_split": "negative",
+    "provenance": "rdp_catalog_seeded_synthetic"
+  },
+  {
+    "case_id": "java_introduce_java_parameter_object_1_r9589_positive",
+    "language": "java",
+    "file_name": "benchmark/java/introduce-java-parameter-object_R9589.java",
+    "source_code": "class BaseR9589 {\n    protected int baseValue() { return 1; }\n}\n\nclass HelperR9589 {\n    int apply(int value) { return value * 2; }\n}\n\nclass ContactR9589 {\n    String getEmail() { return \"accountR9589@example.test\"; }\n}\n\nclass AccountR9589 extends BaseR9589 {\n    private int amount = 602;\n    private final HelperR9589 helper = new HelperR9589();\n    private final ContactR9589 contact = new ContactR9589();\n    private int metricA = 0;\n    private int metricB = 0;\n    private int metricC = 0;\n    private int metricD = 0;\n    private int metricE = 0;\n    private int metricF = 0;\n    private int metricG = 0;\n    private int metricH = 0;\n    private int metricI = 0;\n    private int metricJ = 0;\n    private int metricK = 0;\n    private int metricL = 0;\n\n    public int calculate(int input, int tax, int discount) {\n        int subtotal = input + tax;\n        int adjusted = subtotal - discount;\n        int total = adjusted + baseValue();\n        return total;\n    }\n\n    public int process(int value, int tax, int discount, int fee) {\n        return value + tax - discount + fee;\n    }\n\n    public int delegated(int value) { return helper.apply(value); }\n\n    public int delegatedTwice(int value) { return helper.apply(value) + helper.apply(value); }\n\n    public ContactR9589 getContact() { return contact; }\n\n    public int fee(String kind) {\n        if (\"premium\".equals(kind)) { return amount * 2; }\n        return amount;\n    }\n\n    private int unusedR9589() { return -1; }\n}\n\nclass AccountClientR9589 {\n    int emailLength(AccountR9589 account) {\n        return account.getContact().getEmail().length();\n    }\n}\n\nclass ChildR9589 extends BaseR9589 {\n    public int sharedR9589(int value) { return value + baseValue(); }\n}\n",
+    "action": {
+      "action_type": "introduce_java_parameter_object",
+      "source_refactoring": "Introduce Parameter Object",
+      "parameters": {
+        "source_file": "benchmark/java/introduce-java-parameter-object_R9589.java",
+        "source_class": "AccountR9589",
+        "source_method": "process",
+        "method": "process",
+        "parameter_object_name": "ProcessParamsR9589",
+        "parameter_name": "params"
+      }
+    },
+    "ground_truth": {
+      "model_should_accept": true,
+      "label": "positive"
+    },
+    "dataset_split": "positive",
+    "provenance": "rdp_catalog_seeded_synthetic"
+  },
+  {
+    "case_id": "java_introduce_java_parameter_object_1_r9589_negative",
+    "language": "java",
+    "file_name": "benchmark/java/introduce-java-parameter-object_R9589.java",
+    "source_code": "class BaseR9589 {\n    protected int baseValue() { return 1; }\n}\n\nclass HelperR9589 {\n    int apply(int value) { return value * 2; }\n}\n\nclass ContactR9589 {\n    String getEmail() { return \"accountR9589@example.test\"; }\n}\n\nclass AccountR9589 extends BaseR9589 {\n    private int amount = 602;\n    private final HelperR9589 helper = new HelperR9589();\n    private final ContactR9589 contact = new ContactR9589();\n    private int metricA = 0;\n    private int metricB = 0;\n    private int metricC = 0;\n    private int metricD = 0;\n    private int metricE = 0;\n    private int metricF = 0;\n    private int metricG = 0;\n    private int metricH = 0;\n    private int metricI = 0;\n    private int metricJ = 0;\n    private int metricK = 0;\n    private int metricL = 0;\n\n    public int calculate(int input, int tax, int discount) {\n        int subtotal = input + tax;\n        int adjusted = subtotal - discount;\n        int total = adjusted + baseValue();\n        return total;\n    }\n\n    public int process(int value, int tax, int discount, int fee) {\n        return value + tax - discount + fee;\n    }\n\n    public int delegated(int value) { return helper.apply(value); }\n\n    public int delegatedTwice(int value) { return helper.apply(value) + helper.apply(value); }\n\n    public ContactR9589 getContact() { return contact; }\n\n    public int fee(String kind) {\n        if (\"premium\".equals(kind)) { return amount * 2; }\n        return amount;\n    }\n\n    private int unusedR9589() { return -1; }\n}\n\nclass AccountClientR9589 {\n    int emailLength(AccountR9589 account) {\n        return account.getContact().getEmail().length();\n    }\n}\n\nclass ChildR9589 extends BaseR9589 {\n    public int sharedR9589(int value) { return value + baseValue(); }\n}\n",
+    "action": {
+      "action_type": "introduce_java_parameter_object",
+      "source_refactoring": "Introduce Parameter Object",
+      "parameters": {
+        "source_file": "benchmark/java/introduce-java-parameter-object_R9589.java",
+        "source_class": "MissingR9589",
+        "source_method": "MissingR9589",
+        "method": "MissingR9589",
+        "parameter_object_name": "ProcessParamsR9589",
+        "parameter_name": "params"
+      }
+    },
+    "ground_truth": {
+      "model_should_accept": false,
+      "label": "negative"
+    },
+    "dataset_split": "negative",
+    "provenance": "rdp_catalog_seeded_synthetic"
+  },
+  {
+    "case_id": "java_remove_dead_code_1_r2354_positive",
+    "language": "java",
+    "file_name": "benchmark/java/remove-dead-code_R2354.java",
+    "source_code": "class BaseR2354 {\n    protected int baseValue() { return 1; }\n}\n\nclass HelperR2354 {\n    int apply(int value) { return value * 2; }\n}\n\nclass ContactR2354 {\n    String getEmail() { return \"accountR2354@example.test\"; }\n}\n\nclass AccountR2354 extends BaseR2354 {\n    private int amount = 799;\n    private final HelperR2354 helper = new HelperR2354();\n    private final ContactR2354 contact = new ContactR2354();\n    private int metricA = 0;\n    private int metricB = 0;\n    private int metricC = 0;\n    private int metricD = 0;\n    private int metricE = 0;\n    private int metricF = 0;\n    private int metricG = 0;\n    private int metricH = 0;\n    private int metricI = 0;\n    private int metricJ = 0;\n    private int metricK = 0;\n    private int metricL = 0;\n\n    public int calculate(int input, int tax, int discount) {\n        int subtotal = input + tax;\n        int adjusted = subtotal - discount;\n        int total = adjusted + baseValue();\n        return total;\n    }\n\n    public int process(int value, int tax, int discount, int fee) {\n        return value + tax - discount + fee;\n    }\n\n    public int delegated(int value) { return helper.apply(value); }\n\n    public int delegatedTwice(int value) { return helper.apply(value) + helper.apply(value); }\n\n    public ContactR2354 getContact() { return contact; }\n\n    public int fee(String kind) {\n        if (\"premium\".equals(kind)) { return amount * 2; }\n        return amount;\n    }\n\n    private int unusedR2354() { return -1; }\n}\n\nclass AccountClientR2354 {\n    int emailLength(AccountR2354 account) {\n        return account.getContact().getEmail().length();\n    }\n}\n\nclass ChildR2354 extends BaseR2354 {\n    public int sharedR2354(int value) { return value + baseValue(); }\n}\n",
+    "action": {
+      "action_type": "remove_dead_code",
+      "source_refactoring": "Remove Dead Code",
+      "parameters": {
+        "source_file": "benchmark/java/remove-dead-code_R2354.java",
+        "source_class": "AccountR2354",
+        "source_method": "unusedR2354",
+        "method": "unusedR2354",
+        "target_name": "unusedR2354",
+        "target_kind": "method"
+      }
+    },
+    "ground_truth": {
+      "model_should_accept": true,
+      "label": "positive"
+    },
+    "dataset_split": "positive",
+    "provenance": "rdp_catalog_seeded_synthetic"
+  },
+  {
+    "case_id": "java_remove_dead_code_1_r2354_negative",
+    "language": "java",
+    "file_name": "benchmark/java/remove-dead-code_R2354.java",
+    "source_code": "class BaseR2354 {\n    protected int baseValue() { return 1; }\n}\n\nclass HelperR2354 {\n    int apply(int value) { return value * 2; }\n}\n\nclass ContactR2354 {\n    String getEmail() { return \"accountR2354@example.test\"; }\n}\n\nclass AccountR2354 extends BaseR2354 {\n    private int amount = 799;\n    private final HelperR2354 helper = new HelperR2354();\n    private final ContactR2354 contact = new ContactR2354();\n    private int metricA = 0;\n    private int metricB = 0;\n    private int metricC = 0;\n    private int metricD = 0;\n    private int metricE = 0;\n    private int metricF = 0;\n    private int metricG = 0;\n    private int metricH = 0;\n    private int metricI = 0;\n    private int metricJ = 0;\n    private int metricK = 0;\n    private int metricL = 0;\n\n    public int calculate(int input, int tax, int discount) {\n        int subtotal = input + tax;\n        int adjusted = subtotal - discount;\n        int total = adjusted + baseValue();\n        return total;\n    }\n\n    public int process(int value, int tax, int discount, int fee) {\n        return value + tax - discount + fee;\n    }\n\n    public int delegated(int value) { return helper.apply(value); }\n\n    public int delegatedTwice(int value) { return helper.apply(value) + helper.apply(value); }\n\n    public ContactR2354 getContact() { return contact; }\n\n    public int fee(String kind) {\n        if (\"premium\".equals(kind)) { return amount * 2; }\n        return amount;\n    }\n\n    private int unusedR2354() { return -1; }\n}\n\nclass AccountClientR2354 {\n    int emailLength(AccountR2354 account) {\n        return account.getContact().getEmail().length();\n    }\n}\n\nclass ChildR2354 extends BaseR2354 {\n    public int sharedR2354(int value) { return value + baseValue(); }\n}\n",
+    "action": {
+      "action_type": "remove_dead_code",
+      "source_refactoring": "Remove Dead Code",
+      "parameters": {
+        "source_file": "benchmark/java/remove-dead-code_R2354.java",
+        "source_class": "MissingR2354",
+        "source_method": "MissingR2354",
+        "method": "MissingR2354",
+        "target_name": "MissingR2354",
+        "target_kind": "method"
+      }
+    },
+    "ground_truth": {
+      "model_should_accept": false,
+      "label": "negative"
+    },
+    "dataset_split": "negative",
+    "provenance": "rdp_catalog_seeded_synthetic"
+  },
+  {
+    "case_id": "java_rename_method_1_r9469_positive",
+    "language": "java",
+    "file_name": "benchmark/java/rename-method_R9469.java",
+    "source_code": "class BaseR9469 {\n    protected int baseValue() { return 1; }\n}\n\nclass HelperR9469 {\n    int apply(int value) { return value * 2; }\n}\n\nclass ContactR9469 {\n    String getEmail() { return \"accountR9469@example.test\"; }\n}\n\nclass AccountR9469 extends BaseR9469 {\n    private int amount = 958;\n    private final HelperR9469 helper = new HelperR9469();\n    private final ContactR9469 contact = new ContactR9469();\n    private int metricA = 0;\n    private int metricB = 0;\n    private int metricC = 0;\n    private int metricD = 0;\n    private int metricE = 0;\n    private int metricF = 0;\n    private int metricG = 0;\n    private int metricH = 0;\n    private int metricI = 0;\n    private int metricJ = 0;\n    private int metricK = 0;\n    private int metricL = 0;\n\n    public int calculate(int input, int tax, int discount) {\n        int subtotal = input + tax;\n        int adjusted = subtotal - discount;\n        int total = adjusted + baseValue();\n        return total;\n    }\n\n    public int process(int value, int tax, int discount, int fee) {\n        return value + tax - discount + fee;\n    }\n\n    public int delegated(int value) { return helper.apply(value); }\n\n    public int delegatedTwice(int value) { return helper.apply(value) + helper.apply(value); }\n\n    public ContactR9469 getContact() { return contact; }\n\n    public int fee(String kind) {\n        if (\"premium\".equals(kind)) { return amount * 2; }\n        return amount;\n    }\n\n    private int unusedR9469() { return -1; }\n}\n\nclass AccountClientR9469 {\n    int emailLength(AccountR9469 account) {\n        return account.getContact().getEmail().length();\n    }\n}\n\nclass ChildR9469 extends BaseR9469 {\n    public int sharedR9469(int value) { return value + baseValue(); }\n}\n",
+    "action": {
+      "action_type": "rename_method",
+      "source_refactoring": "Rename Method",
+      "parameters": {
+        "source_file": "benchmark/java/rename-method_R9469.java",
+        "source_class": "AccountR9469",
+        "source_method": "calculate",
+        "method": "calculate",
+        "old_name": "calculate",
+        "new_name": "compute_r9469"
+      }
+    },
+    "ground_truth": {
+      "model_should_accept": true,
+      "label": "positive"
+    },
+    "dataset_split": "positive",
+    "provenance": "rdp_catalog_seeded_synthetic"
+  },
+  {
+    "case_id": "java_rename_method_1_r9469_negative",
+    "language": "java",
+    "file_name": "benchmark/java/rename-method_R9469.java",
+    "source_code": "class BaseR9469 {\n    protected int baseValue() { return 1; }\n}\n\nclass HelperR9469 {\n    int apply(int value) { return value * 2; }\n}\n\nclass ContactR9469 {\n    String getEmail() { return \"accountR9469@example.test\"; }\n}\n\nclass AccountR9469 extends BaseR9469 {\n    private int amount = 958;\n    private final HelperR9469 helper = new HelperR9469();\n    private final ContactR9469 contact = new ContactR9469();\n    private int metricA = 0;\n    private int metricB = 0;\n    private int metricC = 0;\n    private int metricD = 0;\n    private int metricE = 0;\n    private int metricF = 0;\n    private int metricG = 0;\n    private int metricH = 0;\n    private int metricI = 0;\n    private int metricJ = 0;\n    private int metricK = 0;\n    private int metricL = 0;\n\n    public int calculate(int input, int tax, int discount) {\n        int subtotal = input + tax;\n        int adjusted = subtotal - discount;\n        int total = adjusted + baseValue();\n        return total;\n    }\n\n    public int process(int value, int tax, int discount, int fee) {\n        return value + tax - discount + fee;\n    }\n\n    public int delegated(int value) { return helper.apply(value); }\n\n    public int delegatedTwice(int value) { return helper.apply(value) + helper.apply(value); }\n\n    public ContactR9469 getContact() { return contact; }\n\n    public int fee(String kind) {\n        if (\"premium\".equals(kind)) { return amount * 2; }\n        return amount;\n    }\n\n    private int unusedR9469() { return -1; }\n}\n\nclass AccountClientR9469 {\n    int emailLength(AccountR9469 account) {\n        return account.getContact().getEmail().length();\n    }\n}\n\nclass ChildR9469 extends BaseR9469 {\n    public int sharedR9469(int value) { return value + baseValue(); }\n}\n",
+    "action": {
+      "action_type": "rename_method",
+      "source_refactoring": "Rename Method",
+      "parameters": {
+        "source_file": "benchmark/java/rename-method_R9469.java",
+        "source_class": "MissingR9469",
+        "source_method": "MissingR9469",
+        "method": "MissingR9469",
+        "old_name": "MissingR9469",
+        "new_name": "compute_r9469"
+      }
+    },
+    "ground_truth": {
+      "model_should_accept": false,
+      "label": "negative"
+    },
+    "dataset_split": "negative",
+    "provenance": "rdp_catalog_seeded_synthetic"
+  }
+]

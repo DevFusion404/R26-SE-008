@@ -35,6 +35,8 @@ class InvariantMiner:
         actions: Sequence[RefactoringAction],
         strict_mode: bool,
     ) -> ValidationStepResult:
+        # Mine stable observations from behavioral fingerprints and report
+        # whether the transformed output preserves those observations.
         start_iso = utc_now_iso()
         started = time.perf_counter()
 

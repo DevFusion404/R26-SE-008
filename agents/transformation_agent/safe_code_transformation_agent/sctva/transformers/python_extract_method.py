@@ -65,6 +65,8 @@ def apply_extract_method(
     source_resolution_error: str = "",
     smell: str = "",
 ) -> tuple[str, int, dict[str, Any]]:
+    # Parse the module, resolve the target function, and use live-variable flow
+    # analysis to render a behavior-preserving helper extraction.
     metadata = _base_metadata(
         method_name=method_name,
         new_method_name=new_method_name,

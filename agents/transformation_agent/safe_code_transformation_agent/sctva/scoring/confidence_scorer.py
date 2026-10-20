@@ -25,6 +25,8 @@ class ConfidenceScorer:
         behavioral: ValidationStepResult,
         invariant: ValidationStepResult | None = None,
     ) -> Tuple[float, Dict[str, Any]]:
+        # Weight only applicable validation evidence and force failed stages to
+        # contribute zero confidence before returning score details.
         # A validator can retain a diagnostic similarity score while rejecting
         # an action-specific contract. Confidence follows the final pass/fail
         # decision, so a rejected stage cannot be credited as safe evidence.

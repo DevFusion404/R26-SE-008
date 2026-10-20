@@ -194,6 +194,8 @@ def normalize_sctva_request_payload(
     already-normalized SCTVA request, which makes the behavior consistent for
     callers that invoke the agent through a wrapper or test harness.
     """
+    # Normalize every accepted RDP envelope before the agent sees it and
+    # preserve integrity diagnostics for planner data that would be lost.
 
     if not isinstance(payload, dict):
         raise PlannerAdapterError("Request payload must be an object.")
@@ -265,6 +267,8 @@ class PlannerAdapter:
         correlation_id: Optional[str] = None,
         preserve_step_count: bool = True,
     ) -> Dict[str, Any]:
+        # Convert planner steps into canonical RefactoringAction dictionaries
+        # while retaining target, source, warning, and behavior-test metadata.
         if not isinstance(planner_output, dict):
             raise PlannerAdapterError("Planner output must be an object.")
 
@@ -402,6 +406,8 @@ class PlannerAdapter:
         execution_options: Optional[Dict[str, Any]] = None,
         correlation_id: Optional[str] = None,
     ) -> Dict[str, Any]:
+        # Assemble a complete SCTVA request with normalized actions and safe
+        # default execution options for callers using the RDP integration.
         normalized_plan = self.normalize_plan(
             planner_output,
             correlation_id=correlation_id,
@@ -422,6 +428,8 @@ class PlannerAdapter:
         }
 
     def _map_step(self, step: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        # Translate one planner step from display/refactoring vocabulary into
+        # a canonical action type and validated parameter structure.
         refactoring = str(
             step.get("refactoring")
             or step.get("action_type")

@@ -79,6 +79,8 @@ def apply_extract_method(
     current_file_name: str = "",
     source_resolution_error: str = "",
 ) -> tuple[str, int, dict[str, Any]]:
+    # Resolve exactly one C function and delegate selection/rewriting to the
+    # flow-aware extractor, returning review metadata when scope is ambiguous.
     metadata = _base_metadata(method_name, new_method_name, source_class, source_file or current_file_name)
     if source_resolution_error:
         return _review(source_code, source_resolution_error, metadata)

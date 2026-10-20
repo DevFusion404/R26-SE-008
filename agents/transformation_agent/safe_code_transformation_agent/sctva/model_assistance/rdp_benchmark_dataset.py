@@ -102,6 +102,48 @@ _SCENARIOS: tuple[_Scenario, ...] = (
 )
 
 
+# Deterministic transformations exposed by TransformationEngine today. This
+# excludes Java actions retained only as Qwen semantic actions, such as
+# Collapse Hierarchy and Introduce Facade, so they cannot become artificial
+# rule-based false negatives in a capability-scoped benchmark.
+RULE_IMPLEMENTED_ACTIONS_BY_LANGUAGE: dict[str, frozenset[str]] = {
+    "java": frozenset({
+        "extract_java_class",
+        "extract_method",
+        "hide_delegate",
+        "introduce_constant",
+        "introduce_java_parameter_object",
+        "remove_dead_code",
+        "rename_method",
+    }),
+    "python": frozenset({
+        "extract_python_class",
+        "extract_method",
+        "hide_delegate",
+        "inline_python_class",
+        "introduce_constant",
+        "introduce_python_parameter_object",
+        "move_python_method",
+        "narrow_exception_handler",
+        "remove_dead_code",
+        "rename_method",
+        "replace_conditional_with_polymorphism",
+    }),
+    "c": frozenset({
+        "encapsulate_c_variable",
+        "extract_c_component",
+        "extract_method",
+        "introduce_c_parameter_object",
+        "introduce_constant",
+        "remove_dead_code",
+        "replace_nested_conditional_with_guard_clauses",
+        "replace_parameter_with_method_call",
+        "replace_temp_with_query",
+        "replace_unsafe_function",
+    }),
+}
+
+
 def rdp_action_coverage() -> dict[str, tuple[str, ...]]:
     """Return the explicit language coverage for every RDP refactoring."""
 
@@ -109,6 +151,35 @@ def rdp_action_coverage() -> dict[str, tuple[str, ...]]:
         scenario.refactoring: tuple(sorted(scenario.action_by_language))
         for scenario in _SCENARIOS
     }
+
+
+def rule_implemented_action_coverage() -> dict[str, tuple[str, ...]]:
+    """Return RDP techniques backed by deterministic SCTVA transformations."""
+
+    coverage: dict[str, tuple[str, ...]] = {}
+    for scenario in _SCENARIOS:
+        languages = tuple(sorted(
+            language
+            for language, action_type in scenario.action_by_language.items()
+            if action_type in RULE_IMPLEMENTED_ACTIONS_BY_LANGUAGE.get(language, ())
+        ))
+        if languages:
+            coverage[scenario.refactoring] = languages
+    return coverage
+
+
+def cases_for_rule_implemented_actions(
+    cases: Iterable[ModelBenchmarkCase],
+) -> list[ModelBenchmarkCase]:
+    """Filter arbitrary benchmark cases to deterministic rule capabilities."""
+
+    return [
+        case
+        for case in cases
+        if case.action_type in RULE_IMPLEMENTED_ACTIONS_BY_LANGUAGE.get(
+            case.language, ()
+        )
+    ]
 
 
 def _line_of(source: str, text: str) -> int:
@@ -127,9 +198,26 @@ class Helper{token} {{
     int apply(int value) {{ return value * 2; }}
 }}
 
+class Contact{token} {{
+    String getEmail() {{ return "account{token}@example.test"; }}
+}}
+
 class Account{token} extends Base{token} {{
     private int amount = {literal};
     private final Helper{token} helper = new Helper{token}();
+    private final Contact{token} contact = new Contact{token}();
+    private int metricA = 0;
+    private int metricB = 0;
+    private int metricC = 0;
+    private int metricD = 0;
+    private int metricE = 0;
+    private int metricF = 0;
+    private int metricG = 0;
+    private int metricH = 0;
+    private int metricI = 0;
+    private int metricJ = 0;
+    private int metricK = 0;
+    private int metricL = 0;
 
     public int calculate(int input, int tax, int discount) {{
         int subtotal = input + tax;
@@ -144,12 +232,22 @@ class Account{token} extends Base{token} {{
 
     public int delegated(int value) {{ return helper.apply(value); }}
 
+    public int delegatedTwice(int value) {{ return helper.apply(value) + helper.apply(value); }}
+
+    public Contact{token} getContact() {{ return contact; }}
+
     public int fee(String kind) {{
         if ("premium".equals(kind)) {{ return amount * 2; }}
         return amount;
     }}
 
-    public int unused{token}() {{ return -1; }}
+    private int unused{token}() {{ return -1; }}
+}}
+
+class AccountClient{token} {{
+    int emailLength(Account{token} account) {{
+        return account.getContact().getEmail().length();
+    }}
 }}
 
 class Child{token} extends Base{token} {{
@@ -216,15 +314,22 @@ class Child{token}(Base{token}):
 def _c_source(token: str, literal: int) -> str:
     return f"""#include <string.h>
 
-int shared_{token} = 1;
+static int shared_{token} = 1;
 
 int helper_{token}(int value) {{
-    return value * 2;
+    return value * shared_{token};
+}}
+
+int boost_{token}(int value) {{
+    return value + shared_{token};
 }}
 
 int calculate_{token}(int value, int tax, int discount) {{
     int subtotal = value + tax;
-    int adjusted = subtotal - discount;
+    int handling = subtotal + 2;
+    int gross = handling * 2;
+    int reduced = gross - discount;
+    int adjusted = reduced / 2;
     if (adjusted > 0) {{
         if (adjusted < 100) {{
             return adjusted + {literal};
@@ -233,11 +338,12 @@ int calculate_{token}(int value, int tax, int discount) {{
     return 0;
 }}
 
-int process_{token}(int value, int tax, int discount, int fee) {{
+static int process_{token}(int value, int tax, int discount, int fee) {{
     return value + tax - discount + fee;
 }}
 
-void copy_{token}(char *destination, const char *source) {{
+void copy_{token}(const char *source) {{
+    char destination[64];
     strcpy(destination, source);
 }}
 
@@ -285,16 +391,19 @@ def _parameters(
     if action_type in {"extract_class", "extract_java_class", "extract_python_class"}:
         return {
             "source_class": account, "new_class_name": f"AccountDetails{token}",
-            "methods_to_extract": ["delegated"],
+            "methods_to_extract": ["delegated", "delegatedTwice"],
         }
     if action_type == "extract_c_component":
         return {
-            **common, "destination_file": f"calculation_{token}.c",
-            "functions_to_extract": [calculate],
+            "source_class": "",
+            "new_class_name": f"CalculationComponent{token}",
+            "target_file": "same_file",
+            "functions_to_extract": [f"helper_{token}", f"boost_{token}"],
+            "globals_to_extract": [f"shared_{token}"],
         }
     if action_type == "extract_method":
         start_marker = "int subtotal" if language != "python" else "subtotal ="
-        end_marker = f"return adjusted + {literal};" if language == "c" else "return total"
+        end_marker = "int adjusted = reduced / 2;" if language == "c" else "return total"
         return {
             **common,
             "start_line": _line_of(source, start_marker),
@@ -304,7 +413,12 @@ def _parameters(
     if action_type == "extract_subclass":
         return {"source_class": account, "new_subclass_name": f"PremiumAccount{token}"}
     if action_type == "hide_delegate":
-        return {"source_class": account, "method": "delegated", "source_method": "delegated"}
+        return {
+            "source_class": account,
+            "delegate_member": "contact",
+            "delegated_member": "email",
+            "new_method_name": "getEmail",
+        }
     if action_type in {"inline_class", "inline_java_class", "inline_python_class"}:
         return {"source_class": account, "class_to_inline": helper, "target_class": helper}
     if action_type == "introduce_constant":
@@ -329,10 +443,13 @@ def _parameters(
         "introduce_parameter_object", "introduce_java_parameter_object",
         "introduce_python_parameter_object", "introduce_c_parameter_object",
     }:
-        return {
+        parameters = {
             "source_class": account, "source_method": process, "method": process,
             "parameter_object_name": f"ProcessParams{token}", "parameter_name": "params",
         }
+        if language == "c":
+            parameters["source_class"] = ""
+        return parameters
     if action_type in {"move_java_method", "move_python_method"}:
         return {
             "source_class": account, "destination_class": helper,
@@ -432,8 +549,9 @@ def generate_rdp_benchmark_cases(
     samples_per_action: int = 1,
     include_negative: bool = True,
     languages: Iterable[str] | None = None,
+    implemented_rules_only: bool = False,
 ) -> list[ModelBenchmarkCase]:
-    """Generate balanced, reproducible source/action cases for all RDP techniques."""
+    """Generate balanced, reproducible RDP cases, optionally rule-scoped."""
 
     if samples_per_action < 1:
         raise ValueError("samples_per_action must be at least 1")
@@ -456,6 +574,12 @@ def generate_rdp_benchmark_cases(
                 literal = rng.randrange(120, 980)
                 source = _source(language, token, literal)
                 params = _parameters(language, action_type, source, token, literal)
+                if (
+                    implemented_rules_only
+                    and action_type
+                    not in RULE_IMPLEMENTED_ACTIONS_BY_LANGUAGE.get(language, ())
+                ):
+                    continue
                 action_slug = action_type.replace("_", "-")
                 base_id = f"{language}_{action_type}_{sample_index}_{token.lower()}"
                 file_name = f"benchmark/{language}/{action_slug}_{token}.{extensions[language]}"
