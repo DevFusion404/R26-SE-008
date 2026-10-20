@@ -20,7 +20,7 @@ from .behavior_fingerprint import (
     mine_value_invariants,
     stdout_invariants,
 )
-from .c_support import validate_c_behavior
+from .c_support import validate_c_behavior, validate_c_static_behavior
 
 from ..constants import KNOWN_UNSAFE_JAVA_ACTIONS, PARAMETER_OBJECT_ACTIONS
 from ..contracts import RefactoringAction
@@ -54,6 +54,86 @@ class BehavioralValidator:
     AUTO_PROBE_LIMIT = 10
     DEFAULT_PYTHON_TIMEOUT_SECONDS = 8
     DEFAULT_JAVA_TIMEOUT_SECONDS = 8
+
+    def validate_model_checkpoint(
+        self,
+        *,
+        language: str,
+        original_code: str,
+        transformed_code: str,
+        actions: Sequence[RefactoringAction],
+        enable_behavior_tests: bool,
+        structural_validation_passed: bool | None = None,
+    ) -> ValidationStepResult:
+        """Run deterministic static behavior checks before accepting model output.
+
+        Runtime probes remain part of final validation. Keeping them out of each
+        action checkpoint avoids recompiling or executing a project repeatedly.
+        """
+
+        start_iso = utc_now_iso()
+        started = time.perf_counter()
+        if not enable_behavior_tests:
+            return ValidationStepResult(
+                name="behavioral",
+                passed=True,
+                score=0.5,
+                message="Behavioral checkpoint skipped because it is disabled.",
+                details={
+                    "checks": ["disabled"],
+                    "failures": [],
+                    "warnings": ["Behavioral validation was disabled."],
+                    "fingerprint_status": "skipped",
+                    "fingerprint_summary": "Behavioral checkpoint disabled.",
+                    "validation_mode": "model_checkpoint_static",
+                },
+                started_at=start_iso,
+                finished_at=utc_now_iso(),
+                duration_ms=int((time.perf_counter() - started) * 1000),
+            )
+
+        normalized_language = str(language).lower().strip()
+        if normalized_language == "python":
+            passed, score, message, details = self._validate_python_static_fingerprints(
+                original_code=original_code,
+                transformed_code=transformed_code,
+                actions=actions,
+            )
+        elif normalized_language == "c":
+            result = validate_c_static_behavior(
+                original_code=original_code,
+                transformed_code=transformed_code,
+                actions=actions,
+            )
+            passed = bool(result["passed"])
+            score = float(result["score"])
+            message = str(result["message"])
+            details = dict(result["details"])
+        else:
+            return_similarity = normalized_count_similarity(
+                len(re.findall(r"\breturn\b", original_code)),
+                len(re.findall(r"\breturn\b", transformed_code)),
+            )
+            passed, score, message, details = self._validate_java_static_fingerprints(
+                original_code=original_code,
+                transformed_code=transformed_code,
+                actions=actions,
+                return_similarity=return_similarity,
+                structural_validation_passed=structural_validation_passed,
+            )
+
+        details = dict(details or {})
+        details["validation_mode"] = "model_checkpoint_static"
+        return ValidationStepResult(
+            name="behavioral",
+            passed=passed,
+            score=score,
+            message=message,
+            details=details,
+            started_at=start_iso,
+            finished_at=utc_now_iso(),
+            duration_ms=int((time.perf_counter() - started) * 1000),
+        )
 
     def validate(
         self,
@@ -677,6 +757,7 @@ class BehavioralValidator:
             "Used safe static behavioral fingerprints to avoid timeout from imports, file I/O, plotting, ML training, or external dataset loading.",
         ]
 
+        # AST convert - Compute static summaries of the original and transformed code
         original_summary = self._python_static_summary(original_code)
         transformed_summary = self._python_static_summary(transformed_code)
 
@@ -1639,6 +1720,13 @@ class BehavioralValidator:
             )
             static_details["runtime_failure_categories"] = runtime_categories
             static_details["fingerprint_status"] = "degraded_static_passed" if static_passed else "failed"
+            static_details["runtime_verification_status"] = "unavailable"
+            static_details["score_applicable"] = not static_passed
+            static_details["score_basis"] = (
+                "static_fallback"
+                if static_passed
+                else "static_fallback_failed"
+            )
             static_details["fingerprint_summary"] = (
                 "Java runtime probes could not execute because the compile/classpath environment "
                 "was unavailable; "
@@ -2044,10 +2132,33 @@ class BehavioralValidator:
 
         class_renames: Dict[str, str] = {}
         method_renames: Dict[str, str] = {}
+        method_owner_moves: Dict[tuple[str, str], str] = {}
+        collapsed_classes: Dict[str, str] = {}
         original_classes = set(original_summary.get("class_names", []))
 
         for action in actions:
             action_type = getattr(action, "action_type", "")
+            if action_type in {"move_java_method", "pull_up_method"}:
+                source_class = str(action.parameters.get("source_class") or "").strip()
+                method_name = str(
+                    action.parameters.get("source_method")
+                    or action.parameters.get("method")
+                    or ""
+                ).strip()
+                destination_class = str(
+                    action.parameters.get("destination_class")
+                    or action.parameters.get("target_class")
+                    or ""
+                ).strip()
+                if source_class and method_name and destination_class:
+                    method_owner_moves[(source_class, method_name)] = destination_class
+                continue
+            if action_type == "collapse_hierarchy":
+                source_class = str(action.parameters.get("source_class") or "").strip()
+                parent_class = str(action.parameters.get("parent_class") or "").strip()
+                if source_class and parent_class:
+                    collapsed_classes[source_class] = parent_class
+                continue
             if action_type not in {"rename_symbol", "rename_method"}:
                 continue
             old_name = str(action.parameters.get("old_name") or "").strip()
@@ -2079,7 +2190,15 @@ class BehavioralValidator:
         for method_key, original_method in original_methods.items():
             original_class = str(original_method.get("class_name") or "")
             original_method_name = str(original_method.get("method_name") or "")
-            expected_class = str(class_renames.get(original_class, original_class))
+            expected_class = str(
+                method_owner_moves.get(
+                    (original_class, original_method_name),
+                    collapsed_classes.get(
+                        original_class,
+                        class_renames.get(original_class, original_class),
+                    ),
+                )
+            )
             expected_method = str(
                 method_renames.get(original_method_name, original_method_name)
             )
@@ -2184,13 +2303,41 @@ class BehavioralValidator:
                     )
 
             if original_method.get("param_types") != transformed_method.get("param_types"):
-                migration = self._validate_java_parameter_object_migration(
-                    original_method=original_method,
-                    transformed_method=transformed_method,
-                    transformed_summary=transformed_summary,
-                    actions=actions,
-                    structural_validation_passed=structural_validation_passed,
+                replace_parameter_action = next(
+                    (
+                        action
+                        for action in actions
+                        if action.action_type == "replace_parameter_with_method_call"
+                        and str(
+                            action.parameters.get("source_method")
+                            or action.parameters.get("method")
+                            or ""
+                        ).strip()
+                        == original_method_name
+                        and str(action.parameters.get("source_class") or original_class).strip()
+                        == original_class
+                    ),
+                    None,
                 )
+                if (
+                    replace_parameter_action is not None
+                    and structural_validation_passed is True
+                    and len(transformed_method.get("param_types") or [])
+                    < len(original_method.get("param_types") or [])
+                ):
+                    migration = {
+                        "matched": True,
+                        "method": f"{original_class}.{original_method_name}",
+                        "proof": "replace_parameter_with_method_call_signature_reduction",
+                    }
+                else:
+                    migration = self._validate_java_parameter_object_migration(
+                        original_method=original_method,
+                        transformed_method=transformed_method,
+                        transformed_summary=transformed_summary,
+                        actions=actions,
+                        structural_validation_passed=structural_validation_passed,
+                    )
                 if migration.get("matched"):
                     expected_signature_migrations.append(migration)
                 else:

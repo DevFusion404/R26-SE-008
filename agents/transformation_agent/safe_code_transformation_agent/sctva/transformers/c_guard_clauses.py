@@ -3,10 +3,6 @@
 from __future__ import annotations
 
 import re
-import shutil
-import subprocess
-import tempfile
-from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from .c_extract_class import CFunction, _parse_c_module

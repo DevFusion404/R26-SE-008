@@ -12,34 +12,52 @@ SCTVA is a safety-first execution agent that consumes source code plus a structu
 - Confidence scoring: `sctva/scoring/confidence_scorer.py`
 - Reporting: `sctva/reporting/safety_reporter.py`
 - Integration: `sctva/integration/planner_adapter.py`, `sctva/integration/api.py`
-- Optional local code-model candidate layer: `sctva/model_assistance/codet5.py`
+- Optional local code-model candidate layer: `sctva/model_assistance/qwen.py`
 
 ## Optional Local Code-Model Candidate Layer
 
 SCTVA accepts the existing RDP JSON plan unchanged. The planner adapter first
 normalizes that plan and SCTVA resolves the target against the current source.
-In `primary` mode the configured local model proposes the first candidate; in
-`fallback` mode it
-is attempted only when the native transformer produces no change. Every model
-proposal is still subject to SCTVA's syntax, structural, behavioral, invariant,
-and rollback checks.
+In `primary` mode the configured local model proposes the first candidate. In
+the default `fallback` mode SCTVA first completes the deterministic rule-based
+transformation and runs the full syntax, structural, behavioral, invariant, and
+rollback checks. Qwen is attempted only when that complete rule-based output
+fails final validation, and it retries from the original source. Every model
+proposal remains subject to the same SCTVA checks.
 
-The default local profile uses `Qwen2.5-Coder-0.5B-Instruct`. Unlike a base
-CodeT5+ checkpoint, it is instruction-tuned to follow source-transformation
-requests. SCTVA retains compatibility with CodeT5+ checkpoints when an
-operator explicitly selects one. When a complete-file prompt exceeds the
-configured input limit, SCTVA resolves the current Python AST or Java/C symbol model and
+The local-model adapter uses only `Qwen/Qwen2.5-Coder-0.5B-Instruct`, an
+instruction-tuned checkpoint for source-transformation requests. When a
+complete-file prompt exceeds the configured input limit, SCTVA resolves the
+current Python AST or Java/C symbol model and
 sends only the exact target function, method, or class plus compact declaration
 context. Model output is merged back into that exact source span; unrelated
 source is never regenerated. Ambiguous targets and target spans that still do
 not fit are skipped safely so the rule-based transformer can run.
+
+For Java, the model-first adapter preserves every refactoring name in the
+comprehensive RDP vocabulary as an executable semantic action: Extract Method,
+Extract Class, Extract Subclass, Replace Conditional with Polymorphism,
+Introduce Facade, Replace Temp with Query, Introduce Parameter Object, Move
+Method, Pull Up Method, Replace Data Value with Object, Hide Delegate,
+Introduce Constant, Inline Class, Collapse Hierarchy, Remove Dead Code, Replace
+Parameter with Method Call, and Rename Method. These actions are not reported
+as rule support merely because the model can attempt them.
+
+The deterministic Java fallback currently implements Extract Method, Extract
+Class, Introduce Parameter Object, Introduce/Extract Constant, Remove Dead Code,
+Rename Method, and Hide Delegate when the plan supplies an unambiguous delegate
+field/member. The remaining Java actions are model-first and are accepted only
+after their action contract and all SCTVA validators pass. Cross-file class
+moves also require both participating declarations to be available to the
+resolved candidate span; otherwise SCTVA rejects the candidate instead of
+claiming a partial refactoring succeeded.
 
 The SCTVA web client enables the local model in `primary` mode by default. Bare library
 callers can still omit or disable it explicitly. For a local CPU run, install
 the model dependencies into the same Python environment that starts SCTVA:
 
 ```bash
-pip install -r requirements-codet5.txt
+pip install -r requirements-qwen.txt
 ```
 
 CUDA deployments can replace the default CPU-compatible PyTorch package with
@@ -50,70 +68,57 @@ Enable it per request; the RDP plan format is not changed:
 ```json
 {
   "execution_options": {
-    "enable_codet5": true,
-    "codet5_model_id": "Qwen/Qwen2.5-Coder-0.5B-Instruct",
-    "codet5_device": "cpu",
-    "codet5_backend": "auto",
-    "codet5_openvino_model_path": "",
-    "codet5_max_input_tokens": 512,
-    "codet5_max_new_tokens": 256,
-    "codet5_max_bundle_output_tokens": 192,
-    "codet5_cpu_threads": 6,
-    "codet5_max_actions_per_request": 100,
-    "codet5_max_actions_per_file": 100,
-    "codet5_enable_file_bundling": false,
-    "codet5_enable_generic_bundling": false,
-    "codet5_max_actions_per_bundle": 5,
-    "codet5_max_generic_actions_per_bundle": 2,
-    "codet5_generation_timeout_seconds": 30,
-    "codet5_max_generation_seconds_per_request": 0,
-    "codet5_runtime_cache": true,
-    "codet5_allow_unsupported_actions": false,
-    "codet5_mode": "primary"
+    "enable_qwen": true,
+    "qwen_model_id": "Qwen/Qwen2.5-Coder-0.5B-Instruct",
+    "qwen_device": "cpu",
+    "qwen_backend": "auto",
+    "qwen_openvino_model_path": "",
+    "qwen_max_input_tokens": 512,
+    "qwen_max_new_tokens": 256,
+    "qwen_cpu_threads": 6,
+    "qwen_max_actions_per_request": 100,
+    "qwen_max_actions_per_file": 100,
+    "qwen_generation_timeout_seconds": 30,
+    "qwen_max_generation_seconds_per_request": 0,
+    "qwen_runtime_cache": true,
+    "qwen_allow_unsupported_actions": false,
+    "max_parallel_files": 3,
+    "qwen_mode": "fallback"
   }
 }
 ```
 
-Set `codet5_allow_unsupported_actions` to `true` only for research experiments
+Set `qwen_allow_unsupported_actions` to `true` only for research experiments
 with RDP actions that currently normalize to `noop`. Such generic candidates
 receive generic safety validation, but do not claim a method-specific
 structural proof. The model never changes files directly and SCTVA rejects its
 candidate on any failed validation.
 
-`codet5_mode` defaults to `primary`: the configured model is attempted first and the
-existing rule-based transformer is used when the model cannot provide a
-syntax-safe candidate. Set it to `fallback` to preserve the earlier behavior
-where deterministic transformations are attempted first.
+`qwen_mode` defaults to `fallback`: the deterministic rule transformer is
+attempted first and the complete result is validated before Qwen is considered.
+Qwen is invoked only when the validated rule-based output must be rolled back.
+This avoids model inference for successful rule transformations while keeping
+the normal candidate validation gates for model fallbacks. Set it to `primary`
+only for explicit model-first experiments.
 
-In primary mode SCTVA resolves the current RDP file, symbol, and line metadata
-before inference. Independent Java Introduce or Extract Constant targets use
-one tensor-batched OpenVINO call (up to eight prompts per micro-batch), then
-each generated target replacement is validated separately. This is the
-default because it is both faster and more accurate on the local Qwen CPU
-profile than regenerating a long combined source span. Optional compatible
-consecutive Java/C actions can still be grouped into ordered, dependency-aware
-file bundles by enabling `codet5_enable_file_bundling`; those bundles contain
-at most `codet5_max_actions_per_bundle` actions.
-Every original RDP action index, type, order, and safe target
-parameter is retained in the bundle prompt. Generic bundles are limited to two
-actions while reversible constant bundles may contain five. Generic bundles
-are disabled by default because mixed prompts can reduce acceptance quality;
-set `codet5_enable_generic_bundling` to `true` only after benchmarking the
-target model and project. When enabled, their resolved owner scope must be
-identical. One model
-generation applies the whole bundle and one multi-action checkpoint verifies
-every action. A second candidate is generated only for bounded syntax or
-incomplete-intent feedback. Out-of-scope, unrelated, structural, behavioral,
-and invariant failures immediately use the deterministic rule transformer.
-Repository-wide operations, API-changing structural operations, unresolved
-targets, partially overlapping scopes, inferred read/write conflicts, and
-oversized bundles retain the established single-action model path.
+When Qwen is invoked, SCTVA resolves the current RDP file, symbol, and line metadata
+before inference. It generates one model candidate for one RDP action at a
+time, using that action's exact target span. This avoids mixing independent
+refactoring contracts into one prompt, which reduced local-model candidate
+acceptance. Legacy bundle options remain in the request format for backwards
+compatibility but are ignored by the SCTVA model-generation engine. A bounded
+second candidate is permitted only for validator-guided repair of the same
+single action. Syntax, structural, behavioral, and invariant failures
+immediately use the deterministic rule transformer.
 
 Every bundle still receives syntax and structural checks, and the complete
 file still has to pass SCTVA syntax, structural, behavioral, invariant, and
-compiler checks. Model generation remains serialized on CPU; target resolution
-and normal validation do not create competing model instances. Validators are
-never bypassed.
+compiler checks. On CPU, SCTVA runs one model inference at a time but uses up
+to three file workers: while Qwen generates one file, other workers may safely
+perform planning, candidate validation, and reporting for other files. This
+avoids competing model instances while reducing end-to-end project latency.
+Set `max_parallel_files` to `1`, `2`, or `3`; model-assisted CPU requests are
+capped at three workers. Validators are never bypassed.
 
 The model/tokenizer runtime is cached at process scope, so later SCTVA requests
 reuse the loaded checkpoint. For faster CPU inference without weight
@@ -125,48 +130,42 @@ python -m pip install -r requirements-openvino.txt
 optimum-cli export openvino --model Qwen/Qwen2.5-Coder-0.5B-Instruct --task text-generation-with-past --weight-format fp32 C:\models\qwen25-coder-05b-openvino
 ```
 
-Then configure `codet5_backend` as `openvino` and set
-`codet5_openvino_model_path` to that directory. With `auto`, SCTVA selects
+Then configure `qwen_backend` as `openvino` and set
+`qwen_openvino_model_path` to that directory. With `auto`, SCTVA selects
 OpenVINO only when the configured path exists and otherwise retains PyTorch.
-The exported FP32 weights remain unchanged. On OpenVINO CPU, SCTVA uses BF16
-activation execution, dynamic activation quantization, a U8 KV cache, and an
-eight-item generation micro-batch. These runtime settings reduce decoding time
-without changing the RDP action set or bypassing candidate validation.
+OpenVINO inference uses FP32 activation precision and a four-item CPU
+micro-batch. The earlier BF16 activation and U8 KV-cache throughput profile was
+removed because numerical output stability is more important than its modest
+speed improvement for source transformation. This does not change the RDP
+action set or bypass candidate validation.
 The web client uses a 30-second per-generation timeout and no request-level
 generation cutoff. Therefore a slow first file does not prevent later eligible
-RDP actions from reaching the model. To reduce CPU latency without dropping
-actions, `codet5_max_bundle_output_tokens` limits only multi-action bundle
-output. An oversized bundle is split before generation and its independent
-constant actions use the existing tensor-batched single-action path. Every
-candidate still passes the same validation gates. Set a positive
-`codet5_max_generation_seconds_per_request` only when an explicit whole-request
+RDP actions from reaching the model. SCTVA generates one narrowly scoped model
+candidate for each eligible RDP action, then applies the same validation gates
+to every candidate. Set a positive
+`qwen_max_generation_seconds_per_request` only when an explicit whole-request
 latency cutoff is more important than attempting every eligible action.
 
 For unchanged RDP payloads in a deployed environment, configure SCTVA instead
 of changing the RDP JSON:
 
 ```text
-SCTVA_ENABLE_CODET5=true
-SCTVA_CODET5_MODE=primary
-SCTVA_CODET5_DEVICE=cpu
-SCTVA_CODET5_BACKEND=auto
-SCTVA_CODET5_OPENVINO_MODEL_PATH=C:\models\qwen25-coder-05b-openvino
-SCTVA_CODET5_MODEL_ID=Qwen/Qwen2.5-Coder-0.5B-Instruct
-SCTVA_CODET5_CPU_THREADS=6
-SCTVA_CODET5_MAX_ACTIONS_PER_REQUEST=100
-SCTVA_CODET5_MAX_ACTIONS_PER_FILE=100
-SCTVA_CODET5_ENABLE_FILE_BUNDLING=false
-SCTVA_CODET5_ENABLE_GENERIC_BUNDLING=false
-SCTVA_CODET5_MAX_ACTIONS_PER_BUNDLE=5
-SCTVA_CODET5_MAX_GENERIC_ACTIONS_PER_BUNDLE=2
-SCTVA_CODET5_MAX_BUNDLE_OUTPUT_TOKENS=192
-SCTVA_CODET5_GENERATION_TIMEOUT_SECONDS=30
-SCTVA_CODET5_MAX_GENERATION_SECONDS_PER_REQUEST=0
-SCTVA_CODET5_RUNTIME_CACHE=true
+SCTVA_ENABLE_QWEN=true
+SCTVA_QWEN_MODE=fallback
+SCTVA_QWEN_DEVICE=cpu
+SCTVA_QWEN_BACKEND=auto
+SCTVA_QWEN_OPENVINO_MODEL_PATH=C:\models\qwen25-coder-05b-openvino
+SCTVA_QWEN_MODEL_ID=Qwen/Qwen2.5-Coder-0.5B-Instruct
+SCTVA_QWEN_CPU_THREADS=6
+SCTVA_QWEN_MAX_ACTIONS_PER_REQUEST=100
+SCTVA_QWEN_MAX_ACTIONS_PER_FILE=100
+SCTVA_QWEN_GENERATION_TIMEOUT_SECONDS=30
+SCTVA_QWEN_MAX_GENERATION_SECONDS_PER_REQUEST=0
+SCTVA_QWEN_RUNTIME_CACHE=true
 ```
 
-`SCTVA_CODET5_MAX_INPUT_TOKENS`, `SCTVA_CODET5_MAX_NEW_TOKENS`, and
-`SCTVA_CODET5_ALLOW_UNSUPPORTED_ACTIONS` are also available. Both action budgets
+`SCTVA_QWEN_MAX_INPUT_TOKENS`, `SCTVA_QWEN_MAX_NEW_TOKENS`, and
+`SCTVA_QWEN_ALLOW_UNSUPPORTED_ACTIONS` are also available. Both action budgets
 count generation attempts, including bounded repairs; one successful bundle
 therefore consumes one attempt even when it applies several planned actions.
 The request budget caps the complete run, while the per-file budget caps attempts for one source file.
@@ -177,7 +176,7 @@ Request-level
 
 The adapter uses local model files only by default, so a deployed service never
 waits on Hugging Face network access. Download the checkpoint during setup. Set
-`SCTVA_CODET5_ALLOW_DOWNLOAD=true` only when runtime downloads are explicitly
+`SCTVA_QWEN_ALLOW_DOWNLOAD=true` only when runtime downloads are explicitly
 acceptable.
 
 Hugging Face stores a local setup download in the user's cache (normally
@@ -311,6 +310,47 @@ curl -X POST http://localhost:8002/sctva/execute \
 pytest tests -q
 ```
 
+## Model Evaluation Benchmark
+
+Run Qwen against the included isolated Java, Python, and C RDP-style cases:
+
+```powershell
+python run_model_evaluation.py
+```
+
+The command writes JSON and panel-ready Markdown reports to `evaluation_reports`.
+The report separates language metrics and counts only model output retained after
+final SCTVA validation. Rule-based fallback is reported but never credited as a
+model success. For a quick smoke benchmark, run one case per language:
+
+```powershell
+python run_model_evaluation.py --limit-per-language 1
+```
+
+Run the balanced RDP-aligned benchmark covering every refactoring technique in
+the RDP knowledge base across its supported Java, Python, and C combinations:
+
+```powershell
+python run_model_evaluation.py --suite rdp-full --samples-per-action 1
+```
+
+This generates reproducible positive and invalid-target negative cases using
+seed `26008`, writes separate datasets for Java, Python, and C, and reports
+model-only TP/FP/TN/FN, Accuracy, Precision, Recall, Specificity, and F1. A
+prediction counts as positive only when Qwen output survives final SCTVA
+validation. Rule-based fallback is never credited to the model.
+
+Generate and inspect the datasets without loading Qwen:
+
+```powershell
+python run_model_evaluation.py --suite rdp-full --dataset-only --seed 26008
+```
+
+The RDP 120k CSV is recorded as metadata-distribution evidence. Because that
+CSV contains no source code and no C rows, executable source fixtures are
+seeded synthetic cases based on the RDP knowledge catalog and SCTVA contracts.
+Do not present these scores as an external real-world benchmark.
+
 ## Example Payloads
 
 - Planner adapter input: `test_data/planner_payloads.json`
@@ -320,7 +360,9 @@ pytest tests -q
 
 - Java behavioral validation uses conservative mock checks unless external test harness is integrated.
 - Java compile checks depend on local `javac` availability.
-- Adapter maps unsupported RDP refactorings to `noop` actions to keep execution auditable and non-destructive.
+- Refactorings outside the recognized language vocabularies are mapped to
+  auditable `noop` actions; recognized Java model actions retain their semantic
+  action type even when no deterministic fallback exists.
 
 ## Next Upgrades
 

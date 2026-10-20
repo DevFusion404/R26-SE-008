@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, current_app, jsonify, request
 
 from ..constants import SUPPORTED_ACTIONS
 from ..agent import ContractValidationError, SafeCodeTransformationValidationAgent
@@ -87,6 +87,19 @@ def _remove_legacy_result_artifacts() -> None:
         results_dir.rmdir()
     except OSError:
         pass
+
+
+def _execution_error_response(exc: Exception) -> tuple[Any, int]:
+    """Log the server traceback while returning a traceable safe error."""
+
+    request_id = _new_request_id()
+    current_app.logger.exception("SCTVA execution failed; request_id=%s", request_id)
+    return jsonify(
+        {
+            "error": f"Internal execution error (request id: {request_id}): {exc}",
+            "request_id": request_id,
+        }
+    ), 500
 
 
 def _safe_relative_source_path(value: Any) -> str:
@@ -440,7 +453,7 @@ def create_sctva_blueprint() -> Blueprint:
         except ContractValidationError as exc:
             return jsonify({"error": str(exc)}), 400
         except Exception as exc:
-            return jsonify({"error": f"Internal execution error: {exc}"}), 500
+            return _execution_error_response(exc)
 
     @bp.route("/sctva/execute_from_rdp", methods=["POST", "OPTIONS"])
     def sctva_execute_from_rdp() -> Any:
@@ -475,6 +488,6 @@ def create_sctva_blueprint() -> Blueprint:
         except ContractValidationError as exc:
             return jsonify({"error": str(exc)}), 400
         except Exception as exc:
-            return jsonify({"error": f"Internal execution error: {exc}"}), 500
+            return _execution_error_response(exc)
 
     return bp

@@ -1806,9 +1806,6 @@ class StructuralValidator:
         helper_counts = Counter(
             item["normalized_fingerprint"] for item in helper_records
         )
-        caller_counts = Counter(
-            item["normalized_fingerprint"] for item in caller_records
-        )
 
         helper_contains_selected = bool(selected_counts) and all(
             helper_counts[fingerprint] >= count

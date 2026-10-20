@@ -11,7 +11,6 @@ from typing import Any, Dict, List, Sequence
 from ..contracts import RefactoringAction
 from ..models import ValidationStepResult
 from ..utils.io_helpers import utc_now_iso
-from .c_support import summarize_c_source
 
 
 class InvariantMiner:

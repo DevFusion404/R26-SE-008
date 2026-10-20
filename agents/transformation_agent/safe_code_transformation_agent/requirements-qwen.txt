@@ -1,4 +1,4 @@
-# CodeT5+ candidate-generation support for SCTVA.
+# Qwen2.5-Coder candidate-generation support for SCTVA.
 # This default works on CPU hosts. CUDA deployments may replace it with the
 # matching PyTorch wheel from https://pytorch.org/get-started/locally/.
 torch>=2.4,<3

@@ -14,7 +14,7 @@ import keyword
 import re
 import tokenize
 from dataclasses import dataclass, field
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Sequence
 
 import libcst as cst
 

@@ -599,27 +599,22 @@ class ExecutionOptions:
     max_parallel_files: int = 0
     # Optional model-assisted candidate generation. Disabled by default so an
     # existing deployment never downloads or loads a model unexpectedly.
-    enable_codet5: bool = False
-    codet5_model_id: str = "Qwen/Qwen2.5-Coder-0.5B-Instruct"
-    codet5_device: str = "auto"
-    codet5_backend: str = "auto"
-    codet5_openvino_model_path: str = ""
-    codet5_max_new_tokens: int = 256
-    codet5_max_bundle_output_tokens: int = 192
-    codet5_max_input_tokens: int = 512
-    codet5_cpu_threads: int = 4
-    codet5_max_actions_per_request: int = 100
-    codet5_max_actions_per_file: int = 100
-    codet5_enable_file_bundling: bool = False
-    codet5_enable_generic_bundling: bool = False
-    codet5_max_actions_per_bundle: int = 5
-    codet5_max_generic_actions_per_bundle: int = 2
-    codet5_generation_timeout_seconds: int = 30
-    codet5_max_generation_seconds_per_request: int = 0
-    codet5_runtime_cache: bool = True
-    codet5_allow_unsupported_actions: bool = False
-    codet5_mode: str = "primary"
-    codet5_allow_download: bool = False
+    enable_qwen: bool = False
+    qwen_model_id: str = "Qwen/Qwen2.5-Coder-0.5B-Instruct"
+    qwen_device: str = "auto"
+    qwen_backend: str = "auto"
+    qwen_openvino_model_path: str = ""
+    qwen_max_new_tokens: int = 256
+    qwen_max_input_tokens: int = 512
+    qwen_cpu_threads: int = 6
+    qwen_max_actions_per_request: int = 100
+    qwen_max_actions_per_file: int = 100
+    qwen_generation_timeout_seconds: int = 30
+    qwen_max_generation_seconds_per_request: int = 0
+    qwen_runtime_cache: bool = True
+    qwen_allow_unsupported_actions: bool = False
+    qwen_mode: str = "fallback"
+    qwen_allow_download: bool = False
 
     @classmethod
     def from_dict(cls, data: Optional[Dict[str, Any]]) -> "ExecutionOptions":
@@ -643,28 +638,32 @@ class ExecutionOptions:
                 "Field 'execution_options.max_parallel_files' must be a non-negative integer."
             )
 
-        codet5_model_id = str(
-            data.get("codet5_model_id")
-            or os.getenv("SCTVA_CODET5_MODEL_ID")
+        qwen_model_id = str(
+            data.get("qwen_model_id")
+            or os.getenv("SCTVA_QWEN_MODEL_ID")
             or "Qwen/Qwen2.5-Coder-0.5B-Instruct"
         ).strip()
+        if qwen_model_id != "Qwen/Qwen2.5-Coder-0.5B-Instruct":
+            raise ContractValidationError(
+                "SCTVA supports only Qwen/Qwen2.5-Coder-0.5B-Instruct."
+            )
         try:
-            codet5_max_new_tokens = int(
-                data.get("codet5_max_new_tokens")
-                or os.getenv("SCTVA_CODET5_MAX_NEW_TOKENS")
+            qwen_max_new_tokens = int(
+                data.get("qwen_max_new_tokens")
+                or os.getenv("SCTVA_QWEN_MAX_NEW_TOKENS")
                 or 256
             )
-            codet5_max_input_tokens = int(
-                data.get("codet5_max_input_tokens")
-                or os.getenv("SCTVA_CODET5_MAX_INPUT_TOKENS")
+            qwen_max_input_tokens = int(
+                data.get("qwen_max_input_tokens")
+                or os.getenv("SCTVA_QWEN_MAX_INPUT_TOKENS")
                 or 512
             )
         except (TypeError, ValueError) as exc:
             raise ContractValidationError(
-                "CodeT5 token limits must be positive integers."
+                "Qwen token limits must be positive integers."
             ) from exc
-        if codet5_max_new_tokens <= 0 or codet5_max_input_tokens <= 0:
-            raise ContractValidationError("CodeT5 token limits must be positive integers.")
+        if qwen_max_new_tokens <= 0 or qwen_max_input_tokens <= 0:
+            raise ContractValidationError("Qwen token limits must be positive integers.")
 
         def _integer_option(name: str, environment_name: str, default: int) -> int:
             raw_value = data[name] if name in data else os.getenv(environment_name, default)
@@ -675,113 +674,86 @@ class ExecutionOptions:
                     f"Field 'execution_options.{name}' must be an integer."
                 ) from exc
 
-        codet5_cpu_threads = _integer_option(
-            "codet5_cpu_threads", "SCTVA_CODET5_CPU_THREADS", 4
+        qwen_cpu_threads = _integer_option(
+            "qwen_cpu_threads", "SCTVA_QWEN_CPU_THREADS", 6
         )
-        codet5_max_bundle_output_tokens = _integer_option(
-            "codet5_max_bundle_output_tokens",
-            "SCTVA_CODET5_MAX_BUNDLE_OUTPUT_TOKENS",
-            192,
-        )
-        codet5_max_actions_per_request = _integer_option(
-            "codet5_max_actions_per_request",
-            "SCTVA_CODET5_MAX_ACTIONS_PER_REQUEST",
+        qwen_max_actions_per_request = _integer_option(
+            "qwen_max_actions_per_request",
+            "SCTVA_QWEN_MAX_ACTIONS_PER_REQUEST",
             100,
         )
-        codet5_max_actions_per_file = _integer_option(
-            "codet5_max_actions_per_file",
-            "SCTVA_CODET5_MAX_ACTIONS_PER_FILE",
+        qwen_max_actions_per_file = _integer_option(
+            "qwen_max_actions_per_file",
+            "SCTVA_QWEN_MAX_ACTIONS_PER_FILE",
             100,
         )
-        codet5_max_actions_per_bundle = _integer_option(
-            "codet5_max_actions_per_bundle",
-            "SCTVA_CODET5_MAX_ACTIONS_PER_BUNDLE",
-            5,
-        )
-        codet5_max_generic_actions_per_bundle = _integer_option(
-            "codet5_max_generic_actions_per_bundle",
-            "SCTVA_CODET5_MAX_GENERIC_ACTIONS_PER_BUNDLE",
-            2,
-        )
-        codet5_generation_timeout_seconds = _integer_option(
-            "codet5_generation_timeout_seconds",
-            "SCTVA_CODET5_GENERATION_TIMEOUT_SECONDS",
+        qwen_generation_timeout_seconds = _integer_option(
+            "qwen_generation_timeout_seconds",
+            "SCTVA_QWEN_GENERATION_TIMEOUT_SECONDS",
             30,
         )
-        codet5_max_generation_seconds_per_request = _integer_option(
-            "codet5_max_generation_seconds_per_request",
-            "SCTVA_CODET5_MAX_GENERATION_SECONDS_PER_REQUEST",
+        qwen_max_generation_seconds_per_request = _integer_option(
+            "qwen_max_generation_seconds_per_request",
+            "SCTVA_QWEN_MAX_GENERATION_SECONDS_PER_REQUEST",
             0,
         )
-        if codet5_cpu_threads <= 0:
+        if qwen_cpu_threads <= 0:
             raise ContractValidationError(
-                "Field 'execution_options.codet5_cpu_threads' must be positive."
+                "Field 'execution_options.qwen_cpu_threads' must be positive."
             )
-        if codet5_max_bundle_output_tokens < 64:
+        if qwen_max_actions_per_request < 0:
             raise ContractValidationError(
-                "Field 'execution_options.codet5_max_bundle_output_tokens' must be at least 64."
+                "Field 'execution_options.qwen_max_actions_per_request' must be non-negative."
             )
-        if codet5_max_actions_per_request < 0:
+        if qwen_max_actions_per_file <= 0:
             raise ContractValidationError(
-                "Field 'execution_options.codet5_max_actions_per_request' must be non-negative."
+                "Field 'execution_options.qwen_max_actions_per_file' must be positive."
             )
-        if codet5_max_actions_per_file <= 0:
+        if qwen_generation_timeout_seconds <= 0:
             raise ContractValidationError(
-                "Field 'execution_options.codet5_max_actions_per_file' must be positive."
+                "Field 'execution_options.qwen_generation_timeout_seconds' must be positive."
             )
-        if codet5_max_actions_per_bundle < 2:
+        if qwen_max_generation_seconds_per_request < 0:
             raise ContractValidationError(
-                "Field 'execution_options.codet5_max_actions_per_bundle' must be at least 2."
-            )
-        if codet5_max_generic_actions_per_bundle < 2:
-            raise ContractValidationError(
-                "Field 'execution_options.codet5_max_generic_actions_per_bundle' must be at least 2."
-            )
-        if codet5_generation_timeout_seconds <= 0:
-            raise ContractValidationError(
-                "Field 'execution_options.codet5_generation_timeout_seconds' must be positive."
-            )
-        if codet5_max_generation_seconds_per_request < 0:
-            raise ContractValidationError(
-                "Field 'execution_options.codet5_max_generation_seconds_per_request' cannot be negative."
+                "Field 'execution_options.qwen_max_generation_seconds_per_request' cannot be negative."
             )
 
-        codet5_device = str(
-            data.get("codet5_device")
-            or os.getenv("SCTVA_CODET5_DEVICE")
+        qwen_device = str(
+            data.get("qwen_device")
+            or os.getenv("SCTVA_QWEN_DEVICE")
             or "auto"
         ).strip().lower()
-        if codet5_device not in {"auto", "cpu", "cuda"}:
+        if qwen_device not in {"auto", "cpu", "cuda"}:
             raise ContractValidationError(
-                "Field 'execution_options.codet5_device' must be auto, cpu, or cuda."
+                "Field 'execution_options.qwen_device' must be auto, cpu, or cuda."
             )
-        codet5_backend = str(
-            data.get("codet5_backend")
-            or os.getenv("SCTVA_CODET5_BACKEND")
+        qwen_backend = str(
+            data.get("qwen_backend")
+            or os.getenv("SCTVA_QWEN_BACKEND")
             or "auto"
         ).strip().lower()
-        if codet5_backend not in {"auto", "pytorch", "openvino"}:
+        if qwen_backend not in {"auto", "pytorch", "openvino"}:
             raise ContractValidationError(
-                "Field 'execution_options.codet5_backend' must be auto, pytorch, or openvino."
+                "Field 'execution_options.qwen_backend' must be auto, pytorch, or openvino."
             )
-        codet5_openvino_model_path = str(
-            data.get("codet5_openvino_model_path")
-            or os.getenv("SCTVA_CODET5_OPENVINO_MODEL_PATH")
+        qwen_openvino_model_path = str(
+            data.get("qwen_openvino_model_path")
+            or os.getenv("SCTVA_QWEN_OPENVINO_MODEL_PATH")
             or ""
         ).strip()
-        codet5_mode = str(
-            data.get("codet5_mode")
-            or os.getenv("SCTVA_CODET5_MODE")
-            or "primary"
+        qwen_mode = str(
+            data.get("qwen_mode")
+            or os.getenv("SCTVA_QWEN_MODE")
+            or "fallback"
         ).strip().lower()
-        if codet5_mode not in {"primary", "fallback"}:
+        if qwen_mode not in {"primary", "fallback"}:
             raise ContractValidationError(
-                "Field 'execution_options.codet5_mode' must be primary or fallback."
+                "Field 'execution_options.qwen_mode' must be primary or fallback."
             )
-        enable_codet5 = (
-            bool(data["enable_codet5"])
-            if "enable_codet5" in data
-            else _environment_bool("SCTVA_ENABLE_CODET5")
+        enable_qwen = (
+            bool(data["enable_qwen"])
+            if "enable_qwen" in data
+            else _environment_bool("SCTVA_ENABLE_QWEN")
         )
         return cls(
             strict_mode=bool(data.get("strict_mode", True)),
@@ -791,50 +763,35 @@ class ExecutionOptions:
             rollback_on_behavior_failure=bool(data.get("rollback_on_behavior_failure", True)),
             enable_sctva_auto_refactoring=bool(data.get("enable_sctva_auto_refactoring", True)),
             max_parallel_files=max_parallel_files,
-            enable_codet5=enable_codet5,
-            codet5_model_id=codet5_model_id,
-            codet5_device=codet5_device,
-            codet5_backend=codet5_backend,
-            codet5_openvino_model_path=codet5_openvino_model_path,
-            codet5_max_new_tokens=codet5_max_new_tokens,
-            codet5_max_bundle_output_tokens=codet5_max_bundle_output_tokens,
-            codet5_max_input_tokens=codet5_max_input_tokens,
-            codet5_cpu_threads=codet5_cpu_threads,
-            codet5_max_actions_per_request=codet5_max_actions_per_request,
-            codet5_max_actions_per_file=codet5_max_actions_per_file,
-            codet5_enable_file_bundling=(
-                bool(data["codet5_enable_file_bundling"])
-                if "codet5_enable_file_bundling" in data
-                else _environment_bool("SCTVA_CODET5_ENABLE_FILE_BUNDLING", False)
+            enable_qwen=enable_qwen,
+            qwen_model_id=qwen_model_id,
+            qwen_device=qwen_device,
+            qwen_backend=qwen_backend,
+            qwen_openvino_model_path=qwen_openvino_model_path,
+            qwen_max_new_tokens=qwen_max_new_tokens,
+            qwen_max_input_tokens=qwen_max_input_tokens,
+            qwen_cpu_threads=qwen_cpu_threads,
+            qwen_max_actions_per_request=qwen_max_actions_per_request,
+            qwen_max_actions_per_file=qwen_max_actions_per_file,
+            qwen_generation_timeout_seconds=qwen_generation_timeout_seconds,
+            qwen_max_generation_seconds_per_request=(
+                qwen_max_generation_seconds_per_request
             ),
-            codet5_enable_generic_bundling=(
-                bool(data["codet5_enable_generic_bundling"])
-                if "codet5_enable_generic_bundling" in data
-                else _environment_bool("SCTVA_CODET5_ENABLE_GENERIC_BUNDLING", False)
+            qwen_runtime_cache=(
+                bool(data["qwen_runtime_cache"])
+                if "qwen_runtime_cache" in data
+                else _environment_bool("SCTVA_QWEN_RUNTIME_CACHE", True)
             ),
-            codet5_max_actions_per_bundle=codet5_max_actions_per_bundle,
-            codet5_max_generic_actions_per_bundle=(
-                codet5_max_generic_actions_per_bundle
+            qwen_allow_unsupported_actions=(
+                bool(data["qwen_allow_unsupported_actions"])
+                if "qwen_allow_unsupported_actions" in data
+                else _environment_bool("SCTVA_QWEN_ALLOW_UNSUPPORTED_ACTIONS")
             ),
-            codet5_generation_timeout_seconds=codet5_generation_timeout_seconds,
-            codet5_max_generation_seconds_per_request=(
-                codet5_max_generation_seconds_per_request
-            ),
-            codet5_runtime_cache=(
-                bool(data["codet5_runtime_cache"])
-                if "codet5_runtime_cache" in data
-                else _environment_bool("SCTVA_CODET5_RUNTIME_CACHE", True)
-            ),
-            codet5_allow_unsupported_actions=(
-                bool(data["codet5_allow_unsupported_actions"])
-                if "codet5_allow_unsupported_actions" in data
-                else _environment_bool("SCTVA_CODET5_ALLOW_UNSUPPORTED_ACTIONS")
-            ),
-            codet5_mode=codet5_mode,
-            codet5_allow_download=(
-                bool(data["codet5_allow_download"])
-                if "codet5_allow_download" in data
-                else _environment_bool("SCTVA_CODET5_ALLOW_DOWNLOAD")
+            qwen_mode=qwen_mode,
+            qwen_allow_download=(
+                bool(data["qwen_allow_download"])
+                if "qwen_allow_download" in data
+                else _environment_bool("SCTVA_QWEN_ALLOW_DOWNLOAD")
             ),
         )
 
@@ -847,27 +804,22 @@ class ExecutionOptions:
             "rollback_on_behavior_failure": self.rollback_on_behavior_failure,
             "enable_sctva_auto_refactoring": self.enable_sctva_auto_refactoring,
             "max_parallel_files": self.max_parallel_files,
-            "enable_codet5": self.enable_codet5,
-            "codet5_model_id": self.codet5_model_id,
-            "codet5_device": self.codet5_device,
-            "codet5_backend": self.codet5_backend,
-            "codet5_openvino_model_path": self.codet5_openvino_model_path,
-            "codet5_max_new_tokens": self.codet5_max_new_tokens,
-            "codet5_max_bundle_output_tokens": self.codet5_max_bundle_output_tokens,
-            "codet5_max_input_tokens": self.codet5_max_input_tokens,
-            "codet5_cpu_threads": self.codet5_cpu_threads,
-            "codet5_max_actions_per_request": self.codet5_max_actions_per_request,
-            "codet5_max_actions_per_file": self.codet5_max_actions_per_file,
-            "codet5_enable_file_bundling": self.codet5_enable_file_bundling,
-            "codet5_enable_generic_bundling": self.codet5_enable_generic_bundling,
-            "codet5_max_actions_per_bundle": self.codet5_max_actions_per_bundle,
-            "codet5_max_generic_actions_per_bundle": self.codet5_max_generic_actions_per_bundle,
-            "codet5_generation_timeout_seconds": self.codet5_generation_timeout_seconds,
-            "codet5_max_generation_seconds_per_request": self.codet5_max_generation_seconds_per_request,
-            "codet5_runtime_cache": self.codet5_runtime_cache,
-            "codet5_allow_unsupported_actions": self.codet5_allow_unsupported_actions,
-            "codet5_mode": self.codet5_mode,
-            "codet5_allow_download": self.codet5_allow_download,
+            "enable_qwen": self.enable_qwen,
+            "qwen_model_id": self.qwen_model_id,
+            "qwen_device": self.qwen_device,
+            "qwen_backend": self.qwen_backend,
+            "qwen_openvino_model_path": self.qwen_openvino_model_path,
+            "qwen_max_new_tokens": self.qwen_max_new_tokens,
+            "qwen_max_input_tokens": self.qwen_max_input_tokens,
+            "qwen_cpu_threads": self.qwen_cpu_threads,
+            "qwen_max_actions_per_request": self.qwen_max_actions_per_request,
+            "qwen_max_actions_per_file": self.qwen_max_actions_per_file,
+            "qwen_generation_timeout_seconds": self.qwen_generation_timeout_seconds,
+            "qwen_max_generation_seconds_per_request": self.qwen_max_generation_seconds_per_request,
+            "qwen_runtime_cache": self.qwen_runtime_cache,
+            "qwen_allow_unsupported_actions": self.qwen_allow_unsupported_actions,
+            "qwen_mode": self.qwen_mode,
+            "qwen_allow_download": self.qwen_allow_download,
         }
 
 
