@@ -42,7 +42,7 @@ import { describeRefactoring } from "../utils/refactoringDescriptions";
 
 export default function PlanStepNavigator({
   groupMode, decisionCounts, sections, decisions, activeId, onActivate,
-  recommendedIds, visibleIds, onBulk, expanded, onToggleExpanded, onExpandAll, onCollapseAll,
+  recommendedIds, onSelectRecommended, visibleIds, onBulk, expanded, onToggleExpanded, onExpandAll, onCollapseAll,
   totalSteps, onClearDecisions,
 }) {
   const pending = decisionCounts.pending;
@@ -73,10 +73,12 @@ export default function PlanStepNavigator({
       <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
         <button
           type="button"
-          onClick={() => onBulk(recommendedIds, APPROVE)}
+          onClick={() => (onSelectRecommended ? onSelectRecommended() : onBulk(recommendedIds, APPROVE))}
           disabled={!recommendedIds.length}
           className="dw-focus"
-          title="Tick (approve) every step DIWO categorised as Recommended"
+          title={onSelectRecommended
+            ? `Approve the ${recommendedIds.length} step(s) DIWO recommends and reject every other step`
+            : "Tick (approve) every step DIWO categorised as Recommended"}
           style={solidButton(recommendedIds.length > 0, FILLED.recommend)}
         >
           Select recommended ({recommendedIds.length})

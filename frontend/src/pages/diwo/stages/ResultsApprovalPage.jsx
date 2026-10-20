@@ -1118,7 +1118,7 @@ export default function ResultsApprovalPage({
 
             {/* Larger than the shared 11px default: this is the final code the
                 developer reads before committing it. */}
-            <CodeSurface maxHeight={560} style={{ fontSize: 13.5, lineHeight: 1.65 }}>
+            <CodeSurface maxHeight={560} style={{ fontSize: 13.5, lineHeight: 1.65 }} changeMap={view === "diff"}>
               {view === "diff" ? (
                 <DiffBlock rows={activeFile?.diff_rows} />
               ) : (

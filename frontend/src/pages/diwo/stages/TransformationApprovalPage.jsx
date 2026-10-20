@@ -923,7 +923,7 @@ export default function TransformationApprovalPage({
 
           {/* Larger than the shared 11px default: the developer reads every
               changed line here before accepting it. */}
-          <CodeSurface maxHeight={560} style={{ fontSize: 13.5, lineHeight: 1.65 }}>
+          <CodeSurface maxHeight={560} style={{ fontSize: 13.5, lineHeight: 1.65 }} changeMap={view === "diff"}>
             {view === "diff" ? (
               <DiffBlock
                 rows={activeFile?.diff_rows}
