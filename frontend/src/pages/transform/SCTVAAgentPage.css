@@ -902,6 +902,13 @@
   line-height: 1.4;
 }
 
+.sctva-model-metric > .sctva-model-rule-based {
+  margin-top: 10px;
+  color: #86efac;
+  font-size: 11px;
+  font-weight: 700;
+}
+
 .sctva-model-details {
   display: grid;
   gap: 5px;
@@ -1297,16 +1304,37 @@
 }
 
 [data-theme="light"] .sctva-check-item.pass .sctva-check-icon {
-  background: #dcfce7;
-  color: #15803d;
+  background: #bbf7d0;
+  color: #166534;
 }
 
 [data-theme="light"] .sctva-check-item.fail .sctva-check-icon {
+  background: #fee2e2;
   color: #b91c1c;
 }
 
 [data-theme="light"] .sctva-check-item.warn .sctva-check-icon {
+  background: #fef3c7;
   color: #a16207;
+}
+
+[data-theme="light"] .sctva-check-item.pass {
+  background: #f0fdf4;
+  border-color: #86efac;
+}
+
+[data-theme="light"] .sctva-check-item.warn {
+  background: #fffbeb;
+  border-color: #fbbf24;
+}
+
+[data-theme="light"] .sctva-check-item.fail {
+  background: #fef2f2;
+  border-color: #fca5a5;
+}
+
+[data-theme="light"] .sctva-inline-meta {
+  color: #166534;
 }
 
 [data-theme="light"] .sctva-confidence-ring {

@@ -278,7 +278,11 @@ function modelMetricsFromResult(result) {
   }).filter(Boolean);
   const budgetSummary = [...new Set(budgetSummaryParts)].join('; ');
   const candidates = Array.isArray(result?.model_candidates)
-    ? result.model_candidates.filter(item => typeof item?.candidate_code === 'string' && item.candidate_code)
+    ? result.model_candidates.filter(item => (
+      String(item?.status || '').toUpperCase() === 'ACCEPTED'
+      && typeof item?.candidate_code === 'string'
+      && item.candidate_code
+    ))
     : [];
   const fallbackSummary = Array.isArray(result?.model_fallback_details?.failed_validation_summary)
     ? result.model_fallback_details.failed_validation_summary
@@ -1380,13 +1384,19 @@ function ValidationChecklist({ validation }) {
           }
         }
 
-        const message = label === 'Behavioral Preservation'
+        let message = label === 'Behavioral Preservation'
           ? (details.fingerprint_summary || item.message || '')
           : label === 'Invariant Mining'
             ? (details.summary || details.reason || item.message || '')
             : (item.message || '');
+        if (label === 'Structural Equivalence') {
+          message = String(message).replace(
+            /\s+with score\s+\d+(?:\.\d+)?\s*>=\s*\d+(?:\.\d+)?\.?\s*$/i,
+            ''
+          );
+        }
         const resultText = degradedStaticPass
-          ? 'Behavioral checks passed.'
+          ? 'Score: 1.00 · Behavioral checks passed.'
           : `Score: ${typeof item.score === 'number' ? item.score.toFixed(2) : '--'} · ${message}`;
 
         return (
@@ -2701,7 +2711,11 @@ export default function SCTVAAgentPage() {
   const activeSourceName = activeSource ? activeSource.name : '';
   const activeSourceCode = activeSource ? activeSource.code : '';
   const activeModelCandidates = Array.isArray(activeFileResult?.model_candidates)
-    ? activeFileResult.model_candidates.filter(item => typeof item?.candidate_code === 'string' && item.candidate_code)
+    ? activeFileResult.model_candidates.filter(item => (
+      String(item?.status || '').toUpperCase() === 'ACCEPTED'
+      && typeof item?.candidate_code === 'string'
+      && item.candidate_code
+    ))
     : [];
   const selectedCandidateIndex = codeView.startsWith('candidate:')
     ? Number(codeView.slice('candidate:'.length))
@@ -3920,54 +3934,11 @@ export default function SCTVAAgentPage() {
             >
               <span style={{ width: `${modelMetrics.accuracy}%` }} />
             </div>
-            <strong className="sctva-model-status">{modelMetrics.status}</strong>
-            <p>
-              {modelMetrics.used && modelMetrics.retained
-                ? 'Local code-model output was retained after SCTVA validation.'
-                : modelMetrics.used
-                  ? 'The local code model produced the candidate, but final validation rolled the output back.'
-                : modelMetrics.status === 'MODEL ACTION BUDGET EXHAUSTED'
-                  ? 'Generation was skipped because the configured model action budget was reached.'
-                : modelMetrics.ruleFallbackUsed
-                  ? 'The model could not provide an accepted candidate, so SCTVA restarted from the original source and used the validated rule-based result.'
-                : modelMetrics.attempted
-                  ? 'The local code model was attempted, but its output was rejected and rule-based output was used.'
-                  : modelMetrics.status === 'MODEL SKIPPED SAFETY PRECONDITION'
-                    ? 'Model inference was skipped because SCTVA proved this planned target unsafe or ambiguous before generation.'
-                  : modelMetrics.enabled
-                    ? 'The local code model was enabled, but no eligible model action was executed for this file.'
-                    : 'The local code model was disabled for this request.'}
-            </p>
-            {modelMetrics.reasons.length > 0 && (
-              <p className="sctva-model-reason">
-                {`Reason: ${modelMetrics.reasons.join(', ').replaceAll('_', ' ')}`}
-              </p>
-            )}
-            {modelMetrics.validationFailures.length > 0 && (
-              <p className="sctva-model-reason">
-                {`Rejected by: ${modelMetrics.validationFailures.join(' | ')}`}
-              </p>
-            )}
-            <dl className="sctva-model-details">
-              <div><dt>Engine</dt><dd>{modelMetrics.engine}</dd></div>
-              {modelMetrics.modelProvider && (
-                <div><dt>Configured model</dt><dd>{modelMetrics.modelProvider}</dd></div>
-              )}
-              <div><dt>Strategy</dt><dd>{modelMetrics.strategy}</dd></div>
-              <div><dt>Accepted output</dt><dd>{modelMetrics.acceptedOutput}</dd></div>
-              <div><dt>Model attempts</dt><dd>{modelMetrics.attemptCount}</dd></div>
-              <div><dt>Candidates generated</dt><dd>{modelMetrics.candidates.length}</dd></div>
-              <div><dt>Accepted model actions</dt><dd>{modelMetrics.actionCount}</dd></div>
-              <div><dt>Backend</dt><dd>{modelMetrics.backend}</dd></div>
-              <div><dt>Device</dt><dd>{modelMetrics.device}</dd></div>
-              <div><dt>Runtime cache</dt><dd>{modelMetrics.runtimeCacheHit ? 'HIT' : 'MISS'}</dd></div>
-              <div><dt>Model load</dt><dd>{modelMetrics.modelLoadSeconds.toFixed(2)}s</dd></div>
-              <div><dt>Model generation</dt><dd>{modelMetrics.modelGenerationSeconds.toFixed(2)}s</dd></div>
-              {modelMetrics.budgetSummary && (
-                <div><dt>Budget used</dt><dd>{modelMetrics.budgetSummary}</dd></div>
-              )}
-              <div><dt>Context</dt><dd>{modelMetrics.context}</dd></div>
-            </dl>
+            {!modelMetrics.used
+              && activeFileResult?.transformation_applied === true
+              && modelMetrics.acceptedOutput === 'RULE BASED' ? (
+                <p className="sctva-model-rule-based">Code Transformed by Rule-based</p>
+              ) : null}
           </div>
 
           <div className="sctva-mini-metrics">

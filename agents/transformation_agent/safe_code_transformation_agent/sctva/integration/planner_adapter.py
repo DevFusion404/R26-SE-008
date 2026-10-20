@@ -853,9 +853,9 @@ class PlannerAdapter:
                     or target.get("target_file")
                     or ""
                 ).strip()
-                if not method or not source_file or not destination_file:
+                if not method or not source_file:
                     raise PlannerAdapterError(
-                        "C Move Method is normalized to Move Function and requires method, source_file, and destination_file"
+                        "C Move Method is normalized to Move Function and requires method and source_file"
                     )
                 action = {
                     "action_type": ACTION_MOVE_C_FUNCTION,
@@ -863,7 +863,20 @@ class PlannerAdapter:
                         "function_name": str(method),
                         "source_file": source_file,
                         "destination_file": destination_file,
+                        # RDP sometimes describes C modules as classes and omits
+                        # the concrete destination file.  Preserve that intent so
+                        # the project resolver can match LoggerModule to a real
+                        # translation unit instead of silently dropping the step.
+                        "destination_module": str(destination_class),
+                        "destination_parameter": str(
+                            params.get("destination_parameter") or ""
+                        ),
                         "header_file": str(params.get("header_file") or ""),
+                        "source_line": source_line,
+                        "start_line": target_lines[0] if target_lines else source_line,
+                        "end_line": target_lines[-1] if target_lines else source_line,
+                        "target_lines": target_lines,
+                        "requires_project_transaction": True,
                     },
                 }
             elif normalized_source_file.endswith(".java"):
@@ -1164,12 +1177,13 @@ class PlannerAdapter:
             )
 
         elif ref_key == "replace parameter with method call":
-            action = self._java_model_action(
+            action = self._semantic_model_action(
                 action_type=ACTION_REPLACE_PARAMETER_WITH_METHOD_CALL,
                 step=step,
                 params=params,
                 target=target,
                 required=("method",),
+                supported_extensions=(".java", ".c", ".h"),
             )
 
         elif ref_key in {
@@ -1212,6 +1226,22 @@ class PlannerAdapter:
             )
             hint = params.get("hint") or target.get("hint")
 
+            # C RDP reports frequently put a single literal in the human hint
+            # rather than in ``literal_value``.  Recover only an unambiguous
+            # numeric token here; the C transformer still checks the actual
+            # source location before editing it.
+            source_file = self._source_file_from_step(step, params=params, target=target)
+            if (
+                literal_value is None
+                and not literal_values
+                and source_file.replace("\\", "/").lower().endswith((".c", ".h"))
+                and isinstance(hint, str)
+            ):
+                numeric_tokens = re.findall(r"(?<![A-Za-z0-9_])-?\d+(?:\.\d+)?(?![A-Za-z0-9_])", hint)
+                if len(numeric_tokens) == 1:
+                    token = numeric_tokens[0]
+                    literal_value = float(token) if "." in token else int(token)
+
             if literal_value is None and not literal_values and not hint:
                 raise PlannerAdapterError(
                     "introduce constant mapping requires literal_value, literal_values, or hint"
@@ -1228,9 +1258,7 @@ class PlannerAdapter:
                         or "EXTRACTED_CONSTANT"
                     ),
                     "hint": hint,
-                    "source_file": self._source_file_from_step(
-                        step, params=params, target=target
-                    ),
+                    "source_file": source_file,
                     "source_line": self._source_line_from_step(
                         step, params=params, target=target
                     ),
@@ -1523,12 +1551,13 @@ class PlannerAdapter:
             }
 
         elif ref_key == "replace temp with query":
-            action = self._java_model_action(
+            action = self._semantic_model_action(
                 action_type=ACTION_REPLACE_TEMP_WITH_QUERY,
                 step=step,
                 params=params,
                 target=target,
                 required=("method",),
+                supported_extensions=(".java", ".c", ".h"),
             )
 
         elif ref_key == "replace literal":
@@ -1700,6 +1729,81 @@ class PlannerAdapter:
             raise PlannerAdapterError(
                 f"{step.get('refactoring') or action_type} requires "
                 + ", ".join(missing)
+            )
+        return {"action_type": action_type, "parameters": semantic}
+
+    def _semantic_model_action(
+        self,
+        *,
+        action_type: str,
+        step: Dict[str, Any],
+        params: Dict[str, Any],
+        target: Dict[str, Any],
+        required: tuple[str, ...] = (),
+        supported_extensions: tuple[str, ...] = (".java",),
+    ) -> Dict[str, Any]:
+        """Keep a bounded semantic action for Java or C model-first handling.
+
+        The RDP report may omit the exact local variable or query expression.
+        Those details are intentionally left for source-aware model/rule target
+        recovery, rather than converting a valid plan step into ``noop``.
+        """
+        source_file = self._source_file_from_step(step, params=params, target=target)
+        normalized_file = source_file.replace("\\", "/").lower()
+        if source_file and not normalized_file.endswith(supported_extensions):
+            languages = ", ".join(supported_extensions)
+            raise PlannerAdapterError(
+                f"{step.get('refactoring') or action_type} requires source ending in {languages}"
+            )
+        source_class = str(
+            params.get("source_class")
+            or params.get("class_name")
+            or target.get("class")
+            or ""
+        ).strip()
+        method = str(
+            params.get("source_method")
+            or params.get("method")
+            or params.get("method_name")
+            or params.get("function")
+            or params.get("function_name")
+            or target.get("method")
+            or target.get("function")
+            or ""
+        ).strip()
+        start_line, end_line = self._source_range_from_step(
+            step, params=params, target=target
+        )
+        semantic = {
+            "source_file": source_file,
+            "source_class": source_class,
+            "method": method,
+            "source_method": method,
+            "source_line": self._source_line_from_step(
+                step, params=params, target=target
+            ),
+            "start_line": start_line,
+            "end_line": end_line,
+            "target_lines": list(target.get("lines") or params.get("source_lines") or []),
+            "smell": step.get("smell") or step.get("smell_type") or "",
+            "semantic_recovery_required": True,
+        }
+        for key in (
+            "parameter_name",
+            "query_method_name",
+            "replacement_method",
+            "query_expression",
+            "query_parameters",
+            "temp_name",
+            "temporary_name",
+        ):
+            value = params.get(key) or target.get(key)
+            if value not in (None, ""):
+                semantic[key] = value
+        missing = [key for key in required if not str(semantic.get(key) or "").strip()]
+        if missing:
+            raise PlannerAdapterError(
+                f"{step.get('refactoring') or action_type} requires " + ", ".join(missing)
             )
         return {"action_type": action_type, "parameters": semantic}
 

@@ -1,7 +1,6 @@
 import API_CONFIG, { buildApiUrl } from '../config/api.config';
 
 const DEFAULT_OPTIONS = {
-  qwen_runtime_profile: 'openvino-fp32-accuracy-v3',
   strict_mode: true,
   enable_behavior_tests: true,
   timeout_seconds: 10,
@@ -18,26 +17,14 @@ const DEFAULT_OPTIONS = {
   qwen_model_id: 'Qwen/Qwen2.5-Coder-0.5B-Instruct',
   qwen_max_input_tokens: 512,
   qwen_max_new_tokens: 256,
-  // Keep multi-action generations compact. Oversized bundles return to the
-  // existing tensor-batched single-action path without dropping any action.
-  qwen_max_bundle_output_tokens: 192,
   qwen_cpu_threads: 6,
   // Attempts include initial generations and bounded repairs. Keep the file
   // ceiling aligned with the request ceiling so a complete RDP plan can run.
   qwen_max_actions_per_request: 100,
   qwen_max_actions_per_file: 100,
-  // SCTVA uses one model candidate per RDP action. Grouped prompts and
-  // tensor batches are disabled because they reduced candidate acceptance.
-  qwen_enable_file_bundling: false,
-  // Retained for legacy request compatibility; the backend keeps grouped
-  // generation disabled even if an old browser session changes this value.
-  qwen_enable_generic_bundling: false,
-  qwen_max_actions_per_bundle: 5,
-  qwen_max_generic_actions_per_bundle: 2,
   qwen_generation_timeout_seconds: 30,
   // Zero means every eligible RDP action may reach the model. Per-attempt
-  // limits and compact bundle outputs still prevent a single generation from
-  // growing without bound.
+  // limits still prevent a single generation from growing without bound.
   qwen_max_generation_seconds_per_request: 0,
   qwen_runtime_cache: true,
   qwen_allow_download: false,
@@ -64,13 +51,6 @@ const SCTVAAgentService = {
       ...DEFAULT_OPTIONS,
       ...parsed,
     };
-    // Migrate browser-saved options from the earlier long-source bundle
-    // profile once. A user can still explicitly re-enable bundling after the
-    // current profile has been saved.
-    if (parsed.qwen_runtime_profile !== DEFAULT_OPTIONS.qwen_runtime_profile) {
-      options.qwen_runtime_profile = DEFAULT_OPTIONS.qwen_runtime_profile;
-      options.qwen_enable_file_bundling = false;
-    }
     // Upgrade request budgets shipped by earlier UI versions so persisted
     // browser sessions do not silently retain the old 20/30/50 limits.
     if ([20, 30, 50].includes(Number(parsed.qwen_max_actions_per_request))) {

@@ -38,6 +38,8 @@ from ..constants import (
     ACTION_MOVE_PYTHON_METHOD,
     ACTION_REPLACE_CONDITIONAL_WITH_POLYMORPHISM,
     ACTION_REPLACE_NESTED_CONDITIONAL_WITH_GUARD_CLAUSES,
+    ACTION_REPLACE_PARAMETER_WITH_METHOD_CALL,
+    ACTION_REPLACE_TEMP_WITH_QUERY,
     ACTION_MOVE_C_FUNCTION,
     PARAMETER_OBJECT_ACTIONS,
     EXTRACT_CLASS_ACTIONS,
@@ -50,6 +52,7 @@ from . import (
     c_extract_class,
     c_extract_method,
     c_guard_clauses,
+    c_query_refactorings,
     c_transformers,
     java_extract_class,
     java_extract_method,
@@ -298,6 +301,34 @@ def _model_candidate_intent_issue(
             if not (after_classes - before_classes):
                 return "JAVA_POLYMORPHIC_DISPATCH_TYPES_MISSING"
 
+    if language == "c" and action.action_type in {
+        ACTION_REPLACE_TEMP_WITH_QUERY,
+        ACTION_REPLACE_PARAMETER_WITH_METHOD_CALL,
+    }:
+        if re.sub(r"\s+", "", original_source) == re.sub(r"\s+", "", candidate_source):
+            return "C_MODEL_ACTION_DID_NOT_CHANGE_TRANSLATION_UNIT"
+        parameters = action.parameters or {}
+        method_name = str(
+            parameters.get("method") or parameters.get("function") or ""
+        ).strip()
+        try:
+            before_functions = c_extract_class._parse_c_module(original_source).functions_by_name
+            after_functions = c_extract_class._parse_c_module(candidate_source).functions_by_name
+        except (TypeError, ValueError):
+            return "C_MODEL_ACTION_OUTPUT_NOT_PARSEABLE"
+        before = before_functions.get(method_name, [])
+        after = after_functions.get(method_name, [])
+        if len(before) != 1 or len(after) != 1:
+            return "C_MODEL_ACTION_TARGET_FUNCTION_MISSING_OR_AMBIGUOUS"
+        if action.action_type == ACTION_REPLACE_TEMP_WITH_QUERY:
+            if not re.search(r"\bstatic\s+[^;{}]+\bquery_[A-Za-z_][A-Za-z0-9_]*\s*\(", candidate_source):
+                return "C_REPLACE_TEMP_QUERY_HELPER_MISSING"
+        else:
+            if len(after[0].parameters) >= len(before[0].parameters):
+                return "C_REPLACE_PARAMETER_SIGNATURE_UNCHANGED"
+            if not re.search(r"\bstatic\s+[^;{}]+\bquery_[A-Za-z_][A-Za-z0-9_]*\s*\(", candidate_source):
+                return "C_REPLACE_PARAMETER_QUERY_HELPER_MISSING"
+
     if action.action_type not in {ACTION_INTRODUCE_CONSTANT, ACTION_EXTRACT_CONSTANT}:
         return ""
     parameters = action.parameters or {}
@@ -405,192 +436,6 @@ def _model_candidate_intent_issue(
     if compact_candidate != compact_original:
         return "C_INTRODUCE_CONSTANT_UNRELATED_SOURCE_CHANGE"
     return ""
-
-
-def _model_bundle_intent_issue(
-    language: str,
-    original_source: str,
-    candidate_source: str,
-    actions: Sequence[RefactoringAction],
-) -> str:
-    """Prove a constant bundle by reversing every planned edit together."""
-
-    normalized_language = str(language or "").strip().lower()
-    if normalized_language not in {"java", "c"} or len(actions) < 2:
-        return "QWEN_BUNDLE_CONTRACT_UNSUPPORTED"
-
-    restored = candidate_source
-    seen_names: set[str] = set()
-    for action in actions:
-        if action.action_type not in {
-            ACTION_INTRODUCE_CONSTANT,
-            ACTION_EXTRACT_CONSTANT,
-        }:
-            return "QWEN_BUNDLE_CONTRACT_UNSUPPORTED"
-        parameters = action.parameters or {}
-        name = str(parameters.get("constant_name") or "EXTRACTED_CONSTANT").strip()
-        values: List[Any] = []
-        if parameters.get("literal_value") is not None:
-            values = [parameters.get("literal_value")]
-        elif isinstance(parameters.get("literal_values"), list):
-            values = list(parameters.get("literal_values") or [])
-        elif parameters.get("hint"):
-            values = _parse_literal_values_from_hint(str(parameters.get("hint")))
-        if (
-            len(values) != 1
-            or not re.fullmatch(r"[A-Za-z_$][A-Za-z0-9_$]*", name)
-            or name in seen_names
-        ):
-            return "QWEN_BUNDLE_ACTION_AMBIGUOUS"
-        seen_names.add(name)
-
-        if normalized_language == "java":
-            literal_text = java_transformers._to_java_literal(values[0])
-            expected_type = java_transformers._java_type_for_literal(values[0])
-            declaration = re.compile(
-                rf"(?m)^[ \t]*private\s+static\s+final\s+"
-                rf"{re.escape(expected_type)}\s+{re.escape(name)}\s*=\s*"
-                rf"{re.escape(literal_text)}\s*;[ \t]*(?:\r?\n)?"
-            )
-            if len(list(declaration.finditer(restored))) != 1:
-                return f"JAVA_BUNDLE_CONSTANT_DECLARATION_INVALID:{name}"
-            if len(re.findall(rf"\b{re.escape(name)}\b", restored)) < 2:
-                return f"JAVA_BUNDLE_CONSTANT_USAGE_NOT_MIGRATED:{name}"
-            restored = declaration.sub("", restored, count=1)
-        else:
-            literal_value = c_transformers.normalize_planned_numeric_literal(values[0])
-            if not isinstance(literal_value, (int, float)) or isinstance(
-                literal_value,
-                bool,
-            ):
-                return f"C_BUNDLE_CONSTANT_VALUE_INVALID:{name}"
-            literal_text = c_transformers._to_c_literal(literal_value)
-            declaration = re.compile(
-                rf"(?m)^\s*#\s*define\s+{re.escape(name)}\s+"
-                rf"{re.escape(literal_text)}\s*(?://.*)?(?:\r?\n)?"
-            )
-            if len(list(declaration.finditer(restored))) != 1:
-                return f"C_BUNDLE_CONSTANT_DECLARATION_INVALID:{name}"
-            if len(re.findall(rf"\b{re.escape(name)}\b", restored)) < 2:
-                return f"C_BUNDLE_CONSTANT_USAGE_NOT_MIGRATED:{name}"
-            restored = declaration.sub("", restored, count=1)
-
-        restored = re.sub(
-            rf"\b{re.escape(name)}\b",
-            lambda _match, value=literal_text: value,
-            restored,
-        )
-
-    if re.sub(r"\s+", "", restored) != re.sub(r"\s+", "", original_source):
-        return "QWEN_BUNDLE_UNRELATED_SOURCE_CHANGE"
-    return ""
-
-
-def _model_local_bundle_intent_issue(
-    language: str,
-    original_source: str,
-    candidate_source: str,
-    actions: Sequence[RefactoringAction],
-) -> str:
-    """Prove cheap, action-specific facts for a bounded local bundle."""
-
-    normalized_language = str(language or "").strip().lower()
-
-    def literal_count(source: str, value: Any) -> int:
-        if normalized_language == "python":
-            try:
-                tree = ast.parse(source)
-            except SyntaxError:
-                return 0
-            return sum(
-                1
-                for node in ast.walk(tree)
-                if isinstance(node, ast.Constant)
-                and type(node.value) is type(value)
-                and node.value == value
-            )
-        if normalized_language == "java":
-            return source.count(java_transformers._to_java_literal(value))
-        if normalized_language == "c":
-            return source.count(c_transformers._to_c_literal(value))
-        return 0
-
-    for action in actions:
-        parameters = action.parameters or {}
-        if action.action_type == ACTION_REPLACE_LITERAL:
-            if "old_literal" not in parameters or "new_literal" not in parameters:
-                return "QWEN_BUNDLE_REPLACE_LITERAL_CONTRACT_MISSING"
-            old_literal = parameters["old_literal"]
-            new_literal = parameters["new_literal"]
-            if not (
-                literal_count(candidate_source, old_literal)
-                < literal_count(original_source, old_literal)
-                and literal_count(candidate_source, new_literal)
-                > literal_count(original_source, new_literal)
-            ):
-                return "QWEN_BUNDLE_REPLACE_LITERAL_INTENT_NOT_SATISFIED"
-        elif action.action_type == ACTION_REPLACE_UNSAFE_FUNCTION:
-            unsafe_function = str(parameters.get("unsafe_function") or "").strip()
-            safe_alternative = str(parameters.get("safe_alternative") or "").strip()
-            if not unsafe_function or not safe_alternative:
-                return "QWEN_BUNDLE_UNSAFE_FUNCTION_CONTRACT_MISSING"
-            unsafe_pattern = re.compile(rf"\b{re.escape(unsafe_function)}\s*\(")
-            safe_pattern = re.compile(rf"\b{re.escape(safe_alternative)}\s*\(")
-            if not (
-                len(unsafe_pattern.findall(candidate_source))
-                < len(unsafe_pattern.findall(original_source))
-                and len(safe_pattern.findall(candidate_source))
-                > len(safe_pattern.findall(original_source))
-            ):
-                return "QWEN_BUNDLE_UNSAFE_FUNCTION_INTENT_NOT_SATISFIED"
-    return ""
-
-
-def _model_bundle_issue_is_repairable(issue: str) -> bool:
-    """Retry only bounded formatting or incomplete-intent failures."""
-
-    normalized = str(issue or "").strip().upper()
-    if not normalized:
-        return False
-    if any(
-        marker in normalized
-        for marker in (
-            "OUTSIDE_RESOLVED_TARGETS",
-            "UNRELATED_SOURCE_CHANGE",
-            "STRUCTURAL VALIDATION FAILED",
-            "BEHAVIORAL",
-            "INVARIANT",
-        )
-    ):
-        return False
-    return any(
-        marker in normalized
-        for marker in (
-            "INTENT_NOT_SATISFIED",
-            "DECLARATION",
-            "USAGE_NOT_MIGRATED",
-            "UNMATCHED DELIMITER",
-            "UNCLOSED DELIMITER",
-            "SYNTAX",
-        )
-    )
-
-
-def _model_bundle_should_decompose(issue: str) -> bool:
-    """Retry risky or oversized bundle failures as bounded single actions."""
-
-    normalized = str(issue or "").strip().upper()
-    return any(
-        marker in normalized
-        for marker in (
-            "BUNDLE_CONTEXT_TOO_LARGE",
-            "BUNDLE_OUTPUT_TOO_LARGE",
-            "BUNDLE_UNRELATED_SOURCE_CHANGE",
-            "BUNDLE_CHANGE_OUTSIDE_RESOLVED_TARGETS",
-            "BUNDLE_CONSTANT_DECLARATION_INVALID",
-            "BUNDLE_CONSTANT_USAGE_NOT_MIGRATED",
-        )
-    )
 
 
 def _project_java_constant_contract(
@@ -840,303 +685,15 @@ def _java_extract_action_kwargs(
 
 
 class TransformationEngine:
-    """Applies refactoring actions and records detailed audit logs."""
+    """Applies refactoring actions and records detailed audit logs.
 
-    @staticmethod
-    def _suppress_no_replacements_warning(
-        action: RefactoringAction,
-        current_code: str,
-    ) -> bool:
-        if action.action_type not in {ACTION_EXTRACT_CONSTANT, ACTION_INTRODUCE_CONSTANT}:
-            return False
-
-        constant_name = str(action.parameters.get("constant_name") or "").strip()
-        if not constant_name:
-            return False
-        return constant_name in current_code
-
-    @staticmethod
-    def _resolve_c_encapsulate_actions_from_source(
-        source_code: str,
-        actions: List[RefactoringAction],
-        *,
-        file_name: str = "",
-    ) -> None:
-        """Last-chance resolution for generic C Global Variable plan targets.
-
-        This intentionally lives in the transformation engine as well as the
-        agent layer.  Direct engine callers and older integration paths can
-        otherwise bypass agent-side target recovery and still pass the literal
-        planner placeholder ``variable`` to the C transformer.
-        """
-
-        encapsulate_actions = [
-            action
-            for action in actions
-            if action.action_type in {
-                ACTION_ENCAPSULATE_VARIABLE,
-                ACTION_ENCAPSULATE_C_VARIABLE,
-            }
-            or str(action.source_refactoring or "").strip().lower()
-            in {"encapsulate variable", "global variable"}
-        ]
-        if not encapsulate_actions:
-            return
-
-        detected = [
-            action
-            for action in LocalRefactorDetector().detect(
-                language="c",
-                file_name=file_name,
-                source_code=source_code,
-                existing_actions=[],
-            )
-            if action.action_type == ACTION_ENCAPSULATE_C_VARIABLE
-        ]
-        if not detected:
-            return
-
-        detected.sort(
-            key=lambda action: int(action.parameters.get("source_line") or 10**9)
-        )
-        by_name = {
-            str(action.parameters.get("variable_name") or "").strip(): action
-            for action in detected
-            if str(action.parameters.get("variable_name") or "").strip()
-        }
-        generic_names = {
-            "variable", "global", "global_variable", "globalvariable", "var", "value"
-        }
-        resolved_names: set[str] = set()
-        unresolved: list[tuple[int, RefactoringAction, str]] = []
-
-        for order, action in enumerate(encapsulate_actions):
-            params = action.parameters
-            requested = str(params.get("variable_name") or params.get("variable") or "").strip()
-            candidate = by_name.get(requested)
-            if candidate is None:
-                unresolved.append((order, action, requested))
-                continue
-            cparams = candidate.parameters
-            action.action_type = ACTION_ENCAPSULATE_C_VARIABLE
-            params["source_file"] = str(params.get("source_file") or file_name)
-            params["source_line"] = cparams.get("source_line")
-            if str(params.get("getter_name") or "").strip().lower() in {"", "get_variable", "get_global", "get_var"}:
-                params["getter_name"] = cparams.get("getter_name")
-            if str(params.get("setter_name") or "").strip().lower() in {"", "set_variable", "set_global", "set_var"}:
-                params["setter_name"] = cparams.get("setter_name")
-            params["_c_global_target_resolution"] = {
-                "status": "success",
-                "strategy": "engine_exact_source_global",
-                "requested_variable_name": requested,
-                "variable_name": requested,
-                "source_line": cparams.get("source_line"),
-            }
-            resolved_names.add(requested)
-
-        available = [
-            candidate for candidate in detected
-            if str(candidate.parameters.get("variable_name") or "").strip() not in resolved_names
-        ]
-        if not unresolved or len(unresolved) != len(available):
-            return
-
-        unresolved.sort(
-            key=lambda item: (
-                int(item[1].parameters.get("source_line") or 10**9),
-                item[0],
-            )
-        )
-        available.sort(
-            key=lambda action: int(action.parameters.get("source_line") or 10**9)
-        )
-        for (_, action, requested), candidate in zip(unresolved, available):
-            if requested and requested.lower() not in generic_names:
-                continue
-            params = action.parameters
-            cparams = candidate.parameters
-            resolved = str(cparams.get("variable_name") or "").strip()
-            if not resolved:
-                continue
-            requested_getter = str(params.get("getter_name") or "").strip()
-            requested_setter = str(params.get("setter_name") or "").strip()
-            action.action_type = ACTION_ENCAPSULATE_C_VARIABLE
-            params["requested_variable_name"] = requested
-            params["variable_name"] = resolved
-            params["source_file"] = str(params.get("source_file") or file_name)
-            params["source_line"] = cparams.get("source_line")
-            params["getter_name"] = (
-                str(cparams.get("getter_name") or f"get_{resolved}")
-                if not requested_getter or requested_getter.lower() in {"get_variable", "get_global", "get_var"}
-                else requested_getter
-            )
-            params["setter_name"] = (
-                str(cparams.get("setter_name") or f"set_{resolved}")
-                if not requested_setter or requested_setter.lower() in {"set_variable", "set_global", "set_var"}
-                else requested_setter
-            )
-            params["_c_global_target_resolution"] = {
-                "status": "success",
-                "strategy": "engine_declaration_order_placeholder_recovery",
-                "requested_variable_name": requested,
-                "variable_name": resolved,
-                "source_line": cparams.get("source_line"),
-            }
-
-    @staticmethod
-    def _infer_exception_target_from_source(
-        *,
-        language: str,
-        source_code: str,
-        source_line: int | None,
-        original_exception_type: str,
-        handler_name: str,
-    ) -> str:
-        """Supply a missing RDP exception type only when local analysis proves it.
-
-        Planner output often labels the refactoring but omits the concrete
-        exception type. Reuse SCTVA's conservative detector rather than making
-        an unsupported best-effort replacement in a language transformer.
-        """
-
-        candidates = [
-            action
-            for action in LocalRefactorDetector().detect(
-                language=language,
-                file_name="",
-                source_code=source_code,
-                existing_actions=[],
-            )
-            if action.action_type == ACTION_NARROW_EXCEPTION_HANDLER
-        ]
-        if source_line is not None:
-            line_matches = [
-                action for action in candidates
-                if action.parameters.get("source_line") == source_line
-            ]
-            if line_matches:
-                candidates = line_matches
-        if original_exception_type:
-            type_matches = [
-                action for action in candidates
-                if action.parameters.get("original_exception_type") == original_exception_type
-            ]
-            if type_matches:
-                candidates = type_matches
-        if handler_name:
-            name_matches = [
-                action for action in candidates
-                if action.parameters.get("handler_name") == handler_name
-            ]
-            if name_matches:
-                candidates = name_matches
-        if len(candidates) != 1:
-            return ""
-        return str(candidates[0].parameters.get("target_exception_type") or "").strip()
-
-    @staticmethod
-    def _exception_action_at_source_line(
-        *,
-        language: str,
-        source_code: str,
-        source_line: int | None,
-    ) -> Dict[str, Any] | None:
-        """Identify a legacy dead-code action that actually targets a handler."""
-
-        if language not in {"python", "java"} or source_line is None:
-            return None
-        matches = [
-            action
-            for action in LocalRefactorDetector().detect(
-                language=language,
-                file_name="",
-                source_code=source_code,
-                existing_actions=[],
-            )
-            if action.action_type == ACTION_NARROW_EXCEPTION_HANDLER
-            and action.parameters.get("source_line") == source_line
-        ]
-        if len(matches) != 1:
-            return None
-        return dict(matches[0].parameters)
-
-    @staticmethod
-    def _candidate_syntax_issue(language: str, source_code: str) -> str:
-        """Run a cheap per-action syntax guard without contradicting final validators.
-
-        C is special because raw delimiter counting is not preprocessor aware.  A
-        valid translation unit can contain mutually-exclusive function bodies
-        under ``#ifdef/#else/#endif`` (for example WinMain vs main).  Reuse the
-        real C syntax validator here so the per-action checkpoint and the final
-        syntax stage apply the same branch-aware rules.
-        """
-
-        if language == "python":
-            try:
-                ast.parse(source_code)
-            except SyntaxError as exc:
-                return f"Python syntax error: {exc.msg} at line {exc.lineno}."
-            return ""
-
-        if language == "c":
-            result = SyntaxValidator().validate(
-                language="c",
-                source_code=source_code,
-                require_compilation=False,
-                timeout_seconds=5,
-            )
-            return "" if result.passed else result.message
-
-        # Java keeps the small comment/string-aware delimiter check here.  Its
-        # syntax does not have C-style conditional compilation that can make
-        # two mutually-exclusive brace shapes appear in one raw source file.
-        pairs = {")": "(", "]": "[", "}": "{"}
-        stack: list[str] = []
-        state = "code"
-        index = 0
-        while index < len(source_code):
-            char = source_code[index]
-            nxt = source_code[index + 1] if index + 1 < len(source_code) else ""
-            if state == "code":
-                if char == "/" and nxt == "/":
-                    state = "line_comment"
-                    index += 2
-                    continue
-                if char == "/" and nxt == "*":
-                    state = "block_comment"
-                    index += 2
-                    continue
-                if char == '"':
-                    state = "string"
-                elif char == "'":
-                    state = "char"
-                elif char in "([{":
-                    stack.append(char)
-                elif char in pairs:
-                    if not stack or stack.pop() != pairs[char]:
-                        return f"Unmatched delimiter '{char}'."
-            elif state == "line_comment":
-                if char == "\n":
-                    state = "code"
-            elif state == "block_comment":
-                if char == "*" and nxt == "/":
-                    state = "code"
-                    index += 2
-                    continue
-            elif state in {"string", "char"}:
-                quote = '"' if state == "string" else "'"
-                if char == "\\":
-                    index += 2
-                    continue
-                if char == quote:
-                    state = "code"
-            index += 1
-
-        if stack:
-            return f"Unclosed delimiter '{stack[-1]}'."
-        if state in {"block_comment", "string", "char"}:
-            return f"Unclosed {state.replace('_', ' ')}."
-        return ""
+    Reading order:
+    1. ``apply_actions`` is the public execution entry point.
+    2. Its phases are preflight, model-first generation, rule dispatch,
+       optional model fallback, and audit logging.
+    3. The helpers below it support target recovery and action history; they
+       do not execute a transformation on their own.
+    """
 
     def apply_actions(
         self,
@@ -1153,11 +710,9 @@ class TransformationEngine:
         model_candidate_validator: Callable[
             [str, str, RefactoringAction], Dict[str, Any]
         ] | None = None,
-        model_bundle_candidate_validator: Callable[
-            [str, str, Sequence[RefactoringAction]], Dict[str, Any]
-        ] | None = None,
         model_validation_feedback: Dict[int, str] | None = None,
     ) -> Tuple[str, List[TransformationLogEntry], List[str]]:
+        # Phase 1: normalize plan targets and establish the current snapshot.
         current_code = source_code
         logs: List[TransformationLogEntry] = []
         global_warnings: List[str] = []
@@ -1236,6 +791,7 @@ class TransformationEngine:
                 if exception_action is not None:
                     legacy_exception_anchors[action_index] = exception_action
 
+        # Phase 2: preserve dependency order before executing individual actions.
         execution_actions = list(enumerate(actions, start=1))
         dependency_resolutions: Dict[int, Dict[str, Any]] = {}
         if language == "java":
@@ -1338,101 +894,8 @@ class TransformationEngine:
                 cursor += 1
             execution_actions = reordered
 
-        # Retained compatibility maps for historical bundle reports. The
-        # current production profile keeps them empty: each model candidate
-        # represents exactly one RDP action.
-        model_bundle_groups: Dict[int, list[tuple[int, RefactoringAction]]] = {}
-        model_bundle_member_to_first: Dict[int, int] = {}
-        if (
-            model_assistant is not None
-            and model_assistant.settings.mode == "primary"
-            and model_assistant.grouped_generation_enabled
-            and model_assistant.settings.enable_file_bundling
-            and language in {"python", "java", "c"}
-        ):
-            for planned_bundle in model_assistant.plan_dependency_aware_bundles(
-                language=language,
-                source_code=source_code,
-                actions=execution_actions,
-                current_file_name=current_file_name,
-                allow_generic=(
-                    model_bundle_candidate_validator is not None
-                    and model_assistant.settings.enable_generic_bundling
-                ),
-            ):
-                first_index = planned_bundle[0][0]
-                model_bundle_groups[first_index] = list(planned_bundle)
-                for member_index, _member_action in planned_bundle:
-                    model_bundle_member_to_first[member_index] = first_index
-
-        # Tensor-batched candidates are likewise disabled in the production
-        # profile. The normal loop below generates and validates one action at
-        # a time against the latest accepted source snapshot.
-        batched_model_candidates: Dict[int, Any] = {}
-        batched_model_actions: Dict[int, RefactoringAction] = {}
-        batched_model_preparations: Dict[int, Dict[str, Any]] = {}
-        if (
-            model_assistant is not None
-            and model_assistant.settings.mode == "primary"
-            and model_assistant.grouped_generation_enabled
-            and not model_validation_feedback
-        ):
-            batch_requests: list[tuple[int, RefactoringAction]] = []
-            prefetched_java_constants: set[tuple[str, str]] = set()
-            for action_index, planned_action in execution_actions:
-                if action_index in model_bundle_member_to_first:
-                    continue
-                try:
-                    prepared_action, preparation = model_assistant.prepare_action(
-                        language=language,
-                        current_source_code=source_code,
-                        reference_source_code=source_code,
-                        action=planned_action,
-                    )
-                except Exception:
-                    continue
-                constant_key = _java_constant_action_key(language, prepared_action)
-                if constant_key is not None:
-                    if constant_key in prefetched_java_constants:
-                        continue
-                    prefetched_java_constants.add(constant_key)
-                if (
-                    prepared_action.action_type != ACTION_NOOP
-                    and prepared_action.parameters.get("not_applicable_to_source") is not True
-                    and not _model_action_ineligibility_reason(
-                        language,
-                        source_code,
-                        prepared_action,
-                    )
-                ):
-                    batch_requests.append((action_index, prepared_action))
-                    batched_model_actions[action_index] = prepared_action
-                    if preparation:
-                        batched_model_preparations[action_index] = preparation
-            if len(batch_requests) >= 2:
-                batched_model_candidates = model_assistant.propose_batch(
-                    language=language,
-                    source_code=source_code,
-                    actions=batch_requests,
-                    current_file_name=current_file_name,
-                )
-            # Only keep prepared actions that actually received a prefetched
-            # candidate. Everything else is prepared again against the latest
-            # source snapshot in the normal sequential path.
-            batched_model_actions = {
-                key: value
-                for key, value in batched_model_actions.items()
-                if key in batched_model_candidates
-            }
-            batched_model_preparations = {
-                key: value
-                for key, value in batched_model_preparations.items()
-                if key in batched_model_candidates
-            }
-
+        # Phase 3: model-first attempt, deterministic transformation, and fallback.
         accepted_java_model_constants: set[tuple[str, str]] = set()
-        accepted_bundle_members: Dict[int, Dict[str, Any]] = {}
-        bundle_rule_fallback_indexes: set[int] = set()
         for idx, action in execution_actions:
             warnings = list(action.warnings)
             replacements = 0
@@ -1443,380 +906,12 @@ class TransformationEngine:
             model_action = action
 
             try:
-                accepted_bundle = accepted_bundle_members.get(idx)
-                if accepted_bundle is not None:
-                    action_metadata.update({
-                        "status": "success",
-                        "model_assisted": True,
-                        "model_provider": model_assistant.provider if model_assistant else "",
-                        "model_candidate_status": "candidate_generated",
-                        "model_mode": "primary",
-                        "model_bundle_member": True,
-                        "model_bundle_id": accepted_bundle["bundle_id"],
-                        "model_bundle_action_indexes": list(
-                            accepted_bundle["action_indexes"]
-                        ),
-                        "model_bundle_primary_action_index": accepted_bundle[
-                            "primary_action_index"
-                        ],
-                        "model_assistance": {
-                            "status": "candidate_generated",
-                            "reason": "",
-                            "mode": "primary",
-                            "bundle_mode": accepted_bundle["bundle_kind"],
-                            "bundle_id": accepted_bundle["bundle_id"],
-                            "bundle_action_count": len(
-                                accepted_bundle["action_indexes"]
-                            ),
-                            "bundle_action_indexes": list(
-                                accepted_bundle["action_indexes"]
-                            ),
-                            "shared_candidate": True,
-                            "candidate_recorded_on_action_index": accepted_bundle[
-                                "primary_action_index"
-                            ],
-                        },
-                    })
-                    replacements = 1
-                    raise _ModelCandidateApplied
-
-                bundle_group = model_bundle_groups.get(idx)
-                if (
-                    bundle_group
-                    and model_assistant is not None
-                    and idx not in bundle_rule_fallback_indexes
-                ):
-                    prepared_bundle: list[tuple[int, RefactoringAction]] = []
-                    bundle_preparations: Dict[int, Dict[str, Any]] = {}
-                    try:
-                        for member_index, member_action in bundle_group:
-                            prepared_action, preparation = model_assistant.prepare_action(
-                                language=language,
-                                current_source_code=current_code,
-                                reference_source_code=source_code,
-                                action=member_action,
-                            )
-                            if (
-                                prepared_action.action_type == ACTION_NOOP
-                                or prepared_action.parameters.get("not_applicable_to_source") is True
-                                or _model_action_ineligibility_reason(
-                                    language,
-                                    current_code,
-                                    prepared_action,
-                                )
-                            ):
-                                prepared_bundle = []
-                                break
-                            prepared_bundle.append((member_index, prepared_action))
-                            if preparation:
-                                bundle_preparations[member_index] = preparation
-                    except Exception:
-                        # A bundle is only an optimization. Any preparation
-                        # problem returns to the proven single-action path.
-                        prepared_bundle = []
-                        bundle_preparations = {}
-
-                    if len(prepared_bundle) == len(bundle_group):
-                        feedback_parts = [
-                            str((model_validation_feedback or {}).get(member_index) or "").strip()
-                            for member_index, _member_action in prepared_bundle
-                        ]
-                        bundle_feedback = " | ".join(
-                            dict.fromkeys(part for part in feedback_parts if part)
-                        )
-                        bundle_candidate = model_assistant.propose_bundle(
-                            language=language,
-                            source_code=current_code,
-                            actions=prepared_bundle,
-                            current_file_name=current_file_name,
-                            validation_feedback=bundle_feedback,
-                        )
-                        bundle_metadata = dict(bundle_candidate.metadata or {})
-                        bundle_metadata.update({
-                            "status": bundle_candidate.status,
-                            "reason": bundle_candidate.reason,
-                            "mode": "primary",
-                        })
-
-                        # A pre-generation eligibility/size skip returns to the
-                        # unchanged per-action model path. Once a bundle source
-                        # exists, however, it receives at most one repair and
-                        # then uses deterministic rule fallback.
-                        if bundle_candidate.source_code:
-                            bundle_actions = [item[1] for item in prepared_bundle]
-                            bundle_kind = model_assistant.bundle_kind(prepared_bundle)
-                            bundle_syntax_issue = self._candidate_syntax_issue(
-                                language,
-                                bundle_candidate.source_code,
-                            )
-                            bundle_intent_issue = (
-                                ""
-                                if bundle_syntax_issue
-                                else (
-                                    _model_bundle_intent_issue(
-                                        language,
-                                        current_code,
-                                        bundle_candidate.source_code,
-                                        bundle_actions,
-                                    )
-                                    if bundle_kind == "constant_bundle"
-                                    else (
-                                        model_assistant.bundle_candidate_scope_issue(
-                                            language=language,
-                                            original_source=current_code,
-                                            candidate_source=bundle_candidate.source_code,
-                                            actions=prepared_bundle,
-                                        )
-                                        or _model_local_bundle_intent_issue(
-                                            language,
-                                            current_code,
-                                            bundle_candidate.source_code,
-                                            bundle_actions,
-                                        )
-                                    )
-                                )
-                            )
-                            bundle_checkpoint = (
-                                model_bundle_candidate_validator(
-                                    current_code,
-                                    bundle_candidate.source_code,
-                                    bundle_actions,
-                                )
-                                if not bundle_syntax_issue
-                                and not bundle_intent_issue
-                                and model_bundle_candidate_validator is not None
-                                else {}
-                            )
-                            bundle_checkpoint_issue = ""
-                            if (
-                                bundle_checkpoint
-                                and bundle_checkpoint.get("passed") is not True
-                            ):
-                                bundle_checkpoint_issue = "; ".join(
-                                    str(item).strip()
-                                    for item in (bundle_checkpoint.get("issues") or [])
-                                    if str(item).strip()
-                                ) or "Bundle failed SCTVA action validation."
-                            bundle_issue = (
-                                bundle_syntax_issue
-                                or bundle_intent_issue
-                                or bundle_checkpoint_issue
-                            )
-                            initial_bundle_code = bundle_candidate.source_code
-                            repair_attempted = False
-
-                            if (
-                                bundle_issue
-                                and not bundle_feedback
-                                and _model_bundle_issue_is_repairable(bundle_issue)
-                                and not _model_bundle_should_decompose(bundle_issue)
-                                and model_assistant.can_attempt(current_file_name)
-                            ):
-                                repair_attempted = True
-                                repaired_bundle = model_assistant.propose_bundle(
-                                    language=language,
-                                    source_code=current_code,
-                                    actions=prepared_bundle,
-                                    current_file_name=current_file_name,
-                                    validation_feedback=bundle_issue,
-                                    previous_candidate=bundle_candidate.target_replacement,
-                                )
-                                repaired_metadata = dict(repaired_bundle.metadata or {})
-                                repaired_syntax_issue = (
-                                    self._candidate_syntax_issue(
-                                        language,
-                                        repaired_bundle.source_code,
-                                    )
-                                    if repaired_bundle.source_code
-                                    else ""
-                                )
-                                repaired_intent_issue = (
-                                    ""
-                                    if repaired_syntax_issue or not repaired_bundle.source_code
-                                    else (
-                                        _model_bundle_intent_issue(
-                                            language,
-                                            current_code,
-                                            repaired_bundle.source_code,
-                                            bundle_actions,
-                                        )
-                                        if bundle_kind == "constant_bundle"
-                                        else (
-                                            model_assistant.bundle_candidate_scope_issue(
-                                                language=language,
-                                                original_source=current_code,
-                                                candidate_source=repaired_bundle.source_code,
-                                                actions=prepared_bundle,
-                                            )
-                                            or _model_local_bundle_intent_issue(
-                                                language,
-                                                current_code,
-                                                repaired_bundle.source_code,
-                                                bundle_actions,
-                                            )
-                                        )
-                                    )
-                                )
-                                repaired_checkpoint = (
-                                    model_bundle_candidate_validator(
-                                        current_code,
-                                        repaired_bundle.source_code,
-                                        bundle_actions,
-                                    )
-                                    if repaired_bundle.source_code
-                                    and not repaired_syntax_issue
-                                    and not repaired_intent_issue
-                                    and model_bundle_candidate_validator is not None
-                                    else {}
-                                )
-                                repaired_checkpoint_issue = ""
-                                if (
-                                    repaired_checkpoint
-                                    and repaired_checkpoint.get("passed") is not True
-                                ):
-                                    repaired_checkpoint_issue = "; ".join(
-                                        str(item).strip()
-                                        for item in (repaired_checkpoint.get("issues") or [])
-                                        if str(item).strip()
-                                    ) or "Repaired bundle failed SCTVA action validation."
-                                repaired_issue = (
-                                    repaired_syntax_issue
-                                    or repaired_intent_issue
-                                    or repaired_checkpoint_issue
-                                    or repaired_bundle.reason
-                                )
-                                bundle_metadata["initial_rejection"] = {
-                                    "issue": bundle_issue,
-                                    "candidate_code": initial_bundle_code,
-                                    "validation": bundle_checkpoint.get("validation", []),
-                                }
-                                bundle_metadata["bundle_repair_attempted"] = True
-                                bundle_metadata["repair_attempt"] = {
-                                    **repaired_metadata,
-                                    "status": (
-                                        "candidate_repaired"
-                                        if repaired_bundle.source_code and not repaired_issue
-                                        else "candidate_rejected"
-                                    ),
-                                    "reason": repaired_issue,
-                                    "action_validation": repaired_checkpoint.get(
-                                        "validation",
-                                        [],
-                                    ),
-                                }
-                                if repaired_bundle.source_code and not repaired_issue:
-                                    bundle_candidate = repaired_bundle
-                                    bundle_checkpoint = repaired_checkpoint
-                                    bundle_issue = ""
-                                    bundle_metadata.update(repaired_metadata)
-                                    bundle_metadata.update({
-                                        "status": "candidate_repaired",
-                                        "reason": "",
-                                        "bundle_repair_attempted": True,
-                                    })
-                                else:
-                                    bundle_issue = repaired_issue or bundle_issue
-
-                            if not bundle_issue:
-                                action_indexes = [
-                                    member_index
-                                    for member_index, _member_action in prepared_bundle
-                                ]
-                                bundle_id = (
-                                    f"{current_file_name or '<unknown>'}:"
-                                    f"{action_indexes[0]}-{action_indexes[-1]}"
-                                )
-                                bundle_metadata.update({
-                                    "status": (
-                                        "candidate_repaired"
-                                        if repair_attempted
-                                        else "candidate_generated"
-                                    ),
-                                    "reason": "",
-                                    "action_validation": bundle_checkpoint.get(
-                                        "validation",
-                                        [],
-                                    ),
-                                    "bundle_id": bundle_id,
-                                    "bundle_kind": bundle_kind,
-                                    "bundle_repair_attempted": repair_attempted,
-                                })
-                                action_metadata.update({
-                                    "status": "success",
-                                    "model_assisted": True,
-                                    "model_provider": model_assistant.provider,
-                                    "model_candidate_status": bundle_candidate.status,
-                                    "model_mode": "primary",
-                                    "model_bundle_primary": True,
-                                    "model_bundle_id": bundle_id,
-                                    "model_bundle_action_indexes": action_indexes,
-                                    "model_action_preparations": bundle_preparations,
-                                    "model_assistance": bundle_metadata,
-                                    "model_candidate_code": bundle_candidate.source_code,
-                                })
-                                current_code = bundle_candidate.source_code
-                                replacements = 1
-                                for _member_index, member_action in prepared_bundle:
-                                    accepted_key = _java_constant_action_key(
-                                        language,
-                                        member_action,
-                                    )
-                                    if accepted_key is not None:
-                                        accepted_java_model_constants.add(accepted_key)
-                                for member_index in action_indexes[1:]:
-                                    accepted_bundle_members[member_index] = {
-                                        "bundle_id": bundle_id,
-                                        "bundle_kind": bundle_kind,
-                                        "action_indexes": action_indexes,
-                                        "primary_action_index": idx,
-                                    }
-                                raise _ModelCandidateApplied
-
-                            rejected_bundle_metadata = {
-                                **bundle_metadata,
-                                "status": "candidate_rejected",
-                                "reason": bundle_issue,
-                            }
-                            if _model_bundle_should_decompose(bundle_issue):
-                                action_metadata.update({
-                                    "model_bundle_attempt": rejected_bundle_metadata,
-                                    "model_bundle_candidate_code": (
-                                        bundle_candidate.source_code
-                                    ),
-                                    "model_bundle_decomposed_to_single_actions": True,
-                                })
-                                warnings.append(
-                                    f"{model_assistant.display_name} file-action bundle rejected; "
-                                    f"retrying {len(prepared_bundle)} action(s) individually: "
-                                    + bundle_issue
-                                )
-                            else:
-                                action_metadata.update({
-                                    "model_assistance": rejected_bundle_metadata,
-                                    "model_candidate_code": bundle_candidate.source_code,
-                                    "model_bundle_rule_fallback": True,
-                                })
-                                bundle_rule_fallback_indexes.update(
-                                    member_index
-                                    for member_index, _member_action in prepared_bundle
-                                )
-                                warnings.append(
-                                    f"{model_assistant.display_name} file-action bundle rejected; "
-                                    f"using rule fallback for {len(prepared_bundle)} action(s): "
-                                    + bundle_issue
-                                )
-
+                # Phase 3A: prepare and validate one Qwen candidate for this action.
                 # In primary mode the local code model gets the first transformation
                 # attempt. If it is unavailable, empty, too large, or fails
                 # the immediate syntax checkpoint, execution falls through to
                 # the existing deterministic transformer.
-                if idx in batched_model_actions:
-                    model_action = batched_model_actions[idx]
-                    if idx in batched_model_preparations:
-                        action_metadata["model_action_preparation"] = (
-                            batched_model_preparations[idx]
-                        )
-                elif model_assistant is not None:
+                if model_assistant is not None:
                     try:
                         model_action, model_action_preparation = (
                             model_assistant.prepare_action(
@@ -1887,32 +982,19 @@ class TransformationEngine:
                     model_assistant is not None
                     and model_assistant.settings.mode == "primary"
                     and model_action_is_eligible
-                    and idx not in bundle_rule_fallback_indexes
-                    and (
-                        idx in batched_model_candidates
-                        or model_assistant.can_attempt(current_file_name)
-                    )
+                    and model_assistant.can_attempt(current_file_name)
                 )
                 if model_primary_allowed:
                     planned_validation_feedback = str(
                         (model_validation_feedback or {}).get(idx) or ""
                     ).strip()
-                    primary_candidate = batched_model_candidates.pop(idx, None)
-                    if primary_candidate is not None:
-                        primary_candidate = model_assistant.rebase_batched_candidate(
-                            language=language,
-                            current_source_code=current_code,
-                            action=model_action,
-                            candidate=primary_candidate,
-                        )
-                    else:
-                        primary_candidate = model_assistant.propose(
-                            language=language,
-                            source_code=current_code,
-                            action=model_action,
-                            current_file_name=current_file_name,
-                            validation_feedback=planned_validation_feedback,
-                        )
+                    primary_candidate = model_assistant.propose(
+                        language=language,
+                        source_code=current_code,
+                        action=model_action,
+                        current_file_name=current_file_name,
+                        validation_feedback=planned_validation_feedback,
+                    )
                     projected_source, contract_projection = _project_java_constant_contract(
                         language,
                         current_code,
@@ -2201,6 +1283,7 @@ class TransformationEngine:
                 # class symbol.  Never let a preflight stale-file diagnostic
                 # suppress an explicit class that still exists in the current
                 # transformed AST.
+                # Phase 3B: deterministic language transformers for this action.
                 if language == "python" and action.action_type == ACTION_INLINE_PYTHON_CLASS:
                     requested_target = action.parameters.get("requested_target")
                     requested_target = (
@@ -2439,6 +1522,7 @@ class TransformationEngine:
                             f"RDP {action.action_type} target resolution requires review: "
                             f"{action_metadata['reason']}."
                         )
+                # Basic normalization and literal transformations.
                 elif action.action_type == ACTION_NOOP:
                     # Older/upstream PlannerAdapter versions may already have
                     # converted a malformed Feature-Envy Move Method step to
@@ -2844,6 +1928,7 @@ class TransformationEngine:
                     else:
                         warnings.append("normalize_multiline_statement is not required for Python source.")
 
+                # Method and class transformations.
                 elif action.action_type == ACTION_EXTRACT_METHOD:
                     method_name = str(
                         action.parameters.get("method")
@@ -3616,6 +2701,7 @@ class TransformationEngine:
                                 + (f" ({moved})." if moved else ".")
                             )
 
+                # Parameter-object transformations.
                 elif action.action_type == ACTION_UPDATE_JAVA_PARAMETER_OBJECT_CALL_SITE:
                     if language != "java":
                         raise ValueError("Java Parameter Object call-site updates require a Java source file.")
@@ -3756,6 +2842,7 @@ class TransformationEngine:
                             f"{method_name} now accepts {object_name}."
                         )
 
+                # C safety and C-specific transformations.
                 elif action.action_type == ACTION_REPLACE_UNSAFE_FUNCTION:
                     unsafe_function = str(action.parameters.get("unsafe_function") or "").strip()
                     safe_alternative = str(action.parameters.get("safe_alternative") or "").strip()
@@ -3852,6 +2939,87 @@ class TransformationEngine:
                                 f"{action_metadata.get('reason') or 'unsafe global access pattern'}."
                             )
 
+                elif action.action_type == ACTION_REPLACE_TEMP_WITH_QUERY:
+                    if language != "c":
+                        warnings.append("Replace Temp with Query is currently supported by rules for C source only.")
+                        action_metadata = {
+                            "status": "review_required",
+                            "reason": "RULE_TRANSFORMER_UNAVAILABLE_FOR_LANGUAGE",
+                        }
+                    else:
+                        source_line = action.parameters.get("source_line")
+                        current_code, replacements, action_metadata = (
+                            c_query_refactorings.apply_replace_temp_with_query(
+                                current_code,
+                                method_name=str(
+                                    action.parameters.get("method")
+                                    or action.parameters.get("function")
+                                    or ""
+                                ).strip(),
+                                temp_name=str(
+                                    action.parameters.get("temp_name")
+                                    or action.parameters.get("temporary_name")
+                                    or ""
+                                ).strip(),
+                                query_method_name=str(
+                                    action.parameters.get("query_method_name")
+                                    or action.parameters.get("replacement_method")
+                                    or ""
+                                ).strip(),
+                                source_line=(
+                                    int(source_line)
+                                    if isinstance(source_line, (int, float))
+                                    else None
+                                ),
+                            )
+                        )
+                        warnings.append(
+                            "C Replace Temp with Query "
+                            + ("applied." if replacements else "requires review: " + str(action_metadata.get("reason") or "target not safely resolved") + ".")
+                        )
+
+                elif action.action_type == ACTION_REPLACE_PARAMETER_WITH_METHOD_CALL:
+                    if language != "c":
+                        warnings.append("Replace Parameter with Method Call is currently supported by rules for C source only.")
+                        action_metadata = {
+                            "status": "review_required",
+                            "reason": "RULE_TRANSFORMER_UNAVAILABLE_FOR_LANGUAGE",
+                        }
+                    else:
+                        source_line = action.parameters.get("source_line")
+                        raw_query_parameters = action.parameters.get("query_parameters")
+                        current_code, replacements, action_metadata = (
+                            c_query_refactorings.apply_replace_parameter_with_method_call(
+                                current_code,
+                                method_name=str(
+                                    action.parameters.get("method")
+                                    or action.parameters.get("function")
+                                    or ""
+                                ).strip(),
+                                parameter_name=str(action.parameters.get("parameter_name") or "").strip(),
+                                query_method_name=str(
+                                    action.parameters.get("query_method_name")
+                                    or action.parameters.get("replacement_method")
+                                    or ""
+                                ).strip(),
+                                query_expression=str(action.parameters.get("query_expression") or "").strip(),
+                                query_parameters=(
+                                    raw_query_parameters
+                                    if isinstance(raw_query_parameters, list)
+                                    else None
+                                ),
+                                source_line=(
+                                    int(source_line)
+                                    if isinstance(source_line, (int, float))
+                                    else None
+                                ),
+                            )
+                        )
+                        warnings.append(
+                            "C Replace Parameter with Method Call "
+                            + ("applied." if replacements else "requires review: " + str(action_metadata.get("reason") or "target not safely resolved") + ".")
+                        )
+
                 elif action.action_type == ACTION_MOVE_C_FUNCTION:
                     # Moving C functions changes at least two translation units
                     # and usually a header. This single-file engine must not
@@ -3896,6 +3064,7 @@ class TransformationEngine:
                             current_code, original_logic, str(faulty_logic)
                         )
 
+                # Dead-code and exception-handler transformations.
                 elif action.action_type == ACTION_REMOVE_DEAD_CODE:
                     method_name = str(
                         action.parameters.get("method")
@@ -4462,6 +3631,7 @@ class TransformationEngine:
                 if strict_mode:
                     raise
 
+            # Phase 3C: optional model fallback after a non-applicable rule action.
             # The model is a fallback candidate generator, never a way around
             # an explicit AST/data-flow safety decision made by SCTVA.
             model_status = str(action_metadata.get("status") or "").lower()
@@ -4548,6 +3718,7 @@ class TransformationEngine:
                         + model_candidate.reason
                     )
 
+            # Phase 4: run the final per-action syntax guard and write audit data.
             if replacements > 0 and action.action_type != ACTION_INJECT_SYNTAX_ERROR:
                 syntax_key = (language, current_code)
                 syntax_issue = syntax_cache.get(syntax_key)
@@ -4705,6 +3876,310 @@ class TransformationEngine:
                 global_warnings.extend(warnings)
 
         return current_code, logs, global_warnings
+
+    # ------------------------------------------------------------------
+    # Supporting preparation and candidate helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _suppress_no_replacements_warning(
+        action: RefactoringAction,
+        current_code: str,
+    ) -> bool:
+        if action.action_type not in {ACTION_EXTRACT_CONSTANT, ACTION_INTRODUCE_CONSTANT}:
+            return False
+
+        constant_name = str(action.parameters.get("constant_name") or "").strip()
+        if not constant_name:
+            return False
+        return constant_name in current_code
+
+    @staticmethod
+    def _resolve_c_encapsulate_actions_from_source(
+        source_code: str,
+        actions: List[RefactoringAction],
+        *,
+        file_name: str = "",
+    ) -> None:
+        """Last-chance resolution for generic C Global Variable plan targets.
+
+        This intentionally lives in the transformation engine as well as the
+        agent layer.  Direct engine callers and older integration paths can
+        otherwise bypass agent-side target recovery and still pass the literal
+        planner placeholder ``variable`` to the C transformer.
+        """
+
+        encapsulate_actions = [
+            action
+            for action in actions
+            if action.action_type in {
+                ACTION_ENCAPSULATE_VARIABLE,
+                ACTION_ENCAPSULATE_C_VARIABLE,
+            }
+            or str(action.source_refactoring or "").strip().lower()
+            in {"encapsulate variable", "global variable"}
+        ]
+        if not encapsulate_actions:
+            return
+
+        detected = [
+            action
+            for action in LocalRefactorDetector().detect(
+                language="c",
+                file_name=file_name,
+                source_code=source_code,
+                existing_actions=[],
+            )
+            if action.action_type == ACTION_ENCAPSULATE_C_VARIABLE
+        ]
+        if not detected:
+            return
+
+        detected.sort(
+            key=lambda action: int(action.parameters.get("source_line") or 10**9)
+        )
+        by_name = {
+            str(action.parameters.get("variable_name") or "").strip(): action
+            for action in detected
+            if str(action.parameters.get("variable_name") or "").strip()
+        }
+        generic_names = {
+            "variable", "global", "global_variable", "globalvariable", "var", "value"
+        }
+        resolved_names: set[str] = set()
+        unresolved: list[tuple[int, RefactoringAction, str]] = []
+
+        for order, action in enumerate(encapsulate_actions):
+            params = action.parameters
+            requested = str(params.get("variable_name") or params.get("variable") or "").strip()
+            candidate = by_name.get(requested)
+            if candidate is None:
+                unresolved.append((order, action, requested))
+                continue
+            cparams = candidate.parameters
+            action.action_type = ACTION_ENCAPSULATE_C_VARIABLE
+            params["source_file"] = str(params.get("source_file") or file_name)
+            params["source_line"] = cparams.get("source_line")
+            if str(params.get("getter_name") or "").strip().lower() in {"", "get_variable", "get_global", "get_var"}:
+                params["getter_name"] = cparams.get("getter_name")
+            if str(params.get("setter_name") or "").strip().lower() in {"", "set_variable", "set_global", "set_var"}:
+                params["setter_name"] = cparams.get("setter_name")
+            params["_c_global_target_resolution"] = {
+                "status": "success",
+                "strategy": "engine_exact_source_global",
+                "requested_variable_name": requested,
+                "variable_name": requested,
+                "source_line": cparams.get("source_line"),
+            }
+            resolved_names.add(requested)
+
+        available = [
+            candidate for candidate in detected
+            if str(candidate.parameters.get("variable_name") or "").strip() not in resolved_names
+        ]
+        if not unresolved or len(unresolved) != len(available):
+            return
+
+        unresolved.sort(
+            key=lambda item: (
+                int(item[1].parameters.get("source_line") or 10**9),
+                item[0],
+            )
+        )
+        available.sort(
+            key=lambda action: int(action.parameters.get("source_line") or 10**9)
+        )
+        for (_, action, requested), candidate in zip(unresolved, available):
+            if requested and requested.lower() not in generic_names:
+                continue
+            params = action.parameters
+            cparams = candidate.parameters
+            resolved = str(cparams.get("variable_name") or "").strip()
+            if not resolved:
+                continue
+            requested_getter = str(params.get("getter_name") or "").strip()
+            requested_setter = str(params.get("setter_name") or "").strip()
+            action.action_type = ACTION_ENCAPSULATE_C_VARIABLE
+            params["requested_variable_name"] = requested
+            params["variable_name"] = resolved
+            params["source_file"] = str(params.get("source_file") or file_name)
+            params["source_line"] = cparams.get("source_line")
+            params["getter_name"] = (
+                str(cparams.get("getter_name") or f"get_{resolved}")
+                if not requested_getter or requested_getter.lower() in {"get_variable", "get_global", "get_var"}
+                else requested_getter
+            )
+            params["setter_name"] = (
+                str(cparams.get("setter_name") or f"set_{resolved}")
+                if not requested_setter or requested_setter.lower() in {"set_variable", "set_global", "set_var"}
+                else requested_setter
+            )
+            params["_c_global_target_resolution"] = {
+                "status": "success",
+                "strategy": "engine_declaration_order_placeholder_recovery",
+                "requested_variable_name": requested,
+                "variable_name": resolved,
+                "source_line": cparams.get("source_line"),
+            }
+
+    @staticmethod
+    def _infer_exception_target_from_source(
+        *,
+        language: str,
+        source_code: str,
+        source_line: int | None,
+        original_exception_type: str,
+        handler_name: str,
+    ) -> str:
+        """Supply a missing RDP exception type only when local analysis proves it.
+
+        Planner output often labels the refactoring but omits the concrete
+        exception type. Reuse SCTVA's conservative detector rather than making
+        an unsupported best-effort replacement in a language transformer.
+        """
+
+        candidates = [
+            action
+            for action in LocalRefactorDetector().detect(
+                language=language,
+                file_name="",
+                source_code=source_code,
+                existing_actions=[],
+            )
+            if action.action_type == ACTION_NARROW_EXCEPTION_HANDLER
+        ]
+        if source_line is not None:
+            line_matches = [
+                action for action in candidates
+                if action.parameters.get("source_line") == source_line
+            ]
+            if line_matches:
+                candidates = line_matches
+        if original_exception_type:
+            type_matches = [
+                action for action in candidates
+                if action.parameters.get("original_exception_type") == original_exception_type
+            ]
+            if type_matches:
+                candidates = type_matches
+        if handler_name:
+            name_matches = [
+                action for action in candidates
+                if action.parameters.get("handler_name") == handler_name
+            ]
+            if name_matches:
+                candidates = name_matches
+        if len(candidates) != 1:
+            return ""
+        return str(candidates[0].parameters.get("target_exception_type") or "").strip()
+
+    @staticmethod
+    def _exception_action_at_source_line(
+        *,
+        language: str,
+        source_code: str,
+        source_line: int | None,
+    ) -> Dict[str, Any] | None:
+        """Identify a legacy dead-code action that actually targets a handler."""
+
+        if language not in {"python", "java"} or source_line is None:
+            return None
+        matches = [
+            action
+            for action in LocalRefactorDetector().detect(
+                language=language,
+                file_name="",
+                source_code=source_code,
+                existing_actions=[],
+            )
+            if action.action_type == ACTION_NARROW_EXCEPTION_HANDLER
+            and action.parameters.get("source_line") == source_line
+        ]
+        if len(matches) != 1:
+            return None
+        return dict(matches[0].parameters)
+
+    @staticmethod
+    def _candidate_syntax_issue(language: str, source_code: str) -> str:
+        """Run a cheap per-action syntax guard without contradicting final validators.
+
+        C is special because raw delimiter counting is not preprocessor aware.  A
+        valid translation unit can contain mutually-exclusive function bodies
+        under ``#ifdef/#else/#endif`` (for example WinMain vs main).  Reuse the
+        real C syntax validator here so the per-action checkpoint and the final
+        syntax stage apply the same branch-aware rules.
+        """
+
+        if language == "python":
+            try:
+                ast.parse(source_code)
+            except SyntaxError as exc:
+                return f"Python syntax error: {exc.msg} at line {exc.lineno}."
+            return ""
+
+        if language == "c":
+            result = SyntaxValidator().validate(
+                language="c",
+                source_code=source_code,
+                require_compilation=False,
+                timeout_seconds=5,
+            )
+            return "" if result.passed else result.message
+
+        # Java keeps the small comment/string-aware delimiter check here.  Its
+        # syntax does not have C-style conditional compilation that can make
+        # two mutually-exclusive brace shapes appear in one raw source file.
+        pairs = {")": "(", "]": "[", "}": "{"}
+        stack: list[str] = []
+        state = "code"
+        index = 0
+        while index < len(source_code):
+            char = source_code[index]
+            nxt = source_code[index + 1] if index + 1 < len(source_code) else ""
+            if state == "code":
+                if char == "/" and nxt == "/":
+                    state = "line_comment"
+                    index += 2
+                    continue
+                if char == "/" and nxt == "*":
+                    state = "block_comment"
+                    index += 2
+                    continue
+                if char == '"':
+                    state = "string"
+                elif char == "'":
+                    state = "char"
+                elif char in "([{":
+                    stack.append(char)
+                elif char in pairs:
+                    if not stack or stack.pop() != pairs[char]:
+                        return f"Unmatched delimiter '{char}'."
+            elif state == "line_comment":
+                if char == "\n":
+                    state = "code"
+            elif state == "block_comment":
+                if char == "*" and nxt == "/":
+                    state = "code"
+                    index += 2
+                    continue
+            elif state in {"string", "char"}:
+                quote = '"' if state == "string" else "'"
+                if char == "\\":
+                    index += 2
+                    continue
+                if char == quote:
+                    state = "code"
+            index += 1
+
+        if stack:
+            return f"Unclosed delimiter '{stack[-1]}'."
+        if state in {"block_comment", "string", "char"}:
+            return f"Unclosed {state.replace('_', ' ')}."
+        return ""
+
+    # ------------------------------------------------------------------
+    # Accepted-action history and Python dependency helpers
+    # ------------------------------------------------------------------
 
     @staticmethod
     def _accepted_action_history(

@@ -348,3 +348,55 @@ def test_planner_adapter_maps_fault_injection_to_fault_injection_action():
     assert normalized["actions"][0]["action_type"] == "fault_injection"
     assert normalized["actions"][0]["parameters"]["original_logic"] == "return total;"
     assert normalized["actions"][0]["parameters"]["faulty_logic"] == "return total + 1;"
+
+
+def test_adapter_preserves_underspecified_c_semantic_actions_for_source_recovery():
+    normalized = PlannerAdapter().normalize_plan({
+        "plan_id": "c-semantic-actions",
+        "steps": [
+            {
+                "step_id": 1,
+                "refactoring": "Move Method",
+                "target": {"file": "data_pipeline.c", "method": "format_log", "lines": [10, 30]},
+                "parameters": {
+                    "source_file": "data_pipeline.c",
+                    "method": "format_log",
+                    "destination_class": "LoggerModule",
+                },
+            },
+            {
+                "step_id": 2,
+                "refactoring": "Replace Parameter with Method Call",
+                "target": {"file": "session_mgr.c", "method": "validate", "lines": [35, 60]},
+                "parameters": {"source_file": "session_mgr.c", "method": "validate"},
+            },
+            {
+                "step_id": 3,
+                "refactoring": "Replace Temp with Query",
+                "target": {"file": "matrix_math.c", "method": "determinant", "lines": [40, 72]},
+                "parameters": {"source_file": "matrix_math.c", "method": "determinant"},
+            },
+            {
+                "step_id": 4,
+                "refactoring": "Introduce Constant",
+                "target": {"file": "buffer_pool.c", "method": "allocate"},
+                "parameters": {
+                    "source_file": "buffer_pool.c",
+                    "constant_name": "DEFAULT_BUFFER_SIZE",
+                    "hint": "Allocation chunk size uses unexplained literal 4096.",
+                },
+            },
+        ],
+    })
+
+    actions = normalized["actions"]
+    assert [action["action_type"] for action in actions] == [
+        "move_c_function",
+        "replace_parameter_with_method_call",
+        "replace_temp_with_query",
+        "introduce_constant",
+    ]
+    assert actions[0]["parameters"]["destination_module"] == "LoggerModule"
+    assert actions[1]["parameters"]["method"] == "validate"
+    assert actions[2]["parameters"]["method"] == "determinant"
+    assert actions[3]["parameters"]["literal_value"] == 4096

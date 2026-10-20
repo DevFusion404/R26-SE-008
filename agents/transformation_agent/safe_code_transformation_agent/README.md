@@ -74,14 +74,9 @@ Enable it per request; the RDP plan format is not changed:
     "qwen_openvino_model_path": "",
     "qwen_max_input_tokens": 512,
     "qwen_max_new_tokens": 256,
-    "qwen_max_bundle_output_tokens": 192,
     "qwen_cpu_threads": 6,
     "qwen_max_actions_per_request": 100,
     "qwen_max_actions_per_file": 100,
-    "qwen_enable_file_bundling": false,
-    "qwen_enable_generic_bundling": false,
-    "qwen_max_actions_per_bundle": 5,
-    "qwen_max_generic_actions_per_bundle": 2,
     "qwen_generation_timeout_seconds": 30,
     "qwen_max_generation_seconds_per_request": 0,
     "qwen_runtime_cache": true,
@@ -142,11 +137,9 @@ speed improvement for source transformation. This does not change the RDP
 action set or bypass candidate validation.
 The web client uses a 30-second per-generation timeout and no request-level
 generation cutoff. Therefore a slow first file does not prevent later eligible
-RDP actions from reaching the model. To reduce CPU latency without dropping
-actions, `qwen_max_bundle_output_tokens` limits only multi-action bundle
-output. An oversized bundle is split before generation and its independent
-constant actions use the existing tensor-batched single-action path. Every
-candidate still passes the same validation gates. Set a positive
+RDP actions from reaching the model. SCTVA generates one narrowly scoped model
+candidate for each eligible RDP action, then applies the same validation gates
+to every candidate. Set a positive
 `qwen_max_generation_seconds_per_request` only when an explicit whole-request
 latency cutoff is more important than attempting every eligible action.
 
@@ -163,11 +156,6 @@ SCTVA_QWEN_MODEL_ID=Qwen/Qwen2.5-Coder-0.5B-Instruct
 SCTVA_QWEN_CPU_THREADS=6
 SCTVA_QWEN_MAX_ACTIONS_PER_REQUEST=100
 SCTVA_QWEN_MAX_ACTIONS_PER_FILE=100
-SCTVA_QWEN_ENABLE_FILE_BUNDLING=false
-SCTVA_QWEN_ENABLE_GENERIC_BUNDLING=false
-SCTVA_QWEN_MAX_ACTIONS_PER_BUNDLE=5
-SCTVA_QWEN_MAX_GENERIC_ACTIONS_PER_BUNDLE=2
-SCTVA_QWEN_MAX_BUNDLE_OUTPUT_TOKENS=192
 SCTVA_QWEN_GENERATION_TIMEOUT_SECONDS=30
 SCTVA_QWEN_MAX_GENERATION_SECONDS_PER_REQUEST=0
 SCTVA_QWEN_RUNTIME_CACHE=true

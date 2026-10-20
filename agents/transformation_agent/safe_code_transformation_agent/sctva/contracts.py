@@ -605,15 +605,10 @@ class ExecutionOptions:
     qwen_backend: str = "auto"
     qwen_openvino_model_path: str = ""
     qwen_max_new_tokens: int = 256
-    qwen_max_bundle_output_tokens: int = 192
     qwen_max_input_tokens: int = 512
     qwen_cpu_threads: int = 6
     qwen_max_actions_per_request: int = 100
     qwen_max_actions_per_file: int = 100
-    qwen_enable_file_bundling: bool = False
-    qwen_enable_generic_bundling: bool = False
-    qwen_max_actions_per_bundle: int = 5
-    qwen_max_generic_actions_per_bundle: int = 2
     qwen_generation_timeout_seconds: int = 30
     qwen_max_generation_seconds_per_request: int = 0
     qwen_runtime_cache: bool = True
@@ -682,11 +677,6 @@ class ExecutionOptions:
         qwen_cpu_threads = _integer_option(
             "qwen_cpu_threads", "SCTVA_QWEN_CPU_THREADS", 6
         )
-        qwen_max_bundle_output_tokens = _integer_option(
-            "qwen_max_bundle_output_tokens",
-            "SCTVA_QWEN_MAX_BUNDLE_OUTPUT_TOKENS",
-            192,
-        )
         qwen_max_actions_per_request = _integer_option(
             "qwen_max_actions_per_request",
             "SCTVA_QWEN_MAX_ACTIONS_PER_REQUEST",
@@ -696,16 +686,6 @@ class ExecutionOptions:
             "qwen_max_actions_per_file",
             "SCTVA_QWEN_MAX_ACTIONS_PER_FILE",
             100,
-        )
-        qwen_max_actions_per_bundle = _integer_option(
-            "qwen_max_actions_per_bundle",
-            "SCTVA_QWEN_MAX_ACTIONS_PER_BUNDLE",
-            5,
-        )
-        qwen_max_generic_actions_per_bundle = _integer_option(
-            "qwen_max_generic_actions_per_bundle",
-            "SCTVA_QWEN_MAX_GENERIC_ACTIONS_PER_BUNDLE",
-            2,
         )
         qwen_generation_timeout_seconds = _integer_option(
             "qwen_generation_timeout_seconds",
@@ -721,10 +701,6 @@ class ExecutionOptions:
             raise ContractValidationError(
                 "Field 'execution_options.qwen_cpu_threads' must be positive."
             )
-        if qwen_max_bundle_output_tokens < 64:
-            raise ContractValidationError(
-                "Field 'execution_options.qwen_max_bundle_output_tokens' must be at least 64."
-            )
         if qwen_max_actions_per_request < 0:
             raise ContractValidationError(
                 "Field 'execution_options.qwen_max_actions_per_request' must be non-negative."
@@ -732,14 +708,6 @@ class ExecutionOptions:
         if qwen_max_actions_per_file <= 0:
             raise ContractValidationError(
                 "Field 'execution_options.qwen_max_actions_per_file' must be positive."
-            )
-        if qwen_max_actions_per_bundle < 2:
-            raise ContractValidationError(
-                "Field 'execution_options.qwen_max_actions_per_bundle' must be at least 2."
-            )
-        if qwen_max_generic_actions_per_bundle < 2:
-            raise ContractValidationError(
-                "Field 'execution_options.qwen_max_generic_actions_per_bundle' must be at least 2."
             )
         if qwen_generation_timeout_seconds <= 0:
             raise ContractValidationError(
@@ -801,25 +769,10 @@ class ExecutionOptions:
             qwen_backend=qwen_backend,
             qwen_openvino_model_path=qwen_openvino_model_path,
             qwen_max_new_tokens=qwen_max_new_tokens,
-            qwen_max_bundle_output_tokens=qwen_max_bundle_output_tokens,
             qwen_max_input_tokens=qwen_max_input_tokens,
             qwen_cpu_threads=qwen_cpu_threads,
             qwen_max_actions_per_request=qwen_max_actions_per_request,
             qwen_max_actions_per_file=qwen_max_actions_per_file,
-            qwen_enable_file_bundling=(
-                bool(data["qwen_enable_file_bundling"])
-                if "qwen_enable_file_bundling" in data
-                else _environment_bool("SCTVA_QWEN_ENABLE_FILE_BUNDLING", False)
-            ),
-            qwen_enable_generic_bundling=(
-                bool(data["qwen_enable_generic_bundling"])
-                if "qwen_enable_generic_bundling" in data
-                else _environment_bool("SCTVA_QWEN_ENABLE_GENERIC_BUNDLING", False)
-            ),
-            qwen_max_actions_per_bundle=qwen_max_actions_per_bundle,
-            qwen_max_generic_actions_per_bundle=(
-                qwen_max_generic_actions_per_bundle
-            ),
             qwen_generation_timeout_seconds=qwen_generation_timeout_seconds,
             qwen_max_generation_seconds_per_request=(
                 qwen_max_generation_seconds_per_request
@@ -857,15 +810,10 @@ class ExecutionOptions:
             "qwen_backend": self.qwen_backend,
             "qwen_openvino_model_path": self.qwen_openvino_model_path,
             "qwen_max_new_tokens": self.qwen_max_new_tokens,
-            "qwen_max_bundle_output_tokens": self.qwen_max_bundle_output_tokens,
             "qwen_max_input_tokens": self.qwen_max_input_tokens,
             "qwen_cpu_threads": self.qwen_cpu_threads,
             "qwen_max_actions_per_request": self.qwen_max_actions_per_request,
             "qwen_max_actions_per_file": self.qwen_max_actions_per_file,
-            "qwen_enable_file_bundling": self.qwen_enable_file_bundling,
-            "qwen_enable_generic_bundling": self.qwen_enable_generic_bundling,
-            "qwen_max_actions_per_bundle": self.qwen_max_actions_per_bundle,
-            "qwen_max_generic_actions_per_bundle": self.qwen_max_generic_actions_per_bundle,
             "qwen_generation_timeout_seconds": self.qwen_generation_timeout_seconds,
             "qwen_max_generation_seconds_per_request": self.qwen_max_generation_seconds_per_request,
             "qwen_runtime_cache": self.qwen_runtime_cache,
