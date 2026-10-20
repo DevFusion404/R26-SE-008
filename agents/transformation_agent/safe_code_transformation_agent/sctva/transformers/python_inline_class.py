@@ -113,7 +113,6 @@ def build_python_inline_class_model(
         return {"status": "parse_failed", "classes": []}
 
     class_entries = _class_nodes_with_qualified_names(tree)
-    qualified_by_node = {node: qualified for node, qualified, _ in class_entries}
     short_counts: dict[str, int] = {}
     for node, _, _ in class_entries:
         short_counts[node.name] = short_counts.get(node.name, 0) + 1

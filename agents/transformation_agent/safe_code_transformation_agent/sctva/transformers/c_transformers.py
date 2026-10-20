@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Any, Optional, Sequence, Tuple
+from typing import Any, Dict, Optional, Sequence, Tuple
 
 
 _INCLUDE_RE = re.compile(r"^\s*#\s*include\b.*$", re.MULTILINE)
@@ -2623,26 +2623,6 @@ def _split_call_args(args_raw: str) -> list[str]:
     return args
 
 
-def apply_replace_unsafe_function(
-    source_code: str,
-    unsafe_function: str,
-    safe_alternative: str,
-    source_line: Optional[int] = None,
-) -> Tuple[str, int]:
-    """Replace a known unsafe C function call with its safe equivalent.
-
-    Handles special two-step rewrite for ``scanf`` → ``fgets`` + ``sscanf``:
-    a temporary char buffer is introduced and the original format string and
-    variable list are preserved so program behaviour is unchanged.
-    """
-    lines = source_code.splitlines(keepends=True)
-    replacements = 0
-    call_pattern = re.compile(rf"\b{re.escape(unsafe_function)}\s*\((.*?)\)")
-
-    for index, line in enumerate(lines, start=1):
-        if source_line is not None and index != source_line:
-            continue
-
 def _is_c_pointer_variable(var_name: str, source_code: str) -> bool:
     """Return True if var_name is explicitly declared as a pointer (e.g. char *var, void *var)."""
     clean_var = var_name.strip()
@@ -2719,7 +2699,7 @@ def apply_replace_unsafe_function(
                 leading = re.match(r"^(\s*)", match.string[match.pos:])
                 indent = leading.group(1) if leading else ""
                 buf_decl = "char _scanf_buf[256]"
-                fgets_call = f"fgets(_scanf_buf, sizeof(_scanf_buf), stdin)"
+                fgets_call = "fgets(_scanf_buf, sizeof(_scanf_buf), stdin)"
                 if rest:
                     sscanf_call = f"sscanf(_scanf_buf, {fmt}, {rest})"
                 else:

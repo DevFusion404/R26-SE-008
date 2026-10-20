@@ -26,6 +26,48 @@ def test_planner_adapter_maps_extract_method_to_extract_action_when_range_exists
     assert normalized["actions"][0]["parameters"]["end_line"] == 5
 
 
+def test_comprehensive_java_refactorings_remain_executable_for_model_first_mode():
+    cases = [
+        ("Extract Method", "extract_method", {"method": "work", "new_method_name": "workCore"}),
+        ("Extract Class", "extract_java_class", {"source_class": "Source", "new_class_name": "SourceHelper"}),
+        ("Extract Subclass", "extract_subclass", {"source_class": "Source", "new_subclass_name": "SourceSubtype"}),
+        ("Replace Conditional with Polymorphism", "replace_conditional_with_polymorphism", {"source_class": "Source", "method": "work"}),
+        ("Introduce Facade", "introduce_facade", {"source_class": "Source", "facade_class_name": "SourceFacade"}),
+        ("Replace Temp with Query", "replace_temp_with_query", {"method": "work"}),
+        ("Introduce Parameter Object", "introduce_java_parameter_object", {"method": "work", "parameter_object_name": "WorkParams"}),
+        ("Move Method", "move_java_method", {"source_class": "Source", "method": "work", "destination_class": "Destination"}),
+        ("Pull Up Method", "pull_up_method", {"source_class": "Source", "method": "work", "target_class": "Destination"}),
+        ("Replace Data Value with Object", "replace_data_value_with_object", {"source_class": "Source"}),
+        ("Hide Delegate", "hide_delegate", {"source_class": "Source", "method": "work"}),
+        ("Introduce Constant", "introduce_constant", {"constant_name": "LIMIT", "hint": "literal 5"}),
+        ("Inline Class", "inline_java_class", {"class_to_inline": "Source"}),
+        ("Collapse Hierarchy", "collapse_hierarchy", {"source_class": "Source", "parent_class": "Destination"}),
+        ("Remove Dead Code", "remove_dead_code", {"method": "work"}),
+        ("Replace Parameter with Method Call", "replace_parameter_with_method_call", {"method": "work"}),
+        ("Rename Method", "rename_method", {"method": "work", "new_name": "performWork"}),
+    ]
+    steps = []
+    for index, (refactoring, _expected, parameters) in enumerate(cases, start=1):
+        steps.append({
+            "step_id": index,
+            "refactoring": refactoring,
+            "target": {
+                "file": "Source.java",
+                "class": "Source",
+                "method": parameters.get("method", "work"),
+                "lines": [2, 4],
+            },
+            "parameters": {"source_file": "Source.java", **parameters},
+        })
+
+    normalized = PlannerAdapter().normalize_plan({"plan_id": "java-all", "steps": steps})
+
+    actual = [action["action_type"] for action in normalized["actions"]]
+    assert actual == [expected for _name, expected, _params in cases]
+    assert all(action["action_type"] != "noop" for action in normalized["actions"])
+    assert all(not action.get("warnings") for action in normalized["actions"])
+
+
 def test_planner_adapter_maps_move_method_to_python_move_action():
     adapter = PlannerAdapter()
     planner_output = {
@@ -306,3 +348,55 @@ def test_planner_adapter_maps_fault_injection_to_fault_injection_action():
     assert normalized["actions"][0]["action_type"] == "fault_injection"
     assert normalized["actions"][0]["parameters"]["original_logic"] == "return total;"
     assert normalized["actions"][0]["parameters"]["faulty_logic"] == "return total + 1;"
+
+
+def test_adapter_preserves_underspecified_c_semantic_actions_for_source_recovery():
+    normalized = PlannerAdapter().normalize_plan({
+        "plan_id": "c-semantic-actions",
+        "steps": [
+            {
+                "step_id": 1,
+                "refactoring": "Move Method",
+                "target": {"file": "data_pipeline.c", "method": "format_log", "lines": [10, 30]},
+                "parameters": {
+                    "source_file": "data_pipeline.c",
+                    "method": "format_log",
+                    "destination_class": "LoggerModule",
+                },
+            },
+            {
+                "step_id": 2,
+                "refactoring": "Replace Parameter with Method Call",
+                "target": {"file": "session_mgr.c", "method": "validate", "lines": [35, 60]},
+                "parameters": {"source_file": "session_mgr.c", "method": "validate"},
+            },
+            {
+                "step_id": 3,
+                "refactoring": "Replace Temp with Query",
+                "target": {"file": "matrix_math.c", "method": "determinant", "lines": [40, 72]},
+                "parameters": {"source_file": "matrix_math.c", "method": "determinant"},
+            },
+            {
+                "step_id": 4,
+                "refactoring": "Introduce Constant",
+                "target": {"file": "buffer_pool.c", "method": "allocate"},
+                "parameters": {
+                    "source_file": "buffer_pool.c",
+                    "constant_name": "DEFAULT_BUFFER_SIZE",
+                    "hint": "Allocation chunk size uses unexplained literal 4096.",
+                },
+            },
+        ],
+    })
+
+    actions = normalized["actions"]
+    assert [action["action_type"] for action in actions] == [
+        "move_c_function",
+        "replace_parameter_with_method_call",
+        "replace_temp_with_query",
+        "introduce_constant",
+    ]
+    assert actions[0]["parameters"]["destination_module"] == "LoggerModule"
+    assert actions[1]["parameters"]["method"] == "validate"
+    assert actions[2]["parameters"]["method"] == "determinant"
+    assert actions[3]["parameters"]["literal_value"] == 4096

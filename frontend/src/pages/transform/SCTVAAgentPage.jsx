@@ -95,8 +95,12 @@ function validationStageStatus(stepKey, validation, phase) {
       ? String(details.status || '')
       : '';
   const numericScore = typeof step.score === 'number' ? step.score : Number.NaN;
+  const normalizedStatus = reportedStatus.toLowerCase();
 
-  if (reportedStatus.toLowerCase() === 'skipped') return 'pending';
+  if (normalizedStatus === 'skipped') return 'pending';
+  if (stepKey === 'behavioral' && normalizedStatus === 'degraded_static_passed' && step.passed) {
+    return 'completed';
+  }
 
   if (Number.isFinite(numericScore)) {
     if (numericScore > 0.9) return 'completed';
@@ -216,6 +220,7 @@ const EMPTY_MODEL_METRICS = {
   modelLoadSeconds: 0,
   modelGenerationSeconds: 0,
   candidates: [],
+  evaluation: null,
   context: 'N/A',
   strategy: 'RULE ONLY',
   acceptedOutput: 'NO CHANGE',
@@ -232,14 +237,14 @@ function modelMetricsFromResult(result) {
   const accuracy = used && Number.isFinite(reportedAccuracy)
     ? Math.max(1, Math.min(100, reportedAccuracy))
     : 0;
-  const rawEngine = String(result?.transformation_engine || (used ? 'CODET5_PLUS' : 'RULE_BASED'));
+  const rawEngine = String(result?.transformation_engine || (used ? 'QWEN_CODER' : 'RULE_BASED'));
   const rawStatus = String(
     result?.model_status
     || (used ? 'MODEL_OUTPUT_RETAINED' : attempted ? 'MODEL_ATTEMPT_REJECTED_RULE_FALLBACK' : 'MODEL_NOT_USED')
   );
   const rawStrategy = String(
     result?.hybrid_strategy
-    || (enabled ? 'MODEL_FIRST_RULE_FALLBACK' : 'RULE_ONLY')
+    || (enabled ? 'RULE_FIRST_MODEL_FALLBACK' : 'RULE_ONLY')
   );
   const rawAcceptedOutput = String(
     result?.accepted_output_engine
@@ -273,9 +278,49 @@ function modelMetricsFromResult(result) {
     return [request, file, time].filter(Boolean).join(', ');
   }).filter(Boolean);
   const budgetSummary = [...new Set(budgetSummaryParts)].join('; ');
-  const candidates = Array.isArray(result?.model_candidates)
-    ? result.model_candidates.filter(item => typeof item?.candidate_code === 'string' && item.candidate_code)
+  const allCandidates = Array.isArray(result?.model_candidates)
+    ? result.model_candidates.filter(item => (
+      typeof item?.candidate_code === 'string' && item.candidate_code
+    ))
     : [];
+  const candidates = allCandidates.filter(item => (
+      String(item?.status || '').toUpperCase() === 'ACCEPTED'
+  ));
+  const modelAttemptCount = Math.max(0, Number(result?.model_attempt_count) || 0);
+  const modelCandidateCount = Math.max(
+    allCandidates.length,
+    Number(result?.model_candidate_count) || 0,
+  );
+  const modelActionCount = Math.max(0, Number(result?.model_action_count) || 0);
+  const checkpointPassedCount = allCandidates.filter(item => (
+    ['ACCEPTED', 'PASSED_ACTION_CHECKPOINT_FILE_REJECTED']
+      .includes(String(item?.status || '').toUpperCase())
+  )).length;
+  const percent = (numerator, denominator) => (
+    denominator > 0 ? Math.round((numerator / denominator) * 1000) / 10 : null
+  );
+  const evaluation = result?.model_evaluation && typeof result.model_evaluation === 'object'
+    ? result.model_evaluation
+    : {
+      evaluable: modelAttemptCount > 0,
+      model_attempts: modelAttemptCount,
+      generated_candidates: modelCandidateCount,
+      action_checkpoint_passed_candidates: checkpointPassedCount,
+      accepted_model_actions: modelActionCount,
+      candidate_generation_rate_percent: percent(modelCandidateCount, modelAttemptCount),
+      action_checkpoint_pass_rate_percent: percent(checkpointPassedCount, modelCandidateCount),
+      accepted_action_rate_percent: percent(modelActionCount, modelCandidateCount),
+      final_model_output_retained: result?.model_output_retained === true && used,
+      validated_quality_score_percent: (
+        result?.model_output_retained === true && used ? accuracy : null
+      ),
+      total_generation_seconds: Math.max(0, Number(result?.model_generation_seconds) || 0),
+      average_generation_seconds_per_attempt: (
+        modelAttemptCount > 0
+          ? (Math.max(0, Number(result?.model_generation_seconds) || 0) / modelAttemptCount)
+          : null
+      ),
+    };
   const fallbackSummary = Array.isArray(result?.model_fallback_details?.failed_validation_summary)
     ? result.model_fallback_details.failed_validation_summary
     : [];
@@ -302,14 +347,15 @@ function modelMetricsFromResult(result) {
     accuracy,
     engine: rawEngine.replaceAll('_', ' '),
     status: rawStatus.replaceAll('_', ' '),
-    actionCount: Math.max(0, Number(result?.model_action_count) || 0),
-    attemptCount: Math.max(0, Number(result?.model_attempt_count) || 0),
+    actionCount: modelActionCount,
+    attemptCount: modelAttemptCount,
     backend: String(result?.model_backend || 'N/A').replaceAll('_', ' ').toUpperCase(),
     device: String(result?.model_device || 'N/A').toUpperCase(),
     runtimeCacheHit: result?.model_runtime_cache_hit === true,
     modelLoadSeconds: Math.max(0, Number(result?.model_load_seconds) || 0),
     modelGenerationSeconds: Math.max(0, Number(result?.model_generation_seconds) || 0),
     candidates,
+    evaluation,
     budgetSummary,
     context: modes.length ? modes.join(', ').replaceAll('_', ' ') : 'N/A',
     strategy: rawStrategy.replaceAll('_', ' '),
@@ -323,6 +369,24 @@ function modelMetricsFromResult(result) {
     ])],
     reasons: [...new Set([...reasons, ...ineligibleReasons, ...budgetReasons])],
   };
+}
+
+function transformationSourceLabel(result) {
+  if (!result || result.transformation_applied !== true) return '';
+
+  const modelUsed = result.model_used === true;
+  const ruleUsed = (
+    Number(result.rule_action_count) > 0
+    || result.rule_fallback_used === true
+    || ['RULE_BASED', 'MIXED'].includes(String(result.accepted_output_engine || '').toUpperCase())
+  );
+
+  if (modelUsed && ruleUsed) return 'Code Transformed by AI + Rule-based';
+  if (modelUsed) return 'Code Transformed by AI';
+  if (ruleUsed || result.transformation_engine === 'RULE_BASED') {
+    return 'Code Transformed by Rule-based';
+  }
+  return '';
 }
 
 const DEFAULT_TIMELINE = buildPipelineTimeline({
@@ -1348,11 +1412,20 @@ function ValidationChecklist({ validation }) {
           : label === 'Invariant Mining'
             ? String(details.status || (item.passed ? 'passed' : 'failed'))
             : (item.passed ? 'passed' : 'failed');
+        const degradedStaticPass = label === 'Behavioral Preservation'
+          && status.toLowerCase() === 'degraded_static_passed'
+          && item.passed;
+        const validationPassed = item.passed === true;
 
-        let cls = status === 'passed' ? 'pass' : status === 'skipped' ? 'neutral' : 'fail';
-        let icon = status === 'passed' ? '' : status === 'skipped' ? 'o' : 'x';
-
-        if (status !== 'skipped' && Number.isFinite(numericScore)) {
+        // `passed` is the final SCTVA decision. A high similarity score can
+        // coexist with a failed action-specific structural proof, so it must
+        // never recolor a failed validation as a success.
+        let cls = validationPassed ? 'pass' : 'fail';
+        let icon = validationPassed ? '' : 'x';
+        if (status === 'skipped') {
+          cls = 'neutral';
+          icon = 'o';
+        } else if (validationPassed && !degradedStaticPass && Number.isFinite(numericScore)) {
           if (numericScore > 0.9) {
             cls = 'pass';
             icon = '';
@@ -1365,11 +1438,26 @@ function ValidationChecklist({ validation }) {
           }
         }
 
-        const message = label === 'Behavioral Preservation'
+        let message = label === 'Behavioral Preservation'
           ? (details.fingerprint_summary || item.message || '')
           : label === 'Invariant Mining'
             ? (details.summary || details.reason || item.message || '')
             : (item.message || '');
+        if (label === 'Structural Equivalence') {
+          message = String(message).replace(
+            /\s+with score\s+\d+(?:\.\d+)?\s*>=\s*\d+(?:\.\d+)?\.?\s*$/i,
+            ''
+          );
+        }
+        const resultText = degradedStaticPass
+          ? 'Score: 1.00 · Behavioral checks passed.'
+          : validationPassed && Number.isFinite(numericScore)
+            ? `Score: ${numericScore.toFixed(2)} · ${message}`
+            : status === 'skipped'
+              ? `Validation skipped · ${message}`
+              : validationPassed
+                ? `Validation passed · ${message}`
+                : `Validation failed · ${message}`;
 
         return (
           <div key={label} className={`sctva-check-item ${cls}`}>
@@ -1377,7 +1465,7 @@ function ValidationChecklist({ validation }) {
             <div>
               <strong>{label}</strong>
               <small>
-                {`Score: ${typeof item.score === 'number' ? item.score.toFixed(2) : '--'} · ${message}`}
+                {resultText}
               </small>
               {label === 'Invariant Mining' ? invariantExtra(details) : null}
             </div>
@@ -1950,24 +2038,10 @@ function buildRdpPlanFileName(plan) {
   return `RDP Agent plan: ${planId}.json`;
 }
 
-function isBrowserRefreshNavigation() {
-  if (typeof window === 'undefined' || !window.performance) return false;
-
-  const navigationEntry = window.performance.getEntriesByType?.('navigation')?.[0];
-  if (navigationEntry?.type) return navigationEntry.type === 'reload';
-
-  return window.performance.navigation?.type === 1;
-}
-
 function readSctvaSessionState() {
   if (typeof window === 'undefined') return null;
 
   try {
-    if (isBrowserRefreshNavigation()) {
-      window.sessionStorage.removeItem(SCTVA_AGENT_SESSION_KEY);
-      return null;
-    }
-
     const rawState = window.sessionStorage.getItem(SCTVA_AGENT_SESSION_KEY);
     return rawState ? JSON.parse(rawState) : null;
   } catch {
@@ -2482,16 +2556,39 @@ function buildRunSignature({
   return JSON.stringify({
     requestId: String(requestId || '').trim(),
     language: String(language || '').trim().toLowerCase(),
-    sourceFiles: sourceFiles.map(file => ({
-      name: file.name,
-      language: file.language,
-      origin: file.origin,
-      sourceMode: file.sourceMode,
-      code: file.code,
-    })),
-    refactoringPlanText,
+    sourceFiles: [...sourceFiles]
+      .map(file => ({
+        name: file.name,
+        language: file.language,
+        code: file.code,
+      }))
+      .sort((left, right) => left.name.localeCompare(right.name)),
+    refactoringPlanText: canonicalJsonText(refactoringPlanText),
     executionOptionsText,
   });
+}
+
+function canonicalJsonText(value) {
+  try {
+    return JSON.stringify(JSON.parse(value || '{}'));
+  } catch {
+    return String(value || '');
+  }
+}
+
+function sourceFilesHaveSameInputs(leftFiles, rightFiles) {
+  if (!Array.isArray(leftFiles) || !Array.isArray(rightFiles)) return false;
+  if (leftFiles.length !== rightFiles.length) return false;
+
+  const inputKey = files => JSON.stringify([...files]
+    .map(file => ({
+      name: file.name,
+      language: file.language,
+      code: file.code,
+    }))
+    .sort((left, right) => left.name.localeCompare(right.name)));
+
+  return inputKey(leftFiles) === inputKey(rightFiles);
 }
 
 export default function SCTVAAgentPage() {
@@ -2683,7 +2780,11 @@ export default function SCTVAAgentPage() {
   const activeSourceName = activeSource ? activeSource.name : '';
   const activeSourceCode = activeSource ? activeSource.code : '';
   const activeModelCandidates = Array.isArray(activeFileResult?.model_candidates)
-    ? activeFileResult.model_candidates.filter(item => typeof item?.candidate_code === 'string' && item.candidate_code)
+    ? activeFileResult.model_candidates.filter(item => (
+      String(item?.status || '').toUpperCase() === 'ACCEPTED'
+      && typeof item?.candidate_code === 'string'
+      && item.candidate_code
+    ))
     : [];
   const selectedCandidateIndex = codeView.startsWith('candidate:')
     ? Number(codeView.slice('candidate:'.length))
@@ -2695,6 +2796,7 @@ export default function SCTVAAgentPage() {
   const confidenceFileDisplay = activeFileDisplay === 'No file selected'
     ? activeFileDisplay
     : activeFileDisplay.split(/[\\/]/).filter(Boolean).pop() || activeFileDisplay;
+  const transformationSource = transformationSourceLabel(activeFileResult);
   const fileTabs = fileResults.length
     ? fileResults.map(item => {
       const status = fileResultStatus(item);
@@ -2872,19 +2974,31 @@ export default function SCTVAAgentPage() {
         reconstructedCount,
       });
       setCuqaImportWarning(warning);
+      const canRestoreCachedResult = (
+        fileResults.length > 0
+        && sourceFilesHaveSameInputs(loaded, sourceFiles)
+        && Boolean(lastRunSignature)
+      );
+      const nextActiveFileName = loaded.some(file => file.name === activeFileName)
+        ? activeFileName
+        : loaded[0]?.name || '';
       setSourceFiles(loaded);
       setSourceFileName(`CUQA workspace: ${selectedPaths.length} file${selectedPaths.length === 1 ? '' : 's'} selected.${limitedCopy}`);
-      setActiveFileName(loaded[0]?.name || '');
+      setActiveFileName(nextActiveFileName);
       setLanguage(loaded.find(file => file.code)?.language || loaded[0]?.language || 'java');
-      setFileResults([]);
-      setDiffRows([]);
-      setFinalCode('');
-      setRawResponse('{}');
-      setValidation(null);
-      setSafetyMessages([]);
-      setAdditions(0);
-      setDeletions(0);
-      setArtifactStorageInfo(null);
+      if (!canRestoreCachedResult) {
+        setFileResults([]);
+        setDiffRows([]);
+        setFinalCode('');
+        setRawResponse('{}');
+        setValidation(null);
+        setSafetyMessages([]);
+        setAdditions(0);
+        setDeletions(0);
+        setArtifactStorageInfo(null);
+      } else {
+        pushLog('INFO', 'Restored the previous SCTVA result because source files are unchanged.');
+      }
 
       if (warning) {
         if (!silent) showStatus(warning, 'warn');
@@ -2941,15 +3055,33 @@ export default function SCTVAAgentPage() {
     }
 
     const planText = JSON.stringify(plan, null, 2);
+    const planIsUnchanged = (
+      Boolean(refactoringPlanText.trim())
+      && canonicalJsonText(refactoringPlanText) === canonicalJsonText(planText)
+      && fileResults.length > 0
+      && Boolean(lastRunSignature)
+    );
     setRefactoringPlanText(planText);
     setPlanFileName(buildRdpPlanFileName(plan));
-    renderPlanTimeline(plan);
+    if (!planIsUnchanged) {
+      renderPlanTimeline(plan);
+    }
     setErrorMessage('');
 
     if (!silent) {
-      showStatus('Imported refactoring plan from RDP Agent.', 'success');
+      showStatus(
+        planIsUnchanged
+          ? 'Restored the previous SCTVA result; the RDP plan is unchanged.'
+          : 'Imported refactoring plan from RDP Agent.',
+        'success'
+      );
     }
-    pushLog('INFO', 'Loaded refactoring plan from RDP Agent.');
+    pushLog(
+      'INFO',
+      planIsUnchanged
+        ? 'RDP plan unchanged; preserved the previous SCTVA transformation result.'
+        : 'Loaded refactoring plan from RDP Agent.'
+    );
     return true;
   }
 
@@ -3254,6 +3386,7 @@ export default function SCTVAAgentPage() {
       model_fallback_details: data.model_fallback_details,
       model_final_validation_details: data.model_final_validation_details,
       model_final_validation_failures: data.model_final_validation_failures,
+      model_evaluation: data.model_evaluation,
       source_mode: data.source_mode,
       origin: data.origin,
       refactored_code: data.refactored_code,
@@ -3410,9 +3543,10 @@ export default function SCTVAAgentPage() {
         pushLog('ERROR', message);
         return;
       }
-      setErrorMessage(error.message);
-      showStatus('Execution failed.', 'error');
-      pushLog('ERROR', error.message);
+      const message = error.message || 'Execution failed.';
+      setErrorMessage(message);
+      showStatus(message, 'error');
+      pushLog('ERROR', message);
     } finally {
       setIsRunning(false);
     }
@@ -3887,70 +4021,9 @@ export default function SCTVAAgentPage() {
 
           <p className="sctva-confidence-copy">{confidenceCopy}</p>
 
-          <div className={`sctva-model-metric ${modelMetrics.used ? modelMetrics.retained ? 'used' : 'rolled-back' : modelMetrics.attempted ? 'rejected' : 'rule-based'}`}>
-            <div className="sctva-model-metric-head">
-              <span>Model Validated Accuracy</span>
-              <strong>{`${Math.round(modelMetrics.accuracy)}%`}</strong>
-            </div>
-            <div
-              className="sctva-model-progress"
-              role="progressbar"
-              aria-label="Local code model validated accuracy"
-              aria-valuemin="0"
-              aria-valuemax="100"
-              aria-valuenow={Math.round(modelMetrics.accuracy)}
-            >
-              <span style={{ width: `${modelMetrics.accuracy}%` }} />
-            </div>
-            <strong className="sctva-model-status">{modelMetrics.status}</strong>
-            <p>
-              {modelMetrics.used && modelMetrics.retained
-                ? 'Local code-model output was retained after SCTVA validation.'
-                : modelMetrics.used
-                  ? 'The local code model produced the candidate, but final validation rolled the output back.'
-                : modelMetrics.status === 'MODEL ACTION BUDGET EXHAUSTED'
-                  ? 'Generation was skipped because the configured model action budget was reached.'
-                : modelMetrics.ruleFallbackUsed
-                  ? 'The model could not provide an accepted candidate, so SCTVA restarted from the original source and used the validated rule-based result.'
-                : modelMetrics.attempted
-                  ? 'The local code model was attempted, but its output was rejected and rule-based output was used.'
-                  : modelMetrics.status === 'MODEL SKIPPED SAFETY PRECONDITION'
-                    ? 'Model inference was skipped because SCTVA proved this planned target unsafe or ambiguous before generation.'
-                  : modelMetrics.enabled
-                    ? 'The local code model was enabled, but no eligible model action was executed for this file.'
-                    : 'The local code model was disabled for this request.'}
-            </p>
-            {modelMetrics.reasons.length > 0 && (
-              <p className="sctva-model-reason">
-                {`Reason: ${modelMetrics.reasons.join(', ').replaceAll('_', ' ')}`}
-              </p>
-            )}
-            {modelMetrics.validationFailures.length > 0 && (
-              <p className="sctva-model-reason">
-                {`Rejected by: ${modelMetrics.validationFailures.join(' | ')}`}
-              </p>
-            )}
-            <dl className="sctva-model-details">
-              <div><dt>Engine</dt><dd>{modelMetrics.engine}</dd></div>
-              {modelMetrics.modelProvider && (
-                <div><dt>Configured model</dt><dd>{modelMetrics.modelProvider}</dd></div>
-              )}
-              <div><dt>Strategy</dt><dd>{modelMetrics.strategy}</dd></div>
-              <div><dt>Accepted output</dt><dd>{modelMetrics.acceptedOutput}</dd></div>
-              <div><dt>Model attempts</dt><dd>{modelMetrics.attemptCount}</dd></div>
-              <div><dt>Candidates generated</dt><dd>{modelMetrics.candidates.length}</dd></div>
-              <div><dt>Accepted model actions</dt><dd>{modelMetrics.actionCount}</dd></div>
-              <div><dt>Backend</dt><dd>{modelMetrics.backend}</dd></div>
-              <div><dt>Device</dt><dd>{modelMetrics.device}</dd></div>
-              <div><dt>Runtime cache</dt><dd>{modelMetrics.runtimeCacheHit ? 'HIT' : 'MISS'}</dd></div>
-              <div><dt>Model load</dt><dd>{modelMetrics.modelLoadSeconds.toFixed(2)}s</dd></div>
-              <div><dt>Model generation</dt><dd>{modelMetrics.modelGenerationSeconds.toFixed(2)}s</dd></div>
-              {modelMetrics.budgetSummary && (
-                <div><dt>Budget used</dt><dd>{modelMetrics.budgetSummary}</dd></div>
-              )}
-              <div><dt>Context</dt><dd>{modelMetrics.context}</dd></div>
-            </dl>
-          </div>
+          {transformationSource ? (
+            <p className="sctva-transformation-source">{transformationSource}</p>
+          ) : null}
 
           <div className="sctva-mini-metrics">
             <div>

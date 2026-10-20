@@ -8,7 +8,7 @@ import re
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Any, Dict, List, Sequence
+from typing import Any, Dict, List
 
 if __name__ == "__main__" and not __package__:
     # Allow `python sctva/agent.py` to resolve the package-relative imports below.
@@ -46,7 +46,8 @@ from .constants import (
     PARAMETER_OBJECT_ACTION_BY_LANGUAGE,
 )
 from .models import SCTVAResult, TransformationLogEntry, ValidationStepResult
-from .model_assistance import CodeT5CandidateTransformer
+from .model_assistance import QwenCandidateTransformer
+from .model_assistance.evaluation import build_model_evaluation
 from .reporting.safety_reporter import SafetyReporter
 from .rollback.rollback_manager import RollbackManager
 from .scoring.confidence_scorer import ConfidenceScorer
@@ -71,6 +72,9 @@ from .validators.syntax_validator import SyntaxValidator
 class SafeCodeTransformationValidationAgent:
     """Runs transformation + multi-level validation + rollback in one pipeline."""
 
+    # ------------------------------------------------------------------
+    # Lifecycle and request entry points
+    # ------------------------------------------------------------------
     def __init__(self) -> None:
         self.transformer = TransformationEngine()
         self.syntax_validator = SyntaxValidator()
@@ -110,7 +114,7 @@ class SafeCodeTransformationValidationAgent:
         """Execute validated request contract."""
         # The adapter never alters the RDP plan or bypasses SCTVA validation.
         # Its per-request action budget also bounds CPU inference work.
-        model_assistant = CodeT5CandidateTransformer.from_execution_options(
+        model_assistant = QwenCandidateTransformer.from_execution_options(
             request.execution_options
         )
         file_entries = self._collect_source_files(request)
@@ -286,7 +290,7 @@ class SafeCodeTransformationValidationAgent:
                 return index, file_result
 
             model_usage_before = (
-                model_assistant.usage_snapshot()
+                model_assistant.usage_snapshot(file_entry.file_name)
                 if model_assistant is not None
                 else None
             )
@@ -298,12 +302,12 @@ class SafeCodeTransformationValidationAgent:
                 model_assistant=model_assistant,
             )
             if model_assistant is not None and model_usage_before is not None:
-                model_usage_after = model_assistant.usage_snapshot()
+                model_usage_after = model_assistant.usage_snapshot(file_entry.file_name)
                 file_result["model_generation_seconds"] = round(
                     max(
                         0.0,
-                        float(model_usage_after["generation_seconds"])
-                        - float(model_usage_before["generation_seconds"]),
+                        float(model_usage_after["file_generation_seconds"])
+                        - float(model_usage_before["file_generation_seconds"]),
                     ),
                     3,
                 )
@@ -313,8 +317,8 @@ class SafeCodeTransformationValidationAgent:
                 )
                 file_result["model_file_attempts_consumed"] = max(
                     0,
-                    int(model_usage_after["attempt_count"])
-                    - int(model_usage_before["attempt_count"]),
+                    int(model_usage_after["file_attempt_count"])
+                    - int(model_usage_before["file_attempt_count"]),
                 )
             return index, file_result
 
@@ -322,11 +326,10 @@ class SafeCodeTransformationValidationAgent:
         # A coordinated Java Parameter Object edit shares a repository-wide
         # caller set.  Execute its file actions deterministically so its audit
         # trail and transaction decision cannot race other file workers.
-        max_workers = 1 if (
-            coordinated_parameter_transactions or model_assistant is not None
-        ) else self._parallel_file_workers(
+        max_workers = 1 if coordinated_parameter_transactions else self._parallel_file_workers(
             request,
             len(file_entries),
+            model_assisted=model_assistant is not None,
         )
 
         if max_workers <= 1:
@@ -528,7 +531,7 @@ class SafeCodeTransformationValidationAgent:
             and str(result.get("hybrid_strategy") or "").strip()
         })
         configured_model_mode = str(
-            getattr(request.execution_options, "codet5_mode", "primary") or "primary"
+            getattr(request.execution_options, "qwen_mode", "fallback") or "fallback"
         ).strip().lower()
         hybrid_strategy = (
             hybrid_strategies[0]
@@ -732,6 +735,16 @@ class SafeCodeTransformationValidationAgent:
             "file_results": file_results,
             "transformed_workspace_files": all_workspace_files,
         }
+        res_dict["model_evaluation"] = build_model_evaluation(
+            model_attempt_count=res_dict["model_attempt_count"],
+            model_candidate_count=res_dict["model_candidate_count"],
+            model_action_count=res_dict["model_action_count"],
+            model_generation_seconds=res_dict["model_generation_seconds"],
+            model_validated_accuracy=res_dict["model_validated_accuracy"],
+            model_output_retained=res_dict["model_output_retained"],
+            model_used=res_dict["model_used"],
+            model_candidates=res_dict["model_candidates"],
+        )
         if target_res and isinstance(target_res, dict):
             res_dict["file_name"] = target_res.get("file_name")
             res_dict["source_mode"] = target_res.get("source_mode")
@@ -753,6 +766,1219 @@ class SafeCodeTransformationValidationAgent:
             )
         return res_dict
 
+    # ------------------------------------------------------------------
+    # Per-file execution and model validation
+    # ------------------------------------------------------------------
+    def _execute_single_file(
+        self,
+        *,
+        request: SCTVARequestContract,
+        file_entry: SourceFileContract,
+        actions: List[RefactoringAction],
+        project_files: List[Dict[str, Any]],
+        model_assistant: QwenCandidateTransformer | None = None,
+        model_validation_feedback: Dict[int, str] | None = None,
+        allow_model_validation_repair: bool = True,
+    ) -> Dict[str, Any]:
+        language = (file_entry.language or request.language).strip().lower()
+        rule_first_model_fallback = bool(
+            model_assistant is not None
+            and model_assistant.settings.mode == "fallback"
+        )
+        # In fallback mode the initial pass is deliberately rule-only.  Qwen
+        # is eligible only after the complete rule output fails final SCTVA
+        # validation below; passing it into the engine here would invoke it
+        # early for a single action with zero replacements.
+        engine_model_assistant = (
+            None if rule_first_model_fallback else model_assistant
+        )
+
+        source_is_reconstructed = file_entry.source_mode != "raw"
+        executable_actions = [
+            action for action in actions if action.action_type != ACTION_NOOP
+        ]
+        if source_is_reconstructed and executable_actions:
+            transformed_code = file_entry.source_code
+            skip_warning = (
+                "Action skipped because this file was imported from CUQA as "
+                "reconstructed placeholder source. Accurate transformation requires raw source text."
+            )
+            validation_actions: List[RefactoringAction] = []
+            transformation_log = [
+                TransformationLogEntry(
+                    action_index=index,
+                    action_type=action.action_type,
+                    replacements_count=0,
+                    warnings=[*action.warnings, skip_warning],
+                )
+                for index, action in enumerate(actions, start=1)
+            ]
+            transform_warnings = [skip_warning]
+        else:
+            transformed_code, transformation_log, transform_warnings = self.transformer.apply_actions(
+                language=language,
+                source_code=file_entry.source_code,
+                actions=actions,
+                strict_mode=request.execution_options.strict_mode,
+                project_source_files=project_files,
+                current_file_name=file_entry.file_name,
+                repository_complete=bool(request.source_files),
+                behavior_tests=request.refactoring_plan.behavior_tests,
+                model_assistant=engine_model_assistant,
+                model_candidate_validator=(
+                    lambda original, candidate, action: self._validate_model_action_candidate(
+                        language=language,
+                        original_code=original,
+                        candidate_code=candidate,
+                        action=action,
+                        timeout_seconds=request.execution_options.timeout_seconds,
+                        behavior_tests=request.refactoring_plan.behavior_tests,
+                        enable_behavior_tests=request.execution_options.enable_behavior_tests,
+                        strict_mode=request.execution_options.strict_mode,
+                        project_source_files=project_files,
+                        current_file_name=file_entry.file_name,
+                    )
+                    if engine_model_assistant is not None
+                    else None
+                ),
+                model_validation_feedback=model_validation_feedback,
+            )
+            validation_actions = self._actions_with_effective_replacements(
+                actions,
+                transformation_log,
+            )
+
+        transformation_attempted = transformed_code != file_entry.source_code
+        total_replacements = sum(
+            entry.replacements_count for entry in transformation_log
+        )
+        safely_not_applicable_logs = [
+            entry
+            for entry in transformation_log
+            if entry.action_type != ACTION_NOOP
+            and str(entry.metadata.get("status") or "").lower()
+            in {"not_applicable", "already_applied", "already_handled", "satisfied"}
+        ]
+        all_executable_actions_safely_not_applicable = (
+            bool(executable_actions)
+            and len(safely_not_applicable_logs) == len(executable_actions)
+        )
+        all_executable_actions_already_handled = (
+            bool(executable_actions)
+            and len(safely_not_applicable_logs) == len(executable_actions)
+            and all(
+                str(entry.metadata.get("status") or "").lower()
+                in {"already_applied", "already_handled", "satisfied"}
+                for entry in safely_not_applicable_logs
+            )
+        )
+
+        if not transformation_attempted:
+            if all_executable_actions_safely_not_applicable:
+                transform_warnings.append(
+                    "No source-code change was required: every executable action was safely classified as not applicable or already satisfied."
+                )
+            elif executable_actions:
+                transform_warnings.append(
+                    "No source-code change was applied: every executable action produced zero replacements."
+                )
+            else:
+                transform_warnings.append(
+                    "No source-code change was applied: the plan contained only noop actions."
+                )
+            if file_entry.source_mode != "raw":
+                transform_warnings.append(
+                    "This file was imported from CUQA as reconstructed placeholder source, "
+                    "not raw file text. SCTVA preserved it because RDP line/literal actions "
+                    "cannot be applied accurately without the original source code."
+                )
+
+        syntax_step = self.syntax_validator.validate(
+            language=language,
+            source_code=transformed_code,
+            # A coordinated caller can legitimately depend on the target class
+            # in another imported file.  It is compiled with that full source
+            # set by the transaction finalizer below.
+            require_compilation=(
+                request.execution_options.require_compilation
+                and language != "c"
+                and not any(
+                    action.action_type == ACTION_UPDATE_JAVA_PARAMETER_OBJECT_CALL_SITE
+                    for action in actions
+                )
+            ),
+            timeout_seconds=request.execution_options.timeout_seconds,
+        )
+
+        if (
+            language == "c"
+            and syntax_step.passed
+            and request.execution_options.require_compilation
+        ):
+            candidate_c_repository = []
+            target_path = self._normalize_path(file_entry.file_name)
+            for project_file in project_files:
+                project_name = str(
+                    project_file.get("file_name") or project_file.get("file_path") or ""
+                )
+                candidate_c_repository.append({
+                    **project_file,
+                    "source_code": (
+                        transformed_code
+                        if self._normalize_path(project_name) == target_path
+                        else str(project_file.get("source_code") or "")
+                    ),
+                })
+            repository_syntax = self.syntax_validator.validate_c_project(
+                candidate_c_repository,
+                require_compilation=True,
+                timeout_seconds=request.execution_options.timeout_seconds,
+            )
+            syntax_step.details["repository_compiler_validation"] = (
+                repository_syntax.to_dict()
+            )
+            syntax_step.details["compiler_validation"] = (
+                repository_syntax.details.get("compiler_validation", "UNAVAILABLE")
+            )
+            syntax_step.details["compiler"] = repository_syntax.details.get("compiler")
+            if repository_syntax.details.get("warnings"):
+                syntax_step.details.setdefault("warnings", []).extend(
+                    repository_syntax.details["warnings"]
+                )
+            if not repository_syntax.passed:
+                syntax_step.passed = False
+                syntax_step.score = 0.0
+                syntax_step.message = repository_syntax.message
+                syntax_step.details.setdefault("diagnostics", []).extend(
+                    repository_syntax.details.get("diagnostics", [])
+                )
+
+        structural_step = self.structural_validator.validate(
+            language=language,
+            original_code=file_entry.source_code,
+            transformed_code=transformed_code,
+            actions=validation_actions,
+        )
+
+        coordinated_call_site_only = (
+            language == "java"
+            and bool(actions)
+            and all(
+                action.action_type == ACTION_UPDATE_JAVA_PARAMETER_OBJECT_CALL_SITE
+                for action in actions
+            )
+        )
+        coordinated_parameter_target = (
+            language == "java"
+            and any(
+                action.action_type == ACTION_INTRODUCE_JAVA_PARAMETER_OBJECT
+                and action.parameters.get("coordinated_project_transaction_id")
+                for action in actions
+            )
+        )
+        if coordinated_call_site_only:
+            # The caller now depends on the target's new nested parameter
+            # object, so isolated probes would execute an intentionally
+            # incomplete one-file compilation unit.  Repository compilation
+            # is performed atomically after every participating file changes.
+            behavioral_step = ValidationStepResult(
+                name="behavioral",
+                passed=True,
+                score=1.0,
+                message="Java coordinated caller behavior deferred to repository validation.",
+                details={"mode": "coordinated_java_repository_validation"},
+            )
+            invariant_step = ValidationStepResult(
+                name="invariant",
+                passed=True,
+                score=1.0,
+                message="Java coordinated caller invariants deferred to repository validation.",
+                details={"mode": "coordinated_java_repository_validation"},
+            )
+        else:
+            behavioral_step = self.behavioral_validator.validate(
+                language=language,
+                original_code=file_entry.source_code,
+                transformed_code=transformed_code,
+                behavior_tests=request.refactoring_plan.behavior_tests,
+                enable_behavior_tests=request.execution_options.enable_behavior_tests,
+                actions=validation_actions,
+                strict_mode=request.execution_options.strict_mode,
+                # The imported project snapshot still contains the original
+                # caller files while this target is being validated.  Probe the
+                # target in isolation here; the final transaction stage then
+                # compiles the fully rewritten repository together.
+                project_source_files=[] if coordinated_parameter_target else project_files,
+                current_file_name=file_entry.file_name,
+                structural_validation_passed=structural_step.passed,
+            )
+
+            invariant_step = self.invariant_miner.mine(
+                language=language,
+                behavioral_step=behavioral_step,
+                actions=validation_actions,
+                strict_mode=request.execution_options.strict_mode,
+            )
+
+        rollback_occurred, rollback_reason = self.rollback_manager.evaluate(
+            [syntax_step, structural_step, behavioral_step, invariant_step],
+            rollback_on_behavior_failure=request.execution_options.rollback_on_behavior_failure,
+        )
+
+        selective_replay = self._attempt_selective_java_parameter_object_replay(
+            request=request,
+            file_entry=file_entry,
+            actions=actions,
+            project_files=project_files,
+            structural_step=structural_step,
+            rollback_occurred=rollback_occurred,
+        )
+        if selective_replay is not None:
+            (
+                transformed_code,
+                transformation_log,
+                transform_warnings,
+                validation_actions,
+                syntax_step,
+                structural_step,
+                behavioral_step,
+                invariant_step,
+            ) = selective_replay
+            rollback_occurred = False
+            rollback_reason = ""
+            transform_warnings.append(
+                "Selective rollback preserved independent accepted actions after an invalid Java Parameter Object action was removed."
+            )
+
+        if rollback_occurred and rule_first_model_fallback and model_assistant is not None:
+            failed_validation_steps = [
+                step
+                for step in (
+                    syntax_step,
+                    structural_step,
+                    behavioral_step,
+                    invariant_step,
+                )
+                if not step.passed
+            ]
+            failed_steps = [step.name for step in failed_validation_steps]
+            failed_validation_details = [
+                {
+                    "name": step.name,
+                    "message": step.message,
+                    "score": step.score,
+                    "details": step.details,
+                }
+                for step in failed_validation_steps
+            ]
+            repair_summary = " | ".join(
+                self._model_validation_step_feedback(step)
+                for step in failed_validation_steps
+            )
+            retry_feedback = {
+                index: (
+                    "The deterministic rule-based transformation failed final SCTVA "
+                    "validation. Generate a complete safe replacement for this planned "
+                    "action. "
+                    + repair_summary
+                )
+                for index, action in enumerate(actions, start=1)
+                if action.action_type != ACTION_NOOP
+            }
+
+            # Retry from the original source, not from the rejected rule
+            # output. The clone keeps its own attempt counters while using the
+            # same loaded Qwen runtime cache; accounting is merged afterwards.
+            retry_assistant = model_assistant.clone_for_mode("primary")
+            try:
+                retry_result = self._execute_single_file(
+                    request=request,
+                    file_entry=file_entry,
+                    actions=actions,
+                    project_files=project_files,
+                    model_assistant=retry_assistant,
+                    model_validation_feedback=retry_feedback,
+                    allow_model_validation_repair=True,
+                )
+            finally:
+                model_assistant.absorb_usage_from(retry_assistant)
+
+            retry_result["hybrid_strategy"] = "RULE_FIRST_MODEL_FALLBACK"
+            retry_result["rule_validation_failed"] = True
+            retry_result["rule_validation_failure_steps"] = failed_steps
+            retry_result["rule_validation_failure_details"] = failed_validation_details
+            retry_result["model_fallback_details"] = {
+                "strategy": "RULE_FIRST_MODEL_FALLBACK",
+                "trigger": "RULE_FINAL_VALIDATION_FAILED",
+                "provider": model_assistant.provider,
+                "failed_validation_steps": failed_steps,
+                "failed_validation_details": failed_validation_details,
+                "failed_validation_summary": [
+                    f"{item['name']}: {item['message']}"
+                    for item in failed_validation_details
+                    if str(item.get("message") or "").strip()
+                ],
+                "rule_rollback_reason": str(rollback_reason or ""),
+                "accepted_output_engine": retry_result.get(
+                    "accepted_output_engine", "NO_CHANGE"
+                ),
+            }
+            retry_report = retry_result.get("safety_report")
+            if isinstance(retry_report, dict):
+                retry_report["model_fallback"] = retry_result["model_fallback_details"]
+                messages = retry_report.setdefault("human_messages", [])
+                if isinstance(messages, list):
+                    messages.append(
+                        "The rule-based output failed final SCTVA validation, so Qwen "
+                        "retried from the original source."
+                    )
+            return retry_result
+
+        model_candidate_applied = any(
+            entry.replacements_count > 0
+            and (entry.metadata or {}).get("model_assisted") is True
+            for entry in transformation_log
+        )
+        bundle_repair_already_attempted = any(
+            bool(
+                ((entry.metadata or {}).get("model_assistance") or {}).get(
+                    "bundle_repair_attempted"
+                )
+            )
+            for entry in transformation_log
+            if isinstance((entry.metadata or {}).get("model_assistance"), dict)
+        )
+        if (
+            rollback_occurred
+            and model_candidate_applied
+            and model_assistant is not None
+            and model_assistant.settings.mode == "primary"
+        ):
+            failed_steps = [
+                step.name
+                for step in (
+                    syntax_step,
+                    structural_step,
+                    behavioral_step,
+                    invariant_step,
+                )
+                if not step.passed
+            ]
+            failed_validation_details = [
+                {
+                    "name": step.name,
+                    "message": step.message,
+                    "score": step.score,
+                    "details": step.details,
+                }
+                for step in (
+                    syntax_step,
+                    structural_step,
+                    behavioral_step,
+                    invariant_step,
+                )
+                if not step.passed
+            ]
+            repair_summary = " | ".join(
+                self._model_validation_step_feedback(step)
+                for step in (
+                    syntax_step,
+                    structural_step,
+                    behavioral_step,
+                    invariant_step,
+                )
+                if not step.passed
+            )
+            repair_feedback = {
+                entry.action_index: (
+                    "The previous model-generated file failed final SCTVA validation. "
+                    + repair_summary
+                )
+                for entry in transformation_log
+                if entry.replacements_count > 0
+                and (entry.metadata or {}).get("model_assisted") is True
+            }
+            if (
+                allow_model_validation_repair
+                and not bundle_repair_already_attempted
+                and repair_feedback
+                and model_assistant.can_attempt(file_entry.file_name)
+            ):
+                repaired_result = self._execute_single_file(
+                    request=request,
+                    file_entry=file_entry,
+                    actions=actions,
+                    project_files=project_files,
+                    model_assistant=model_assistant,
+                    model_validation_feedback=repair_feedback,
+                    allow_model_validation_repair=False,
+                )
+                if (
+                    repaired_result.get("model_used") is True
+                    and repaired_result.get("model_output_retained") is True
+                    and repaired_result.get("rollback_occurred") is not True
+                ):
+                    repaired_result["model_validation_repair_attempted"] = True
+                    repaired_result["model_validation_repair_accepted"] = True
+                    repaired_result["model_validation_repair_feedback"] = repair_summary
+                    repaired_report = repaired_result.get("safety_report")
+                    if isinstance(repaired_report, dict):
+                        repaired_report.setdefault("human_messages", []).append(
+                            "A validator-guided model repair candidate passed final SCTVA validation."
+                        )
+                    return repaired_result
+            rule_result = self._execute_single_file(
+                request=request,
+                file_entry=file_entry,
+                actions=actions,
+                project_files=project_files,
+                model_assistant=None,
+                allow_model_validation_repair=False,
+            )
+            fallback_result = self._annotate_model_first_rule_fallback(
+                rule_result,
+                model_assistant=model_assistant,
+                failed_model_log=transformation_log,
+                failed_steps=failed_steps,
+                failed_validation_details=failed_validation_details,
+                rollback_reason=rollback_reason,
+            )
+            return fallback_result
+
+        self._finalize_extract_class_logs(
+            transformation_log,
+            syntax_passed=syntax_step.passed,
+            structural_passed=structural_step.passed,
+            behavioral_passed=behavioral_step.passed,
+            invariant_passed=invariant_step.passed,
+            rollback_occurred=rollback_occurred,
+        )
+        self._finalize_extract_method_logs(
+            transformation_log,
+            syntax_passed=syntax_step.passed,
+            structural_passed=structural_step.passed,
+            behavioral_passed=behavioral_step.passed,
+            invariant_passed=invariant_step.passed,
+            rollback_occurred=rollback_occurred,
+        )
+        self._finalize_parameter_object_logs(
+            transformation_log,
+            syntax_passed=syntax_step.passed,
+            structural_passed=structural_step.passed,
+            behavioral_passed=behavioral_step.passed,
+            invariant_passed=invariant_step.passed,
+            rollback_occurred=rollback_occurred,
+        )
+        self._finalize_remove_dead_code_logs(
+            transformation_log,
+            syntax_passed=syntax_step.passed,
+            structural_passed=structural_step.passed,
+            behavioral_passed=behavioral_step.passed,
+            invariant_passed=invariant_step.passed,
+            rollback_occurred=rollback_occurred,
+            dead_code_validation=list(
+                structural_step.details.get("dead_code_validation") or []
+            ),
+        )
+        self._finalize_guard_clauses_logs(
+            transformation_log,
+            syntax_passed=syntax_step.passed,
+            structural_passed=structural_step.passed,
+            behavioral_passed=behavioral_step.passed,
+            invariant_passed=invariant_step.passed,
+            rollback_occurred=rollback_occurred,
+        )
+
+        final_code = file_entry.source_code if rollback_occurred else transformed_code
+        transformation_applied = final_code != file_entry.source_code
+
+        validation_score, confidence_details = self.scorer.score(
+            syntax=syntax_step,
+            structural=structural_step,
+            behavioral=behavioral_step,
+            invariant=invariant_step,
+        )
+        confidence_score = validation_score
+        if rollback_occurred:
+            confidence_score = min(confidence_score, 0.49)
+        confidence_applicable = transformation_applied or rollback_occurred
+        if not confidence_applicable:
+            confidence_score = None
+
+        model_usage = self._model_usage_summary(
+            transformation_log,
+            validation_score=validation_score,
+            rollback_occurred=rollback_occurred,
+            transformation_applied=transformation_applied,
+            model_enabled=model_assistant is not None,
+            model_mode=(
+                model_assistant.settings.mode if model_assistant is not None else ""
+            ),
+            configured_model_provider=(
+                model_assistant.provider if model_assistant is not None else ""
+            ),
+            validation_steps=[syntax_step, structural_step, behavioral_step, invariant_step],
+        )
+
+        safety_report = self.reporter.build(
+            rollback_occurred=rollback_occurred,
+            rollback_reason=rollback_reason,
+            transformation_log=transformation_log,
+            validation_steps=[syntax_step, structural_step, behavioral_step, invariant_step],
+            extra_warnings=(
+                []
+                if all_executable_actions_safely_not_applicable
+                else transform_warnings
+            ),
+            transformation_applied=transformation_applied,
+            not_applicable=all_executable_actions_safely_not_applicable,
+        )
+
+        safety_report.human_messages.append(
+            "Confidence formula: "
+            + str(confidence_details.get("formula") or "validation components")
+        )
+        if model_usage["model_used"]:
+            safety_report.human_messages.append(
+                "Local code-model contribution retained: "
+                f"{model_usage['model_action_count']} action candidate(s), "
+                f"validated accuracy {model_usage['model_validated_accuracy']}%."
+            )
+        elif model_usage["model_attempted"]:
+            attempt_reasons = ", ".join(model_usage["model_attempt_reasons"])
+            safety_report.human_messages.append(
+                "The local code model was attempted, but no model candidate was retained; "
+                "the accepted output is rule-based."
+                + (f" Reason(s): {attempt_reasons}." if attempt_reasons else "")
+            )
+        elif model_usage["model_ineligible_reasons"]:
+            ineligible_reasons = ", ".join(model_usage["model_ineligible_reasons"])
+            safety_report.human_messages.append(
+                "Local model inference was skipped by SCTVA's language safety preflight. "
+                f"Reason(s): {ineligible_reasons}."
+            )
+        elif model_usage["model_enabled"]:
+            safety_report.human_messages.append(
+                "The local code model was enabled, but this file had no eligible executable model action."
+            )
+        else:
+            safety_report.human_messages.append(
+                "The local code model was not used for this file; model validated accuracy is 0%."
+            )
+
+        requested_move_count = sum(
+            1
+            for action in actions
+            if action.action_type == ACTION_MOVE_PYTHON_METHOD
+        )
+        completed_move_count = sum(
+            1
+            for log_entry in transformation_log
+            if str(
+                log_entry.metadata.get("reclassified_action_type")
+                or log_entry.action_type
+            ).strip() == ACTION_MOVE_PYTHON_METHOD
+            and str(log_entry.metadata.get("status") or "success").lower()
+            in {"success", "already_applied"}
+        )
+        unresolved_move_count = sum(
+            1
+            for log_entry in transformation_log
+            if log_entry.action_type == ACTION_MOVE_PYTHON_METHOD
+            and str(log_entry.metadata.get("status") or "").lower() == "not_applicable"
+        )
+        move_method_plan_complete = (
+            requested_move_count == 0
+            or completed_move_count + unresolved_move_count == requested_move_count
+        )
+        if requested_move_count and not move_method_plan_complete:
+            safety_report.risk_flags.append("plan_compliance_failed:move_method")
+            safety_report.human_messages.append(
+                "Move Method plan compliance failed: not every requested Move Method action was applied."
+            )
+
+        requested_inline_count = sum(
+            1
+            for action in actions
+            if action.action_type == ACTION_INLINE_PYTHON_CLASS
+        )
+        successful_inline_count = sum(
+            1
+            for log_entry in transformation_log
+            if log_entry.replacements_count > 0
+            and str(
+                log_entry.metadata.get("reclassified_action_type")
+                or log_entry.action_type
+            ).strip() == ACTION_INLINE_PYTHON_CLASS
+            and str(log_entry.metadata.get("status") or "success").lower() == "success"
+        )
+        unresolved_inline_count = sum(
+            1
+            for log_entry in transformation_log
+            if log_entry.action_type == ACTION_INLINE_PYTHON_CLASS
+            and str(log_entry.metadata.get("status") or "").lower() == "not_applicable"
+            and str(log_entry.metadata.get("reason") or "")
+            != "SMELL_RESOLVED_BY_PRIOR_REFACTORING"
+        )
+        resolved_by_prior_refactoring_inline_count = sum(
+            1
+            for log_entry in transformation_log
+            if log_entry.action_type == ACTION_INLINE_PYTHON_CLASS
+            and str(log_entry.metadata.get("status") or "").lower()
+            in {"not_applicable", "satisfied"}
+            and str(log_entry.metadata.get("reason") or "")
+            == "SMELL_RESOLVED_BY_PRIOR_REFACTORING"
+        )
+        already_handled_inline_count = sum(
+            1
+            for log_entry in transformation_log
+            if log_entry.action_type == ACTION_INLINE_PYTHON_CLASS
+            and str(log_entry.metadata.get("status") or "").lower()
+            == "already_handled"
+            and str(log_entry.metadata.get("reason") or "")
+            == "ALREADY_HANDLED_BY_PRIOR_INLINE_CLASS"
+        )
+        inline_class_plan_complete = (
+            requested_inline_count == 0
+            or successful_inline_count
+            + unresolved_inline_count
+            + resolved_by_prior_refactoring_inline_count
+            + already_handled_inline_count
+            == requested_inline_count
+        )
+        if requested_inline_count and not inline_class_plan_complete:
+            safety_report.risk_flags.append("plan_compliance_failed:inline_class")
+            safety_report.human_messages.append(
+                "Inline Class plan compliance failed: not every requested Inline Class action was applied."
+            )
+
+        requested_global_variable_count = sum(
+            1
+            for action in actions
+            if action.action_type in {
+                ACTION_ENCAPSULATE_C_VARIABLE,
+                ACTION_ENCAPSULATE_VARIABLE,
+            }
+            or str(action.source_refactoring or "").strip().lower()
+            in {"encapsulate variable", "global variable"}
+        )
+        successful_global_variable_count = sum(
+            1
+            for log_entry in transformation_log
+            if log_entry.replacements_count > 0
+            and str(
+                log_entry.metadata.get("reclassified_action_type")
+                or log_entry.action_type
+            ).strip() == ACTION_ENCAPSULATE_C_VARIABLE
+            and str(log_entry.metadata.get("status") or "success").lower() == "success"
+        )
+        not_applicable_global_variable_count = sum(
+            1
+            for log_entry in transformation_log
+            if str(
+                log_entry.metadata.get("reclassified_action_type")
+                or log_entry.action_type
+            ).strip() in {ACTION_ENCAPSULATE_C_VARIABLE, ACTION_ENCAPSULATE_VARIABLE}
+            and str(log_entry.metadata.get("status") or "").lower()
+            in {"not_applicable", "already_handled", "satisfied"}
+        )
+        review_global_variable_count = sum(
+            1
+            for log_entry in transformation_log
+            if str(
+                log_entry.metadata.get("reclassified_action_type")
+                or log_entry.action_type
+            ).strip() in {ACTION_ENCAPSULATE_C_VARIABLE, ACTION_ENCAPSULATE_VARIABLE}
+            and str(log_entry.metadata.get("status") or "").lower() == "review_required"
+        )
+        global_variable_plan_complete = (
+            requested_global_variable_count == 0
+            or successful_global_variable_count + not_applicable_global_variable_count
+            == requested_global_variable_count
+        )
+        if requested_global_variable_count and (
+            review_global_variable_count or not global_variable_plan_complete
+        ):
+            safety_report.risk_flags.append("plan_compliance_failed:global_variable")
+            safety_report.human_messages.append(
+                "Global Variable plan compliance requires review: at least one requested C global target could not be proven applicable or safely dismissed."
+            )
+
+        requested_hide_delegate_count = sum(
+            1
+            for action in actions
+            if action.action_type == ACTION_HIDE_DELEGATE
+        )
+        successful_hide_delegate_count = sum(
+            1
+            for log_entry in transformation_log
+            if log_entry.replacements_count > 0
+            and str(
+                log_entry.metadata.get("reclassified_action_type")
+                or log_entry.action_type
+            ).strip() == ACTION_HIDE_DELEGATE
+            and str(log_entry.metadata.get("status") or "success").lower() == "success"
+        )
+        unresolved_hide_delegate_count = sum(
+            1
+            for log_entry in transformation_log
+            if log_entry.action_type == ACTION_HIDE_DELEGATE
+            and str(log_entry.metadata.get("status") or "").lower() == "not_applicable"
+        )
+        hide_delegate_plan_complete = (
+            requested_hide_delegate_count == 0
+            or successful_hide_delegate_count + unresolved_hide_delegate_count
+            == requested_hide_delegate_count
+        )
+        if requested_hide_delegate_count and not hide_delegate_plan_complete:
+            safety_report.risk_flags.append("plan_compliance_failed:hide_delegate")
+            safety_report.human_messages.append(
+                "Hide Delegate plan compliance failed: not every requested Hide Delegate action was applied."
+            )
+
+        requested_polymorphism_count = sum(
+            1
+            for action in actions
+            if action.action_type == ACTION_REPLACE_CONDITIONAL_WITH_POLYMORPHISM
+        )
+        successful_polymorphism_count = sum(
+            1
+            for log_entry in transformation_log
+            if log_entry.replacements_count > 0
+            and str(
+                log_entry.metadata.get("reclassified_action_type")
+                or log_entry.action_type
+            ).strip() == ACTION_REPLACE_CONDITIONAL_WITH_POLYMORPHISM
+            and str(log_entry.metadata.get("status") or "success").lower() == "success"
+        )
+        not_applicable_polymorphism_count = sum(
+            1
+            for log_entry in transformation_log
+            if log_entry.action_type == ACTION_REPLACE_CONDITIONAL_WITH_POLYMORPHISM
+            and str(log_entry.metadata.get("status") or "").lower() == "not_applicable"
+        )
+        polymorphism_plan_complete = (
+            requested_polymorphism_count == 0
+            or successful_polymorphism_count + not_applicable_polymorphism_count
+            == requested_polymorphism_count
+        )
+        if requested_polymorphism_count and not polymorphism_plan_complete:
+            safety_report.risk_flags.append("plan_compliance_failed:polymorphism")
+            safety_report.human_messages.append(
+                "Replace Conditional with Polymorphism plan compliance failed: "
+                "not every requested action was safely applied."
+            )
+
+        validation_passed = (
+            (not rollback_occurred)
+            and syntax_step.passed
+            and structural_step.passed
+            and behavioral_step.passed
+            and invariant_step.passed
+            and move_method_plan_complete
+            and inline_class_plan_complete
+            and global_variable_plan_complete
+            and hide_delegate_plan_complete
+            and polymorphism_plan_complete
+        )
+        success = validation_passed and (
+            transformation_applied
+            or all_executable_actions_safely_not_applicable
+        )
+
+        result = SCTVAResult(
+            request_id=request.request_id,
+            language=language,
+            success=success,
+            rollback_occurred=rollback_occurred,
+            confidence_score=confidence_score,
+            refactored_code=final_code,
+            validation_syntax=syntax_step,
+            validation_structural=structural_step,
+            validation_behavioral=behavioral_step,
+            validation_invariant=invariant_step,
+            safety_report=safety_report,
+            transformation_applied=transformation_applied,
+            total_replacements=total_replacements,
+            confidence_applicable=confidence_applicable,
+            validation_score=validation_score,
+        ).to_dict()
+
+        result["file_name"] = file_entry.file_name
+        result["source_mode"] = file_entry.source_mode
+        result["origin"] = file_entry.origin
+        result["confidence_components"] = confidence_details
+        result.update(model_usage)
+        result["model_evaluation"] = build_model_evaluation(
+            model_attempt_count=result["model_attempt_count"],
+            model_candidate_count=result["model_candidate_count"],
+            model_action_count=result["model_action_count"],
+            model_generation_seconds=result["model_generation_seconds"],
+            model_validated_accuracy=result["model_validated_accuracy"],
+            model_output_retained=result["model_output_retained"],
+            model_used=result["model_used"],
+            model_candidates=result["model_candidates"],
+        )
+        # Report only transformations that were actually accepted for this
+        # file.  The earlier fixed five-family summary made every unrelated
+        # family look like PASS whenever its requested count was zero.
+        result["plan_compliance"] = self._file_plan_compliance(
+            transformation_log,
+            rollback_occurred=rollback_occurred,
+        )
+        has_review = any(
+            str(e.metadata.get("status") if hasattr(e, "metadata") else "").lower() == "review_required"
+            or any("review" in str(w).lower() for w in (e.warnings if hasattr(e, "warnings") else []))
+            for e in transformation_log
+        )
+        if rollback_occurred:
+            file_status = "FAILED"
+        elif has_review:
+            file_status = "REVIEW_REQUIRED"
+        elif all_executable_actions_already_handled and not transformation_applied:
+            file_status = "ALREADY_HANDLED"
+        elif all_executable_actions_safely_not_applicable and not transformation_applied:
+            file_status = "NOT_APPLICABLE"
+        elif success:
+            file_status = "FULL_SUCCESS"
+        elif total_replacements > 0:
+            file_status = "PARTIAL_SUCCESS"
+        else:
+            file_status = "FAILED"
+
+        result["status"] = file_status
+        result["application_status"] = (
+            "ROLLED_BACK"
+            if rollback_occurred
+            else "APPLIED"
+            if transformation_applied
+            else "ALREADY_HANDLED"
+            if file_status == "ALREADY_HANDLED"
+            else "NO_CHANGE_REQUIRED"
+            if file_status == "NOT_APPLICABLE"
+            else "NOT_APPLIED"
+        )
+        return result
+
+    def _validate_model_action_candidate(
+        self,
+        *,
+        language: str,
+        original_code: str,
+        candidate_code: str,
+        action: RefactoringAction,
+        timeout_seconds: int,
+        behavior_tests: List[Dict[str, Any]] | None = None,
+        enable_behavior_tests: bool = True,
+        strict_mode: bool = True,
+        project_source_files: List[Dict[str, Any]] | None = None,
+        current_file_name: str = "",
+    ) -> Dict[str, Any]:
+        """Validate one model edit against only its corresponding RDP action."""
+
+        syntax = self.syntax_validator.validate(
+            language=language,
+            source_code=candidate_code,
+            require_compilation=False,
+            timeout_seconds=timeout_seconds,
+        )
+        validation_action = action
+        structural = self.structural_validator.validate(
+            language=language,
+            original_code=original_code,
+            transformed_code=candidate_code,
+            actions=[validation_action],
+        )
+        accepted_metadata: Dict[str, Any] = {}
+        extra_steps: List[ValidationStepResult] = []
+
+        # The final Java behavioral validator proves Extract Method through an
+        # explicit caller -> helper lineage.  Rule transformers naturally
+        # produce that metadata; model candidates must derive the same facts
+        # from the accepted source instead of arriving at final validation as
+        # an unclassified body rewrite.
+        if (
+            language.lower() == "java"
+            and action.action_type == ACTION_EXTRACT_METHOD
+            and syntax.passed
+            and structural.passed
+        ):
+            params = dict(action.parameters or {})
+            source_method = str(
+                params.get("source_method")
+                or params.get("method")
+                or params.get("method_name")
+                or params.get("target_method")
+                or ""
+            ).strip()
+            source_class = str(
+                params.get("source_class")
+                or params.get("target_class")
+                or params.get("class_name")
+                or ""
+            ).strip()
+            if not source_class and source_method:
+                owners = []
+                for candidate_class in declared_class_names(original_code):
+                    model = _parse_java_class(original_code, candidate_class)
+                    if model is not None and model.methods_by_name.get(source_method):
+                        owners.append(candidate_class)
+                if len(owners) == 1:
+                    source_class = owners[0]
+
+            helper_resolution = (
+                java_extract_method.infer_extracted_method_name(
+                    original_code,
+                    candidate_code,
+                    source_class=source_class,
+                    source_method=source_method,
+                )
+                if source_class and source_method
+                else {"status": "unresolved", "reason": "SOURCE_TARGET_NOT_RESOLVED"}
+            )
+            extracted_method = str(helper_resolution.get("method_name") or "").strip()
+            if extracted_method:
+                postconditions = {
+                    "target_resolution": "PASS",
+                    "data_flow": "PASS",
+                    "structural": "PASS",
+                    "scope_validation": "PASS",
+                    "no_severe_new_smell": "PASS",
+                    "long_method_reduction": "PASS",
+                }
+                accepted_metadata = {
+                    "language": "java",
+                    "source_class": source_class,
+                    "source_method": source_method,
+                    "planned_extracted_method": str(
+                        params.get("new_method_name")
+                        or params.get("extracted_method_name")
+                        or ""
+                    ).strip(),
+                    "extracted_method": extracted_method,
+                    "extracted_method_resolution": helper_resolution,
+                    "plan_compliance": "PASS",
+                    "validation": postconditions,
+                }
+                validation_params = dict(params)
+                validation_params["applied_transformation_metadata"] = dict(
+                    accepted_metadata
+                )
+                validation_action = RefactoringAction(
+                    action_type=action.action_type,
+                    parameters=validation_params,
+                    source_step_id=action.source_step_id,
+                    source_refactoring=action.source_refactoring,
+                    warnings=list(action.warnings),
+                )
+                behavioral = self.behavioral_validator.validate(
+                    language=language,
+                    original_code=original_code,
+                    transformed_code=candidate_code,
+                    behavior_tests=list(behavior_tests or []),
+                    enable_behavior_tests=enable_behavior_tests,
+                    actions=[validation_action],
+                    strict_mode=strict_mode,
+                    project_source_files=project_source_files or [],
+                    current_file_name=current_file_name,
+                    structural_validation_passed=True,
+                )
+                invariant = self.invariant_miner.mine(
+                    language=language,
+                    behavioral_step=behavioral,
+                    actions=[validation_action],
+                    strict_mode=strict_mode,
+                )
+                extra_steps.extend((behavioral, invariant))
+            else:
+                structural.passed = False
+                structural.score = 0.0
+                structural.message = (
+                    "Extract Method helper lineage could not be resolved uniquely."
+                )
+                structural.details["model_helper_resolution"] = helper_resolution
+
+        if syntax.passed and structural.passed and not extra_steps:
+            behavioral = self.behavioral_validator.validate_model_checkpoint(
+                language=language,
+                original_code=original_code,
+                transformed_code=candidate_code,
+                enable_behavior_tests=enable_behavior_tests,
+                actions=[validation_action],
+                structural_validation_passed=True,
+            )
+            invariant = self.invariant_miner.mine(
+                language=language,
+                behavioral_step=behavioral,
+                actions=[validation_action],
+                strict_mode=strict_mode,
+            )
+            extra_steps.extend((behavioral, invariant))
+
+        steps = (syntax, structural, *extra_steps)
+        validation = [
+            {
+                "name": step.name,
+                "passed": bool(step.passed),
+                "score": step.score,
+                "message": step.message,
+                "details": step.details,
+                "scope": "single_rdp_action",
+            }
+            for step in steps
+        ]
+        issues = [
+            self._model_validation_step_feedback(step)
+            for step in steps
+            if not step.passed
+        ]
+        return {
+            "passed": not issues,
+            "issues": issues,
+            "validation": validation,
+            "accepted_metadata": accepted_metadata if not issues else {},
+        }
+
+    @staticmethod
+    def _model_validation_step_feedback(step: ValidationStepResult) -> str:
+        """Return bounded, actionable validator feedback for one model retry."""
+
+        details = step.details if isinstance(step.details, dict) else {}
+        reasons: List[str] = []
+
+        for failure in list(details.get("failures") or [])[:3]:
+            text = str(failure).strip()
+            if text and text not in reasons:
+                reasons.append(text)
+
+        for violation in list(details.get("violated_invariants") or [])[:3]:
+            if isinstance(violation, dict):
+                text = str(
+                    violation.get("reason")
+                    or violation.get("name")
+                    or violation
+                ).strip()
+            else:
+                text = str(violation).strip()
+            if text and text not in reasons:
+                reasons.append(text)
+
+        for validation_key in (
+            "extract_method_validation",
+            "parameter_object_validation",
+            "move_method_validation",
+            "inline_class_validation",
+        ):
+            for item in list(details.get(validation_key) or [])[:2]:
+                if not isinstance(item, dict) or item.get("passed") is not False:
+                    continue
+                text = str(item.get("reason") or "").strip()
+                if text and text not in reasons:
+                    reasons.append(text)
+
+        message = f"{step.name}: {step.message}"
+        if reasons:
+            message += " Details: " + "; ".join(reasons[:4])
+        # Keep repair prompts inside small local-model context windows.
+        return message[:900]
+
+
+    def _attempt_selective_java_parameter_object_replay(
+        self,
+        *,
+        request: SCTVARequestContract,
+        file_entry: SourceFileContract,
+        actions: List[RefactoringAction],
+        project_files: List[Dict[str, Any]],
+        structural_step: ValidationStepResult,
+        rollback_occurred: bool,
+    ) -> tuple[Any, ...] | None:
+        """Replay independent accepted Java actions after a proven PO failure.
+
+        This is deliberately narrow: it only removes an action that the
+        Parameter Object structural validator identified as failing.  If the
+        remaining sequence cannot pass all validation stages, SCTVA keeps the
+        existing whole-file rollback rather than guessing at dependencies.
+        """
+        language = (file_entry.language or request.language).strip().lower()
+        if not rollback_occurred or language != "java":
+            return None
+        if any(action.parameters.get("coordinated_project_transaction_id") for action in actions):
+            return None
+        checks = list(structural_step.details.get("parameter_object_validation") or [])
+        failed_indexes = [
+            int(item.get("action_index"))
+            for item in checks
+            if item.get("passed") is False and isinstance(item.get("action_index"), int)
+        ]
+        if not failed_indexes:
+            return None
+        parameter_indexes = [
+            index for index, action in enumerate(actions, start=1)
+            if action.action_type == ACTION_INTRODUCE_JAVA_PARAMETER_OBJECT
+        ]
+        if len(parameter_indexes) < 2:
+            return None
+
+        for failed_index in failed_indexes:
+            retained = [
+                copy.deepcopy(action)
+                for index, action in enumerate(actions, start=1)
+                if index != failed_index
+            ]
+            if not retained:
+                continue
+            candidate, logs, warnings = self.transformer.apply_actions(
+                language=language,
+                source_code=file_entry.source_code,
+                actions=retained,
+                strict_mode=request.execution_options.strict_mode,
+                project_source_files=project_files,
+                current_file_name=file_entry.file_name,
+                repository_complete=bool(request.source_files),
+                behavior_tests=request.refactoring_plan.behavior_tests,
+            )
+            effective = self._actions_with_effective_replacements(retained, logs)
+            syntax = self.syntax_validator.validate(
+                language=language,
+                source_code=candidate,
+                require_compilation=request.execution_options.require_compilation,
+                timeout_seconds=request.execution_options.timeout_seconds,
+            )
+            structural = self.structural_validator.validate(
+                language=language,
+                original_code=file_entry.source_code,
+                transformed_code=candidate,
+                actions=effective,
+            )
+            behavioral = self.behavioral_validator.validate(
+                language=language,
+                original_code=file_entry.source_code,
+                transformed_code=candidate,
+                behavior_tests=request.refactoring_plan.behavior_tests,
+                enable_behavior_tests=request.execution_options.enable_behavior_tests,
+                actions=effective,
+                strict_mode=request.execution_options.strict_mode,
+                project_source_files=project_files,
+                current_file_name=file_entry.file_name,
+                structural_validation_passed=structural.passed,
+            )
+            invariant = self.invariant_miner.mine(
+                language=language,
+                behavioral_step=behavioral,
+                actions=effective,
+                strict_mode=request.execution_options.strict_mode,
+            )
+            if all(step.passed for step in (syntax, structural, behavioral, invariant)):
+                for entry in logs:
+                    entry.metadata.setdefault("selective_replay", True)
+                    entry.metadata.setdefault("selectively_rolled_back_action", failed_index)
+                return candidate, logs, warnings, effective, syntax, structural, behavioral, invariant
+        return None
+
+    # ------------------------------------------------------------------
+    # Repository-level transactions
+    # ------------------------------------------------------------------
     def _collect_source_files(self, request: SCTVARequestContract) -> List[SourceFileContract]:
         if request.source_files:
             return request.source_files
@@ -1322,6 +2548,515 @@ class SafeCodeTransformationValidationAgent:
                 "invariant": target_invariant.to_dict(),
             }
 
+    # ------------------------------------------------------------------
+    # Plan normalization and source target resolution
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _promote_move_method_noops(actions: List[RefactoringAction]) -> None:
+        """Promote legacy Move Method noops back to an executable action.
+
+        Older PlannerAdapter versions rejected filename-derived identifiers and
+        stored the original refactoring only in ``source_refactoring``/warnings.
+        The real target is recovered from source AST in the next step.
+        """
+
+        for action in actions:
+            if action.action_type != ACTION_NOOP:
+                continue
+            source_refactoring = str(action.source_refactoring or "").strip().lower()
+            warnings = " ".join(str(item) for item in action.warnings).lower()
+            if source_refactoring not in {"move method", "feature envy"} and "move method" not in warnings:
+                continue
+            action.action_type = ACTION_MOVE_PYTHON_METHOD
+            params = action.parameters or {}
+            params["promoted_from_noop"] = True
+            params.setdefault("method", "")
+            params.setdefault("source_class", "")
+            params.setdefault("destination_class", "")
+            params.setdefault("destination_parameter", "")
+
+    @staticmethod
+    def _promote_inline_class_noops(actions: List[RefactoringAction]) -> None:
+        """Recover legacy RDP Inline Class steps that were stored as noops."""
+
+        for action in actions:
+            if action.action_type != ACTION_NOOP:
+                continue
+            source_refactoring = str(action.source_refactoring or "").strip().lower()
+            warnings = " ".join(str(item) for item in action.warnings).lower()
+            if source_refactoring != "inline class" and "inline class" not in warnings:
+                continue
+            action.action_type = ACTION_INLINE_PYTHON_CLASS
+            # ``parameters`` is a dataclass-owned dict.  Do not use ``or {}``
+            # here: an empty legacy parameter object must receive the resolved
+            # class and source-file values below.
+            params = action.parameters
+            params["promoted_from_noop"] = True
+            params.setdefault("class_to_inline", "")
+            action.warnings = [
+                warning
+                for warning in action.warnings
+                if not (
+                    "inline class" in str(warning).lower()
+                    and (
+                        "richer semantic edits" in str(warning).lower()
+                        or "not simulated" in str(warning).lower()
+                        or "mapped to noop" in str(warning).lower()
+                    )
+                )
+            ]
+
+    @staticmethod
+    def _canonicalize_inline_class_targets(actions: List[RefactoringAction]) -> None:
+        """Preserve one semantic Inline Class target across planner formats."""
+
+        for action in actions:
+            if action.action_type != ACTION_INLINE_PYTHON_CLASS:
+                continue
+            params = action.parameters
+            requested_target = params.get("requested_target")
+            requested_target = (
+                requested_target if isinstance(requested_target, dict) else {}
+            )
+            legacy_step = params.get("legacy_step")
+            legacy_step = legacy_step if isinstance(legacy_step, dict) else {}
+            legacy_params = legacy_step.get("parameters")
+            legacy_params = legacy_params if isinstance(legacy_params, dict) else {}
+            legacy_target = legacy_step.get("target")
+            legacy_target = legacy_target if isinstance(legacy_target, dict) else {}
+
+            target_class = str(
+                params.get("qualified_class_name")
+                or params.get("class_to_inline")
+                or params.get("target_class")
+                or params.get("source_class")
+                or params.get("class_name")
+                or requested_target.get("class_to_inline")
+                or legacy_params.get("class_to_inline")
+                or legacy_params.get("target_class")
+                or legacy_params.get("source_class")
+                or legacy_target.get("class")
+                or ""
+            ).strip()
+            source_file = str(
+                params.get("source_file")
+                or requested_target.get("source_file")
+                or legacy_params.get("source_file")
+                or legacy_target.get("source_file")
+                or ""
+            ).strip()
+
+            params["class_to_inline"] = target_class
+            params["target_class"] = target_class
+            if source_file:
+                params["source_file"] = source_file
+            params["requested_target"] = {
+                "class_to_inline": target_class,
+                "source_file": source_file,
+            }
+            if target_class:
+                params.pop("target_resolution_error", None)
+                if params.get("source_resolution_error") == "INLINE_CLASS_TARGET_MISSING":
+                    params.pop("source_resolution_error", None)
+                continue
+
+            params["target_resolution_error"] = "INLINE_CLASS_TARGET_MISSING"
+            params["source_resolution_error"] = "INLINE_CLASS_TARGET_MISSING"
+            params["source_resolution_status"] = "review_required"
+
+    @staticmethod
+    def _promote_hide_delegate_noops(actions: List[RefactoringAction]) -> None:
+        """Recover legacy Hide Delegate steps before they are silently ignored.
+
+        Earlier adapter versions treated Hide Delegate as an unsupported
+        semantic edit and replaced it with ``noop``.  The current transformer
+        implements this operation for proven Python and Java message chains,
+        so preserve the original RDP target data and dispatch the real action.
+        """
+
+        for action in actions:
+            if action.action_type != ACTION_NOOP:
+                continue
+            source_refactoring = str(action.source_refactoring or "").strip().lower()
+            warnings = " ".join(str(item) for item in action.warnings).lower()
+            if source_refactoring != "hide delegate" and "hide delegate" not in warnings:
+                continue
+
+            params = action.parameters
+            legacy_step = params.get("legacy_step")
+            if not isinstance(legacy_step, dict):
+                legacy_step = {}
+            legacy_params = legacy_step.get("parameters")
+            legacy_params = legacy_params if isinstance(legacy_params, dict) else {}
+            legacy_target = legacy_step.get("target")
+            legacy_target = legacy_target if isinstance(legacy_target, dict) else {}
+
+            def first_text(*values: Any) -> str:
+                for value in values:
+                    if isinstance(value, str) and value.strip():
+                        return value.strip()
+                return ""
+
+            params["source_class"] = first_text(
+                params.get("source_class"),
+                legacy_params.get("source_class"),
+                legacy_target.get("class"),
+                legacy_target.get("source_class"),
+            )
+            params["delegate_member"] = first_text(
+                params.get("delegate_member"),
+                params.get("delegate_field"),
+                legacy_params.get("delegate_member"),
+                legacy_params.get("delegate_field"),
+                legacy_params.get("delegate"),
+            )
+            params["delegated_member"] = first_text(
+                params.get("delegated_member"),
+                params.get("target_member"),
+                legacy_params.get("delegated_member"),
+                legacy_params.get("target_member"),
+                legacy_params.get("member"),
+            )
+            params["new_method_name"] = first_text(
+                params.get("new_method_name"),
+                legacy_params.get("new_method_name"),
+                legacy_params.get("delegate_method_name"),
+            )
+            # Preserve the method/line hints from RDP even when the adapter had
+            # to map an incomplete Hide Delegate step to noop.  These hints are
+            # essential for repository-sized files because the semantic resolver
+            # must search the correct function instead of an unrelated message
+            # chain elsewhere in the module.
+            params["method"] = first_text(
+                params.get("method"),
+                params.get("method_name"),
+                legacy_target.get("method"),
+                legacy_target.get("function"),
+                legacy_params.get("method"),
+                legacy_params.get("method_name"),
+            )
+            legacy_lines = legacy_target.get("lines")
+            if not isinstance(legacy_lines, (list, tuple)):
+                legacy_lines = legacy_params.get("lines")
+            if not isinstance(params.get("source_line"), (int, float)):
+                explicit_line = legacy_params.get("source_line")
+                if isinstance(explicit_line, (int, float)):
+                    params["source_line"] = int(explicit_line)
+                elif (
+                    isinstance(legacy_lines, (list, tuple))
+                    and legacy_lines
+                    and isinstance(legacy_lines[0], (int, float))
+                ):
+                    params["source_line"] = int(legacy_lines[0])
+            params["source_file"] = first_text(
+                params.get("source_file"),
+                legacy_params.get("source_file"),
+                legacy_target.get("file"),
+                legacy_target.get("source_file"),
+            )
+            params["promoted_from_noop"] = True
+            action.action_type = ACTION_HIDE_DELEGATE
+            action.warnings = [
+                warning
+                for warning in action.warnings
+                if not (
+                    "hide delegate" in str(warning).lower()
+                    and (
+                        "richer semantic edits" in str(warning).lower()
+                        or "not simulated" in str(warning).lower()
+                        or "mapped to noop" in str(warning).lower()
+                    )
+                )
+            ]
+
+    @staticmethod
+    def _promote_polymorphism_noops(actions: List[RefactoringAction]) -> None:
+        """Recover plans normalized before polymorphism support was added."""
+
+        for action in actions:
+            if action.action_type != ACTION_NOOP:
+                continue
+            source_refactoring = str(action.source_refactoring or "").strip().lower()
+            warnings = " ".join(str(item) for item in action.warnings).lower()
+            if (
+                source_refactoring != "replace conditional with polymorphism"
+                and "replace conditional with polymorphism" not in warnings
+                and "replace_conditional_with_polymorphism" not in warnings
+            ):
+                continue
+
+            params = action.parameters
+            legacy_step = params.get("legacy_step")
+            legacy_step = legacy_step if isinstance(legacy_step, dict) else {}
+            legacy_params = legacy_step.get("parameters")
+            legacy_params = legacy_params if isinstance(legacy_params, dict) else {}
+            legacy_target = legacy_step.get("target")
+            legacy_target = legacy_target if isinstance(legacy_target, dict) else {}
+
+            def first_text(*values: Any) -> str:
+                return next(
+                    (
+                        value.strip()
+                        for value in values
+                        if isinstance(value, str) and value.strip()
+                    ),
+                    "",
+                )
+
+            lines = legacy_target.get("lines")
+            if not isinstance(lines, (list, tuple)):
+                lines = legacy_params.get("lines")
+            params["method"] = first_text(
+                params.get("method"),
+                params.get("method_name"),
+                legacy_target.get("method"),
+                legacy_target.get("function"),
+                legacy_params.get("method"),
+                legacy_params.get("method_name"),
+            )
+            params["source_class"] = first_text(
+                params.get("source_class"),
+                legacy_target.get("class"),
+                legacy_params.get("source_class"),
+                legacy_params.get("class_name"),
+            )
+            params["source_file"] = first_text(
+                params.get("source_file"),
+                legacy_target.get("file"),
+                legacy_target.get("source_file"),
+                legacy_params.get("source_file"),
+            )
+            params["base_class_name"] = first_text(
+                params.get("base_class_name"),
+                legacy_params.get("base_class_name"),
+            )
+            if isinstance(lines, (list, tuple)) and lines:
+                params.setdefault("start_line", lines[0])
+                params.setdefault("source_line", lines[0])
+                params.setdefault("end_line", lines[-1])
+            params["promoted_from_noop"] = True
+            action.action_type = ACTION_REPLACE_CONDITIONAL_WITH_POLYMORPHISM
+            action.warnings = [
+                warning
+                for warning in action.warnings
+                if not (
+                    "replace conditional with polymorphism" in str(warning).lower()
+                    or "replace_conditional_with_polymorphism" in str(warning).lower()
+                    or "mapped to noop" in str(warning).lower()
+                )
+            ]
+
+    @staticmethod
+    def _promote_guard_clauses_noops(actions: List[RefactoringAction]) -> None:
+        """Promote legacy Guard Clause noops back to an executable action."""
+        for action in actions:
+            if action.action_type != ACTION_NOOP:
+                continue
+            source_refactoring = str(action.source_refactoring or "").strip().lower()
+            warnings = " ".join(str(item) for item in action.warnings).lower()
+            if (
+                source_refactoring in {
+                    "replace nested conditional with guard clauses",
+                    "replace nested conditionals with guard clauses",
+                    "replace conditional with guard clauses",
+                    "deep nesting",
+                    "deepnesting",
+                    "guard clauses",
+                }
+                or "guard clause" in warnings
+                or "deep nesting" in warnings
+            ):
+                action.action_type = ACTION_REPLACE_NESTED_CONDITIONAL_WITH_GUARD_CLAUSES
+                params = action.parameters
+                params["promoted_from_noop"] = True
+                params.setdefault("method", "")
+                action.warnings = [
+                    warning
+                    for warning in action.warnings
+                    if not (
+                        "guard clause" in str(warning).lower()
+                        and ("mapped to noop" in str(warning).lower() or "not simulated" in str(warning).lower())
+                    )
+                ]
+
+    @staticmethod
+    def _promote_guard_clause_noops(actions: List[RefactoringAction]) -> None:
+        """Recover legacy C Guard Clause actions before file/symbol resolution."""
+
+        guard_names = {
+            "replace nested conditional with guard clauses",
+            "replace nested conditional with guard clause",
+            "replace_conditional_with_guard_clauses",
+            "guard clauses",
+            "guard clause",
+        }
+
+        def first_text(*values: Any) -> str:
+            return next(
+                (value.strip() for value in values if isinstance(value, str) and value.strip()),
+                "",
+            )
+
+        for action in actions:
+            if action.action_type != ACTION_NOOP:
+                continue
+            source_refactoring = str(action.source_refactoring or "").strip().lower()
+            warning_text = " ".join(str(item) for item in action.warnings).lower()
+            if source_refactoring not in guard_names and "guard clause" not in warning_text:
+                continue
+
+            params = action.parameters
+            legacy_step = params.get("legacy_step")
+            legacy_step = legacy_step if isinstance(legacy_step, dict) else {}
+            legacy_params = legacy_step.get("parameters")
+            legacy_params = legacy_params if isinstance(legacy_params, dict) else {}
+            legacy_target = legacy_step.get("target")
+            legacy_target = legacy_target if isinstance(legacy_target, dict) else {}
+            legacy_location = legacy_step.get("location")
+            legacy_location = legacy_location if isinstance(legacy_location, dict) else {}
+
+            method = first_text(
+                params.get("source_method"), params.get("method"),
+                params.get("function"), params.get("target_function"),
+                legacy_params.get("source_method"), legacy_params.get("method"),
+                legacy_params.get("function"), legacy_params.get("target_function"),
+                legacy_target.get("method"), legacy_target.get("function"),
+                legacy_target.get("target_function"), legacy_location.get("method"),
+                legacy_location.get("function"), legacy_step.get("target_function"),
+            )
+            source_file = first_text(
+                params.get("source_file"), legacy_params.get("source_file"),
+                legacy_target.get("source_file"), legacy_target.get("file"),
+                legacy_location.get("source_file"), legacy_location.get("file"),
+                legacy_step.get("source_file"),
+            )
+            target_lines = (
+                params.get("target_lines") or params.get("lines")
+                or legacy_params.get("target_lines") or legacy_params.get("lines")
+                or legacy_target.get("target_lines") or legacy_target.get("lines")
+                or legacy_step.get("target_lines") or legacy_step.get("lines")
+                or []
+            )
+            if not isinstance(target_lines, (list, tuple)):
+                target_lines = [target_lines] if target_lines is not None else []
+            numeric_lines = [
+                int(value) for value in target_lines
+                if isinstance(value, (int, float)) or (isinstance(value, str) and value.strip().isdigit())
+            ]
+            source_line = params.get("source_line")
+            if not isinstance(source_line, (int, float)) and numeric_lines:
+                source_line = numeric_lines[0]
+
+            params["method"] = method
+            params["source_method"] = method
+            params["target_function"] = method
+            if source_file:
+                params["source_file"] = source_file
+            params["target_lines"] = list(target_lines)
+            if isinstance(source_line, (int, float)):
+                params["source_line"] = int(source_line)
+            params["source_step_id"] = (
+                params.get("source_step_id")
+                or legacy_step.get("source_step_id")
+                or legacy_step.get("step_id")
+                or action.source_step_id
+            )
+            params["promoted_from_noop"] = True
+            action.action_type = ACTION_REPLACE_NESTED_CONDITIONAL_WITH_GUARD_CLAUSES
+            action.warnings = [
+                warning for warning in action.warnings
+                if not (
+                    "guard clause" in str(warning).lower()
+                    and ("unsupported" in str(warning).lower() or "mapped to noop" in str(warning).lower())
+                )
+            ]
+
+    @classmethod
+    def _mark_unresolved_legacy_actions(
+        cls,
+        actions: List[RefactoringAction],
+    ) -> None:
+        """Mark targetless compatibility actions without removing plan intent."""
+
+        for action in actions:
+            params = action.parameters
+            resolution_error = str(params.get("source_resolution_error") or "").strip()
+            resolution_status = str(params.get("source_resolution_status") or "").strip().lower()
+            promoted = params.get("promoted_from_noop") is True
+            targetless_bare_except = (
+                action.action_type == ACTION_NARROW_EXCEPTION_HANDLER
+                and not str(params.get("original_exception_type") or "").strip()
+                and not str(
+                    params.get("source_method")
+                    or params.get("method")
+                    or params.get("method_name")
+                    or ""
+                ).strip()
+                and not isinstance(params.get("source_line"), (int, float))
+            )
+            if targetless_bare_except:
+                params["unresolved_legacy_target"] = True
+                params["unresolved_action_type"] = action.action_type
+                params["unresolved_reason"] = "BARE_EXCEPT_TARGET_MISSING_FROM_PLAN"
+                params["unresolved_status"] = "review_required"
+                action.warnings = [
+                    warning
+                    for warning in action.warnings
+                    if "mapped to noop" not in str(warning).lower()
+                ]
+                continue
+            stale_extract_method = False
+            if action.action_type == ACTION_EXTRACT_METHOD and resolution_error:
+                source_file = cls._action_source_file(action)
+                file_stem = cls._file_stem(source_file)
+                method = str(
+                    params.get("method")
+                    or params.get("method_name")
+                    or params.get("function")
+                    or params.get("function_name")
+                    or ""
+                ).strip()
+                source_class = str(
+                    params.get("source_class")
+                    or params.get("class_name")
+                    or params.get("module_name")
+                    or ""
+                ).strip()
+
+                def normalize(value: str) -> str:
+                    return "".join(
+                        character.lower()
+                        for character in value
+                        if character.isalnum()
+                    )
+
+                stale_extract_method = bool(file_stem) and (
+                    not method
+                    or normalize(method) == normalize(file_stem)
+                    or normalize(source_class) == normalize(file_stem)
+                )
+
+            if not resolution_error or not (
+                promoted
+                or stale_extract_method
+                or resolution_status in {"not_applicable", "review_required"}
+            ):
+                continue
+
+            params["unresolved_legacy_target"] = True
+            params["unresolved_action_type"] = action.action_type
+            params["unresolved_reason"] = resolution_error
+            params["unresolved_status"] = resolution_status or "not_applicable"
+            action.warnings = [
+                warning
+                for warning in action.warnings
+                if not (
+                    "richer semantic edits" in str(warning).lower()
+                    or "not simulated" in str(warning).lower()
+                    or "mapped to noop" in str(warning).lower()
+                )
+            ]
+
     @classmethod
     def _resolve_action_source_files(
         cls,
@@ -1692,618 +3427,33 @@ class SafeCodeTransformationValidationAgent:
             )
             params["dead_code_scope_resolution"] = "python_ast_scan_failed"
 
-    def _execute_single_file(
+    def _resolve_c_global_variable_plan_actions(
         self,
-        *,
-        request: SCTVARequestContract,
-        file_entry: SourceFileContract,
         actions: List[RefactoringAction],
-        project_files: List[Dict[str, Any]],
-        model_assistant: CodeT5CandidateTransformer | None = None,
-        model_validation_feedback: Dict[int, str] | None = None,
-        allow_model_validation_repair: bool = True,
-    ) -> Dict[str, Any]:
-        language = (file_entry.language or request.language).strip().lower()
+        *,
+        file_entry: SourceFileContract,
+        fallback_language: str,
+    ) -> None:
+        """Resolve malformed C Encapsulate Variable planner targets safely.
 
-        source_is_reconstructed = file_entry.source_mode != "raw"
-        executable_actions = [
-            action for action in actions if action.action_type != ACTION_NOOP
-        ]
-        if source_is_reconstructed and executable_actions:
-            transformed_code = file_entry.source_code
-            skip_warning = (
-                "Action skipped because this file was imported from CUQA as "
-                "reconstructed placeholder source. Accurate transformation requires raw source text."
-            )
-            validation_actions: List[RefactoringAction] = []
-            transformation_log = [
-                TransformationLogEntry(
-                    action_index=index,
-                    action_type=action.action_type,
-                    replacements_count=0,
-                    warnings=[*action.warnings, skip_warning],
-                )
-                for index, action in enumerate(actions, start=1)
-            ]
-            transform_warnings = [skip_warning]
-        else:
-            transformed_code, transformation_log, transform_warnings = self.transformer.apply_actions(
-                language=language,
-                source_code=file_entry.source_code,
-                actions=actions,
-                strict_mode=request.execution_options.strict_mode,
-                project_source_files=project_files,
-                current_file_name=file_entry.file_name,
-                repository_complete=bool(request.source_files),
-                behavior_tests=request.refactoring_plan.behavior_tests,
-                model_assistant=model_assistant,
-                model_candidate_validator=(
-                    lambda original, candidate, action: self._validate_model_action_candidate(
-                        language=language,
-                        original_code=original,
-                        candidate_code=candidate,
-                        action=action,
-                        timeout_seconds=request.execution_options.timeout_seconds,
-                        behavior_tests=request.refactoring_plan.behavior_tests,
-                        enable_behavior_tests=request.execution_options.enable_behavior_tests,
-                        strict_mode=request.execution_options.strict_mode,
-                        project_source_files=project_files,
-                        current_file_name=file_entry.file_name,
-                    )
-                    if model_assistant is not None
-                    else None
-                ),
-                model_bundle_candidate_validator=(
-                    lambda original, candidate, bundle_actions: self._validate_model_bundle_candidate(
-                        language=language,
-                        original_code=original,
-                        candidate_code=candidate,
-                        actions=bundle_actions,
-                        timeout_seconds=request.execution_options.timeout_seconds,
-                    )
-                    if model_assistant is not None
-                    else None
-                ),
-                model_validation_feedback=model_validation_feedback,
-            )
-            validation_actions = self._actions_with_effective_replacements(
-                actions,
-                transformation_log,
-            )
+        Some RDP plans describe each C Global Variable action with the generic
+        values ``variable``, ``get_variable`` and ``set_variable``.  Passing
+        those strings directly to the C transformer inevitably produces
+        GLOBAL_DECLARATION_NOT_FOUND_OR_AMBIGUOUS.
 
-        transformation_attempted = transformed_code != file_entry.source_code
-        total_replacements = sum(
-            entry.replacements_count for entry in transformation_log
-        )
-        safely_not_applicable_logs = [
-            entry
-            for entry in transformation_log
-            if entry.action_type != ACTION_NOOP
-            and str(entry.metadata.get("status") or "").lower()
-            in {"not_applicable", "already_applied", "already_handled", "satisfied"}
-        ]
-        all_executable_actions_safely_not_applicable = (
-            bool(executable_actions)
-            and len(safely_not_applicable_logs) == len(executable_actions)
-        )
-        all_executable_actions_already_handled = (
-            bool(executable_actions)
-            and len(safely_not_applicable_logs) == len(executable_actions)
-            and all(
-                str(entry.metadata.get("status") or "").lower()
-                in {"already_applied", "already_handled", "satisfied"}
-                for entry in safely_not_applicable_logs
-            )
-        )
+        SCTVA already has a conservative local C Global Variable detector.  We
+        reuse that detector here and pair unresolved planner actions with the
+        proven mutable scalar globals in declaration order *only when the
+        mapping is unambiguous*.  This happens before local actions are merged,
+        which also prevents duplicate detector actions from being appended.
+        """
 
-        if not transformation_attempted:
-            if all_executable_actions_safely_not_applicable:
-                transform_warnings.append(
-                    "No source-code change was required: every executable action was safely classified as not applicable or already satisfied."
-                )
-            elif executable_actions:
-                transform_warnings.append(
-                    "No source-code change was applied: every executable action produced zero replacements."
-                )
-            else:
-                transform_warnings.append(
-                    "No source-code change was applied: the plan contained only noop actions."
-                )
-            if file_entry.source_mode != "raw":
-                transform_warnings.append(
-                    "This file was imported from CUQA as reconstructed placeholder source, "
-                    "not raw file text. SCTVA preserved it because RDP line/literal actions "
-                    "cannot be applied accurately without the original source code."
-                )
+        language = (file_entry.language or fallback_language or "").strip().lower()
+        if language != "c" or file_entry.source_mode != "raw" or not actions:
+            return
 
-        syntax_step = self.syntax_validator.validate(
-            language=language,
-            source_code=transformed_code,
-            # A coordinated caller can legitimately depend on the target class
-            # in another imported file.  It is compiled with that full source
-            # set by the transaction finalizer below.
-            require_compilation=(
-                request.execution_options.require_compilation
-                and language != "c"
-                and not any(
-                    action.action_type == ACTION_UPDATE_JAVA_PARAMETER_OBJECT_CALL_SITE
-                    for action in actions
-                )
-            ),
-            timeout_seconds=request.execution_options.timeout_seconds,
-        )
-
-        if (
-            language == "c"
-            and syntax_step.passed
-            and request.execution_options.require_compilation
-        ):
-            candidate_c_repository = []
-            target_path = self._normalize_path(file_entry.file_name)
-            for project_file in project_files:
-                project_name = str(
-                    project_file.get("file_name") or project_file.get("file_path") or ""
-                )
-                candidate_c_repository.append({
-                    **project_file,
-                    "source_code": (
-                        transformed_code
-                        if self._normalize_path(project_name) == target_path
-                        else str(project_file.get("source_code") or "")
-                    ),
-                })
-            repository_syntax = self.syntax_validator.validate_c_project(
-                candidate_c_repository,
-                require_compilation=True,
-                timeout_seconds=request.execution_options.timeout_seconds,
-            )
-            syntax_step.details["repository_compiler_validation"] = (
-                repository_syntax.to_dict()
-            )
-            syntax_step.details["compiler_validation"] = (
-                repository_syntax.details.get("compiler_validation", "UNAVAILABLE")
-            )
-            syntax_step.details["compiler"] = repository_syntax.details.get("compiler")
-            if repository_syntax.details.get("warnings"):
-                syntax_step.details.setdefault("warnings", []).extend(
-                    repository_syntax.details["warnings"]
-                )
-            if not repository_syntax.passed:
-                syntax_step.passed = False
-                syntax_step.score = 0.0
-                syntax_step.message = repository_syntax.message
-                syntax_step.details.setdefault("diagnostics", []).extend(
-                    repository_syntax.details.get("diagnostics", [])
-                )
-
-        structural_step = self.structural_validator.validate(
-            language=language,
-            original_code=file_entry.source_code,
-            transformed_code=transformed_code,
-            actions=validation_actions,
-        )
-
-        coordinated_call_site_only = (
-            language == "java"
-            and bool(actions)
-            and all(
-                action.action_type == ACTION_UPDATE_JAVA_PARAMETER_OBJECT_CALL_SITE
-                for action in actions
-            )
-        )
-        coordinated_parameter_target = (
-            language == "java"
-            and any(
-                action.action_type == ACTION_INTRODUCE_JAVA_PARAMETER_OBJECT
-                and action.parameters.get("coordinated_project_transaction_id")
-                for action in actions
-            )
-        )
-        if coordinated_call_site_only:
-            # The caller now depends on the target's new nested parameter
-            # object, so isolated probes would execute an intentionally
-            # incomplete one-file compilation unit.  Repository compilation
-            # is performed atomically after every participating file changes.
-            behavioral_step = ValidationStepResult(
-                name="behavioral",
-                passed=True,
-                score=1.0,
-                message="Java coordinated caller behavior deferred to repository validation.",
-                details={"mode": "coordinated_java_repository_validation"},
-            )
-            invariant_step = ValidationStepResult(
-                name="invariant",
-                passed=True,
-                score=1.0,
-                message="Java coordinated caller invariants deferred to repository validation.",
-                details={"mode": "coordinated_java_repository_validation"},
-            )
-        else:
-            behavioral_step = self.behavioral_validator.validate(
-                language=language,
-                original_code=file_entry.source_code,
-                transformed_code=transformed_code,
-                behavior_tests=request.refactoring_plan.behavior_tests,
-                enable_behavior_tests=request.execution_options.enable_behavior_tests,
-                actions=validation_actions,
-                strict_mode=request.execution_options.strict_mode,
-                # The imported project snapshot still contains the original
-                # caller files while this target is being validated.  Probe the
-                # target in isolation here; the final transaction stage then
-                # compiles the fully rewritten repository together.
-                project_source_files=[] if coordinated_parameter_target else project_files,
-                current_file_name=file_entry.file_name,
-                structural_validation_passed=structural_step.passed,
-            )
-
-            invariant_step = self.invariant_miner.mine(
-                language=language,
-                behavioral_step=behavioral_step,
-                actions=validation_actions,
-                strict_mode=request.execution_options.strict_mode,
-            )
-
-        rollback_occurred, rollback_reason = self.rollback_manager.evaluate(
-            [syntax_step, structural_step, behavioral_step, invariant_step],
-            rollback_on_behavior_failure=request.execution_options.rollback_on_behavior_failure,
-        )
-
-        selective_replay = self._attempt_selective_java_parameter_object_replay(
-            request=request,
-            file_entry=file_entry,
-            actions=actions,
-            project_files=project_files,
-            structural_step=structural_step,
-            rollback_occurred=rollback_occurred,
-        )
-        if selective_replay is not None:
-            (
-                transformed_code,
-                transformation_log,
-                transform_warnings,
-                validation_actions,
-                syntax_step,
-                structural_step,
-                behavioral_step,
-                invariant_step,
-            ) = selective_replay
-            rollback_occurred = False
-            rollback_reason = ""
-            transform_warnings.append(
-                "Selective rollback preserved independent accepted actions after an invalid Java Parameter Object action was removed."
-            )
-
-        model_candidate_applied = any(
-            entry.replacements_count > 0
-            and (entry.metadata or {}).get("model_assisted") is True
-            for entry in transformation_log
-        )
-        bundle_repair_already_attempted = any(
-            bool(
-                ((entry.metadata or {}).get("model_assistance") or {}).get(
-                    "bundle_repair_attempted"
-                )
-            )
-            for entry in transformation_log
-            if isinstance((entry.metadata or {}).get("model_assistance"), dict)
-        )
-        if (
-            rollback_occurred
-            and model_candidate_applied
-            and model_assistant is not None
-            and model_assistant.settings.mode == "primary"
-        ):
-            failed_steps = [
-                step.name
-                for step in (
-                    syntax_step,
-                    structural_step,
-                    behavioral_step,
-                    invariant_step,
-                )
-                if not step.passed
-            ]
-            failed_validation_details = [
-                {
-                    "name": step.name,
-                    "message": step.message,
-                    "score": step.score,
-                    "details": step.details,
-                }
-                for step in (
-                    syntax_step,
-                    structural_step,
-                    behavioral_step,
-                    invariant_step,
-                )
-                if not step.passed
-            ]
-            repair_summary = " | ".join(
-                self._model_validation_step_feedback(step)
-                for step in (
-                    syntax_step,
-                    structural_step,
-                    behavioral_step,
-                    invariant_step,
-                )
-                if not step.passed
-            )
-            repair_feedback = {
-                entry.action_index: (
-                    "The previous model-generated file failed final SCTVA validation. "
-                    + repair_summary
-                )
-                for entry in transformation_log
-                if entry.replacements_count > 0
-                and (entry.metadata or {}).get("model_assisted") is True
-            }
-            if (
-                allow_model_validation_repair
-                and not bundle_repair_already_attempted
-                and repair_feedback
-                and model_assistant.can_attempt(file_entry.file_name)
-            ):
-                repaired_result = self._execute_single_file(
-                    request=request,
-                    file_entry=file_entry,
-                    actions=actions,
-                    project_files=project_files,
-                    model_assistant=model_assistant,
-                    model_validation_feedback=repair_feedback,
-                    allow_model_validation_repair=False,
-                )
-                if (
-                    repaired_result.get("model_used") is True
-                    and repaired_result.get("model_output_retained") is True
-                    and repaired_result.get("rollback_occurred") is not True
-                ):
-                    repaired_result["model_validation_repair_attempted"] = True
-                    repaired_result["model_validation_repair_accepted"] = True
-                    repaired_result["model_validation_repair_feedback"] = repair_summary
-                    repaired_report = repaired_result.get("safety_report")
-                    if isinstance(repaired_report, dict):
-                        repaired_report.setdefault("human_messages", []).append(
-                            "A validator-guided model repair candidate passed final SCTVA validation."
-                        )
-                    return repaired_result
-            rule_result = self._execute_single_file(
-                request=request,
-                file_entry=file_entry,
-                actions=actions,
-                project_files=project_files,
-                model_assistant=None,
-                allow_model_validation_repair=False,
-            )
-            fallback_result = self._annotate_model_first_rule_fallback(
-                rule_result,
-                model_assistant=model_assistant,
-                failed_model_log=transformation_log,
-                failed_steps=failed_steps,
-                failed_validation_details=failed_validation_details,
-                rollback_reason=rollback_reason,
-            )
-            return fallback_result
-
-        self._finalize_extract_class_logs(
-            transformation_log,
-            syntax_passed=syntax_step.passed,
-            structural_passed=structural_step.passed,
-            behavioral_passed=behavioral_step.passed,
-            invariant_passed=invariant_step.passed,
-            rollback_occurred=rollback_occurred,
-        )
-        self._finalize_extract_method_logs(
-            transformation_log,
-            syntax_passed=syntax_step.passed,
-            structural_passed=structural_step.passed,
-            behavioral_passed=behavioral_step.passed,
-            invariant_passed=invariant_step.passed,
-            rollback_occurred=rollback_occurred,
-        )
-        self._finalize_parameter_object_logs(
-            transformation_log,
-            syntax_passed=syntax_step.passed,
-            structural_passed=structural_step.passed,
-            behavioral_passed=behavioral_step.passed,
-            invariant_passed=invariant_step.passed,
-            rollback_occurred=rollback_occurred,
-        )
-        self._finalize_remove_dead_code_logs(
-            transformation_log,
-            syntax_passed=syntax_step.passed,
-            structural_passed=structural_step.passed,
-            behavioral_passed=behavioral_step.passed,
-            invariant_passed=invariant_step.passed,
-            rollback_occurred=rollback_occurred,
-            dead_code_validation=list(
-                structural_step.details.get("dead_code_validation") or []
-            ),
-        )
-        self._finalize_guard_clauses_logs(
-            transformation_log,
-            syntax_passed=syntax_step.passed,
-            structural_passed=structural_step.passed,
-            behavioral_passed=behavioral_step.passed,
-            invariant_passed=invariant_step.passed,
-            rollback_occurred=rollback_occurred,
-        )
-
-        final_code = file_entry.source_code if rollback_occurred else transformed_code
-        transformation_applied = final_code != file_entry.source_code
-
-        validation_score, confidence_details = self.scorer.score(
-            syntax=syntax_step,
-            structural=structural_step,
-            behavioral=behavioral_step,
-            invariant=invariant_step,
-        )
-        confidence_score = validation_score
-        if rollback_occurred:
-            confidence_score = min(confidence_score, 0.49)
-        confidence_applicable = transformation_applied or rollback_occurred
-        if not confidence_applicable:
-            confidence_score = None
-
-        model_usage = self._model_usage_summary(
-            transformation_log,
-            validation_score=validation_score,
-            rollback_occurred=rollback_occurred,
-            transformation_applied=transformation_applied,
-            model_enabled=model_assistant is not None,
-            model_mode=(
-                model_assistant.settings.mode if model_assistant is not None else ""
-            ),
-            configured_model_provider=(
-                model_assistant.provider if model_assistant is not None else ""
-            ),
-            validation_steps=[syntax_step, structural_step, behavioral_step, invariant_step],
-        )
-
-        safety_report = self.reporter.build(
-            rollback_occurred=rollback_occurred,
-            rollback_reason=rollback_reason,
-            transformation_log=transformation_log,
-            validation_steps=[syntax_step, structural_step, behavioral_step, invariant_step],
-            extra_warnings=(
-                []
-                if all_executable_actions_safely_not_applicable
-                else transform_warnings
-            ),
-            transformation_applied=transformation_applied,
-            not_applicable=all_executable_actions_safely_not_applicable,
-        )
-
-        safety_report.human_messages.append(
-            "Confidence formula: syntax_w*syntax + structural_w*structural + behavioral_w*behavioral"
-        )
-        if model_usage["model_used"]:
-            safety_report.human_messages.append(
-                "Local code-model contribution retained: "
-                f"{model_usage['model_action_count']} action candidate(s), "
-                f"validated accuracy {model_usage['model_validated_accuracy']}%."
-            )
-        elif model_usage["model_attempted"]:
-            attempt_reasons = ", ".join(model_usage["model_attempt_reasons"])
-            safety_report.human_messages.append(
-                "The local code model was attempted, but no model candidate was retained; "
-                "the accepted output is rule-based."
-                + (f" Reason(s): {attempt_reasons}." if attempt_reasons else "")
-            )
-        elif model_usage["model_ineligible_reasons"]:
-            ineligible_reasons = ", ".join(model_usage["model_ineligible_reasons"])
-            safety_report.human_messages.append(
-                "Local model inference was skipped by SCTVA's language safety preflight. "
-                f"Reason(s): {ineligible_reasons}."
-            )
-        elif model_usage["model_enabled"]:
-            safety_report.human_messages.append(
-                "The local code model was enabled, but this file had no eligible executable model action."
-            )
-        else:
-            safety_report.human_messages.append(
-                "The local code model was not used for this file; model validated accuracy is 0%."
-            )
-
-        requested_move_count = sum(
-            1
-            for action in actions
-            if action.action_type == ACTION_MOVE_PYTHON_METHOD
-        )
-        completed_move_count = sum(
-            1
-            for log_entry in transformation_log
-            if str(
-                log_entry.metadata.get("reclassified_action_type")
-                or log_entry.action_type
-            ).strip() == ACTION_MOVE_PYTHON_METHOD
-            and str(log_entry.metadata.get("status") or "success").lower()
-            in {"success", "already_applied"}
-        )
-        unresolved_move_count = sum(
-            1
-            for log_entry in transformation_log
-            if log_entry.action_type == ACTION_MOVE_PYTHON_METHOD
-            and str(log_entry.metadata.get("status") or "").lower() == "not_applicable"
-        )
-        review_move_count = sum(
-            1
-            for log_entry in transformation_log
-            if log_entry.action_type == ACTION_MOVE_PYTHON_METHOD
-            and str(log_entry.metadata.get("status") or "").lower() == "review_required"
-        )
-        move_method_plan_complete = (
-            requested_move_count == 0
-            or completed_move_count + unresolved_move_count == requested_move_count
-        )
-        if requested_move_count and not move_method_plan_complete:
-            safety_report.risk_flags.append("plan_compliance_failed:move_method")
-            safety_report.human_messages.append(
-                "Move Method plan compliance failed: not every requested Move Method action was applied."
-            )
-
-        requested_inline_count = sum(
-            1
-            for action in actions
-            if action.action_type == ACTION_INLINE_PYTHON_CLASS
-        )
-        successful_inline_count = sum(
-            1
-            for log_entry in transformation_log
-            if log_entry.replacements_count > 0
-            and str(
-                log_entry.metadata.get("reclassified_action_type")
-                or log_entry.action_type
-            ).strip() == ACTION_INLINE_PYTHON_CLASS
-            and str(log_entry.metadata.get("status") or "success").lower() == "success"
-        )
-        unresolved_inline_count = sum(
-            1
-            for log_entry in transformation_log
-            if log_entry.action_type == ACTION_INLINE_PYTHON_CLASS
-            and str(log_entry.metadata.get("status") or "").lower() == "not_applicable"
-            and str(log_entry.metadata.get("reason") or "")
-            != "SMELL_RESOLVED_BY_PRIOR_REFACTORING"
-        )
-        resolved_by_prior_refactoring_inline_count = sum(
-            1
-            for log_entry in transformation_log
-            if log_entry.action_type == ACTION_INLINE_PYTHON_CLASS
-            and str(log_entry.metadata.get("status") or "").lower()
-            in {"not_applicable", "satisfied"}
-            and str(log_entry.metadata.get("reason") or "")
-            == "SMELL_RESOLVED_BY_PRIOR_REFACTORING"
-        )
-        already_handled_inline_count = sum(
-            1
-            for log_entry in transformation_log
-            if log_entry.action_type == ACTION_INLINE_PYTHON_CLASS
-            and str(log_entry.metadata.get("status") or "").lower()
-            == "already_handled"
-            and str(log_entry.metadata.get("reason") or "")
-            == "ALREADY_HANDLED_BY_PRIOR_INLINE_CLASS"
-        )
-        review_inline_count = sum(
-            1
-            for log_entry in transformation_log
-            if log_entry.action_type == ACTION_INLINE_PYTHON_CLASS
-            and str(log_entry.metadata.get("status") or "").lower() == "review_required"
-        )
-        inline_class_plan_complete = (
-            requested_inline_count == 0
-            or successful_inline_count
-            + unresolved_inline_count
-            + resolved_by_prior_refactoring_inline_count
-            + already_handled_inline_count
-            == requested_inline_count
-        )
-        if requested_inline_count and not inline_class_plan_complete:
-            safety_report.risk_flags.append("plan_compliance_failed:inline_class")
-            safety_report.human_messages.append(
-                "Inline Class plan compliance failed: not every requested Inline Class action was applied."
-            )
-
-        requested_global_variable_count = sum(
-            1
+        encapsulate_actions = [
+            action
             for action in actions
             if action.action_type in {
                 ACTION_ENCAPSULATE_C_VARIABLE,
@@ -2311,1000 +3461,145 @@ class SafeCodeTransformationValidationAgent:
             }
             or str(action.source_refactoring or "").strip().lower()
             in {"encapsulate variable", "global variable"}
-        )
-        successful_global_variable_count = sum(
-            1
-            for log_entry in transformation_log
-            if log_entry.replacements_count > 0
-            and str(
-                log_entry.metadata.get("reclassified_action_type")
-                or log_entry.action_type
-            ).strip() == ACTION_ENCAPSULATE_C_VARIABLE
-            and str(log_entry.metadata.get("status") or "success").lower() == "success"
-        )
-        not_applicable_global_variable_count = sum(
-            1
-            for log_entry in transformation_log
-            if str(
-                log_entry.metadata.get("reclassified_action_type")
-                or log_entry.action_type
-            ).strip() in {ACTION_ENCAPSULATE_C_VARIABLE, ACTION_ENCAPSULATE_VARIABLE}
-            and str(log_entry.metadata.get("status") or "").lower()
-            in {"not_applicable", "already_handled", "satisfied"}
-        )
-        review_global_variable_count = sum(
-            1
-            for log_entry in transformation_log
-            if str(
-                log_entry.metadata.get("reclassified_action_type")
-                or log_entry.action_type
-            ).strip() in {ACTION_ENCAPSULATE_C_VARIABLE, ACTION_ENCAPSULATE_VARIABLE}
-            and str(log_entry.metadata.get("status") or "").lower() == "review_required"
-        )
-        global_variable_plan_complete = (
-            requested_global_variable_count == 0
-            or successful_global_variable_count + not_applicable_global_variable_count
-            == requested_global_variable_count
-        )
-        if requested_global_variable_count and (
-            review_global_variable_count or not global_variable_plan_complete
-        ):
-            safety_report.risk_flags.append("plan_compliance_failed:global_variable")
-            safety_report.human_messages.append(
-                "Global Variable plan compliance requires review: at least one requested C global target could not be proven applicable or safely dismissed."
-            )
-
-        requested_hide_delegate_count = sum(
-            1
-            for action in actions
-            if action.action_type == ACTION_HIDE_DELEGATE
-        )
-        successful_hide_delegate_count = sum(
-            1
-            for log_entry in transformation_log
-            if log_entry.replacements_count > 0
-            and str(
-                log_entry.metadata.get("reclassified_action_type")
-                or log_entry.action_type
-            ).strip() == ACTION_HIDE_DELEGATE
-            and str(log_entry.metadata.get("status") or "success").lower() == "success"
-        )
-        unresolved_hide_delegate_count = sum(
-            1
-            for log_entry in transformation_log
-            if log_entry.action_type == ACTION_HIDE_DELEGATE
-            and str(log_entry.metadata.get("status") or "").lower() == "not_applicable"
-        )
-        review_hide_delegate_count = sum(
-            1
-            for log_entry in transformation_log
-            if log_entry.action_type == ACTION_HIDE_DELEGATE
-            and str(log_entry.metadata.get("status") or "").lower() == "review_required"
-        )
-        hide_delegate_plan_complete = (
-            requested_hide_delegate_count == 0
-            or successful_hide_delegate_count + unresolved_hide_delegate_count
-            == requested_hide_delegate_count
-        )
-        if requested_hide_delegate_count and not hide_delegate_plan_complete:
-            safety_report.risk_flags.append("plan_compliance_failed:hide_delegate")
-            safety_report.human_messages.append(
-                "Hide Delegate plan compliance failed: not every requested Hide Delegate action was applied."
-            )
-
-        requested_polymorphism_count = sum(
-            1
-            for action in actions
-            if action.action_type == ACTION_REPLACE_CONDITIONAL_WITH_POLYMORPHISM
-        )
-        successful_polymorphism_count = sum(
-            1
-            for log_entry in transformation_log
-            if log_entry.replacements_count > 0
-            and str(
-                log_entry.metadata.get("reclassified_action_type")
-                or log_entry.action_type
-            ).strip() == ACTION_REPLACE_CONDITIONAL_WITH_POLYMORPHISM
-            and str(log_entry.metadata.get("status") or "success").lower() == "success"
-        )
-        not_applicable_polymorphism_count = sum(
-            1
-            for log_entry in transformation_log
-            if log_entry.action_type == ACTION_REPLACE_CONDITIONAL_WITH_POLYMORPHISM
-            and str(log_entry.metadata.get("status") or "").lower() == "not_applicable"
-        )
-        review_polymorphism_count = sum(
-            1
-            for log_entry in transformation_log
-            if log_entry.action_type == ACTION_REPLACE_CONDITIONAL_WITH_POLYMORPHISM
-            and str(log_entry.metadata.get("status") or "").lower() == "review_required"
-        )
-        polymorphism_plan_complete = (
-            requested_polymorphism_count == 0
-            or successful_polymorphism_count + not_applicable_polymorphism_count
-            == requested_polymorphism_count
-        )
-        if requested_polymorphism_count and not polymorphism_plan_complete:
-            safety_report.risk_flags.append("plan_compliance_failed:polymorphism")
-            safety_report.human_messages.append(
-                "Replace Conditional with Polymorphism plan compliance failed: "
-                "not every requested action was safely applied."
-            )
-
-        validation_passed = (
-            (not rollback_occurred)
-            and syntax_step.passed
-            and structural_step.passed
-            and behavioral_step.passed
-            and invariant_step.passed
-            and move_method_plan_complete
-            and inline_class_plan_complete
-            and global_variable_plan_complete
-            and hide_delegate_plan_complete
-            and polymorphism_plan_complete
-        )
-        success = validation_passed and (
-            transformation_applied
-            or all_executable_actions_safely_not_applicable
-        )
-
-        result = SCTVAResult(
-            request_id=request.request_id,
-            language=language,
-            success=success,
-            rollback_occurred=rollback_occurred,
-            confidence_score=confidence_score,
-            refactored_code=final_code,
-            validation_syntax=syntax_step,
-            validation_structural=structural_step,
-            validation_behavioral=behavioral_step,
-            validation_invariant=invariant_step,
-            safety_report=safety_report,
-            transformation_applied=transformation_applied,
-            total_replacements=total_replacements,
-            confidence_applicable=confidence_applicable,
-            validation_score=validation_score,
-        ).to_dict()
-
-        result["file_name"] = file_entry.file_name
-        result["source_mode"] = file_entry.source_mode
-        result["origin"] = file_entry.origin
-        result["confidence_components"] = confidence_details
-        result.update(model_usage)
-        # Report only transformations that were actually accepted for this
-        # file.  The earlier fixed five-family summary made every unrelated
-        # family look like PASS whenever its requested count was zero.
-        result["plan_compliance"] = self._file_plan_compliance(
-            transformation_log,
-            rollback_occurred=rollback_occurred,
-        )
-        has_review = any(
-            str(e.metadata.get("status") if hasattr(e, "metadata") else "").lower() == "review_required"
-            or any("review" in str(w).lower() for w in (e.warnings if hasattr(e, "warnings") else []))
-            for e in transformation_log
-        )
-        if rollback_occurred:
-            file_status = "FAILED"
-        elif has_review:
-            file_status = "REVIEW_REQUIRED"
-        elif all_executable_actions_already_handled and not transformation_applied:
-            file_status = "ALREADY_HANDLED"
-        elif all_executable_actions_safely_not_applicable and not transformation_applied:
-            file_status = "NOT_APPLICABLE"
-        elif success:
-            file_status = "FULL_SUCCESS"
-        elif total_replacements > 0:
-            file_status = "PARTIAL_SUCCESS"
-        else:
-            file_status = "FAILED"
-
-        result["status"] = file_status
-        result["application_status"] = (
-            "ROLLED_BACK"
-            if rollback_occurred
-            else "APPLIED"
-            if transformation_applied
-            else "ALREADY_HANDLED"
-            if file_status == "ALREADY_HANDLED"
-            else "NO_CHANGE_REQUIRED"
-            if file_status == "NOT_APPLICABLE"
-            else "NOT_APPLIED"
-        )
-        return result
-
-    def _validate_model_action_candidate(
-        self,
-        *,
-        language: str,
-        original_code: str,
-        candidate_code: str,
-        action: RefactoringAction,
-        timeout_seconds: int,
-        behavior_tests: List[Dict[str, Any]] | None = None,
-        enable_behavior_tests: bool = True,
-        strict_mode: bool = True,
-        project_source_files: List[Dict[str, Any]] | None = None,
-        current_file_name: str = "",
-    ) -> Dict[str, Any]:
-        """Validate one model edit against only its corresponding RDP action."""
-
-        syntax = self.syntax_validator.validate(
-            language=language,
-            source_code=candidate_code,
-            require_compilation=False,
-            timeout_seconds=timeout_seconds,
-        )
-        validation_action = action
-        structural = self.structural_validator.validate(
-            language=language,
-            original_code=original_code,
-            transformed_code=candidate_code,
-            actions=[validation_action],
-        )
-        accepted_metadata: Dict[str, Any] = {}
-        extra_steps: List[ValidationStepResult] = []
-
-        # The final Java behavioral validator proves Extract Method through an
-        # explicit caller -> helper lineage.  Rule transformers naturally
-        # produce that metadata; model candidates must derive the same facts
-        # from the accepted source instead of arriving at final validation as
-        # an unclassified body rewrite.
-        if (
-            language.lower() == "java"
-            and action.action_type == ACTION_EXTRACT_METHOD
-            and syntax.passed
-            and structural.passed
-        ):
-            params = dict(action.parameters or {})
-            source_method = str(
-                params.get("source_method")
-                or params.get("method")
-                or params.get("method_name")
-                or params.get("target_method")
-                or ""
-            ).strip()
-            source_class = str(
-                params.get("source_class")
-                or params.get("target_class")
-                or params.get("class_name")
-                or ""
-            ).strip()
-            if not source_class and source_method:
-                owners = []
-                for candidate_class in declared_class_names(original_code):
-                    model = _parse_java_class(original_code, candidate_class)
-                    if model is not None and model.methods_by_name.get(source_method):
-                        owners.append(candidate_class)
-                if len(owners) == 1:
-                    source_class = owners[0]
-
-            helper_resolution = (
-                java_extract_method.infer_extracted_method_name(
-                    original_code,
-                    candidate_code,
-                    source_class=source_class,
-                    source_method=source_method,
-                )
-                if source_class and source_method
-                else {"status": "unresolved", "reason": "SOURCE_TARGET_NOT_RESOLVED"}
-            )
-            extracted_method = str(helper_resolution.get("method_name") or "").strip()
-            if extracted_method:
-                postconditions = {
-                    "target_resolution": "PASS",
-                    "data_flow": "PASS",
-                    "structural": "PASS",
-                    "scope_validation": "PASS",
-                    "no_severe_new_smell": "PASS",
-                    "long_method_reduction": "PASS",
-                }
-                accepted_metadata = {
-                    "language": "java",
-                    "source_class": source_class,
-                    "source_method": source_method,
-                    "planned_extracted_method": str(
-                        params.get("new_method_name")
-                        or params.get("extracted_method_name")
-                        or ""
-                    ).strip(),
-                    "extracted_method": extracted_method,
-                    "extracted_method_resolution": helper_resolution,
-                    "plan_compliance": "PASS",
-                    "validation": postconditions,
-                }
-                validation_params = dict(params)
-                validation_params["applied_transformation_metadata"] = dict(
-                    accepted_metadata
-                )
-                validation_action = RefactoringAction(
-                    action_type=action.action_type,
-                    parameters=validation_params,
-                    source_step_id=action.source_step_id,
-                    source_refactoring=action.source_refactoring,
-                    warnings=list(action.warnings),
-                )
-                behavioral = self.behavioral_validator.validate(
-                    language=language,
-                    original_code=original_code,
-                    transformed_code=candidate_code,
-                    behavior_tests=list(behavior_tests or []),
-                    enable_behavior_tests=enable_behavior_tests,
-                    actions=[validation_action],
-                    strict_mode=strict_mode,
-                    project_source_files=project_source_files or [],
-                    current_file_name=current_file_name,
-                    structural_validation_passed=True,
-                )
-                invariant = self.invariant_miner.mine(
-                    language=language,
-                    behavioral_step=behavioral,
-                    actions=[validation_action],
-                    strict_mode=strict_mode,
-                )
-                extra_steps.extend((behavioral, invariant))
-            else:
-                structural.passed = False
-                structural.score = 0.0
-                structural.message = (
-                    "Extract Method helper lineage could not be resolved uniquely."
-                )
-                structural.details["model_helper_resolution"] = helper_resolution
-
-        steps = (syntax, structural, *extra_steps)
-        validation = [
-            {
-                "name": step.name,
-                "passed": bool(step.passed),
-                "score": step.score,
-                "message": step.message,
-                "details": step.details,
-                "scope": "single_rdp_action",
-            }
-            for step in steps
         ]
-        issues = [
-            self._model_validation_step_feedback(step)
-            for step in steps
-            if not step.passed
-        ]
-        return {
-            "passed": not issues,
-            "issues": issues,
-            "validation": validation,
-            "accepted_metadata": accepted_metadata if not issues else {},
-        }
-
-    def _validate_model_bundle_candidate(
-        self,
-        *,
-        language: str,
-        original_code: str,
-        candidate_code: str,
-        actions: Sequence[RefactoringAction],
-        timeout_seconds: int,
-    ) -> Dict[str, Any]:
-        """Validate one combined model edit against its complete action bundle."""
-
-        syntax = self.syntax_validator.validate(
-            language=language,
-            source_code=candidate_code,
-            require_compilation=False,
-            timeout_seconds=timeout_seconds,
-        )
-        structural = self.structural_validator.validate(
-            language=language,
-            original_code=original_code,
-            transformed_code=candidate_code,
-            actions=list(actions),
-        )
-        steps = (syntax, structural)
-        validation = [
-            {
-                "name": step.name,
-                "passed": bool(step.passed),
-                "score": step.score,
-                "message": step.message,
-                "details": step.details,
-                "scope": "file_action_bundle",
-            }
-            for step in steps
-        ]
-        issues = [
-            self._model_validation_step_feedback(step)
-            for step in steps
-            if not step.passed
-        ]
-        return {
-            "passed": not issues,
-            "issues": issues,
-            "validation": validation,
-            "accepted_metadata": {
-                "bundle_action_count": len(actions),
-                "bundle_action_types": [action.action_type for action in actions],
-            } if not issues else {},
-        }
-
-    @staticmethod
-    def _model_validation_step_feedback(step: ValidationStepResult) -> str:
-        """Return bounded, actionable validator feedback for one model retry."""
-
-        details = step.details if isinstance(step.details, dict) else {}
-        reasons: List[str] = []
-
-        for failure in list(details.get("failures") or [])[:3]:
-            text = str(failure).strip()
-            if text and text not in reasons:
-                reasons.append(text)
-
-        for violation in list(details.get("violated_invariants") or [])[:3]:
-            if isinstance(violation, dict):
-                text = str(
-                    violation.get("reason")
-                    or violation.get("name")
-                    or violation
-                ).strip()
-            else:
-                text = str(violation).strip()
-            if text and text not in reasons:
-                reasons.append(text)
-
-        for validation_key in (
-            "extract_method_validation",
-            "parameter_object_validation",
-            "move_method_validation",
-            "inline_class_validation",
-        ):
-            for item in list(details.get(validation_key) or [])[:2]:
-                if not isinstance(item, dict) or item.get("passed") is not False:
-                    continue
-                text = str(item.get("reason") or "").strip()
-                if text and text not in reasons:
-                    reasons.append(text)
-
-        message = f"{step.name}: {step.message}"
-        if reasons:
-            message += " Details: " + "; ".join(reasons[:4])
-        # Keep repair prompts inside small local-model context windows.
-        return message[:900]
-
-
-    @staticmethod
-    def _promote_guard_clauses_noops(actions: List[RefactoringAction]) -> None:
-        """Promote legacy Guard Clause noops back to an executable action."""
-        for action in actions:
-            if action.action_type != ACTION_NOOP:
-                continue
-            source_refactoring = str(action.source_refactoring or "").strip().lower()
-            warnings = " ".join(str(item) for item in action.warnings).lower()
-            if (
-                source_refactoring in {
-                    "replace nested conditional with guard clauses",
-                    "replace nested conditionals with guard clauses",
-                    "replace conditional with guard clauses",
-                    "deep nesting",
-                    "deepnesting",
-                    "guard clauses",
-                }
-                or "guard clause" in warnings
-                or "deep nesting" in warnings
-            ):
-                action.action_type = ACTION_REPLACE_NESTED_CONDITIONAL_WITH_GUARD_CLAUSES
-                params = action.parameters
-                params["promoted_from_noop"] = True
-                params.setdefault("method", "")
-                action.warnings = [
-                    warning
-                    for warning in action.warnings
-                    if not (
-                        "guard clause" in str(warning).lower()
-                        and ("mapped to noop" in str(warning).lower() or "not simulated" in str(warning).lower())
-                    )
-                ]
-
-    def _resolve_guard_clauses_source_files(
-        self,
-        actions: List[RefactoringAction],
-        file_entries: List[SourceFileContract],
-        *,
-        fallback_language: str = "",
-    ) -> None:
-        """Bind Guard Clause actions to the matching C source file."""
-        c_files = [
-            f for f in file_entries
-            if (f.language or fallback_language).strip().lower() == "c"
-            or f.file_name.lower().endswith(".c")
-        ]
-        if not c_files:
+        if not encapsulate_actions:
             return
 
-        guard_actions = {
-            ACTION_REPLACE_NESTED_CONDITIONAL_WITH_GUARD_CLAUSES,
-            ACTION_REPLACE_CONDITIONAL_WITH_GUARD_CLAUSES,
-            ACTION_GUARD_CLAUSES,
+        detected = [
+            action
+            for action in self.local_refactor_detector.detect(
+                language="c",
+                file_name=file_entry.file_name,
+                source_code=file_entry.source_code,
+                existing_actions=[],
+            )
+            if action.action_type == ACTION_ENCAPSULATE_C_VARIABLE
+        ]
+        if not detected:
+            return
+
+        detected.sort(
+            key=lambda action: (
+                int(action.parameters.get("source_line") or 10**9),
+                str(action.parameters.get("variable_name") or ""),
+            )
+        )
+        candidates_by_name = {
+            str(action.parameters.get("variable_name") or "").strip(): action
+            for action in detected
+            if str(action.parameters.get("variable_name") or "").strip()
         }
 
-        for action in actions:
-            if action.action_type not in guard_actions:
-                continue
-            params = action.parameters
-            configured_file = str(params.get("source_file") or "").strip()
-            if configured_file:
-                continue
-
-            method = str(params.get("method") or params.get("target_method") or "").strip()
-
-            matches: List[SourceFileContract] = []
-            if method:
-                for entry in c_files:
-                    if re.search(rf"\b{re.escape(method)}\s*\(", entry.source_code):
-                        matches.append(entry)
-
-            if len(matches) == 1:
-                params["source_file"] = matches[0].file_name
-            elif len(c_files) == 1:
-                params["source_file"] = c_files[0].file_name
-
-    @staticmethod
-    def _finalize_guard_clauses_logs(
-        transformation_log: List[TransformationLogEntry],
-        *,
-        syntax_passed: bool,
-        structural_passed: bool,
-        behavioral_passed: bool,
-        invariant_passed: bool,
-        rollback_occurred: bool,
-    ) -> None:
-        """Finalize metrics and validation status for Replace Nested Conditional with Guard Clauses."""
-        guard_actions = {
-            ACTION_REPLACE_NESTED_CONDITIONAL_WITH_GUARD_CLAUSES,
-            ACTION_REPLACE_CONDITIONAL_WITH_GUARD_CLAUSES,
-            ACTION_GUARD_CLAUSES,
+        generic_names = {
+            "variable",
+            "global",
+            "global_variable",
+            "globalvariable",
+            "var",
+            "value",
         }
-        for entry in transformation_log:
-            if entry.action_type not in guard_actions:
-                continue
+        resolved_names: set[str] = set()
+        unresolved: list[tuple[int, RefactoringAction, str]] = []
 
-            metadata = entry.metadata
-            if str(metadata.get("status") or "").lower() == "not_applicable":
-                metadata["final_checks"] = {
-                    "plan_compliance": "NOT_APPLICABLE",
-                    "nesting_depth_reduction": "NOT_APPLICABLE",
-                    "behavior_preservation": "PASS" if behavioral_passed else "FAIL",
-                    "compilation_syntax_validation": "PASS" if syntax_passed else "FAIL",
-                    "invariant_preservation": "PASS" if invariant_passed else "FAIL",
-                }
-                metadata["syntax"] = metadata["final_checks"]["compilation_syntax_validation"]
-                metadata["behavior"] = metadata["final_checks"]["behavior_preservation"]
-                metadata["smell_reduction"] = "NOT_APPLICABLE"
-                metadata["final_status"] = "NOT_APPLICABLE"
-                metadata["final_decision"] = "NOT_APPLICABLE"
-                continue
-
-            nesting_reduced = bool(metadata.get("nesting_reduced"))
-            after_depth = metadata.get("after_nesting_depth")
-            depth_below_threshold = isinstance(after_depth, int) and after_depth <= 4
-            conditional_nesting_reduced = bool(
-                metadata.get("conditional_nesting_reduced")
-            )
-            smell_reduced_passed = nesting_reduced and (
-                depth_below_threshold or conditional_nesting_reduced
-            )
-
-            checks = {
-                "plan_compliance": "PASS" if metadata.get("plan_compliance") == "PASS" else "FAIL",
-                "nesting_depth_reduction": "PASS" if smell_reduced_passed else "FAIL",
-                "behavior_preservation": "PASS" if behavioral_passed else "FAIL",
-                "compilation_syntax_validation": "PASS" if syntax_passed else "FAIL",
-                "invariant_preservation": "PASS" if invariant_passed else "FAIL",
-            }
-            metadata["final_checks"] = checks
-            metadata["syntax"] = checks["compilation_syntax_validation"]
-            metadata["behavior"] = checks["behavior_preservation"]
-            metadata["smell_reduction"] = (
-                "PASS"
-                if smell_reduced_passed and depth_below_threshold
-                else "REDUCED" if smell_reduced_passed else "FAIL"
-            )
-
-            if rollback_occurred:
-                metadata["status"] = "rolled_back"
-                metadata["final_status"] = "ROLLED_BACK"
-                metadata["final_decision"] = "ROLLBACK"
-            elif entry.replacements_count <= 0 or "FAIL" in checks.values():
-                metadata["status"] = "review_required"
-                metadata["final_status"] = "REVIEW_REQUIRED"
-                metadata["final_decision"] = "REVIEW_REQUIRED"
-            else:
-                metadata["status"] = "pass"
-                metadata["final_status"] = "PASS"
-                metadata["final_decision"] = "PASS"
-
-    @staticmethod
-    def _promote_move_method_noops(actions: List[RefactoringAction]) -> None:
-        """Promote legacy Move Method noops back to an executable action.
-
-        Older PlannerAdapter versions rejected filename-derived identifiers and
-        stored the original refactoring only in ``source_refactoring``/warnings.
-        The real target is recovered from source AST in the next step.
-        """
-
-        for action in actions:
-            if action.action_type != ACTION_NOOP:
-                continue
-            source_refactoring = str(action.source_refactoring or "").strip().lower()
-            warnings = " ".join(str(item) for item in action.warnings).lower()
-            if source_refactoring not in {"move method", "feature envy"} and "move method" not in warnings:
-                continue
-            action.action_type = ACTION_MOVE_PYTHON_METHOD
-            params = action.parameters or {}
-            params["promoted_from_noop"] = True
-            params.setdefault("method", "")
-            params.setdefault("source_class", "")
-            params.setdefault("destination_class", "")
-            params.setdefault("destination_parameter", "")
-
-    @staticmethod
-    def _promote_inline_class_noops(actions: List[RefactoringAction]) -> None:
-        """Recover legacy RDP Inline Class steps that were stored as noops."""
-
-        for action in actions:
-            if action.action_type != ACTION_NOOP:
-                continue
-            source_refactoring = str(action.source_refactoring or "").strip().lower()
-            warnings = " ".join(str(item) for item in action.warnings).lower()
-            if source_refactoring != "inline class" and "inline class" not in warnings:
-                continue
-            action.action_type = ACTION_INLINE_PYTHON_CLASS
-            # ``parameters`` is a dataclass-owned dict.  Do not use ``or {}``
-            # here: an empty legacy parameter object must receive the resolved
-            # class and source-file values below.
+        for order, action in enumerate(encapsulate_actions):
             params = action.parameters
-            params["promoted_from_noop"] = True
-            params.setdefault("class_to_inline", "")
-            action.warnings = [
-                warning
-                for warning in action.warnings
-                if not (
-                    "inline class" in str(warning).lower()
-                    and (
-                        "richer semantic edits" in str(warning).lower()
-                        or "not simulated" in str(warning).lower()
-                        or "mapped to noop" in str(warning).lower()
-                    )
-                )
-            ]
-
-    @staticmethod
-    def _canonicalize_inline_class_targets(actions: List[RefactoringAction]) -> None:
-        """Preserve one semantic Inline Class target across planner formats."""
-
-        for action in actions:
-            if action.action_type != ACTION_INLINE_PYTHON_CLASS:
-                continue
-            params = action.parameters
-            requested_target = params.get("requested_target")
-            requested_target = (
-                requested_target if isinstance(requested_target, dict) else {}
-            )
-            legacy_step = params.get("legacy_step")
-            legacy_step = legacy_step if isinstance(legacy_step, dict) else {}
-            legacy_params = legacy_step.get("parameters")
-            legacy_params = legacy_params if isinstance(legacy_params, dict) else {}
-            legacy_target = legacy_step.get("target")
-            legacy_target = legacy_target if isinstance(legacy_target, dict) else {}
-
-            target_class = str(
-                params.get("qualified_class_name")
-                or params.get("class_to_inline")
-                or params.get("target_class")
-                or params.get("source_class")
-                or params.get("class_name")
-                or requested_target.get("class_to_inline")
-                or legacy_params.get("class_to_inline")
-                or legacy_params.get("target_class")
-                or legacy_params.get("source_class")
-                or legacy_target.get("class")
+            requested_name = str(
+                params.get("variable_name")
+                or params.get("variable")
                 or ""
             ).strip()
-            source_file = str(
-                params.get("source_file")
-                or requested_target.get("source_file")
-                or legacy_params.get("source_file")
-                or legacy_target.get("source_file")
-                or ""
-            ).strip()
+            candidate = candidates_by_name.get(requested_name)
+            if candidate is None:
+                unresolved.append((order, action, requested_name))
+                continue
 
-            params["class_to_inline"] = target_class
-            params["target_class"] = target_class
-            if source_file:
-                params["source_file"] = source_file
-            params["requested_target"] = {
-                "class_to_inline": target_class,
-                "source_file": source_file,
+            detected_params = candidate.parameters
+            action.action_type = ACTION_ENCAPSULATE_C_VARIABLE
+            params["source_file"] = file_entry.file_name
+            params["source_line"] = detected_params.get("source_line")
+            if not str(params.get("getter_name") or "").strip() or str(
+                params.get("getter_name")
+            ).strip().lower() in {"get_variable", "get_global", "get_var"}:
+                params["getter_name"] = detected_params.get("getter_name")
+            if not str(params.get("setter_name") or "").strip() or str(
+                params.get("setter_name")
+            ).strip().lower() in {"set_variable", "set_global", "set_var"}:
+                params["setter_name"] = detected_params.get("setter_name")
+            params["target_resolution"] = {
+                "status": "success",
+                "strategy": "exact_source_global",
+                "requested_variable_name": requested_name,
+                "variable_name": requested_name,
+                "source_line": detected_params.get("source_line"),
             }
-            if target_class:
-                params.pop("target_resolution_error", None)
-                if params.get("source_resolution_error") == "INLINE_CLASS_TARGET_MISSING":
-                    params.pop("source_resolution_error", None)
-                continue
+            resolved_names.add(requested_name)
 
-            params["target_resolution_error"] = "INLINE_CLASS_TARGET_MISSING"
-            params["source_resolution_error"] = "INLINE_CLASS_TARGET_MISSING"
-            params["source_resolution_status"] = "review_required"
+        if not unresolved:
+            return
 
-    @staticmethod
-    def _promote_hide_delegate_noops(actions: List[RefactoringAction]) -> None:
-        """Recover legacy Hide Delegate steps before they are silently ignored.
+        available = [
+            candidate
+            for candidate in detected
+            if str(candidate.parameters.get("variable_name") or "").strip()
+            not in resolved_names
+        ]
 
-        Earlier adapter versions treated Hide Delegate as an unsupported
-        semantic edit and replaced it with ``noop``.  The current transformer
-        implements this operation for proven Python and Java message chains,
-        so preserve the original RDP target data and dispatch the real action.
-        """
+        # The safe fallback for generic placeholders is declaration-order
+        # pairing only when the cardinalities match exactly.  The planner's
+        # line numbers can be offset by comments/imports, so nearest-line
+        # matching alone is not reliable for this case.
+        if len(unresolved) != len(available):
+            return
 
-        for action in actions:
-            if action.action_type != ACTION_NOOP:
-                continue
-            source_refactoring = str(action.source_refactoring or "").strip().lower()
-            warnings = " ".join(str(item) for item in action.warnings).lower()
-            if source_refactoring != "hide delegate" and "hide delegate" not in warnings:
-                continue
+        unresolved.sort(
+            key=lambda item: (
+                int(item[1].parameters.get("source_line") or 10**9),
+                item[0],
+            )
+        )
+        available.sort(
+            key=lambda action: int(action.parameters.get("source_line") or 10**9)
+        )
 
+        for (_, action, requested_name), candidate in zip(unresolved, available):
             params = action.parameters
-            legacy_step = params.get("legacy_step")
-            if not isinstance(legacy_step, dict):
-                legacy_step = {}
-            legacy_params = legacy_step.get("parameters")
-            legacy_params = legacy_params if isinstance(legacy_params, dict) else {}
-            legacy_target = legacy_step.get("target")
-            legacy_target = legacy_target if isinstance(legacy_target, dict) else {}
-
-            def first_text(*values: Any) -> str:
-                for value in values:
-                    if isinstance(value, str) and value.strip():
-                        return value.strip()
-                return ""
-
-            params["source_class"] = first_text(
-                params.get("source_class"),
-                legacy_params.get("source_class"),
-                legacy_target.get("class"),
-                legacy_target.get("source_class"),
-            )
-            params["delegate_member"] = first_text(
-                params.get("delegate_member"),
-                params.get("delegate_field"),
-                legacy_params.get("delegate_member"),
-                legacy_params.get("delegate_field"),
-                legacy_params.get("delegate"),
-            )
-            params["delegated_member"] = first_text(
-                params.get("delegated_member"),
-                params.get("target_member"),
-                legacy_params.get("delegated_member"),
-                legacy_params.get("target_member"),
-                legacy_params.get("member"),
-            )
-            params["new_method_name"] = first_text(
-                params.get("new_method_name"),
-                legacy_params.get("new_method_name"),
-                legacy_params.get("delegate_method_name"),
-            )
-            # Preserve the method/line hints from RDP even when the adapter had
-            # to map an incomplete Hide Delegate step to noop.  These hints are
-            # essential for repository-sized files because the semantic resolver
-            # must search the correct function instead of an unrelated message
-            # chain elsewhere in the module.
-            params["method"] = first_text(
-                params.get("method"),
-                params.get("method_name"),
-                legacy_target.get("method"),
-                legacy_target.get("function"),
-                legacy_params.get("method"),
-                legacy_params.get("method_name"),
-            )
-            legacy_lines = legacy_target.get("lines")
-            if not isinstance(legacy_lines, (list, tuple)):
-                legacy_lines = legacy_params.get("lines")
-            if not isinstance(params.get("source_line"), (int, float)):
-                explicit_line = legacy_params.get("source_line")
-                if isinstance(explicit_line, (int, float)):
-                    params["source_line"] = int(explicit_line)
-                elif (
-                    isinstance(legacy_lines, (list, tuple))
-                    and legacy_lines
-                    and isinstance(legacy_lines[0], (int, float))
-                ):
-                    params["source_line"] = int(legacy_lines[0])
-            params["source_file"] = first_text(
-                params.get("source_file"),
-                legacy_params.get("source_file"),
-                legacy_target.get("file"),
-                legacy_target.get("source_file"),
-            )
-            params["promoted_from_noop"] = True
-            action.action_type = ACTION_HIDE_DELEGATE
-            action.warnings = [
-                warning
-                for warning in action.warnings
-                if not (
-                    "hide delegate" in str(warning).lower()
-                    and (
-                        "richer semantic edits" in str(warning).lower()
-                        or "not simulated" in str(warning).lower()
-                        or "mapped to noop" in str(warning).lower()
-                    )
-                )
-            ]
-
-    @staticmethod
-    def _promote_guard_clause_noops(actions: List[RefactoringAction]) -> None:
-        """Recover legacy C Guard Clause actions before file/symbol resolution."""
-
-        guard_names = {
-            "replace nested conditional with guard clauses",
-            "replace nested conditional with guard clause",
-            "replace_conditional_with_guard_clauses",
-            "guard clauses",
-            "guard clause",
-        }
-
-        def first_text(*values: Any) -> str:
-            return next(
-                (value.strip() for value in values if isinstance(value, str) and value.strip()),
-                "",
-            )
-
-        for action in actions:
-            if action.action_type != ACTION_NOOP:
-                continue
-            source_refactoring = str(action.source_refactoring or "").strip().lower()
-            warning_text = " ".join(str(item) for item in action.warnings).lower()
-            if source_refactoring not in guard_names and "guard clause" not in warning_text:
+            detected_params = candidate.parameters
+            resolved_name = str(detected_params.get("variable_name") or "").strip()
+            if not resolved_name:
                 continue
 
-            params = action.parameters
-            legacy_step = params.get("legacy_step")
-            legacy_step = legacy_step if isinstance(legacy_step, dict) else {}
-            legacy_params = legacy_step.get("parameters")
-            legacy_params = legacy_params if isinstance(legacy_params, dict) else {}
-            legacy_target = legacy_step.get("target")
-            legacy_target = legacy_target if isinstance(legacy_target, dict) else {}
-            legacy_location = legacy_step.get("location")
-            legacy_location = legacy_location if isinstance(legacy_location, dict) else {}
-
-            method = first_text(
-                params.get("source_method"), params.get("method"),
-                params.get("function"), params.get("target_function"),
-                legacy_params.get("source_method"), legacy_params.get("method"),
-                legacy_params.get("function"), legacy_params.get("target_function"),
-                legacy_target.get("method"), legacy_target.get("function"),
-                legacy_target.get("target_function"), legacy_location.get("method"),
-                legacy_location.get("function"), legacy_step.get("target_function"),
-            )
-            source_file = first_text(
-                params.get("source_file"), legacy_params.get("source_file"),
-                legacy_target.get("source_file"), legacy_target.get("file"),
-                legacy_location.get("source_file"), legacy_location.get("file"),
-                legacy_step.get("source_file"),
-            )
-            target_lines = (
-                params.get("target_lines") or params.get("lines")
-                or legacy_params.get("target_lines") or legacy_params.get("lines")
-                or legacy_target.get("target_lines") or legacy_target.get("lines")
-                or legacy_step.get("target_lines") or legacy_step.get("lines")
-                or []
-            )
-            if not isinstance(target_lines, (list, tuple)):
-                target_lines = [target_lines] if target_lines is not None else []
-            numeric_lines = [
-                int(value) for value in target_lines
-                if isinstance(value, (int, float)) or (isinstance(value, str) and value.strip().isdigit())
-            ]
-            source_line = params.get("source_line")
-            if not isinstance(source_line, (int, float)) and numeric_lines:
-                source_line = numeric_lines[0]
-
-            params["method"] = method
-            params["source_method"] = method
-            params["target_function"] = method
-            if source_file:
-                params["source_file"] = source_file
-            params["target_lines"] = list(target_lines)
-            if isinstance(source_line, (int, float)):
-                params["source_line"] = int(source_line)
-            params["source_step_id"] = (
-                params.get("source_step_id")
-                or legacy_step.get("source_step_id")
-                or legacy_step.get("step_id")
-                or action.source_step_id
-            )
-            params["promoted_from_noop"] = True
-            action.action_type = ACTION_REPLACE_NESTED_CONDITIONAL_WITH_GUARD_CLAUSES
-            action.warnings = [
-                warning for warning in action.warnings
-                if not (
-                    "guard clause" in str(warning).lower()
-                    and ("unsupported" in str(warning).lower() or "mapped to noop" in str(warning).lower())
-                )
-            ]
-
-    @staticmethod
-    def _promote_polymorphism_noops(actions: List[RefactoringAction]) -> None:
-        """Recover plans normalized before polymorphism support was added."""
-
-        for action in actions:
-            if action.action_type != ACTION_NOOP:
-                continue
-            source_refactoring = str(action.source_refactoring or "").strip().lower()
-            warnings = " ".join(str(item) for item in action.warnings).lower()
-            if (
-                source_refactoring != "replace conditional with polymorphism"
-                and "replace conditional with polymorphism" not in warnings
-                and "replace_conditional_with_polymorphism" not in warnings
-            ):
+            # Do not silently remap a concrete, different C identifier.  This
+            # fallback is intended for known planner placeholders (or an empty
+            # target) only.
+            if requested_name and requested_name.lower() not in generic_names:
                 continue
 
-            params = action.parameters
-            legacy_step = params.get("legacy_step")
-            legacy_step = legacy_step if isinstance(legacy_step, dict) else {}
-            legacy_params = legacy_step.get("parameters")
-            legacy_params = legacy_params if isinstance(legacy_params, dict) else {}
-            legacy_target = legacy_step.get("target")
-            legacy_target = legacy_target if isinstance(legacy_target, dict) else {}
-
-            def first_text(*values: Any) -> str:
-                return next(
-                    (
-                        value.strip()
-                        for value in values
-                        if isinstance(value, str) and value.strip()
-                    ),
-                    "",
-                )
-
-            lines = legacy_target.get("lines")
-            if not isinstance(lines, (list, tuple)):
-                lines = legacy_params.get("lines")
-            params["method"] = first_text(
-                params.get("method"),
-                params.get("method_name"),
-                legacy_target.get("method"),
-                legacy_target.get("function"),
-                legacy_params.get("method"),
-                legacy_params.get("method_name"),
+            requested_getter = str(params.get("getter_name") or "").strip()
+            requested_setter = str(params.get("setter_name") or "").strip()
+            action.action_type = ACTION_ENCAPSULATE_C_VARIABLE
+            params["requested_variable_name"] = requested_name
+            params["variable_name"] = resolved_name
+            params["source_file"] = file_entry.file_name
+            params["source_line"] = detected_params.get("source_line")
+            params["getter_name"] = (
+                str(detected_params.get("getter_name") or f"get_{resolved_name}")
+                if not requested_getter
+                or requested_getter.lower() in {"get_variable", "get_global", "get_var"}
+                else requested_getter
             )
-            params["source_class"] = first_text(
-                params.get("source_class"),
-                legacy_target.get("class"),
-                legacy_params.get("source_class"),
-                legacy_params.get("class_name"),
+            params["setter_name"] = (
+                str(detected_params.get("setter_name") or f"set_{resolved_name}")
+                if not requested_setter
+                or requested_setter.lower() in {"set_variable", "set_global", "set_var"}
+                else requested_setter
             )
-            params["source_file"] = first_text(
-                params.get("source_file"),
-                legacy_target.get("file"),
-                legacy_target.get("source_file"),
-                legacy_params.get("source_file"),
-            )
-            params["base_class_name"] = first_text(
-                params.get("base_class_name"),
-                legacy_params.get("base_class_name"),
-            )
-            if isinstance(lines, (list, tuple)) and lines:
-                params.setdefault("start_line", lines[0])
-                params.setdefault("source_line", lines[0])
-                params.setdefault("end_line", lines[-1])
-            params["promoted_from_noop"] = True
-            action.action_type = ACTION_REPLACE_CONDITIONAL_WITH_POLYMORPHISM
-            action.warnings = [
-                warning
-                for warning in action.warnings
-                if not (
-                    "replace conditional with polymorphism" in str(warning).lower()
-                    or "replace_conditional_with_polymorphism" in str(warning).lower()
-                    or "mapped to noop" in str(warning).lower()
-                )
-            ]
+            params["target_resolution"] = {
+                "status": "success",
+                "strategy": "declaration_order_placeholder_recovery",
+                "requested_variable_name": requested_name,
+                "variable_name": resolved_name,
+                "source_line": detected_params.get("source_line"),
+            }
 
     @classmethod
     def _resolve_hide_delegate_source_files(
@@ -3452,6 +3747,141 @@ class SafeCodeTransformationValidationAgent:
         actions.extend(expanded_actions)
 
     @classmethod
+    def _resolve_move_method_source_files(
+        cls,
+        actions: List[RefactoringAction],
+        file_entries: List[SourceFileContract],
+    ) -> None:
+        """Resolve Move Method targets against actual Python source.
+
+        The resolver is project-aware: when no source file is provided it scans
+        candidate Python files and accepts the target only when exactly one file
+        contains an unambiguous Feature-Envy move.
+        """
+
+        from .transformers import python_transformers
+
+        for action in actions:
+            if action.action_type != ACTION_MOVE_PYTHON_METHOD:
+                continue
+
+            params = action.parameters or {}
+            configured_file = cls._action_source_file(action)
+            candidate_entries = [
+                entry
+                for entry in file_entries
+                if (
+                    ((entry.language or "").strip().lower() == "python")
+                    or entry.file_name.lower().endswith(".py")
+                )
+                and (
+                    not configured_file
+                    or cls._file_matches(
+                        action_source_file=configured_file,
+                        file_name=entry.file_name,
+                    )
+                )
+            ]
+
+            if configured_file and not candidate_entries:
+                params["source_resolution_error"] = "SOURCE_FILE_TARGET_MISMATCH"
+                continue
+
+            source_line = params.get("source_line")
+            if not isinstance(source_line, (int, float)):
+                target_lines = params.get("target_lines")
+                source_line = (
+                    target_lines[0]
+                    if isinstance(target_lines, list)
+                    and target_lines
+                    and isinstance(target_lines[0], (int, float))
+                    else None
+                )
+            source_line = int(source_line) if isinstance(source_line, (int, float)) else None
+
+            matches: list[tuple[SourceFileContract, dict[str, Any]]] = []
+            failures: list[tuple[str, str]] = []
+            non_applicable_resolutions: list[dict[str, Any]] = []
+            for entry in candidate_entries:
+                resolution = python_transformers.resolve_move_method_target(
+                    entry.source_code,
+                    method_name=str(
+                        params.get("method") or params.get("source_method") or ""
+                    ),
+                    source_class=str(params.get("source_class") or ""),
+                    destination_class=str(params.get("destination_class") or ""),
+                    destination_parameter=str(params.get("destination_parameter") or ""),
+                    source_line=source_line,
+                    allow_unique_inference=params.get("promoted_from_noop") is True,
+                )
+                if resolution.get("status") == "success":
+                    matches.append((entry, resolution))
+                else:
+                    failures.append((
+                        str(resolution.get("status") or "review_required"),
+                        str(resolution.get("reason") or "MOVE_METHOD_TARGET_NOT_FOUND"),
+                    ))
+                    if resolution.get("status") == "not_applicable":
+                        non_applicable_resolutions.append({
+                            **resolution,
+                            "source_file": entry.file_name,
+                        })
+
+            if len(matches) != 1:
+                failure_reasons = [reason for _, reason in failures]
+                params["source_resolution_error"] = (
+                    "AMBIGUOUS_MOVE_METHOD_FILE"
+                    if len(matches) > 1
+                    else (
+                        failure_reasons[0]
+                        if len(set(failure_reasons)) == 1 and failure_reasons
+                        else "MOVE_METHOD_TARGET_NOT_FOUND"
+                    )
+                )
+                params["source_resolution_status"] = (
+                    "review_required"
+                    if len(matches) > 1
+                    or any(status == "review_required" for status, _ in failures)
+                    else "not_applicable"
+                )
+                if params["source_resolution_status"] == "not_applicable" and non_applicable_resolutions:
+                    resolved = non_applicable_resolutions[0]
+                    params["target_kind"] = str(
+                        resolved.get("target_kind") or "CLASS_METHOD"
+                    )
+                    params["suggested_refactoring"] = str(
+                        resolved.get("suggested_refactoring") or ""
+                    )
+                    params["source_class_resolved"] = bool(
+                        resolved.get("source_class_resolved", False)
+                    )
+                    params["destination_class_resolved"] = bool(
+                        resolved.get("destination_class_resolved", False)
+                    )
+                    params["move_method_target_resolution"] = resolved
+                continue
+
+            entry, resolution = matches[0]
+            requested = {
+                "method": str(
+                    params.get("method") or params.get("source_method") or ""
+                ),
+                "source_class": str(params.get("source_class") or ""),
+                "destination_class": str(params.get("destination_class") or ""),
+                "destination_parameter": str(params.get("destination_parameter") or ""),
+            }
+            params["source_file"] = entry.file_name
+            params["method"] = str(resolution["method"])
+            params["source_method"] = str(resolution["method"])
+            params["source_class"] = str(resolution["source_class"])
+            params["destination_class"] = str(resolution["destination_class"])
+            params["destination_parameter"] = str(resolution["destination_parameter"])
+            params["move_target_resolution"] = "python_ast_semantic_recovery"
+            params["source_resolution_status"] = "success"
+            params["requested_move_target"] = requested
+            params.pop("source_resolution_error", None)
+
+    @classmethod
     def _resolve_inline_class_source_files(
         cls,
         actions: List[RefactoringAction],
@@ -3459,7 +3889,6 @@ class SafeCodeTransformationValidationAgent:
     ) -> None:
         """Resolve explicit Inline Class targets before semantic fallback."""
 
-        import ast
         from .transformers import python_transformers
 
         for action in actions:
@@ -3604,141 +4033,6 @@ class SafeCodeTransformationValidationAgent:
             params.pop("source_resolution_error", None)
 
     @classmethod
-    def _resolve_move_method_source_files(
-        cls,
-        actions: List[RefactoringAction],
-        file_entries: List[SourceFileContract],
-    ) -> None:
-        """Resolve Move Method targets against actual Python source.
-
-        The resolver is project-aware: when no source file is provided it scans
-        candidate Python files and accepts the target only when exactly one file
-        contains an unambiguous Feature-Envy move.
-        """
-
-        from .transformers import python_transformers
-
-        for action in actions:
-            if action.action_type != ACTION_MOVE_PYTHON_METHOD:
-                continue
-
-            params = action.parameters or {}
-            configured_file = cls._action_source_file(action)
-            candidate_entries = [
-                entry
-                for entry in file_entries
-                if (
-                    ((entry.language or "").strip().lower() == "python")
-                    or entry.file_name.lower().endswith(".py")
-                )
-                and (
-                    not configured_file
-                    or cls._file_matches(
-                        action_source_file=configured_file,
-                        file_name=entry.file_name,
-                    )
-                )
-            ]
-
-            if configured_file and not candidate_entries:
-                params["source_resolution_error"] = "SOURCE_FILE_TARGET_MISMATCH"
-                continue
-
-            source_line = params.get("source_line")
-            if not isinstance(source_line, (int, float)):
-                target_lines = params.get("target_lines")
-                source_line = (
-                    target_lines[0]
-                    if isinstance(target_lines, list)
-                    and target_lines
-                    and isinstance(target_lines[0], (int, float))
-                    else None
-                )
-            source_line = int(source_line) if isinstance(source_line, (int, float)) else None
-
-            matches: list[tuple[SourceFileContract, dict[str, Any]]] = []
-            failures: list[tuple[str, str]] = []
-            non_applicable_resolutions: list[dict[str, Any]] = []
-            for entry in candidate_entries:
-                resolution = python_transformers.resolve_move_method_target(
-                    entry.source_code,
-                    method_name=str(
-                        params.get("method") or params.get("source_method") or ""
-                    ),
-                    source_class=str(params.get("source_class") or ""),
-                    destination_class=str(params.get("destination_class") or ""),
-                    destination_parameter=str(params.get("destination_parameter") or ""),
-                    source_line=source_line,
-                    allow_unique_inference=params.get("promoted_from_noop") is True,
-                )
-                if resolution.get("status") == "success":
-                    matches.append((entry, resolution))
-                else:
-                    failures.append((
-                        str(resolution.get("status") or "review_required"),
-                        str(resolution.get("reason") or "MOVE_METHOD_TARGET_NOT_FOUND"),
-                    ))
-                    if resolution.get("status") == "not_applicable":
-                        non_applicable_resolutions.append({
-                            **resolution,
-                            "source_file": entry.file_name,
-                        })
-
-            if len(matches) != 1:
-                failure_reasons = [reason for _, reason in failures]
-                params["source_resolution_error"] = (
-                    "AMBIGUOUS_MOVE_METHOD_FILE"
-                    if len(matches) > 1
-                    else (
-                        failure_reasons[0]
-                        if len(set(failure_reasons)) == 1 and failure_reasons
-                        else "MOVE_METHOD_TARGET_NOT_FOUND"
-                    )
-                )
-                params["source_resolution_status"] = (
-                    "review_required"
-                    if len(matches) > 1
-                    or any(status == "review_required" for status, _ in failures)
-                    else "not_applicable"
-                )
-                if params["source_resolution_status"] == "not_applicable" and non_applicable_resolutions:
-                    resolved = non_applicable_resolutions[0]
-                    params["target_kind"] = str(
-                        resolved.get("target_kind") or "CLASS_METHOD"
-                    )
-                    params["suggested_refactoring"] = str(
-                        resolved.get("suggested_refactoring") or ""
-                    )
-                    params["source_class_resolved"] = bool(
-                        resolved.get("source_class_resolved", False)
-                    )
-                    params["destination_class_resolved"] = bool(
-                        resolved.get("destination_class_resolved", False)
-                    )
-                    params["move_method_target_resolution"] = resolved
-                continue
-
-            entry, resolution = matches[0]
-            requested = {
-                "method": str(
-                    params.get("method") or params.get("source_method") or ""
-                ),
-                "source_class": str(params.get("source_class") or ""),
-                "destination_class": str(params.get("destination_class") or ""),
-                "destination_parameter": str(params.get("destination_parameter") or ""),
-            }
-            params["source_file"] = entry.file_name
-            params["method"] = str(resolution["method"])
-            params["source_method"] = str(resolution["method"])
-            params["source_class"] = str(resolution["source_class"])
-            params["destination_class"] = str(resolution["destination_class"])
-            params["destination_parameter"] = str(resolution["destination_parameter"])
-            params["move_target_resolution"] = "python_ast_semantic_recovery"
-            params["source_resolution_status"] = "success"
-            params["requested_move_target"] = requested
-            params.pop("source_resolution_error", None)
-
-    @classmethod
     def _resolve_extract_method_source_files(
         cls,
         actions: List[RefactoringAction],
@@ -3834,143 +4128,6 @@ class SafeCodeTransformationValidationAgent:
                 params["source_resolution_error"] = "METHOD_TARGET_NOT_FOUND"
                 if len(candidates) == 1:
                     params["source_file"] = candidates[0].file_name
-
-    @staticmethod
-    def _extract_method_target_count(
-        file_entry: SourceFileContract,
-        *,
-        method_name: str,
-        source_class: str,
-        signature: str,
-    ) -> int:
-        if not method_name:
-            return 0
-        language = (file_entry.language or "").strip().lower()
-        lower_name = file_entry.file_name.lower()
-        kwargs = {
-            "method_name": method_name,
-            "source_class": source_class,
-            "method_signature": signature,
-        }
-        if language == "python" or lower_name.endswith(".py"):
-            return python_method_target_count(file_entry.source_code, **kwargs)
-        if language == "java" or lower_name.endswith(".java"):
-            return java_method_target_count(file_entry.source_code, **kwargs)
-        if language == "c" or lower_name.endswith((".c", ".h")):
-            return c_method_target_count(file_entry.source_code, **kwargs)
-        return 0
-
-    @staticmethod
-    def _recover_python_extract_method_target(
-        file_entry: SourceFileContract,
-        *,
-        method_name: str,
-        source_class: str,
-        signature: str,
-        parameters: Dict[str, Any],
-    ) -> tuple[str, str] | None:
-        """Recover one real Python routine from stale RDP class/name metadata.
-
-        Recovery is intentionally restricted to an unambiguous AST match. It
-        first checks the requested routine name without the accidental module
-        name-as-class constraint, then uses an RDP range only when exactly one
-        supported top-level/class method contains that range.
-        """
-
-        language = (file_entry.language or "").strip().lower()
-        if language != "python" and not file_entry.file_name.lower().endswith(".py"):
-            return None
-        try:
-            import ast
-
-            tree = ast.parse(file_entry.source_code)
-        except SyntaxError:
-            return None
-
-        candidates: list[tuple[str, str, ast.FunctionDef | ast.AsyncFunctionDef]] = []
-        for node in tree.body:
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                candidates.append((node.name, "", node))
-            elif isinstance(node, ast.ClassDef):
-                candidates.extend(
-                    (member.name, node.name, member)
-                    for member in node.body
-                    if isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef))
-                )
-
-        # Do not trust a file stem/module label as a Python class. A routine
-        # name remains a safe identity if it occurs exactly once in this file.
-        named = [item for item in candidates if item[0] == method_name]
-        if len(named) == 1:
-            return named[0][0], named[0][1]
-
-        def as_line(value: Any) -> int | None:
-            if isinstance(value, (int, float)):
-                return int(value)
-            if isinstance(value, str) and value.strip().isdigit():
-                return int(value.strip())
-            return None
-
-        start_line = as_line(
-            parameters.get("start_line")
-            or parameters.get("source_line")
-            or parameters.get("line")
-        )
-        end_line = as_line(parameters.get("end_line")) or start_line
-        if start_line is None or end_line is None:
-            return None
-
-        def is_substantial(
-            item: tuple[str, str, ast.FunctionDef | ast.AsyncFunctionDef],
-        ) -> bool:
-            node = item[2]
-            statement_count = sum(
-                isinstance(descendant, ast.stmt)
-                and descendant is not node
-                and not isinstance(descendant, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
-                for descendant in ast.walk(node)
-            )
-            loc = int(getattr(node, "end_lineno", node.lineno) or node.lineno) - node.lineno + 1
-            return statement_count >= 4 and loc >= 10
-
-        enclosing = [
-            item
-            for item in candidates
-            if is_substantial(item)
-            and int(getattr(item[2], "lineno", 0) or 0) <= start_line
-            and int(getattr(item[2], "end_lineno", item[2].lineno) or item[2].lineno) >= end_line
-        ]
-        if len(enclosing) == 1:
-            return enclosing[0][0], enclosing[0][1]
-
-        # Smell locations sometimes include a module docstring or the whole
-        # file, so no function encloses both endpoints. Select by overlap only
-        # when one routine is clearly dominant over every other routine.
-        overlaps: list[tuple[int, tuple[str, str, ast.FunctionDef | ast.AsyncFunctionDef]]] = []
-        for item in candidates:
-            if not is_substantial(item):
-                continue
-            node_start = int(getattr(item[2], "lineno", 0) or 0)
-            node_end = int(getattr(item[2], "end_lineno", node_start) or node_start)
-            overlap = max(0, min(node_end, end_line) - max(node_start, start_line) + 1)
-            if overlap:
-                overlaps.append((overlap, item))
-        overlaps.sort(key=lambda entry: entry[0], reverse=True)
-        if overlaps and (
-            len(overlaps) == 1
-            or overlaps[0][0] >= max(3, overlaps[1][0] * 2)
-        ):
-            winner = overlaps[0][1]
-            return winner[0], winner[1]
-
-        # Final recovery for plans with no usable line metadata: a file may
-        # contain one real business routine plus tiny entry-point wrappers.
-        # Require exactly one substantial routine so this cannot silently pick
-        # between multiple legitimate methods.
-        substantial = [item for item in candidates if is_substantial(item)]
-        if len(substantial) == 1:
-            return substantial[0][0], substantial[0][1]
-        return None
 
     @classmethod
     def _resolve_extract_class_source_files(
@@ -4194,92 +4351,52 @@ class SafeCodeTransformationValidationAgent:
             params["source_class"] = owner
             params.pop("source_resolution_error", None)
 
-    @classmethod
-    def _mark_unresolved_legacy_actions(
-        cls,
+    def _resolve_guard_clauses_source_files(
+        self,
         actions: List[RefactoringAction],
+        file_entries: List[SourceFileContract],
+        *,
+        fallback_language: str = "",
     ) -> None:
-        """Mark targetless compatibility actions without removing plan intent."""
+        """Bind Guard Clause actions to the matching C source file."""
+        c_files = [
+            f for f in file_entries
+            if (f.language or fallback_language).strip().lower() == "c"
+            or f.file_name.lower().endswith(".c")
+        ]
+        if not c_files:
+            return
+
+        guard_actions = {
+            ACTION_REPLACE_NESTED_CONDITIONAL_WITH_GUARD_CLAUSES,
+            ACTION_REPLACE_CONDITIONAL_WITH_GUARD_CLAUSES,
+            ACTION_GUARD_CLAUSES,
+        }
 
         for action in actions:
+            if action.action_type not in guard_actions:
+                continue
             params = action.parameters
-            resolution_error = str(params.get("source_resolution_error") or "").strip()
-            resolution_status = str(params.get("source_resolution_status") or "").strip().lower()
-            promoted = params.get("promoted_from_noop") is True
-            targetless_bare_except = (
-                action.action_type == ACTION_NARROW_EXCEPTION_HANDLER
-                and not str(params.get("original_exception_type") or "").strip()
-                and not str(
-                    params.get("source_method")
-                    or params.get("method")
-                    or params.get("method_name")
-                    or ""
-                ).strip()
-                and not isinstance(params.get("source_line"), (int, float))
-            )
-            if targetless_bare_except:
-                params["unresolved_legacy_target"] = True
-                params["unresolved_action_type"] = action.action_type
-                params["unresolved_reason"] = "BARE_EXCEPT_TARGET_MISSING_FROM_PLAN"
-                params["unresolved_status"] = "review_required"
-                action.warnings = [
-                    warning
-                    for warning in action.warnings
-                    if "mapped to noop" not in str(warning).lower()
-                ]
-                continue
-            stale_extract_method = False
-            if action.action_type == ACTION_EXTRACT_METHOD and resolution_error:
-                source_file = cls._action_source_file(action)
-                file_stem = cls._file_stem(source_file)
-                method = str(
-                    params.get("method")
-                    or params.get("method_name")
-                    or params.get("function")
-                    or params.get("function_name")
-                    or ""
-                ).strip()
-                source_class = str(
-                    params.get("source_class")
-                    or params.get("class_name")
-                    or params.get("module_name")
-                    or ""
-                ).strip()
-
-                def normalize(value: str) -> str:
-                    return "".join(
-                        character.lower()
-                        for character in value
-                        if character.isalnum()
-                    )
-
-                stale_extract_method = bool(file_stem) and (
-                    not method
-                    or normalize(method) == normalize(file_stem)
-                    or normalize(source_class) == normalize(file_stem)
-                )
-
-            if not resolution_error or not (
-                promoted
-                or stale_extract_method
-                or resolution_status in {"not_applicable", "review_required"}
-            ):
+            configured_file = str(params.get("source_file") or "").strip()
+            if configured_file:
                 continue
 
-            params["unresolved_legacy_target"] = True
-            params["unresolved_action_type"] = action.action_type
-            params["unresolved_reason"] = resolution_error
-            params["unresolved_status"] = resolution_status or "not_applicable"
-            action.warnings = [
-                warning
-                for warning in action.warnings
-                if not (
-                    "richer semantic edits" in str(warning).lower()
-                    or "not simulated" in str(warning).lower()
-                    or "mapped to noop" in str(warning).lower()
-                )
-            ]
+            method = str(params.get("method") or params.get("target_method") or "").strip()
 
+            matches: List[SourceFileContract] = []
+            if method:
+                for entry in c_files:
+                    if re.search(rf"\b{re.escape(method)}\s*\(", entry.source_code):
+                        matches.append(entry)
+
+            if len(matches) == 1:
+                params["source_file"] = matches[0].file_name
+            elif len(c_files) == 1:
+                params["source_file"] = c_files[0].file_name
+
+    # ------------------------------------------------------------------
+    # Action planning and local recovery
+    # ------------------------------------------------------------------
     @staticmethod
     def _apply_local_target_recovery(
         *,
@@ -4378,197 +4495,385 @@ class SafeCodeTransformationValidationAgent:
 
         return remaining
 
-    @staticmethod
-    def _java_parameter_object_method_owners(source: str, method: str) -> list[str]:
-        if not method:
-            return []
-        owners: list[str] = []
-        for class_name in declared_class_names(source):
-            model = _parse_java_class(source, class_name)
-            if model and any(item.name == method and not item.is_constructor for item in model.methods):
-                owners.append(class_name)
-        return sorted(set(owners))
-
-    @staticmethod
-    def _python_parameter_object_method_owners(source: str, method: str) -> list[str]:
-        if not method:
-            return []
-        try:
-            import ast
-
-            tree = ast.parse(source)
-        except SyntaxError:
-            return []
-        owners: list[str] = []
-        if any(
-            isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == method
-            for node in tree.body
-        ):
-            owners.append("")
-        for node in tree.body:
-            if not isinstance(node, ast.ClassDef):
-                continue
-            if any(
-                isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)) and child.name == method
-                for child in node.body
-            ):
-                owners.append(node.name)
-        return sorted(set(owners))
-
-    @staticmethod
-    def _specialize_extract_class_action(
-        action: RefactoringAction,
-        file_entry: SourceFileContract,
-    ) -> bool:
-        """Bind a legacy Extract Class intent to exactly one language operation."""
-
-        language = (file_entry.language or "").strip().lower()
-        lower_name = file_entry.file_name.lower()
-        if language not in EXTRACT_CLASS_ACTION_BY_LANGUAGE:
-            if lower_name.endswith(".py"):
-                language = "python"
-            elif lower_name.endswith(".java"):
-                language = "java"
-            elif lower_name.endswith((".c", ".h")):
-                language = "c"
-
-        specialized_action = EXTRACT_CLASS_ACTION_BY_LANGUAGE.get(language)
-        if not specialized_action:
-            return False
-        if action.action_type != ACTION_EXTRACT_CLASS and action.action_type != specialized_action:
-            return False
-
-        action.action_type = specialized_action
-        action.parameters["extract_class_language"] = language
-        action.parameters["legacy_action_type"] = ACTION_EXTRACT_CLASS
-        return True
-
-    @classmethod
-    def _resolve_extract_class_name_in_file(
-        cls,
-        file_entry: SourceFileContract,
+    def _local_actions_for_file(
+        self,
         *,
-        classes: set[str],
-        requested_class: str,
-        parameters: Dict[str, Any],
-    ) -> str:
-        if requested_class in classes:
-            return requested_class
-        if not classes:
-            return ""
+        request: SCTVARequestContract,
+        file_entry: SourceFileContract,
+        existing_actions: List[RefactoringAction],
+    ) -> List[RefactoringAction]:
+        if not request.execution_options.enable_sctva_auto_refactoring:
+            return []
+        if file_entry.source_mode != "raw":
+            return []
+        if not self._request_allows_local_refactoring(request):
+            return []
 
-        source_class_origin = str(parameters.get("source_class_origin") or "").strip().lower()
-        inferred = source_class_origin == "file_stem_fallback"
-        requested_file_stem = cls._file_stem(requested_class).lower()
-        actual_file_stem = cls._file_stem(file_entry.file_name).lower()
-        inferred_from_configured_file = bool(
-            not source_class_origin
-            and requested_file_stem
-            and requested_file_stem == actual_file_stem
+        language = (file_entry.language or request.language).strip().lower()
+        detected_actions = self.local_refactor_detector.detect(
+            language=language,
+            file_name=file_entry.file_name,
+            source_code=file_entry.source_code,
+            existing_actions=existing_actions,
         )
-        if (inferred or inferred_from_configured_file) and len(classes) == 1:
-            return next(iter(classes))
-        if not requested_class and len(classes) == 1:
-            return next(iter(classes))
+        if language == "python" and detected_actions:
+            # RDP and SCTVA's local detector can identify the same bare
+            # handler using different line numbers after prior refactorings.
+            # Resolve both against this AST and retain the RDP action only.
+            from .transformers import python_transformers
 
-        requested_methods = parameters.get("methods_to_extract") or []
-        requested_fields = parameters.get("fields_to_extract") or []
-        if not isinstance(requested_methods, list):
-            requested_methods = []
-        if not isinstance(requested_fields, list):
-            requested_fields = []
-        if not requested_methods and not requested_fields:
-            return ""
+            planned_bare_targets: set[tuple[str, int]] = set()
+            for planned in existing_actions:
+                if planned.action_type != ACTION_NARROW_EXCEPTION_HANDLER:
+                    continue
+                params = planned.parameters or {}
+                if str(params.get("original_exception_type") or "").strip():
+                    continue
+                raw_line = params.get("source_line")
+                resolved = python_transformers.resolve_bare_exception_handler(
+                    file_entry.source_code,
+                    source_line=int(raw_line) if isinstance(raw_line, (int, float)) else None,
+                    source_class=str(
+                        params.get("source_class") or params.get("class_name") or ""
+                    ).strip(),
+                    source_method=str(
+                        params.get("source_method") or params.get("method") or ""
+                    ).strip(),
+                    handler_name=str(params.get("handler_name") or "").strip(),
+                    target_exception_type=str(
+                        params.get("target_exception_type") or ""
+                    ).strip(),
+                    require_specific_exception=False,
+                )
+                if resolved.get("status") == "success":
+                    planned_bare_targets.add((
+                        str(resolved.get("qualified_source_method") or ""),
+                        int(resolved.get("resolved_handler_line") or 0),
+                    ))
 
-        member_matches = [
-            class_name
-            for class_name in classes
-            if cls._extract_class_members_match(
-                file_entry,
-                class_name=class_name,
-                requested_methods={str(item).strip() for item in requested_methods if str(item).strip()},
-                requested_fields={str(item).strip() for item in requested_fields if str(item).strip()},
-            )
-        ]
-        return member_matches[0] if len(member_matches) == 1 else ""
+            if planned_bare_targets:
+                retained_actions: list[RefactoringAction] = []
+                for detected in detected_actions:
+                    if (
+                        detected.action_type != ACTION_NARROW_EXCEPTION_HANDLER
+                        or detected.source_refactoring != "SCTVA Internal Analysis"
+                        or str(
+                            (detected.parameters or {}).get("original_exception_type") or ""
+                        ).strip()
+                    ):
+                        retained_actions.append(detected)
+                        continue
+                    params = detected.parameters or {}
+                    raw_line = params.get("source_line")
+                    resolved = python_transformers.resolve_bare_exception_handler(
+                        file_entry.source_code,
+                        source_line=int(raw_line) if isinstance(raw_line, (int, float)) else None,
+                        source_class=str(
+                            params.get("source_class") or params.get("class_name") or ""
+                        ).strip(),
+                        source_method=str(
+                            params.get("source_method") or params.get("method") or ""
+                        ).strip(),
+                        handler_name=str(params.get("handler_name") or "").strip(),
+                        target_exception_type=str(params.get("target_exception_type") or "").strip(),
+                        require_specific_exception=False,
+                    )
+                    identity = (
+                        str(resolved.get("qualified_source_method") or ""),
+                        int(resolved.get("resolved_handler_line") or 0),
+                    )
+                    if resolved.get("status") != "success" or identity not in planned_bare_targets:
+                        retained_actions.append(detected)
+                detected_actions = retained_actions
+        # Only the actions already scoped to this file are authoritative here.
+        # Using every action from the request leaks refactoring types from other
+        # files into the current file when a multi-file request is processed.
+        planned_types = {
+            action.action_type
+            for action in existing_actions
+        }
+        planned_types.discard(ACTION_NOOP)
 
-    @staticmethod
-    def _extract_class_members_match(
-        file_entry: SourceFileContract,
-        *,
-        class_name: str,
-        requested_methods: set[str],
-        requested_fields: set[str],
-    ) -> bool:
-        language = (file_entry.language or "").strip().lower()
-        lower_name = file_entry.file_name.lower()
-        if language == "java" or lower_name.endswith(".java"):
-            model = _parse_java_class(file_entry.source_code, class_name)
-            return bool(
-                model
-                and requested_methods <= set(model.methods_by_name)
-                and requested_fields <= set(model.fields)
-            )
-        if language == "python" or lower_name.endswith(".py"):
-            try:
-                import ast
+        # Move Method needs relationship analysis rather than a simple smell
+        # threshold.  Reuse the same conservative resolver as the transformer
+        # when a legacy RDP action lost its method/class target.
+        if (
+            language == "python"
+            and ACTION_MOVE_PYTHON_METHOD in planned_types
+            and not any(action.action_type == ACTION_MOVE_PYTHON_METHOD for action in detected_actions)
+        ):
+            from .transformers import python_transformers
 
-                tree = ast.parse(file_entry.source_code)
-            except SyntaxError:
-                return False
-            source_node = next(
+            stale_move = next(
                 (
-                    node for node in tree.body
-                    if isinstance(node, ast.ClassDef) and node.name == class_name
+                    action
+                    for action in existing_actions
+                    if action.action_type == ACTION_MOVE_PYTHON_METHOD
+                    and action.parameters.get("unresolved_legacy_target") is True
                 ),
                 None,
             )
-            if source_node is None:
-                return False
-            methods = {
-                node.name
-                for node in source_node.body
-                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-            }
-            fields = {
-                node.attr
-                for node in ast.walk(source_node)
-                if isinstance(node, ast.Attribute)
-                and isinstance(node.value, ast.Name)
-                and node.value.id in {"self", "cls"}
-            }
-            fields.update(
-                target.id
-                for node in source_node.body
-                if isinstance(node, (ast.Assign, ast.AnnAssign))
-                for target in (
-                    node.targets if isinstance(node, ast.Assign) else [node.target]
-                )
-                if isinstance(target, ast.Name)
+            source_line = stale_move.parameters.get("source_line") if stale_move else None
+            source_line = int(source_line) if isinstance(source_line, (int, float)) else None
+            resolution = python_transformers.resolve_move_method_target(
+                file_entry.source_code,
+                source_line=source_line,
             )
-            return requested_methods <= methods and requested_fields <= fields
-        return False
+            if resolution.get("status") == "success":
+                detected_actions.append(RefactoringAction(
+                    action_type=ACTION_MOVE_PYTHON_METHOD,
+                    source_refactoring="Move Method",
+                    parameters={
+                        "source_file": file_entry.file_name,
+                        "method": str(resolution["method"]),
+                        "source_class": str(resolution["source_class"]),
+                        "destination_class": str(resolution["destination_class"]),
+                        "destination_parameter": str(resolution["destination_parameter"]),
+                        "move_target_resolution": "local_python_feature_envy_analysis",
+                    },
+                ))
+        if not planned_types:
+            return self._deduplicate_internal_actions(
+                file_name=file_entry.file_name,
+                existing_actions=existing_actions,
+                detected_actions=detected_actions,
+            )
+
+        # The dedicated polymorphism transformer performs its own AST target
+        # recovery.  Do not append a second locally detected action when RDP
+        # already requested this refactoring, otherwise the second action
+        # would run after the conditional has already been replaced.
+        if ACTION_REPLACE_CONDITIONAL_WITH_POLYMORPHISM in planned_types:
+            detected_actions = [
+                action
+                for action in detected_actions
+                if action.action_type != ACTION_REPLACE_CONDITIONAL_WITH_POLYMORPHISM
+            ]
+
+        # A non-empty RDP plan is authoritative.  SCTVA may supplement a
+        # requested action type (for example, locate additional proven-dead
+        # Python statements), but it must not introduce unrelated constants,
+        # string rewrites, or smell refactorings that the plan did not ask for.
+        planned_literals: set[Any] = set()
+        for action in existing_actions:
+            if action.action_type not in {"extract_constant", "introduce_constant"}:
+                continue
+            if "literal_value" in action.parameters:
+                planned_literals.add(action.parameters["literal_value"])
+            values = action.parameters.get("literal_values")
+            if isinstance(values, list):
+                planned_literals.update(values)
+
+        detected_actions = [
+            action
+            for action in detected_actions
+            if action.action_type in planned_types
+            and (
+                action.action_type not in {"extract_constant", "introduce_constant"}
+                or not planned_literals
+                or action.parameters.get("literal_value") in planned_literals
+            )
+        ]
+        return self._deduplicate_internal_actions(
+            file_name=file_entry.file_name,
+            existing_actions=existing_actions,
+            detected_actions=detected_actions,
+        )
 
     @staticmethod
-    def _apply_resolved_extract_class_name(
-        parameters: Dict[str, Any],
+    def _request_allows_local_refactoring(request: SCTVARequestContract) -> bool:
+        metadata = request.refactoring_plan.metadata or {}
+        if request.source_files:
+            return True
+        if metadata.get("enable_sctva_auto_refactoring") is True:
+            return True
+        return str(metadata.get("source_agent") or "").strip().lower() == "rdp_agent"
+
+    @classmethod
+    def _deduplicate_internal_actions(
+        cls,
         *,
-        resolved_class: str,
-        requested_class: str,
-    ) -> None:
-        if requested_class and requested_class != resolved_class:
-            parameters["requested_source_class"] = requested_class
-            parameters["source_class_resolution"] = "parsed_class_and_member_identity"
-        elif not requested_class:
-            parameters["source_class_resolution"] = "single_top_level_class"
-        parameters["source_class"] = resolved_class
-        if str(parameters.get("new_class_name_origin") or "").strip().lower() == "generated":
-            parameters["new_class_name"] = f"{resolved_class}Helper"
+        file_name: str,
+        existing_actions: List[RefactoringAction],
+        detected_actions: List[RefactoringAction],
+    ) -> List[RefactoringAction]:
+        """Remove duplicate local actions without suppressing new SCTVA findings."""
+
+        planned_keys = {
+            key
+            for action in existing_actions
+            if (key := cls._internal_action_deduplication_key(
+                action,
+                file_name=file_name,
+            )) is not None
+        }
+        retained: List[RefactoringAction] = []
+        seen_local_keys: set[tuple[str, str, str]] = set()
+
+        for action in detected_actions:
+            key = cls._internal_action_deduplication_key(action, file_name=file_name)
+            if key is not None and (key in planned_keys or key in seen_local_keys):
+                continue
+            if key is not None:
+                seen_local_keys.add(key)
+            retained.append(action)
+        return retained
+
+    @classmethod
+    def _internal_action_deduplication_key(
+        cls,
+        action: RefactoringAction,
+        *,
+        file_name: str,
+    ) -> tuple[str, str, str] | None:
+        family = cls._canonical_refactoring_family(action)
+        method = cls._action_target_method(action)
+        if family != ACTION_EXTRACT_METHOD or not method:
+            return None
+        return (cls._dedup_file_identity(action, file_name), family, method)
+
+    @classmethod
+    def _dedup_file_identity(cls, action: RefactoringAction, file_name: str) -> str:
+        """Resolve only exact/suffix path aliases; never merge sibling files."""
+
+        action_path = cls._normalize_path(cls._action_source_file(action))
+        current_path = cls._normalize_path(file_name)
+        if not action_path:
+            return current_path
+        if (
+            action_path == current_path
+            or current_path.endswith(f"/{action_path}")
+            or action_path.endswith(f"/{current_path}")
+        ):
+            return current_path
+        return action_path
 
     @staticmethod
-    def _file_stem(file_name: str) -> str:
-        normalized = str(file_name or "").replace("\\", "/").rsplit("/", 1)[-1]
-        return normalized.rsplit(".", 1)[0]
+    def _canonical_refactoring_family(action: RefactoringAction) -> str:
+        """Normalize display and technical action names for target deduplication."""
+
+        for value in (action.action_type, action.source_refactoring):
+            normalized = re.sub(
+                r"[^a-z0-9]+",
+                "_",
+                str(value or "").strip().lower(),
+            ).strip("_")
+            if normalized in {
+                "extract_method",
+                "extract_function",
+                "extract_c_method",
+                "extract_java_method",
+                "extract_python_method",
+            }:
+                return ACTION_EXTRACT_METHOD
+            if normalized in {
+                ACTION_ENCAPSULATE_VARIABLE,
+                ACTION_ENCAPSULATE_C_VARIABLE,
+                "encapsulate_variable",
+                "global_variable",
+            }:
+                return "global_variable"
+        return str(action.action_type or "").strip().lower()
+
+    @staticmethod
+    def _action_target_method(action: RefactoringAction) -> str:
+        """Get the normalized routine name from modern or legacy action data."""
+
+        params = action.parameters or {}
+        target = params.get("target")
+        target = target if isinstance(target, dict) else {}
+        for key in (
+            "source_method",
+            "method",
+            "method_name",
+            "function",
+            "function_name",
+        ):
+            value = params.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+            value = target.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return ""
+
+    # ------------------------------------------------------------------
+    # Transformation reporting and plan compliance
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _finalize_guard_clauses_logs(
+        transformation_log: List[TransformationLogEntry],
+        *,
+        syntax_passed: bool,
+        structural_passed: bool,
+        behavioral_passed: bool,
+        invariant_passed: bool,
+        rollback_occurred: bool,
+    ) -> None:
+        """Finalize metrics and validation status for Replace Nested Conditional with Guard Clauses."""
+        guard_actions = {
+            ACTION_REPLACE_NESTED_CONDITIONAL_WITH_GUARD_CLAUSES,
+            ACTION_REPLACE_CONDITIONAL_WITH_GUARD_CLAUSES,
+            ACTION_GUARD_CLAUSES,
+        }
+        for entry in transformation_log:
+            if entry.action_type not in guard_actions:
+                continue
+
+            metadata = entry.metadata
+            if str(metadata.get("status") or "").lower() == "not_applicable":
+                metadata["final_checks"] = {
+                    "plan_compliance": "NOT_APPLICABLE",
+                    "nesting_depth_reduction": "NOT_APPLICABLE",
+                    "behavior_preservation": "PASS" if behavioral_passed else "FAIL",
+                    "compilation_syntax_validation": "PASS" if syntax_passed else "FAIL",
+                    "invariant_preservation": "PASS" if invariant_passed else "FAIL",
+                }
+                metadata["syntax"] = metadata["final_checks"]["compilation_syntax_validation"]
+                metadata["behavior"] = metadata["final_checks"]["behavior_preservation"]
+                metadata["smell_reduction"] = "NOT_APPLICABLE"
+                metadata["final_status"] = "NOT_APPLICABLE"
+                metadata["final_decision"] = "NOT_APPLICABLE"
+                continue
+
+            nesting_reduced = bool(metadata.get("nesting_reduced"))
+            after_depth = metadata.get("after_nesting_depth")
+            depth_below_threshold = isinstance(after_depth, int) and after_depth <= 4
+            conditional_nesting_reduced = bool(
+                metadata.get("conditional_nesting_reduced")
+            )
+            smell_reduced_passed = nesting_reduced and (
+                depth_below_threshold or conditional_nesting_reduced
+            )
+
+            checks = {
+                "plan_compliance": "PASS" if metadata.get("plan_compliance") == "PASS" else "FAIL",
+                "nesting_depth_reduction": "PASS" if smell_reduced_passed else "FAIL",
+                "behavior_preservation": "PASS" if behavioral_passed else "FAIL",
+                "compilation_syntax_validation": "PASS" if syntax_passed else "FAIL",
+                "invariant_preservation": "PASS" if invariant_passed else "FAIL",
+            }
+            metadata["final_checks"] = checks
+            metadata["syntax"] = checks["compilation_syntax_validation"]
+            metadata["behavior"] = checks["behavior_preservation"]
+            metadata["smell_reduction"] = (
+                "PASS"
+                if smell_reduced_passed and depth_below_threshold
+                else "REDUCED" if smell_reduced_passed else "FAIL"
+            )
+
+            if rollback_occurred:
+                metadata["status"] = "rolled_back"
+                metadata["final_status"] = "ROLLED_BACK"
+                metadata["final_decision"] = "ROLLBACK"
+            elif entry.replacements_count <= 0 or "FAIL" in checks.values():
+                metadata["status"] = "review_required"
+                metadata["final_status"] = "REVIEW_REQUIRED"
+                metadata["final_decision"] = "REVIEW_REQUIRED"
+            else:
+                metadata["status"] = "pass"
+                metadata["final_status"] = "PASS"
+                metadata["final_decision"] = "PASS"
 
     @staticmethod
     def _finalize_extract_class_logs(
@@ -4851,372 +5156,88 @@ class SafeCodeTransformationValidationAgent:
                 entry.metadata["final_decision"] = "REVIEW_REQUIRED"
 
     @staticmethod
-    def _compatibility_check(value: Any) -> str:
-        normalized = str(value or "").strip().upper()
-        if normalized == "PASS":
-            return "PASS"
-        if normalized in {"", "NOT_APPLICABLE", "N/A"}:
-            return "NOT_APPLICABLE"
-        return "FAIL"
-
-    def _resolve_c_global_variable_plan_actions(
-        self,
+    def _actions_with_effective_replacements(
         actions: List[RefactoringAction],
-        *,
-        file_entry: SourceFileContract,
-        fallback_language: str,
-    ) -> None:
-        """Resolve malformed C Encapsulate Variable planner targets safely.
-
-        Some RDP plans describe each C Global Variable action with the generic
-        values ``variable``, ``get_variable`` and ``set_variable``.  Passing
-        those strings directly to the C transformer inevitably produces
-        GLOBAL_DECLARATION_NOT_FOUND_OR_AMBIGUOUS.
-
-        SCTVA already has a conservative local C Global Variable detector.  We
-        reuse that detector here and pair unresolved planner actions with the
-        proven mutable scalar globals in declaration order *only when the
-        mapping is unambiguous*.  This happens before local actions are merged,
-        which also prevents duplicate detector actions from being appended.
-        """
-
-        language = (file_entry.language or fallback_language or "").strip().lower()
-        if language != "c" or file_entry.source_mode != "raw" or not actions:
-            return
-
-        encapsulate_actions = [
-            action
-            for action in actions
-            if action.action_type in {
-                ACTION_ENCAPSULATE_C_VARIABLE,
-                ACTION_ENCAPSULATE_VARIABLE,
-            }
-            or str(action.source_refactoring or "").strip().lower()
-            in {"encapsulate variable", "global variable"}
-        ]
-        if not encapsulate_actions:
-            return
-
-        detected = [
-            action
-            for action in self.local_refactor_detector.detect(
-                language="c",
-                file_name=file_entry.file_name,
-                source_code=file_entry.source_code,
-                existing_actions=[],
-            )
-            if action.action_type == ACTION_ENCAPSULATE_C_VARIABLE
-        ]
-        if not detected:
-            return
-
-        detected.sort(
-            key=lambda action: (
-                int(action.parameters.get("source_line") or 10**9),
-                str(action.parameters.get("variable_name") or ""),
-            )
-        )
-        candidates_by_name = {
-            str(action.parameters.get("variable_name") or "").strip(): action
-            for action in detected
-            if str(action.parameters.get("variable_name") or "").strip()
-        }
-
-        generic_names = {
-            "variable",
-            "global",
-            "global_variable",
-            "globalvariable",
-            "var",
-            "value",
-        }
-        resolved_names: set[str] = set()
-        unresolved: list[tuple[int, RefactoringAction, str]] = []
-
-        for order, action in enumerate(encapsulate_actions):
-            params = action.parameters
-            requested_name = str(
-                params.get("variable_name")
-                or params.get("variable")
-                or ""
-            ).strip()
-            candidate = candidates_by_name.get(requested_name)
-            if candidate is None:
-                unresolved.append((order, action, requested_name))
-                continue
-
-            detected_params = candidate.parameters
-            action.action_type = ACTION_ENCAPSULATE_C_VARIABLE
-            params["source_file"] = file_entry.file_name
-            params["source_line"] = detected_params.get("source_line")
-            if not str(params.get("getter_name") or "").strip() or str(
-                params.get("getter_name")
-            ).strip().lower() in {"get_variable", "get_global", "get_var"}:
-                params["getter_name"] = detected_params.get("getter_name")
-            if not str(params.get("setter_name") or "").strip() or str(
-                params.get("setter_name")
-            ).strip().lower() in {"set_variable", "set_global", "set_var"}:
-                params["setter_name"] = detected_params.get("setter_name")
-            params["target_resolution"] = {
-                "status": "success",
-                "strategy": "exact_source_global",
-                "requested_variable_name": requested_name,
-                "variable_name": requested_name,
-                "source_line": detected_params.get("source_line"),
-            }
-            resolved_names.add(requested_name)
-
-        if not unresolved:
-            return
-
-        available = [
-            candidate
-            for candidate in detected
-            if str(candidate.parameters.get("variable_name") or "").strip()
-            not in resolved_names
-        ]
-
-        # The safe fallback for generic placeholders is declaration-order
-        # pairing only when the cardinalities match exactly.  The planner's
-        # line numbers can be offset by comments/imports, so nearest-line
-        # matching alone is not reliable for this case.
-        if len(unresolved) != len(available):
-            return
-
-        unresolved.sort(
-            key=lambda item: (
-                int(item[1].parameters.get("source_line") or 10**9),
-                item[0],
-            )
-        )
-        available.sort(
-            key=lambda action: int(action.parameters.get("source_line") or 10**9)
-        )
-
-        for (_, action, requested_name), candidate in zip(unresolved, available):
-            params = action.parameters
-            detected_params = candidate.parameters
-            resolved_name = str(detected_params.get("variable_name") or "").strip()
-            if not resolved_name:
-                continue
-
-            # Do not silently remap a concrete, different C identifier.  This
-            # fallback is intended for known planner placeholders (or an empty
-            # target) only.
-            if requested_name and requested_name.lower() not in generic_names:
-                continue
-
-            requested_getter = str(params.get("getter_name") or "").strip()
-            requested_setter = str(params.get("setter_name") or "").strip()
-            action.action_type = ACTION_ENCAPSULATE_C_VARIABLE
-            params["requested_variable_name"] = requested_name
-            params["variable_name"] = resolved_name
-            params["source_file"] = file_entry.file_name
-            params["source_line"] = detected_params.get("source_line")
-            params["getter_name"] = (
-                str(detected_params.get("getter_name") or f"get_{resolved_name}")
-                if not requested_getter
-                or requested_getter.lower() in {"get_variable", "get_global", "get_var"}
-                else requested_getter
-            )
-            params["setter_name"] = (
-                str(detected_params.get("setter_name") or f"set_{resolved_name}")
-                if not requested_setter
-                or requested_setter.lower() in {"set_variable", "set_global", "set_var"}
-                else requested_setter
-            )
-            params["target_resolution"] = {
-                "status": "success",
-                "strategy": "declaration_order_placeholder_recovery",
-                "requested_variable_name": requested_name,
-                "variable_name": resolved_name,
-                "source_line": detected_params.get("source_line"),
-            }
-
-    def _local_actions_for_file(
-        self,
-        *,
-        request: SCTVARequestContract,
-        file_entry: SourceFileContract,
-        existing_actions: List[RefactoringAction],
+        transformation_log: List[TransformationLogEntry],
     ) -> List[RefactoringAction]:
-        if not request.execution_options.enable_sctva_auto_refactoring:
-            return []
-        if file_entry.source_mode != "raw":
-            return []
-        if not self._request_allows_local_refactoring(request):
-            return []
-
-        language = (file_entry.language or request.language).strip().lower()
-        detected_actions = self.local_refactor_detector.detect(
-            language=language,
-            file_name=file_entry.file_name,
-            source_code=file_entry.source_code,
-            existing_actions=existing_actions,
-        )
-        if language == "python" and detected_actions:
-            # RDP and SCTVA's local detector can identify the same bare
-            # handler using different line numbers after prior refactorings.
-            # Resolve both against this AST and retain the RDP action only.
-            from .transformers import python_transformers
-
-            planned_bare_targets: set[tuple[str, int]] = set()
-            for planned in existing_actions:
-                if planned.action_type != ACTION_NARROW_EXCEPTION_HANDLER:
-                    continue
-                params = planned.parameters or {}
-                if str(params.get("original_exception_type") or "").strip():
-                    continue
-                raw_line = params.get("source_line")
-                resolved = python_transformers.resolve_bare_exception_handler(
-                    file_entry.source_code,
-                    source_line=int(raw_line) if isinstance(raw_line, (int, float)) else None,
-                    source_class=str(
-                        params.get("source_class") or params.get("class_name") or ""
-                    ).strip(),
-                    source_method=str(
-                        params.get("source_method") or params.get("method") or ""
-                    ).strip(),
-                    handler_name=str(params.get("handler_name") or "").strip(),
-                    target_exception_type=str(
-                        params.get("target_exception_type") or ""
-                    ).strip(),
-                    require_specific_exception=False,
-                )
-                if resolved.get("status") == "success":
-                    planned_bare_targets.add((
-                        str(resolved.get("qualified_source_method") or ""),
-                        int(resolved.get("resolved_handler_line") or 0),
-                    ))
-
-            if planned_bare_targets:
-                retained_actions: list[RefactoringAction] = []
-                for detected in detected_actions:
-                    if (
-                        detected.action_type != ACTION_NARROW_EXCEPTION_HANDLER
-                        or detected.source_refactoring != "SCTVA Internal Analysis"
-                        or str(
-                            (detected.parameters or {}).get("original_exception_type") or ""
-                        ).strip()
-                    ):
-                        retained_actions.append(detected)
-                        continue
-                    params = detected.parameters or {}
-                    raw_line = params.get("source_line")
-                    resolved = python_transformers.resolve_bare_exception_handler(
-                        file_entry.source_code,
-                        source_line=int(raw_line) if isinstance(raw_line, (int, float)) else None,
-                        source_class=str(
-                            params.get("source_class") or params.get("class_name") or ""
-                        ).strip(),
-                        source_method=str(
-                            params.get("source_method") or params.get("method") or ""
-                        ).strip(),
-                        handler_name=str(params.get("handler_name") or "").strip(),
-                        target_exception_type=str(params.get("target_exception_type") or "").strip(),
-                        require_specific_exception=False,
-                    )
-                    identity = (
-                        str(resolved.get("qualified_source_method") or ""),
-                        int(resolved.get("resolved_handler_line") or 0),
-                    )
-                    if resolved.get("status") != "success" or identity not in planned_bare_targets:
-                        retained_actions.append(detected)
-                detected_actions = retained_actions
-        # Only the actions already scoped to this file are authoritative here.
-        # Using every action from the request leaks refactoring types from other
-        # files into the current file when a multi-file request is processed.
-        planned_types = {
-            action.action_type
-            for action in existing_actions
+        effective_actions: List[RefactoringAction] = []
+        logs_by_action_index = {
+            entry.action_index: entry for entry in transformation_log
         }
-        planned_types.discard(ACTION_NOOP)
-
-        # Move Method needs relationship analysis rather than a simple smell
-        # threshold.  Reuse the same conservative resolver as the transformer
-        # when a legacy RDP action lost its method/class target.
-        if (
-            language == "python"
-            and ACTION_MOVE_PYTHON_METHOD in planned_types
-            and not any(action.action_type == ACTION_MOVE_PYTHON_METHOD for action in detected_actions)
-        ):
-            from .transformers import python_transformers
-
-            stale_move = next(
-                (
-                    action
-                    for action in existing_actions
-                    if action.action_type == ACTION_MOVE_PYTHON_METHOD
-                    and action.parameters.get("unresolved_legacy_target") is True
-                ),
-                None,
-            )
-            source_line = stale_move.parameters.get("source_line") if stale_move else None
-            source_line = int(source_line) if isinstance(source_line, (int, float)) else None
-            resolution = python_transformers.resolve_move_method_target(
-                file_entry.source_code,
-                source_line=source_line,
-            )
-            if resolution.get("status") == "success":
-                detected_actions.append(RefactoringAction(
-                    action_type=ACTION_MOVE_PYTHON_METHOD,
-                    source_refactoring="Move Method",
-                    parameters={
-                        "source_file": file_entry.file_name,
-                        "method": str(resolution["method"]),
-                        "source_class": str(resolution["source_class"]),
-                        "destination_class": str(resolution["destination_class"]),
-                        "destination_parameter": str(resolution["destination_parameter"]),
-                        "move_target_resolution": "local_python_feature_envy_analysis",
-                    },
-                ))
-        if not planned_types:
-            return self._deduplicate_internal_actions(
-                file_name=file_entry.file_name,
-                existing_actions=existing_actions,
-                detected_actions=detected_actions,
-            )
-
-        # The dedicated polymorphism transformer performs its own AST target
-        # recovery.  Do not append a second locally detected action when RDP
-        # already requested this refactoring, otherwise the second action
-        # would run after the conditional has already been replaced.
-        if ACTION_REPLACE_CONDITIONAL_WITH_POLYMORPHISM in planned_types:
-            detected_actions = [
-                action
-                for action in detected_actions
-                if action.action_type != ACTION_REPLACE_CONDITIONAL_WITH_POLYMORPHISM
-            ]
-
-        # A non-empty RDP plan is authoritative.  SCTVA may supplement a
-        # requested action type (for example, locate additional proven-dead
-        # Python statements), but it must not introduce unrelated constants,
-        # string rewrites, or smell refactorings that the plan did not ask for.
-        planned_literals: set[Any] = set()
-        for action in existing_actions:
-            if action.action_type not in {"extract_constant", "introduce_constant"}:
+        for index, action in enumerate(actions, start=1):
+            log_entry = logs_by_action_index.get(index)
+            if log_entry is None:
                 continue
-            if "literal_value" in action.parameters:
-                planned_literals.add(action.parameters["literal_value"])
-            values = action.parameters.get("literal_values")
-            if isinstance(values, list):
-                planned_literals.update(values)
-
-        detected_actions = [
-            action
-            for action in detected_actions
-            if action.action_type in planned_types
-            and (
-                action.action_type not in {"extract_constant", "introduce_constant"}
-                or not planned_literals
-                or action.parameters.get("literal_value") in planned_literals
+            satisfied_inline_class = (
+                action.action_type == ACTION_INLINE_PYTHON_CLASS
+                and str(log_entry.metadata.get("reason") or "")
+                == "SMELL_RESOLVED_BY_PRIOR_REFACTORING"
+                and str(log_entry.metadata.get("plan_compliance") or "") == "PASS"
             )
-        ]
-        return self._deduplicate_internal_actions(
-            file_name=file_entry.file_name,
-            existing_actions=existing_actions,
-            detected_actions=detected_actions,
-        )
+            if log_entry.replacements_count <= 0 and not satisfied_inline_class:
+                continue
+
+            effective_type = str(
+                log_entry.metadata.get("reclassified_action_type")
+                or action.action_type
+            ).strip()
+
+            # Plain noops are ignored.  A noop that was safely reclassified by
+            # the engine (for example legacy Move Method) must be validated as
+            # the operation that was actually performed.
+            if effective_type == ACTION_NOOP:
+                continue
+
+            effective_parameters = log_entry.metadata.get("effective_action_parameters")
+            if isinstance(effective_parameters, dict):
+                validation_parameters = dict(effective_parameters)
+                validation_parameters["_sctva_action_index"] = index
+                validation_parameters["applied_transformation_metadata"] = dict(
+                    log_entry.metadata
+                )
+                effective_actions.append(
+                    RefactoringAction(
+                        action_type=effective_type,
+                        parameters=validation_parameters,
+                        source_step_id=action.source_step_id,
+                        source_refactoring=action.source_refactoring,
+                        warnings=list(action.warnings),
+                    )
+                )
+                continue
+
+            if effective_type == action.action_type:
+                validation_parameters = dict(action.parameters or {})
+                validation_parameters["_sctva_action_index"] = index
+                validation_parameters["applied_transformation_metadata"] = dict(
+                    log_entry.metadata
+                )
+                effective_actions.append(
+                    RefactoringAction(
+                        action_type=effective_type,
+                        parameters=validation_parameters,
+                        source_step_id=action.source_step_id,
+                        source_refactoring=action.source_refactoring,
+                        warnings=list(action.warnings),
+                    )
+                )
+                continue
+
+            validation_parameters = dict(action.parameters or {})
+            validation_parameters["_sctva_action_index"] = index
+            validation_parameters["applied_transformation_metadata"] = dict(
+                log_entry.metadata
+            )
+            effective_actions.append(
+                RefactoringAction(
+                    action_type=effective_type,
+                    parameters=validation_parameters,
+                    source_step_id=action.source_step_id,
+                    source_refactoring=action.source_refactoring,
+                    warnings=list(action.warnings),
+                )
+            )
+        return effective_actions
 
     @staticmethod
     def _model_usage_summary(
@@ -5301,12 +5322,21 @@ class SafeCodeTransformationValidationAgent:
             for entry in attempted_entries
             if str((entry.metadata.get("model_assistance") or {}).get("context_mode") or "").strip()
         })
+        def final_attempt_reason(entry: TransformationLogEntry) -> str:
+            assistance = (entry.metadata.get("model_assistance") or {})
+            repair = assistance.get("repair_attempt")
+            if (
+                assistance.get("status") == "candidate_rejected"
+                and isinstance(repair, dict)
+                and str(repair.get("reason") or "").strip()
+            ):
+                return str(repair["reason"]).strip()
+            return str(assistance.get("reason") or "").strip()
+
         attempt_reasons = sorted({
-            str((entry.metadata.get("model_assistance") or {}).get("reason"))
+            reason
             for entry in attempted_entries
-            if str(
-                (entry.metadata.get("model_assistance") or {}).get("reason") or ""
-            ).strip()
+            if (reason := final_attempt_reason(entry))
         })
         model_backends = sorted({
             str((entry.metadata.get("model_assistance") or {}).get("backend") or "").strip()
@@ -5391,6 +5421,12 @@ class SafeCodeTransformationValidationAgent:
             candidate_model_info = candidate_model_info if isinstance(candidate_model_info, dict) else {}
             candidate_gate_failed = candidate_model_info.get("status") == "candidate_rejected"
             action_validation = list(candidate_model_info.get("action_validation") or [])
+            repair = candidate_model_info.get("repair_attempt")
+            repair_failure = (
+                str(repair.get("reason") or "").strip()
+                if isinstance(repair, dict)
+                else ""
+            )
             candidate_failures = (
                 [{
                     "name": "model_candidate_gate",
@@ -5402,6 +5438,11 @@ class SafeCodeTransformationValidationAgent:
                         or "Model candidate failed the immediate SCTVA checkpoint."
                     ),
                 }]
+                + ([{
+                    "name": "model_candidate_repair",
+                    "passed": False,
+                    "message": repair_failure,
+                }] if repair_failure else [])
                 if candidate_gate_failed
                 else [*action_validation, *candidate_validation]
             )
@@ -5430,7 +5471,7 @@ class SafeCodeTransformationValidationAgent:
         inferred_model_enabled = bool(
             model_enabled or model_used or attempted_entries or ineligible_entries or budget_entries
         )
-        normalized_mode = str(model_mode or "primary").strip().lower()
+        normalized_mode = str(model_mode or "fallback").strip().lower()
         hybrid_strategy = (
             "MODEL_FIRST_RULE_FALLBACK"
             if inferred_model_enabled and normalized_mode == "primary"
@@ -5513,7 +5554,7 @@ class SafeCodeTransformationValidationAgent:
     def _annotate_model_first_rule_fallback(
         rule_result: Dict[str, Any],
         *,
-        model_assistant: CodeT5CandidateTransformer,
+        model_assistant: QwenCandidateTransformer,
         failed_model_log: List[TransformationLogEntry],
         failed_steps: List[str],
         failed_validation_details: List[Dict[str, Any]],
@@ -5682,33 +5723,6 @@ class SafeCodeTransformationValidationAgent:
                 )
         return result
 
-    @staticmethod
-    def _canonical_refactoring_family(action: RefactoringAction) -> str:
-        """Normalize display and technical action names for target deduplication."""
-
-        for value in (action.action_type, action.source_refactoring):
-            normalized = re.sub(
-                r"[^a-z0-9]+",
-                "_",
-                str(value or "").strip().lower(),
-            ).strip("_")
-            if normalized in {
-                "extract_method",
-                "extract_function",
-                "extract_c_method",
-                "extract_java_method",
-                "extract_python_method",
-            }:
-                return ACTION_EXTRACT_METHOD
-            if normalized in {
-                ACTION_ENCAPSULATE_VARIABLE,
-                ACTION_ENCAPSULATE_C_VARIABLE,
-                "encapsulate_variable",
-                "global_variable",
-            }:
-                return "global_variable"
-        return str(action.action_type or "").strip().lower()
-
     @classmethod
     def _file_plan_compliance(
         cls,
@@ -5746,292 +5760,9 @@ class SafeCodeTransformationValidationAgent:
 
         return compliance
 
-    @staticmethod
-    def _action_target_method(action: RefactoringAction) -> str:
-        """Get the normalized routine name from modern or legacy action data."""
-
-        params = action.parameters or {}
-        target = params.get("target")
-        target = target if isinstance(target, dict) else {}
-        for key in (
-            "source_method",
-            "method",
-            "method_name",
-            "function",
-            "function_name",
-        ):
-            value = params.get(key)
-            if isinstance(value, str) and value.strip():
-                return value.strip()
-            value = target.get(key)
-            if isinstance(value, str) and value.strip():
-                return value.strip()
-        return ""
-
-    @classmethod
-    def _dedup_file_identity(cls, action: RefactoringAction, file_name: str) -> str:
-        """Resolve only exact/suffix path aliases; never merge sibling files."""
-
-        action_path = cls._normalize_path(cls._action_source_file(action))
-        current_path = cls._normalize_path(file_name)
-        if not action_path:
-            return current_path
-        if (
-            action_path == current_path
-            or current_path.endswith(f"/{action_path}")
-            or action_path.endswith(f"/{current_path}")
-        ):
-            return current_path
-        return action_path
-
-    @classmethod
-    def _internal_action_deduplication_key(
-        cls,
-        action: RefactoringAction,
-        *,
-        file_name: str,
-    ) -> tuple[str, str, str] | None:
-        family = cls._canonical_refactoring_family(action)
-        method = cls._action_target_method(action)
-        if family != ACTION_EXTRACT_METHOD or not method:
-            return None
-        return (cls._dedup_file_identity(action, file_name), family, method)
-
-    @classmethod
-    def _deduplicate_internal_actions(
-        cls,
-        *,
-        file_name: str,
-        existing_actions: List[RefactoringAction],
-        detected_actions: List[RefactoringAction],
-    ) -> List[RefactoringAction]:
-        """Remove duplicate local actions without suppressing new SCTVA findings."""
-
-        planned_keys = {
-            key
-            for action in existing_actions
-            if (key := cls._internal_action_deduplication_key(
-                action,
-                file_name=file_name,
-            )) is not None
-        }
-        retained: List[RefactoringAction] = []
-        seen_local_keys: set[tuple[str, str, str]] = set()
-
-        for action in detected_actions:
-            key = cls._internal_action_deduplication_key(action, file_name=file_name)
-            if key is not None and (key in planned_keys or key in seen_local_keys):
-                continue
-            if key is not None:
-                seen_local_keys.add(key)
-            retained.append(action)
-        return retained
-
-    @staticmethod
-    def _request_allows_local_refactoring(request: SCTVARequestContract) -> bool:
-        metadata = request.refactoring_plan.metadata or {}
-        if request.source_files:
-            return True
-        if metadata.get("enable_sctva_auto_refactoring") is True:
-            return True
-        return str(metadata.get("source_agent") or "").strip().lower() == "rdp_agent"
-
-    @staticmethod
-    def _actions_with_effective_replacements(
-        actions: List[RefactoringAction],
-        transformation_log: List[TransformationLogEntry],
-    ) -> List[RefactoringAction]:
-        effective_actions: List[RefactoringAction] = []
-        logs_by_action_index = {
-            entry.action_index: entry for entry in transformation_log
-        }
-        for index, action in enumerate(actions, start=1):
-            log_entry = logs_by_action_index.get(index)
-            if log_entry is None:
-                continue
-            satisfied_inline_class = (
-                action.action_type == ACTION_INLINE_PYTHON_CLASS
-                and str(log_entry.metadata.get("reason") or "")
-                == "SMELL_RESOLVED_BY_PRIOR_REFACTORING"
-                and str(log_entry.metadata.get("plan_compliance") or "") == "PASS"
-            )
-            if log_entry.replacements_count <= 0 and not satisfied_inline_class:
-                continue
-
-            effective_type = str(
-                log_entry.metadata.get("reclassified_action_type")
-                or action.action_type
-            ).strip()
-
-            # Plain noops are ignored.  A noop that was safely reclassified by
-            # the engine (for example legacy Move Method) must be validated as
-            # the operation that was actually performed.
-            if effective_type == ACTION_NOOP:
-                continue
-
-            effective_parameters = log_entry.metadata.get("effective_action_parameters")
-            if isinstance(effective_parameters, dict):
-                validation_parameters = dict(effective_parameters)
-                validation_parameters["_sctva_action_index"] = index
-                validation_parameters["applied_transformation_metadata"] = dict(
-                    log_entry.metadata
-                )
-                effective_actions.append(
-                    RefactoringAction(
-                        action_type=effective_type,
-                        parameters=validation_parameters,
-                        source_step_id=action.source_step_id,
-                        source_refactoring=action.source_refactoring,
-                        warnings=list(action.warnings),
-                    )
-                )
-                continue
-
-            if effective_type == action.action_type:
-                validation_parameters = dict(action.parameters or {})
-                validation_parameters["_sctva_action_index"] = index
-                validation_parameters["applied_transformation_metadata"] = dict(
-                    log_entry.metadata
-                )
-                effective_actions.append(
-                    RefactoringAction(
-                        action_type=effective_type,
-                        parameters=validation_parameters,
-                        source_step_id=action.source_step_id,
-                        source_refactoring=action.source_refactoring,
-                        warnings=list(action.warnings),
-                    )
-                )
-                continue
-
-            validation_parameters = dict(action.parameters or {})
-            validation_parameters["_sctva_action_index"] = index
-            validation_parameters["applied_transformation_metadata"] = dict(
-                log_entry.metadata
-            )
-            effective_actions.append(
-                RefactoringAction(
-                    action_type=effective_type,
-                    parameters=validation_parameters,
-                    source_step_id=action.source_step_id,
-                    source_refactoring=action.source_refactoring,
-                    warnings=list(action.warnings),
-                )
-            )
-        return effective_actions
-
-    def _attempt_selective_java_parameter_object_replay(
-        self,
-        *,
-        request: SCTVARequestContract,
-        file_entry: SourceFileContract,
-        actions: List[RefactoringAction],
-        project_files: List[Dict[str, Any]],
-        structural_step: ValidationStepResult,
-        rollback_occurred: bool,
-    ) -> tuple[Any, ...] | None:
-        """Replay independent accepted Java actions after a proven PO failure.
-
-        This is deliberately narrow: it only removes an action that the
-        Parameter Object structural validator identified as failing.  If the
-        remaining sequence cannot pass all validation stages, SCTVA keeps the
-        existing whole-file rollback rather than guessing at dependencies.
-        """
-        language = (file_entry.language or request.language).strip().lower()
-        if not rollback_occurred or language != "java":
-            return None
-        if any(action.parameters.get("coordinated_project_transaction_id") for action in actions):
-            return None
-        checks = list(structural_step.details.get("parameter_object_validation") or [])
-        failed_indexes = [
-            int(item.get("action_index"))
-            for item in checks
-            if item.get("passed") is False and isinstance(item.get("action_index"), int)
-        ]
-        if not failed_indexes:
-            return None
-        parameter_indexes = [
-            index for index, action in enumerate(actions, start=1)
-            if action.action_type == ACTION_INTRODUCE_JAVA_PARAMETER_OBJECT
-        ]
-        if len(parameter_indexes) < 2:
-            return None
-
-        for failed_index in failed_indexes:
-            retained = [
-                copy.deepcopy(action)
-                for index, action in enumerate(actions, start=1)
-                if index != failed_index
-            ]
-            if not retained:
-                continue
-            candidate, logs, warnings = self.transformer.apply_actions(
-                language=language,
-                source_code=file_entry.source_code,
-                actions=retained,
-                strict_mode=request.execution_options.strict_mode,
-                project_source_files=project_files,
-                current_file_name=file_entry.file_name,
-                repository_complete=bool(request.source_files),
-                behavior_tests=request.refactoring_plan.behavior_tests,
-            )
-            effective = self._actions_with_effective_replacements(retained, logs)
-            syntax = self.syntax_validator.validate(
-                language=language,
-                source_code=candidate,
-                require_compilation=request.execution_options.require_compilation,
-                timeout_seconds=request.execution_options.timeout_seconds,
-            )
-            structural = self.structural_validator.validate(
-                language=language,
-                original_code=file_entry.source_code,
-                transformed_code=candidate,
-                actions=effective,
-            )
-            behavioral = self.behavioral_validator.validate(
-                language=language,
-                original_code=file_entry.source_code,
-                transformed_code=candidate,
-                behavior_tests=request.refactoring_plan.behavior_tests,
-                enable_behavior_tests=request.execution_options.enable_behavior_tests,
-                actions=effective,
-                strict_mode=request.execution_options.strict_mode,
-                project_source_files=project_files,
-                current_file_name=file_entry.file_name,
-                structural_validation_passed=structural.passed,
-            )
-            invariant = self.invariant_miner.mine(
-                language=language,
-                behavioral_step=behavioral,
-                actions=effective,
-                strict_mode=request.execution_options.strict_mode,
-            )
-            if all(step.passed for step in (syntax, structural, behavioral, invariant)):
-                for entry in logs:
-                    entry.metadata.setdefault("selective_replay", True)
-                    entry.metadata.setdefault("selectively_rolled_back_action", failed_index)
-                return candidate, logs, warnings, effective, syntax, structural, behavioral, invariant
-        return None
-
-    @staticmethod
-    def _parallel_file_workers(
-        request: SCTVARequestContract,
-        file_count: int,
-    ) -> int:
-        if file_count <= 1:
-            return 1
-
-        configured = request.execution_options.max_parallel_files
-        if configured > 0:
-            return max(1, min(configured, file_count))
-
-        env_value = os.getenv("SCTVA_MAX_PARALLEL_FILES", "").strip()
-        if env_value.isdigit():
-            return max(1, min(int(env_value), file_count))
-
-        cpu_count = os.cpu_count() or 2
-        return max(1, min(4, cpu_count, file_count))
-
+    # ------------------------------------------------------------------
+    # Action scoping and execution controls
+    # ------------------------------------------------------------------
     @classmethod
     def _build_action_scope_index(
         cls,
@@ -6101,6 +5832,375 @@ class SafeCodeTransformationValidationAgent:
         ]
 
     @staticmethod
+    def _parallel_file_workers(
+        request: SCTVARequestContract,
+        file_count: int,
+        *,
+        model_assisted: bool = False,
+    ) -> int:
+        if file_count <= 1:
+            return 1
+
+        configured = request.execution_options.max_parallel_files
+        if configured > 0:
+            workers = configured
+        else:
+            env_value = os.getenv("SCTVA_MAX_PARALLEL_FILES", "").strip()
+            if env_value.isdigit():
+                workers = int(env_value)
+            else:
+                cpu_count = os.cpu_count() or 2
+                # A model-enabled request keeps inference serialized by the
+                # shared runtime lock. Three file workers let validation for
+                # one file overlap generation for the next without creating
+                # competing CPU model instances on a laptop-class machine.
+                workers = min(3, cpu_count) if model_assisted else min(4, cpu_count)
+
+        if model_assisted:
+            workers = min(workers, 3)
+
+        return max(1, min(workers, file_count))
+
+    # ------------------------------------------------------------------
+    # Language-specific analysis helpers
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _extract_method_target_count(
+        file_entry: SourceFileContract,
+        *,
+        method_name: str,
+        source_class: str,
+        signature: str,
+    ) -> int:
+        if not method_name:
+            return 0
+        language = (file_entry.language or "").strip().lower()
+        lower_name = file_entry.file_name.lower()
+        kwargs = {
+            "method_name": method_name,
+            "source_class": source_class,
+            "method_signature": signature,
+        }
+        if language == "python" or lower_name.endswith(".py"):
+            return python_method_target_count(file_entry.source_code, **kwargs)
+        if language == "java" or lower_name.endswith(".java"):
+            return java_method_target_count(file_entry.source_code, **kwargs)
+        if language == "c" or lower_name.endswith((".c", ".h")):
+            return c_method_target_count(file_entry.source_code, **kwargs)
+        return 0
+
+    @staticmethod
+    def _recover_python_extract_method_target(
+        file_entry: SourceFileContract,
+        *,
+        method_name: str,
+        source_class: str,
+        signature: str,
+        parameters: Dict[str, Any],
+    ) -> tuple[str, str] | None:
+        """Recover one real Python routine from stale RDP class/name metadata.
+
+        Recovery is intentionally restricted to an unambiguous AST match. It
+        first checks the requested routine name without the accidental module
+        name-as-class constraint, then uses an RDP range only when exactly one
+        supported top-level/class method contains that range.
+        """
+
+        language = (file_entry.language or "").strip().lower()
+        if language != "python" and not file_entry.file_name.lower().endswith(".py"):
+            return None
+        try:
+            import ast
+
+            tree = ast.parse(file_entry.source_code)
+        except SyntaxError:
+            return None
+
+        candidates: list[tuple[str, str, ast.FunctionDef | ast.AsyncFunctionDef]] = []
+        for node in tree.body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                candidates.append((node.name, "", node))
+            elif isinstance(node, ast.ClassDef):
+                candidates.extend(
+                    (member.name, node.name, member)
+                    for member in node.body
+                    if isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef))
+                )
+
+        # Do not trust a file stem/module label as a Python class. A routine
+        # name remains a safe identity if it occurs exactly once in this file.
+        named = [item for item in candidates if item[0] == method_name]
+        if len(named) == 1:
+            return named[0][0], named[0][1]
+
+        def as_line(value: Any) -> int | None:
+            if isinstance(value, (int, float)):
+                return int(value)
+            if isinstance(value, str) and value.strip().isdigit():
+                return int(value.strip())
+            return None
+
+        start_line = as_line(
+            parameters.get("start_line")
+            or parameters.get("source_line")
+            or parameters.get("line")
+        )
+        end_line = as_line(parameters.get("end_line")) or start_line
+        if start_line is None or end_line is None:
+            return None
+
+        def is_substantial(
+            item: tuple[str, str, ast.FunctionDef | ast.AsyncFunctionDef],
+        ) -> bool:
+            node = item[2]
+            statement_count = sum(
+                isinstance(descendant, ast.stmt)
+                and descendant is not node
+                and not isinstance(descendant, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+                for descendant in ast.walk(node)
+            )
+            loc = int(getattr(node, "end_lineno", node.lineno) or node.lineno) - node.lineno + 1
+            return statement_count >= 4 and loc >= 10
+
+        enclosing = [
+            item
+            for item in candidates
+            if is_substantial(item)
+            and int(getattr(item[2], "lineno", 0) or 0) <= start_line
+            and int(getattr(item[2], "end_lineno", item[2].lineno) or item[2].lineno) >= end_line
+        ]
+        if len(enclosing) == 1:
+            return enclosing[0][0], enclosing[0][1]
+
+        # Smell locations sometimes include a module docstring or the whole
+        # file, so no function encloses both endpoints. Select by overlap only
+        # when one routine is clearly dominant over every other routine.
+        overlaps: list[tuple[int, tuple[str, str, ast.FunctionDef | ast.AsyncFunctionDef]]] = []
+        for item in candidates:
+            if not is_substantial(item):
+                continue
+            node_start = int(getattr(item[2], "lineno", 0) or 0)
+            node_end = int(getattr(item[2], "end_lineno", node_start) or node_start)
+            overlap = max(0, min(node_end, end_line) - max(node_start, start_line) + 1)
+            if overlap:
+                overlaps.append((overlap, item))
+        overlaps.sort(key=lambda entry: entry[0], reverse=True)
+        if overlaps and (
+            len(overlaps) == 1
+            or overlaps[0][0] >= max(3, overlaps[1][0] * 2)
+        ):
+            winner = overlaps[0][1]
+            return winner[0], winner[1]
+
+        # Final recovery for plans with no usable line metadata: a file may
+        # contain one real business routine plus tiny entry-point wrappers.
+        # Require exactly one substantial routine so this cannot silently pick
+        # between multiple legitimate methods.
+        substantial = [item for item in candidates if is_substantial(item)]
+        if len(substantial) == 1:
+            return substantial[0][0], substantial[0][1]
+        return None
+
+    @staticmethod
+    def _java_parameter_object_method_owners(source: str, method: str) -> list[str]:
+        if not method:
+            return []
+        owners: list[str] = []
+        for class_name in declared_class_names(source):
+            model = _parse_java_class(source, class_name)
+            if model and any(item.name == method and not item.is_constructor for item in model.methods):
+                owners.append(class_name)
+        return sorted(set(owners))
+
+    @staticmethod
+    def _python_parameter_object_method_owners(source: str, method: str) -> list[str]:
+        if not method:
+            return []
+        try:
+            import ast
+
+            tree = ast.parse(source)
+        except SyntaxError:
+            return []
+        owners: list[str] = []
+        if any(
+            isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == method
+            for node in tree.body
+        ):
+            owners.append("")
+        for node in tree.body:
+            if not isinstance(node, ast.ClassDef):
+                continue
+            if any(
+                isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)) and child.name == method
+                for child in node.body
+            ):
+                owners.append(node.name)
+        return sorted(set(owners))
+
+    @staticmethod
+    def _specialize_extract_class_action(
+        action: RefactoringAction,
+        file_entry: SourceFileContract,
+    ) -> bool:
+        """Bind a legacy Extract Class intent to exactly one language operation."""
+
+        language = (file_entry.language or "").strip().lower()
+        lower_name = file_entry.file_name.lower()
+        if language not in EXTRACT_CLASS_ACTION_BY_LANGUAGE:
+            if lower_name.endswith(".py"):
+                language = "python"
+            elif lower_name.endswith(".java"):
+                language = "java"
+            elif lower_name.endswith((".c", ".h")):
+                language = "c"
+
+        specialized_action = EXTRACT_CLASS_ACTION_BY_LANGUAGE.get(language)
+        if not specialized_action:
+            return False
+        if action.action_type != ACTION_EXTRACT_CLASS and action.action_type != specialized_action:
+            return False
+
+        action.action_type = specialized_action
+        action.parameters["extract_class_language"] = language
+        action.parameters["legacy_action_type"] = ACTION_EXTRACT_CLASS
+        return True
+
+    @classmethod
+    def _resolve_extract_class_name_in_file(
+        cls,
+        file_entry: SourceFileContract,
+        *,
+        classes: set[str],
+        requested_class: str,
+        parameters: Dict[str, Any],
+    ) -> str:
+        if requested_class in classes:
+            return requested_class
+        if not classes:
+            return ""
+
+        source_class_origin = str(parameters.get("source_class_origin") or "").strip().lower()
+        inferred = source_class_origin == "file_stem_fallback"
+        requested_file_stem = cls._file_stem(requested_class).lower()
+        actual_file_stem = cls._file_stem(file_entry.file_name).lower()
+        inferred_from_configured_file = bool(
+            not source_class_origin
+            and requested_file_stem
+            and requested_file_stem == actual_file_stem
+        )
+        if (inferred or inferred_from_configured_file) and len(classes) == 1:
+            return next(iter(classes))
+        if not requested_class and len(classes) == 1:
+            return next(iter(classes))
+
+        requested_methods = parameters.get("methods_to_extract") or []
+        requested_fields = parameters.get("fields_to_extract") or []
+        if not isinstance(requested_methods, list):
+            requested_methods = []
+        if not isinstance(requested_fields, list):
+            requested_fields = []
+        if not requested_methods and not requested_fields:
+            return ""
+
+        member_matches = [
+            class_name
+            for class_name in classes
+            if cls._extract_class_members_match(
+                file_entry,
+                class_name=class_name,
+                requested_methods={str(item).strip() for item in requested_methods if str(item).strip()},
+                requested_fields={str(item).strip() for item in requested_fields if str(item).strip()},
+            )
+        ]
+        return member_matches[0] if len(member_matches) == 1 else ""
+
+    @staticmethod
+    def _extract_class_members_match(
+        file_entry: SourceFileContract,
+        *,
+        class_name: str,
+        requested_methods: set[str],
+        requested_fields: set[str],
+    ) -> bool:
+        language = (file_entry.language or "").strip().lower()
+        lower_name = file_entry.file_name.lower()
+        if language == "java" or lower_name.endswith(".java"):
+            model = _parse_java_class(file_entry.source_code, class_name)
+            return bool(
+                model
+                and requested_methods <= set(model.methods_by_name)
+                and requested_fields <= set(model.fields)
+            )
+        if language == "python" or lower_name.endswith(".py"):
+            try:
+                import ast
+
+                tree = ast.parse(file_entry.source_code)
+            except SyntaxError:
+                return False
+            source_node = next(
+                (
+                    node for node in tree.body
+                    if isinstance(node, ast.ClassDef) and node.name == class_name
+                ),
+                None,
+            )
+            if source_node is None:
+                return False
+            methods = {
+                node.name
+                for node in source_node.body
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            }
+            fields = {
+                node.attr
+                for node in ast.walk(source_node)
+                if isinstance(node, ast.Attribute)
+                and isinstance(node.value, ast.Name)
+                and node.value.id in {"self", "cls"}
+            }
+            fields.update(
+                target.id
+                for node in source_node.body
+                if isinstance(node, (ast.Assign, ast.AnnAssign))
+                for target in (
+                    node.targets if isinstance(node, ast.Assign) else [node.target]
+                )
+                if isinstance(target, ast.Name)
+            )
+            return requested_methods <= methods and requested_fields <= fields
+        return False
+
+    @staticmethod
+    def _apply_resolved_extract_class_name(
+        parameters: Dict[str, Any],
+        *,
+        resolved_class: str,
+        requested_class: str,
+    ) -> None:
+        if requested_class and requested_class != resolved_class:
+            parameters["requested_source_class"] = requested_class
+            parameters["source_class_resolution"] = "parsed_class_and_member_identity"
+        elif not requested_class:
+            parameters["source_class_resolution"] = "single_top_level_class"
+        parameters["source_class"] = resolved_class
+        if str(parameters.get("new_class_name_origin") or "").strip().lower() == "generated":
+            parameters["new_class_name"] = f"{resolved_class}Helper"
+
+    # ------------------------------------------------------------------
+    # Small reusable utility helpers
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _compatibility_check(value: Any) -> str:
+        normalized = str(value or "").strip().upper()
+        if normalized == "PASS":
+            return "PASS"
+        if normalized in {"", "NOT_APPLICABLE", "N/A"}:
+            return "NOT_APPLICABLE"
+        return "FAIL"
+
+    @staticmethod
     def _action_source_file(action: RefactoringAction) -> str:
         params = action.parameters or {}
         for key in (
@@ -6159,6 +6259,11 @@ class SafeCodeTransformationValidationAgent:
             for part in str(value).replace("\\", "/").strip().lower().split("/")
             if part and part != "."
         )
+
+    @staticmethod
+    def _file_stem(file_name: str) -> str:
+        normalized = str(file_name or "").replace("\\", "/").rsplit("/", 1)[-1]
+        return normalized.rsplit(".", 1)[0]
 
     @staticmethod
     def _summarize_languages(file_results: List[Dict[str, Any]]) -> str:

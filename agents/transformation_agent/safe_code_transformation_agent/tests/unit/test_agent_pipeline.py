@@ -1,4 +1,37 @@
 from sctva.agent import SafeCodeTransformationValidationAgent
+from sctva.contracts import ExecutionOptions
+
+
+def test_model_assisted_file_pipeline_defaults_to_three_workers(monkeypatch):
+    monkeypatch.delenv("SCTVA_MAX_PARALLEL_FILES", raising=False)
+    agent = SafeCodeTransformationValidationAgent()
+    request = type("Request", (), {"execution_options": ExecutionOptions()})()
+
+    assert agent._parallel_file_workers(
+        request,
+        8,
+        model_assisted=True,
+    ) == 3
+    assert agent._parallel_file_workers(
+        request,
+        8,
+        model_assisted=False,
+    ) == 4
+
+
+def test_model_assisted_file_pipeline_caps_explicit_workers_to_three():
+    agent = SafeCodeTransformationValidationAgent()
+    request = type(
+        "Request",
+        (),
+        {"execution_options": ExecutionOptions(max_parallel_files=8)},
+    )()
+
+    assert agent._parallel_file_workers(
+        request,
+        8,
+        model_assisted=True,
+    ) == 3
 
 
 def test_zero_replacement_c_action_does_not_trigger_rollback():

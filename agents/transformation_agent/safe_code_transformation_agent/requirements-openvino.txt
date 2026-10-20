@@ -1,5 +1,5 @@
-# Optional FP32 CPU acceleration for SCTVA's local Qwen/CodeT5 runtime.
-# Install together with requirements-codet5.txt, then export the checkpoint to
+# Optional FP32 CPU acceleration for SCTVA's local Qwen runtime.
+# Install together with requirements-qwen.txt, then export the checkpoint to
 # OpenVINO IR before selecting the openvino backend.
 openvino>=2025.0,<2027
 optimum-intel>=1.22,<2

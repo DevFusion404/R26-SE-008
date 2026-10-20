@@ -7,9 +7,8 @@ import shutil
 import subprocess
 import tempfile
 import time
-from collections import Counter
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Sequence, Tuple
+from typing import Any, Dict, List, Sequence
 
 from ..contracts import RefactoringAction
 from .behavior_fingerprint import (
@@ -1160,6 +1159,21 @@ def _validate_c_static(
     }
 
 
+def validate_c_static_behavior(
+    *,
+    original_code: str,
+    transformed_code: str,
+    actions: Sequence[RefactoringAction],
+) -> Dict[str, Any]:
+    """Run the non-executing C behavior gate used for model checkpoints."""
+
+    return _validate_c_static(
+        original_code=original_code,
+        transformed_code=transformed_code,
+        actions=actions,
+    )
+
+
 def _expected_failure_c(
     *,
     name: str,
@@ -1198,4 +1212,5 @@ __all__ = [
     "run_c_runtime_test",
     "summarize_c_source",
     "validate_c_behavior",
+    "validate_c_static_behavior",
 ]
