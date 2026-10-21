@@ -260,6 +260,11 @@ def init_db(app):
         # show only the steps that were already approved.
         if "plan_full_json" not in existing_cols:
             conn.execute("ALTER TABLE workflows ADD COLUMN plan_full_json TEXT")
+        # The selected files' source, read at smell selection, so the
+        # transformation does not depend on CUQA's shared workspace still
+        # holding this repository (services/source_snapshot.py).
+        if "source_snapshot_json" not in existing_cols:
+            conn.execute("ALTER TABLE workflows ADD COLUMN source_snapshot_json TEXT")
 
         # Stage 2 writes one feedback row per plan step the developer decided
         # on. The frontend can send `modify` and then `approve` for the same

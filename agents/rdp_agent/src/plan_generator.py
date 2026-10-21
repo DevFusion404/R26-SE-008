@@ -109,7 +109,7 @@ class PlanGenerator:
             target_dict = {
                 k: v
                 for k, v in smell.location.items()
-                if k in ("class", "method", "lines", "file", "entity", "duplicate_group") and v and v != "unknown"
+                if k in ("class", "method", "lines", "file", "entity", "duplicate_group", "variable", "variable_name") and v and v != "unknown"
             }
             if candidate["name"] == "Move Method":
                 target_dict.update({
@@ -214,6 +214,8 @@ class PlanGenerator:
             Explanation string.
         """
         target_str = self._format_target(smell.location)
+        if smell.location.get("variable_name"):
+            target_str = f"variable '{smell.location['variable_name']}' in {target_str}" 
         smell_type = smell.type
         ref_name = candidate["name"]
         impact = candidate.get("impact", "medium")
@@ -495,10 +497,19 @@ class PlanGenerator:
                 params["method"] = method
 
         elif name == "Remove Dead Code":
-            params["source_class"] = _source_context()
+            var_name = location.get("variable_name") or getattr(smell, "variable_name", None)
+            if var_name:
+                params["variable_name"] = var_name
+                params["target_kind"] = "variable"
+            real_cls = _loc("class")
+            if real_cls:
+                params["source_class"] = real_cls
             method = _loc("method")
             if method:
                 params["method"] = method
+            lines = location.get("lines", [])
+            if lines:
+                params["source_line"] = lines[0]
 
         elif name == "Rename Method":
             params["source_class"] = _source_context()

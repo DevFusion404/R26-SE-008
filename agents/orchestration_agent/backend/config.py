@@ -222,6 +222,22 @@ def sctva_execute_timeout() -> int:
     return _seconds("SCTVA_EXECUTE_TIMEOUT_SECONDS", 600)
 
 
+def rdp_generate_timeout() -> int:
+    """Seconds to wait for the RDP agent's /generate (RDP_GENERATE_TIMEOUT_SECONDS).
+
+    RDP scores every selected smell; a large selection (hundreds of smells)
+    needs minutes. When it does not answer in time DIWO falls back to its own
+    plan, which carries no RDP scoring evidence.
+    """
+    return _seconds("RDP_GENERATE_TIMEOUT_SECONDS", 600)
+
+
+def source_snapshot_max_bytes() -> int:
+    """Upper bound on the source kept per workflow at smell selection
+    (DIWO_SOURCE_SNAPSHOT_MAX_MB, default 8). Files past it are read live."""
+    return _seconds("DIWO_SOURCE_SNAPSHOT_MAX_MB", 8, minimum=1) * 1024 * 1024
+
+
 def source_fetch_timeout() -> int:
     """Seconds to wait when reading the planned files' source text before the
     transformation (DIWO_SOURCE_FETCH_TIMEOUT_SECONDS)."""
