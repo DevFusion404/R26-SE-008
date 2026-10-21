@@ -152,6 +152,7 @@ def expected_c_transform_summary(actions: Sequence[RefactoringAction]) -> Dict[s
     expected_macros: Dict[str, Any] = {}
     expected_added_functions: Dict[str, str] = {}
     expected_parameter_objects: Dict[str, Dict[str, str]] = {}
+    expected_parameter_removals: Dict[str, str] = {}
 
     for action in actions:
         action_type = getattr(action, "action_type", "")
@@ -223,6 +224,46 @@ def expected_c_transform_summary(actions: Sequence[RefactoringAction]) -> Dict[s
             if helper_name:
                 expected_added_functions[helper_name] = ""
 
+        elif action_type == "replace_temp_with_query":
+            method = str(
+                params.get("method")
+                or params.get("function")
+                or params.get("source_method")
+                or ""
+            ).strip()
+            temporary = str(params.get("temp_name") or params.get("variable_name") or "").strip()
+            applied = params.get("applied_transformation_metadata")
+            if not isinstance(applied, dict):
+                applied = {}
+            query_name = str(
+                applied.get("query_method_name")
+                or params.get("query_method_name")
+                or (f"query_{method}_{temporary}" if method and temporary else "")
+            ).strip()
+            if query_name:
+                expected_added_functions[query_name] = ""
+
+        elif action_type == "replace_parameter_with_method_call":
+            method = str(
+                params.get("method")
+                or params.get("function")
+                or params.get("source_method")
+                or ""
+            ).strip()
+            parameter_name = str(params.get("parameter_name") or "").strip()
+            applied = params.get("applied_transformation_metadata")
+            if not isinstance(applied, dict):
+                applied = {}
+            query_name = str(
+                applied.get("query_method_name")
+                or params.get("query_method_name")
+                or (f"query_{method}_{parameter_name}" if method and parameter_name else "")
+            ).strip()
+            if method and parameter_name:
+                expected_parameter_removals[method] = parameter_name
+            if query_name:
+                expected_added_functions[query_name] = ""
+
         elif action_type in {"encapsulate_variable", "encapsulate_c_variable"}:
             variable_name = str(
                 params.get("variable_name") or params.get("variable") or ""
@@ -282,7 +323,28 @@ def expected_c_transform_summary(actions: Sequence[RefactoringAction]) -> Dict[s
         "expected_macros": expected_macros,
         "expected_added_functions": expected_added_functions,
         "expected_parameter_objects": expected_parameter_objects,
+        "expected_parameter_removals": expected_parameter_removals,
     }
+
+
+def _c_signature_without_parameter(signature: str, parameter_name: str) -> str:
+    """Render the simple C signature expected after removing one parameter."""
+
+    if ":" not in signature:
+        return signature
+    function_name, raw_parameters = signature.split(":", 1)
+    parameters = [item.strip() for item in raw_parameters.split(",")]
+    retained = [
+        declaration
+        for declaration in parameters
+        if not re.search(
+            rf"\b{re.escape(parameter_name)}\s*(?:\[[^]]*\])?\s*$",
+            declaration,
+        )
+    ]
+    if len(retained) == len(parameters):
+        return signature
+    return f"{function_name}:{', '.join(retained) if retained else 'void'}"
 
 
 def compare_c_static_summaries(
@@ -308,6 +370,7 @@ def compare_c_static_summaries(
     expected_macros = expected["expected_macros"]
     expected_added_functions = expected["expected_added_functions"]
     expected_parameter_objects = expected["expected_parameter_objects"]
+    expected_parameter_removals = expected["expected_parameter_removals"]
 
     original_signatures = dict(original_summary.get("functions", {}))
     transformed_signatures = dict(transformed_summary.get("functions", {}))
@@ -323,6 +386,16 @@ def compare_c_static_summaries(
         if parameter_object and expected_name == name:
             normalized_expected_original.add(
                 f"{name}:{parameter_object['object_name']} {parameter_object['parameter_name']}"
+            )
+        elif name in expected_parameter_removals and expected_name == name:
+            normalized_expected_original.add(
+                canonicalize_c_signature_array_bounds(
+                    _c_signature_without_parameter(
+                        signature,
+                        expected_parameter_removals[name],
+                    ),
+                    original_macros,
+                )
             )
         else:
             normalized_expected_original.add(

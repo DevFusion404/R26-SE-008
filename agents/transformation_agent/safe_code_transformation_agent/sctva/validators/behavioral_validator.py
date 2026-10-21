@@ -70,6 +70,8 @@ class BehavioralValidator:
         Runtime probes remain part of final validation. Keeping them out of each
         action checkpoint avoids recompiling or executing a project repeatedly.
         """
+        # Run a cheap static behavior gate for each model candidate; expensive
+        # runtime probes are deferred until the final retained output.
 
         start_iso = utc_now_iso()
         started = time.perf_counter()
@@ -149,6 +151,8 @@ class BehavioralValidator:
         current_file_name: str | None = None,
         structural_validation_passed: bool | None = None,
     ) -> ValidationStepResult:
+        # Compare original and transformed fingerprints using explicit tests,
+        # safe inferred probes, or static fallbacks for the target language.
         start_iso = utc_now_iso()
         started = time.perf_counter()
 

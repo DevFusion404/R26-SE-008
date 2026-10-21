@@ -11,6 +11,8 @@ class RollbackManager:
     """Determines whether rollback is required and why."""
 
     def evaluate(self, validation_steps: Iterable[ValidationStepResult], rollback_on_behavior_failure: bool = True) -> Tuple[bool, str]:
+        # Convert failed validation steps into one rollback decision; the
+        # original source remains the safe fallback when a required stage fails.
         # If rollback_on_behavior_failure is False, ignore behavioral validation failures for rollback decision
         failed = [
             step.name

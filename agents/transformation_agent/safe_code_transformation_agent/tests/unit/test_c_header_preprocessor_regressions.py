@@ -67,6 +67,57 @@ typedef struct {
     )
 
 
+def test_c_introduce_constant_preserves_float_literal_suffix_in_macro():
+    source = '''#include <stdio.h>
+
+float read_temperature(int channel_id) {
+    return channel_id * 1.5f;
+}
+'''
+
+    transformed, replacements, metadata = c_transformers.apply_introduce_constant(
+        source,
+        1.5,
+        "TEMPERATURE_SCALE",
+        4,
+        reference_source_code=source,
+    )
+
+    assert replacements == 1
+    assert metadata["status"] == "success"
+    assert metadata["source_literal"] == "1.5f"
+    assert "#define TEMPERATURE_SCALE 1.5f" in transformed
+    assert "return channel_id * TEMPERATURE_SCALE;" in transformed
+
+    result = SafeCodeTransformationValidationAgent().execute({
+        "request_id": "c_float_suffix_constant",
+        "language": "c",
+        "source_code": source,
+        "refactoring_plan": {
+            "plan_id": "c_float_suffix_constant",
+            "actions": [{
+                "action_type": "introduce_constant",
+                "parameters": {
+                    "literal_value": 1.5,
+                    "constant_name": "TEMPERATURE_SCALE",
+                    "source_line": 4,
+                },
+            }],
+            "behavior_tests": [],
+        },
+        "execution_options": {
+            "strict_mode": True,
+            "enable_behavior_tests": False,
+            "require_compilation": False,
+            "enable_sctva_auto_refactoring": False,
+        },
+    })
+
+    assert result["success"] is True
+    assert result["rollback_occurred"] is False
+    assert result["accepted_output_engine"] == "RULE_BASED"
+
+
 def test_c_local_and_parameter_array_bounds_are_safe_constant_targets():
     parameter_source = "int f(char userID[15]) { return userID[0]; }\n"
     local_source = "void f(void) { char filename[20]; filename[0] = '\\0'; }\n"

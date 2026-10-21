@@ -340,6 +340,35 @@ model-only TP/FP/TN/FN, Accuracy, Precision, Recall, Specificity, and F1. A
 prediction counts as positive only when Qwen output survives final SCTVA
 validation. Rule-based fallback is never credited to the model.
 
+Evaluate the deterministic rule-based transformer against the identical seeded
+dataset and ground-truth labels:
+
+```powershell
+python run_model_evaluation.py --suite rdp-full --samples-per-action 1 --engine rule
+```
+
+This writes `sctva_rule_evaluation_*.json` and Markdown reports with TP/FP/TN/FN,
+Accuracy, Precision, Recall, Specificity, F1, final-validation pass rate, rule
+transformation rate, and execution time for Java, Python, and C. To create
+separate Qwen and rule-based reports plus a one-page comparison from the same
+dataset, run:
+
+```powershell
+python run_model_evaluation.py --suite rdp-full --samples-per-action 1 --engine both
+```
+
+For the panel-facing deterministic-rule metric, exclude RDP techniques that
+are intentionally model-only and retain only current SCTVA rule capabilities:
+
+```powershell
+python run_model_evaluation.py --suite rdp-full --engine rule --implemented-rules-only
+```
+
+This capability-scoped dataset still contains both valid and invalid-target
+controls for every included transformation, so Accuracy, Precision, Recall,
+Specificity, and F1 remain meaningful without counting a model-only RDP method
+as a rule-based false negative.
+
 Generate and inspect the datasets without loading Qwen:
 
 ```powershell

@@ -714,6 +714,9 @@ class TransformationEngine:
         model_validation_feedback: Dict[int, str] | None = None,
         allow_per_action_model_fallback: bool = False,
     ) -> Tuple[str, List[TransformationLogEntry], List[str]]:
+        # This is the transformation dispatcher: it prepares targets, asks
+        # Qwen only when eligible, dispatches language rules, and records an
+        # audit log consumed later by SCTVA validation and reporting.
         # Phase 1: normalize plan targets and establish the current snapshot.
         current_code = source_code
         logs: List[TransformationLogEntry] = []
@@ -1796,6 +1799,10 @@ class TransformationEngine:
                                             "allow_string_literal_extraction", True
                                         )
                                     ),
+                                    source_class=str(
+                                        action.parameters.get("source_class") or ""
+                                    ).strip()
+                                    or None,
                                 )
                             )
                             literal_results = action_metadata.setdefault(
@@ -1822,7 +1829,17 @@ class TransformationEngine:
                                 "satisfied",
                                 "not_applicable",
                             } and statuses:
-                                all_symbolically_handled = "not_applicable" not in statuses
+                                all_symbolically_handled = all(
+                                    str(item.get("status") or "").lower()
+                                    in {
+                                        "already_handled",
+                                        "already_applied",
+                                        "satisfied",
+                                    }
+                                    or str(item.get("reason") or "")
+                                    == "TARGET_ALREADY_REFACTORED_BY_PREVIOUS_ACTION"
+                                    for item in literal_results
+                                )
                                 action_metadata["status"] = (
                                     "already_handled"
                                     if all_symbolically_handled

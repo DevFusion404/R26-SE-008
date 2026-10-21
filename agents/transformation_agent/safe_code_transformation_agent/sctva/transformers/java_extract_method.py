@@ -204,6 +204,8 @@ def apply_extract_method(
     project_source_files: Sequence[Any] | None = None,
     compilation_timeout_seconds: int = 10,
 ) -> tuple[str, int, dict[str, Any]]:
+    # Resolve Java candidates, rank a safe statement window, then render the
+    # helper and call site while preserving data flow and method ownership.
     metadata = _base_metadata(method_name, new_method_name, source_class, source_file or current_file_name)
     if source_resolution_error:
         return _review(source_code, source_resolution_error, metadata)

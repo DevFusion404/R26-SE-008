@@ -112,6 +112,8 @@ BENCHMARK_CASES: tuple[ModelBenchmarkCase, ...] = (
 
 
 def cases_for_languages(languages: Iterable[str] | None = None) -> list[ModelBenchmarkCase]:
+    # Load deterministic benchmark cases used to compare model behavior by
+    # language, action type, and expected transformation outcome.
     """Return cases in a stable language/case order."""
 
     selected = {str(item).strip().lower() for item in (languages or []) if str(item).strip()}
@@ -123,6 +125,8 @@ def _percent(numerator: int, denominator: int) -> float | None:
 
 
 def classification_metrics(case_results: Iterable[dict[str, Any]]) -> dict[str, Any]:
+    # Convert per-case expected/observed labels into aggregate accuracy,
+    # precision, recall, and F1-style metrics.
     """Measure validator-gated model acceptance as a binary classifier.
 
     Positive ground truth means the RDP action and target are intentionally
@@ -179,6 +183,8 @@ def classification_metrics(case_results: Iterable[dict[str, Any]]) -> dict[str, 
 
 
 def aggregate_language_metrics(case_results: Iterable[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    # Group benchmark outcomes by language so Java, Python, and C performance
+    # can be inspected independently.
     """Aggregate model-only, validator-gated results by language."""
 
     grouped: dict[str, list[dict[str, Any]]] = {}
@@ -222,6 +228,7 @@ def aggregate_language_metrics(case_results: Iterable[dict[str, Any]]) -> dict[s
 
 
 def aggregate_action_metrics(case_results: Iterable[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    # Group outcomes by refactoring action to expose action-specific failures.
     """Return classification metrics for every language/action pair."""
 
     grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}

@@ -21,6 +21,8 @@ class SafetyReporter:
         transformation_applied: bool = True,
         not_applicable: bool = False,
     ) -> SafetyReport:
+        # Translate validation/rollback state into the frontend's human-readable
+        # messages and machine-readable risk flags.
         validation_timestamps: Dict[str, Dict[str, object]] = {}
         risk_flags: List[str] = []
         human_messages: List[str] = []

@@ -111,12 +111,35 @@ def _normalize_constant_name(
     return cleaned
 
 
-def _class_constant_names(source_code: str) -> set[str]:
-    return {match.group(1) for match in _STATIC_FINAL_RE.finditer(source_code)}
+def _class_scope(source_code: str, source_class: Optional[str] = None) -> str:
+    """Return the requested type body, or the full source for legacy callers."""
+
+    target_name = str(source_class or "").strip()
+    if not target_name:
+        return source_code
+    for match in _TYPE_DECL_RE.finditer(source_code):
+        if match.group(2) != target_name:
+            continue
+        closing_brace = _find_matching_brace(source_code, match.end() - 1)
+        if closing_brace is not None:
+            return source_code[match.start() : closing_brace + 1]
+    return ""
 
 
-def _has_class_constant(source_code: str, constant_name: str) -> bool:
-    return constant_name in _class_constant_names(source_code)
+def _class_constant_names(
+    source_code: str,
+    source_class: Optional[str] = None,
+) -> set[str]:
+    scope = _class_scope(source_code, source_class)
+    return {match.group(1) for match in _STATIC_FINAL_RE.finditer(scope)}
+
+
+def _has_class_constant(
+    source_code: str,
+    constant_name: str,
+    source_class: Optional[str] = None,
+) -> bool:
+    return constant_name in _class_constant_names(source_code, source_class)
 
 
 def _unique_constant_name(source_code: str, preferred_name: str) -> str:
@@ -482,6 +505,7 @@ def _extract_complete_java_string_literal(
     literal_value: Any,
     constant_name: Optional[str],
     source_line: Optional[int],
+    source_class: Optional[str] = None,
 ) -> Tuple[str, int, dict[str, Any]]:
     """Extract one RDP-targeted Java string token without changing its output.
 
@@ -537,7 +561,12 @@ def _extract_complete_java_string_literal(
     transformed = source_code
     for start, end in reversed(current_candidates):
         transformed = transformed[:start] + preferred_name + transformed[end:]
-    transformed = _insert_class_constant(transformed, preferred_name, target_value)
+    transformed = _insert_class_constant(
+        transformed,
+        preferred_name,
+        target_value,
+        source_class=source_class,
+    )
 
     metadata.update({
         "constant_name": preferred_name,
@@ -550,6 +579,7 @@ def _extract_complete_java_string_literal(
 def _numeric_constants_for_literal(
     source_code: str,
     literal_value: Any,
+    source_class: Optional[str] = None,
 ) -> list[str]:
     """Return Java constant names whose initializer is exactly this number."""
 
@@ -564,7 +594,10 @@ def _numeric_constants_for_literal(
         rf"\bstatic\s+final\s+[A-Za-z_][A-Za-z0-9_<>\[\].?]*\s+"
         rf"(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*=\s*{literal_text}\s*;"
     )
-    return [match.group("name") for match in pattern.finditer(source_code)]
+    return [
+        match.group("name")
+        for match in pattern.finditer(_class_scope(source_code, source_class))
+    ]
 
 
 def apply_introduce_constant(
@@ -575,6 +608,7 @@ def apply_introduce_constant(
     *,
     reference_source_code: Optional[str] = None,
     allow_string_literal_extraction: bool = False,
+    source_class: Optional[str] = None,
 ) -> Tuple[str, int, dict[str, Any]]:
     """Safely apply Java Introduce Constant with target diagnostics.
 
@@ -588,6 +622,9 @@ def apply_introduce_constant(
     as ``not_applicable`` rather than rewritten or reported as failures.
     """
 
+    # Resolve the planned literal and class scope before replacing tokens so
+    # unrelated Java classes, strings, and comments remain untouched.
+
     reference = reference_source_code if reference_source_code is not None else source_code
     metadata: dict[str, Any] = {
         "refactoring": "Introduce Constant",
@@ -597,6 +634,19 @@ def apply_introduce_constant(
         "status": "success",
         "reason": "introduce_constant_applied",
     }
+    target_class = str(source_class or "").strip()
+    if target_class:
+        metadata["source_class"] = target_class
+        if not _class_scope(source_code, target_class):
+            metadata.update(
+                {
+                    "status": "not_applicable",
+                    "reason": "SOURCE_CLASS_NOT_FOUND",
+                    "final_status": "NOT_APPLICABLE",
+                    "final_decision": "NOT_APPLICABLE",
+                }
+            )
+            return source_code, 0, metadata
 
     is_numeric = (
         isinstance(literal_value, (int, float))
@@ -653,6 +703,7 @@ def apply_introduce_constant(
                 literal_value,
                 constant_name,
                 source_line,
+                target_class,
             )
             metadata.update(string_metadata)
             if replacements > 0:
@@ -704,8 +755,12 @@ def apply_introduce_constant(
         return source_code, 0, metadata
 
     current_code_occurrences = _numeric_literal_occurrences(source_code, literal_value)
-    current_constants = set(_numeric_constants_for_literal(source_code, literal_value))
-    reference_constants = set(_numeric_constants_for_literal(reference, literal_value))
+    current_constants = set(
+        _numeric_constants_for_literal(source_code, literal_value, target_class)
+    )
+    reference_constants = set(
+        _numeric_constants_for_literal(reference, literal_value, target_class)
+    )
     constants_added_during_run = sorted(current_constants - reference_constants)
     normalized_name = _normalize_constant_name(constant_name, literal_value)
     requested_constant_already_exists = normalized_name in current_constants
@@ -755,10 +810,15 @@ def apply_introduce_constant(
         source_code, literal_value, preferred_name, effective_line
     )
     if replacements > 0 and not requested_constant_already_exists and not _has_class_constant(
-        transformed, preferred_name
+        transformed,
+        preferred_name,
+        target_class,
     ):
         transformed = _insert_class_constant(
-            transformed, preferred_name, literal_value
+            transformed,
+            preferred_name,
+            literal_value,
+            source_class=target_class,
         )
 
     metadata.update(
@@ -840,11 +900,18 @@ def _insert_class_constant(
     source_code: str,
     constant_name: str,
     literal_value: Any,
+    *,
+    source_class: Optional[str] = None,
 ) -> str:
-    if _has_class_constant(source_code, constant_name):
+    if _has_class_constant(source_code, constant_name, source_class):
         return source_code
 
-    match = _TYPE_DECL_RE.search(source_code)
+    target_name = str(source_class or "").strip()
+    match = None
+    for candidate in _TYPE_DECL_RE.finditer(source_code):
+        if not target_name or candidate.group(2) == target_name:
+            match = candidate
+            break
     if not match:
         return source_code
 

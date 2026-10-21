@@ -76,6 +76,8 @@ class SafeCodeTransformationValidationAgent:
     # Lifecycle and request entry points
     # ------------------------------------------------------------------
     def __init__(self) -> None:
+        # Create one coordinator for transformation, validation, rollback,
+        # scoring, reporting, and local plan recovery.
         self.transformer = TransformationEngine()
         self.syntax_validator = SyntaxValidator()
         self.structural_validator = StructuralValidator()
@@ -88,6 +90,8 @@ class SafeCodeTransformationValidationAgent:
 
     def execute(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         """Execute from raw payload and return result dict."""
+        # Normalize the RDP payload, reject lost planner metadata, then hand
+        # the validated request to execute_request for the full pipeline.
         # Keep programmatic callers on the same RDP normalization path as both
         # HTTP entry points.  This is idempotent for an ordinary SCTVA request.
         normalized_payload, integrity_issues = normalize_sctva_request_payload(payload)
@@ -112,6 +116,8 @@ class SafeCodeTransformationValidationAgent:
 
     def execute_request(self, request: SCTVARequestContract) -> Dict[str, Any]:
         """Execute validated request contract."""
+        # Scope planned actions to source files, run files in parallel where
+        # allowed, and aggregate each file's validation and safety result.
         # The adapter never alters the RDP plan or bypasses SCTVA validation.
         # Its per-request action budget also bounds CPU inference work.
         model_assistant = QwenCandidateTransformer.from_execution_options(
@@ -780,6 +786,8 @@ class SafeCodeTransformationValidationAgent:
         model_validation_feedback: Dict[int, str] | None = None,
         allow_model_validation_repair: bool = True,
     ) -> Dict[str, Any]:
+        # Apply rule/model transformations for one file, then run syntax,
+        # structural, behavioral, and invariant checks before final scoring.
         language = (file_entry.language or request.language).strip().lower()
         rule_first_model_fallback = bool(
             model_assistant is not None
@@ -1675,6 +1683,8 @@ class SafeCodeTransformationValidationAgent:
         current_file_name: str = "",
     ) -> Dict[str, Any]:
         """Validate one model edit against only its corresponding RDP action."""
+        # Gate a model candidate independently before it can replace the
+        # rule-based output; failed candidates remain inspection-only.
 
         syntax = self.syntax_validator.validate(
             language=language,
@@ -4305,6 +4315,14 @@ class SafeCodeTransformationValidationAgent:
             if len(exact) == 1:
                 resolved = exact[0]
             else:
+                if len(matches) == 1:
+                    matched_entry = matches[0][0]
+                    matched_language = (matched_entry.language or "").strip().lower()
+                    if matched_language == "c" or matched_entry.file_name.lower().endswith((".c", ".h")):
+                        # C has translation units and functions, not class owners.
+                        # Some RDP plans still carry a Java-style source_class
+                        # placeholder; a unique parsed function is authoritative.
+                        resolved = matches[0]
                 inferred_class = (
                     not requested_class
                     or str(params.get("source_class_origin") or "").lower() == "file_stem_fallback"
@@ -4313,7 +4331,7 @@ class SafeCodeTransformationValidationAgent:
                         and requested_class.lower() == cls._file_stem(candidates[0].file_name).lower()
                     )
                 )
-                if inferred_class and len(matches) == 1:
+                if resolved is None and inferred_class and len(matches) == 1:
                     resolved = matches[0]
 
             if resolved is None:

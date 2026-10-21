@@ -329,12 +329,16 @@ def _find_cuqa_workspace_files(
 
 def create_sctva_blueprint() -> Blueprint:
     """Create and return a Blueprint with SCTVA endpoints."""
+    # Build the HTTP boundary and share one agent/adapter instance across the
+    # health, source-import, and execution routes.
     bp = Blueprint("sctva_api", __name__)
     agent = SafeCodeTransformationValidationAgent()
     adapter = PlannerAdapter()
 
     @bp.route("/sctva/health", methods=["GET", "OPTIONS"])
     def sctva_health() -> Any:
+        # Advertise service health and the capabilities supported by this
+        # backend without starting a transformation.
         if request.method == "OPTIONS":
             return jsonify({"status": "ok"}), 200
         return jsonify(
@@ -359,6 +363,8 @@ def create_sctva_blueprint() -> Blueprint:
 
     @bp.route("/sctva/cuqa-sources", methods=["POST", "OPTIONS"])
     def sctva_cuqa_sources() -> Any:
+        # Resolve safe CUQA workspace paths and return raw source files for
+        # plans that reference files outside the request payload.
         if request.method == "OPTIONS":
             return jsonify({"status": "ok"}), 200
         try:
@@ -425,6 +431,8 @@ def create_sctva_blueprint() -> Blueprint:
 
     @bp.route("/sctva/execute", methods=["POST", "OPTIONS"])
     def sctva_execute() -> Any:
+        # Normalize a direct request, invoke the SCTVA agent, and return the
+        # result while keeping legacy artifact persistence disabled.
         if request.method == "OPTIONS":
             return jsonify({"status": "ok"}), 200
         try:
@@ -457,6 +465,8 @@ def create_sctva_blueprint() -> Blueprint:
 
     @bp.route("/sctva/execute_from_rdp", methods=["POST", "OPTIONS"])
     def sctva_execute_from_rdp() -> Any:
+        # Execute the RDP-shaped contract through the same adapter and agent
+        # path as the direct endpoint so both routes behave identically.
         if request.method == "OPTIONS":
             return jsonify({"status": "ok"}), 200
         try:

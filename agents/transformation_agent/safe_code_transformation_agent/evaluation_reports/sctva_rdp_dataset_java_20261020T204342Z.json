@@ -1,0 +1,338 @@
+[
+  {
+    "case_id": "java_extract_java_class_1_r4549_positive",
+    "language": "java",
+    "file_name": "benchmark/java/extract-java-class_R4549.java",
+    "source_code": "class BaseR4549 {\n    protected int baseValue() { return 1; }\n}\n\nclass HelperR4549 {\n    int apply(int value) { return value * 2; }\n}\n\nclass AccountR4549 extends BaseR4549 {\n    private int amount = 818;\n    private final HelperR4549 helper = new HelperR4549();\n\n    public int calculate(int input, int tax, int discount) {\n        int subtotal = input + tax;\n        int adjusted = subtotal - discount;\n        int total = adjusted + baseValue();\n        return total;\n    }\n\n    public int process(int value, int tax, int discount, int fee) {\n        return value + tax - discount + fee;\n    }\n\n    public int delegated(int value) { return helper.apply(value); }\n\n    public int fee(String kind) {\n        if (\"premium\".equals(kind)) { return amount * 2; }\n        return amount;\n    }\n\n    public int unusedR4549() { return -1; }\n}\n\nclass ChildR4549 extends BaseR4549 {\n    public int sharedR4549(int value) { return value + baseValue(); }\n}\n",
+    "action": {
+      "action_type": "extract_java_class",
+      "source_refactoring": "Extract Class",
+      "parameters": {
+        "source_file": "benchmark/java/extract-java-class_R4549.java",
+        "source_class": "AccountR4549",
+        "new_class_name": "AccountDetailsR4549",
+        "methods_to_extract": [
+          "delegated"
+        ]
+      }
+    },
+    "ground_truth": {
+      "model_should_accept": true,
+      "label": "positive"
+    },
+    "dataset_split": "positive",
+    "provenance": "rdp_catalog_seeded_synthetic"
+  },
+  {
+    "case_id": "java_extract_java_class_1_r4549_negative",
+    "language": "java",
+    "file_name": "benchmark/java/extract-java-class_R4549.java",
+    "source_code": "class BaseR4549 {\n    protected int baseValue() { return 1; }\n}\n\nclass HelperR4549 {\n    int apply(int value) { return value * 2; }\n}\n\nclass AccountR4549 extends BaseR4549 {\n    private int amount = 818;\n    private final HelperR4549 helper = new HelperR4549();\n\n    public int calculate(int input, int tax, int discount) {\n        int subtotal = input + tax;\n        int adjusted = subtotal - discount;\n        int total = adjusted + baseValue();\n        return total;\n    }\n\n    public int process(int value, int tax, int discount, int fee) {\n        return value + tax - discount + fee;\n    }\n\n    public int delegated(int value) { return helper.apply(value); }\n\n    public int fee(String kind) {\n        if (\"premium\".equals(kind)) { return amount * 2; }\n        return amount;\n    }\n\n    public int unusedR4549() { return -1; }\n}\n\nclass ChildR4549 extends BaseR4549 {\n    public int sharedR4549(int value) { return value + baseValue(); }\n}\n",
+    "action": {
+      "action_type": "extract_java_class",
+      "source_refactoring": "Extract Class",
+      "parameters": {
+        "source_file": "benchmark/java/extract-java-class_R4549.java",
+        "source_class": "MissingR4549",
+        "new_class_name": "AccountDetailsR4549",
+        "methods_to_extract": [
+          "MissingR4549"
+        ]
+      }
+    },
+    "ground_truth": {
+      "model_should_accept": false,
+      "label": "negative"
+    },
+    "dataset_split": "negative",
+    "provenance": "rdp_catalog_seeded_synthetic"
+  },
+  {
+    "case_id": "java_extract_method_1_r4547_positive",
+    "language": "java",
+    "file_name": "benchmark/java/extract-method_R4547.java",
+    "source_code": "class BaseR4547 {\n    protected int baseValue() { return 1; }\n}\n\nclass HelperR4547 {\n    int apply(int value) { return value * 2; }\n}\n\nclass AccountR4547 extends BaseR4547 {\n    private int amount = 221;\n    private final HelperR4547 helper = new HelperR4547();\n\n    public int calculate(int input, int tax, int discount) {\n        int subtotal = input + tax;\n        int adjusted = subtotal - discount;\n        int total = adjusted + baseValue();\n        return total;\n    }\n\n    public int process(int value, int tax, int discount, int fee) {\n        return value + tax - discount + fee;\n    }\n\n    public int delegated(int value) { return helper.apply(value); }\n\n    public int fee(String kind) {\n        if (\"premium\".equals(kind)) { return amount * 2; }\n        return amount;\n    }\n\n    public int unusedR4547() { return -1; }\n}\n\nclass ChildR4547 extends BaseR4547 {\n    public int sharedR4547(int value) { return value + baseValue(); }\n}\n",
+    "action": {
+      "action_type": "extract_method",
+      "source_refactoring": "Extract Method",
+      "parameters": {
+        "source_file": "benchmark/java/extract-method_R4547.java",
+        "source_method": "calculate",
+        "method": "calculate",
+        "source_class": "AccountR4547",
+        "start_line": 14,
+        "end_line": 17,
+        "new_method_name": "calculate_core_R4547"
+      }
+    },
+    "ground_truth": {
+      "model_should_accept": true,
+      "label": "positive"
+    },
+    "dataset_split": "positive",
+    "provenance": "rdp_catalog_seeded_synthetic"
+  },
+  {
+    "case_id": "java_extract_method_1_r4547_negative",
+    "language": "java",
+    "file_name": "benchmark/java/extract-method_R4547.java",
+    "source_code": "class BaseR4547 {\n    protected int baseValue() { return 1; }\n}\n\nclass HelperR4547 {\n    int apply(int value) { return value * 2; }\n}\n\nclass AccountR4547 extends BaseR4547 {\n    private int amount = 221;\n    private final HelperR4547 helper = new HelperR4547();\n\n    public int calculate(int input, int tax, int discount) {\n        int subtotal = input + tax;\n        int adjusted = subtotal - discount;\n        int total = adjusted + baseValue();\n        return total;\n    }\n\n    public int process(int value, int tax, int discount, int fee) {\n        return value + tax - discount + fee;\n    }\n\n    public int delegated(int value) { return helper.apply(value); }\n\n    public int fee(String kind) {\n        if (\"premium\".equals(kind)) { return amount * 2; }\n        return amount;\n    }\n\n    public int unusedR4547() { return -1; }\n}\n\nclass ChildR4547 extends BaseR4547 {\n    public int sharedR4547(int value) { return value + baseValue(); }\n}\n",
+    "action": {
+      "action_type": "extract_method",
+      "source_refactoring": "Extract Method",
+      "parameters": {
+        "source_file": "benchmark/java/extract-method_R4547.java",
+        "source_method": "MissingR4547",
+        "method": "MissingR4547",
+        "source_class": "MissingR4547",
+        "start_line": 136,
+        "end_line": 137,
+        "new_method_name": "calculate_core_R4547"
+      }
+    },
+    "ground_truth": {
+      "model_should_accept": false,
+      "label": "negative"
+    },
+    "dataset_split": "negative",
+    "provenance": "rdp_catalog_seeded_synthetic"
+  },
+  {
+    "case_id": "java_hide_delegate_1_r2794_positive",
+    "language": "java",
+    "file_name": "benchmark/java/hide-delegate_R2794.java",
+    "source_code": "class BaseR2794 {\n    protected int baseValue() { return 1; }\n}\n\nclass HelperR2794 {\n    int apply(int value) { return value * 2; }\n}\n\nclass AccountR2794 extends BaseR2794 {\n    private int amount = 671;\n    private final HelperR2794 helper = new HelperR2794();\n\n    public int calculate(int input, int tax, int discount) {\n        int subtotal = input + tax;\n        int adjusted = subtotal - discount;\n        int total = adjusted + baseValue();\n        return total;\n    }\n\n    public int process(int value, int tax, int discount, int fee) {\n        return value + tax - discount + fee;\n    }\n\n    public int delegated(int value) { return helper.apply(value); }\n\n    public int fee(String kind) {\n        if (\"premium\".equals(kind)) { return amount * 2; }\n        return amount;\n    }\n\n    public int unusedR2794() { return -1; }\n}\n\nclass ChildR2794 extends BaseR2794 {\n    public int sharedR2794(int value) { return value + baseValue(); }\n}\n",
+    "action": {
+      "action_type": "hide_delegate",
+      "source_refactoring": "Hide Delegate",
+      "parameters": {
+        "source_file": "benchmark/java/hide-delegate_R2794.java",
+        "source_class": "AccountR2794",
+        "method": "delegated",
+        "source_method": "delegated"
+      }
+    },
+    "ground_truth": {
+      "model_should_accept": true,
+      "label": "positive"
+    },
+    "dataset_split": "positive",
+    "provenance": "rdp_catalog_seeded_synthetic"
+  },
+  {
+    "case_id": "java_hide_delegate_1_r2794_negative",
+    "language": "java",
+    "file_name": "benchmark/java/hide-delegate_R2794.java",
+    "source_code": "class BaseR2794 {\n    protected int baseValue() { return 1; }\n}\n\nclass HelperR2794 {\n    int apply(int value) { return value * 2; }\n}\n\nclass AccountR2794 extends BaseR2794 {\n    private int amount = 671;\n    private final HelperR2794 helper = new HelperR2794();\n\n    public int calculate(int input, int tax, int discount) {\n        int subtotal = input + tax;\n        int adjusted = subtotal - discount;\n        int total = adjusted + baseValue();\n        return total;\n    }\n\n    public int process(int value, int tax, int discount, int fee) {\n        return value + tax - discount + fee;\n    }\n\n    public int delegated(int value) { return helper.apply(value); }\n\n    public int fee(String kind) {\n        if (\"premium\".equals(kind)) { return amount * 2; }\n        return amount;\n    }\n\n    public int unusedR2794() { return -1; }\n}\n\nclass ChildR2794 extends BaseR2794 {\n    public int sharedR2794(int value) { return value + baseValue(); }\n}\n",
+    "action": {
+      "action_type": "hide_delegate",
+      "source_refactoring": "Hide Delegate",
+      "parameters": {
+        "source_file": "benchmark/java/hide-delegate_R2794.java",
+        "source_class": "MissingR2794",
+        "method": "MissingR2794",
+        "source_method": "MissingR2794"
+      }
+    },
+    "ground_truth": {
+      "model_should_accept": false,
+      "label": "negative"
+    },
+    "dataset_split": "negative",
+    "provenance": "rdp_catalog_seeded_synthetic"
+  },
+  {
+    "case_id": "java_introduce_constant_1_r9901_positive",
+    "language": "java",
+    "file_name": "benchmark/java/introduce-constant_R9901.java",
+    "source_code": "class BaseR9901 {\n    protected int baseValue() { return 1; }\n}\n\nclass HelperR9901 {\n    int apply(int value) { return value * 2; }\n}\n\nclass AccountR9901 extends BaseR9901 {\n    private int amount = 560;\n    private final HelperR9901 helper = new HelperR9901();\n\n    public int calculate(int input, int tax, int discount) {\n        int subtotal = input + tax;\n        int adjusted = subtotal - discount;\n        int total = adjusted + baseValue();\n        return total;\n    }\n\n    public int process(int value, int tax, int discount, int fee) {\n        return value + tax - discount + fee;\n    }\n\n    public int delegated(int value) { return helper.apply(value); }\n\n    public int fee(String kind) {\n        if (\"premium\".equals(kind)) { return amount * 2; }\n        return amount;\n    }\n\n    public int unusedR9901() { return -1; }\n}\n\nclass ChildR9901 extends BaseR9901 {\n    public int sharedR9901(int value) { return value + baseValue(); }\n}\n",
+    "action": {
+      "action_type": "introduce_constant",
+      "source_refactoring": "Introduce Constant",
+      "parameters": {
+        "source_file": "benchmark/java/introduce-constant_R9901.java",
+        "literal_value": 560,
+        "constant_name": "DEFAULT_AMOUNT_R9901",
+        "source_line": 10,
+        "source_class": "AccountR9901",
+        "field_name": "amount",
+        "source_method": ""
+      }
+    },
+    "ground_truth": {
+      "model_should_accept": true,
+      "label": "positive"
+    },
+    "dataset_split": "positive",
+    "provenance": "rdp_catalog_seeded_synthetic"
+  },
+  {
+    "case_id": "java_introduce_constant_1_r9901_negative",
+    "language": "java",
+    "file_name": "benchmark/java/introduce-constant_R9901.java",
+    "source_code": "class BaseR9901 {\n    protected int baseValue() { return 1; }\n}\n\nclass HelperR9901 {\n    int apply(int value) { return value * 2; }\n}\n\nclass AccountR9901 extends BaseR9901 {\n    private int amount = 560;\n    private final HelperR9901 helper = new HelperR9901();\n\n    public int calculate(int input, int tax, int discount) {\n        int subtotal = input + tax;\n        int adjusted = subtotal - discount;\n        int total = adjusted + baseValue();\n        return total;\n    }\n\n    public int process(int value, int tax, int discount, int fee) {\n        return value + tax - discount + fee;\n    }\n\n    public int delegated(int value) { return helper.apply(value); }\n\n    public int fee(String kind) {\n        if (\"premium\".equals(kind)) { return amount * 2; }\n        return amount;\n    }\n\n    public int unusedR9901() { return -1; }\n}\n\nclass ChildR9901 extends BaseR9901 {\n    public int sharedR9901(int value) { return value + baseValue(); }\n}\n",
+    "action": {
+      "action_type": "introduce_constant",
+      "source_refactoring": "Introduce Constant",
+      "parameters": {
+        "source_file": "benchmark/java/introduce-constant_R9901.java",
+        "literal_value": 900005,
+        "constant_name": "DEFAULT_AMOUNT_R9901",
+        "source_line": 136,
+        "source_class": "MissingR9901",
+        "field_name": "MissingR9901",
+        "source_method": ""
+      }
+    },
+    "ground_truth": {
+      "model_should_accept": false,
+      "label": "negative"
+    },
+    "dataset_split": "negative",
+    "provenance": "rdp_catalog_seeded_synthetic"
+  },
+  {
+    "case_id": "java_introduce_java_parameter_object_1_r9589_positive",
+    "language": "java",
+    "file_name": "benchmark/java/introduce-java-parameter-object_R9589.java",
+    "source_code": "class BaseR9589 {\n    protected int baseValue() { return 1; }\n}\n\nclass HelperR9589 {\n    int apply(int value) { return value * 2; }\n}\n\nclass AccountR9589 extends BaseR9589 {\n    private int amount = 602;\n    private final HelperR9589 helper = new HelperR9589();\n\n    public int calculate(int input, int tax, int discount) {\n        int subtotal = input + tax;\n        int adjusted = subtotal - discount;\n        int total = adjusted + baseValue();\n        return total;\n    }\n\n    public int process(int value, int tax, int discount, int fee) {\n        return value + tax - discount + fee;\n    }\n\n    public int delegated(int value) { return helper.apply(value); }\n\n    public int fee(String kind) {\n        if (\"premium\".equals(kind)) { return amount * 2; }\n        return amount;\n    }\n\n    public int unusedR9589() { return -1; }\n}\n\nclass ChildR9589 extends BaseR9589 {\n    public int sharedR9589(int value) { return value + baseValue(); }\n}\n",
+    "action": {
+      "action_type": "introduce_java_parameter_object",
+      "source_refactoring": "Introduce Parameter Object",
+      "parameters": {
+        "source_file": "benchmark/java/introduce-java-parameter-object_R9589.java",
+        "source_class": "AccountR9589",
+        "source_method": "process",
+        "method": "process",
+        "parameter_object_name": "ProcessParamsR9589",
+        "parameter_name": "params"
+      }
+    },
+    "ground_truth": {
+      "model_should_accept": true,
+      "label": "positive"
+    },
+    "dataset_split": "positive",
+    "provenance": "rdp_catalog_seeded_synthetic"
+  },
+  {
+    "case_id": "java_introduce_java_parameter_object_1_r9589_negative",
+    "language": "java",
+    "file_name": "benchmark/java/introduce-java-parameter-object_R9589.java",
+    "source_code": "class BaseR9589 {\n    protected int baseValue() { return 1; }\n}\n\nclass HelperR9589 {\n    int apply(int value) { return value * 2; }\n}\n\nclass AccountR9589 extends BaseR9589 {\n    private int amount = 602;\n    private final HelperR9589 helper = new HelperR9589();\n\n    public int calculate(int input, int tax, int discount) {\n        int subtotal = input + tax;\n        int adjusted = subtotal - discount;\n        int total = adjusted + baseValue();\n        return total;\n    }\n\n    public int process(int value, int tax, int discount, int fee) {\n        return value + tax - discount + fee;\n    }\n\n    public int delegated(int value) { return helper.apply(value); }\n\n    public int fee(String kind) {\n        if (\"premium\".equals(kind)) { return amount * 2; }\n        return amount;\n    }\n\n    public int unusedR9589() { return -1; }\n}\n\nclass ChildR9589 extends BaseR9589 {\n    public int sharedR9589(int value) { return value + baseValue(); }\n}\n",
+    "action": {
+      "action_type": "introduce_java_parameter_object",
+      "source_refactoring": "Introduce Parameter Object",
+      "parameters": {
+        "source_file": "benchmark/java/introduce-java-parameter-object_R9589.java",
+        "source_class": "MissingR9589",
+        "source_method": "MissingR9589",
+        "method": "MissingR9589",
+        "parameter_object_name": "ProcessParamsR9589",
+        "parameter_name": "params"
+      }
+    },
+    "ground_truth": {
+      "model_should_accept": false,
+      "label": "negative"
+    },
+    "dataset_split": "negative",
+    "provenance": "rdp_catalog_seeded_synthetic"
+  },
+  {
+    "case_id": "java_remove_dead_code_1_r2354_positive",
+    "language": "java",
+    "file_name": "benchmark/java/remove-dead-code_R2354.java",
+    "source_code": "class BaseR2354 {\n    protected int baseValue() { return 1; }\n}\n\nclass HelperR2354 {\n    int apply(int value) { return value * 2; }\n}\n\nclass AccountR2354 extends BaseR2354 {\n    private int amount = 799;\n    private final HelperR2354 helper = new HelperR2354();\n\n    public int calculate(int input, int tax, int discount) {\n        int subtotal = input + tax;\n        int adjusted = subtotal - discount;\n        int total = adjusted + baseValue();\n        return total;\n    }\n\n    public int process(int value, int tax, int discount, int fee) {\n        return value + tax - discount + fee;\n    }\n\n    public int delegated(int value) { return helper.apply(value); }\n\n    public int fee(String kind) {\n        if (\"premium\".equals(kind)) { return amount * 2; }\n        return amount;\n    }\n\n    public int unusedR2354() { return -1; }\n}\n\nclass ChildR2354 extends BaseR2354 {\n    public int sharedR2354(int value) { return value + baseValue(); }\n}\n",
+    "action": {
+      "action_type": "remove_dead_code",
+      "source_refactoring": "Remove Dead Code",
+      "parameters": {
+        "source_file": "benchmark/java/remove-dead-code_R2354.java",
+        "source_class": "AccountR2354",
+        "source_method": "unusedR2354",
+        "method": "unusedR2354",
+        "target_name": "unusedR2354",
+        "target_kind": "method"
+      }
+    },
+    "ground_truth": {
+      "model_should_accept": true,
+      "label": "positive"
+    },
+    "dataset_split": "positive",
+    "provenance": "rdp_catalog_seeded_synthetic"
+  },
+  {
+    "case_id": "java_remove_dead_code_1_r2354_negative",
+    "language": "java",
+    "file_name": "benchmark/java/remove-dead-code_R2354.java",
+    "source_code": "class BaseR2354 {\n    protected int baseValue() { return 1; }\n}\n\nclass HelperR2354 {\n    int apply(int value) { return value * 2; }\n}\n\nclass AccountR2354 extends BaseR2354 {\n    private int amount = 799;\n    private final HelperR2354 helper = new HelperR2354();\n\n    public int calculate(int input, int tax, int discount) {\n        int subtotal = input + tax;\n        int adjusted = subtotal - discount;\n        int total = adjusted + baseValue();\n        return total;\n    }\n\n    public int process(int value, int tax, int discount, int fee) {\n        return value + tax - discount + fee;\n    }\n\n    public int delegated(int value) { return helper.apply(value); }\n\n    public int fee(String kind) {\n        if (\"premium\".equals(kind)) { return amount * 2; }\n        return amount;\n    }\n\n    public int unusedR2354() { return -1; }\n}\n\nclass ChildR2354 extends BaseR2354 {\n    public int sharedR2354(int value) { return value + baseValue(); }\n}\n",
+    "action": {
+      "action_type": "remove_dead_code",
+      "source_refactoring": "Remove Dead Code",
+      "parameters": {
+        "source_file": "benchmark/java/remove-dead-code_R2354.java",
+        "source_class": "MissingR2354",
+        "source_method": "MissingR2354",
+        "method": "MissingR2354",
+        "target_name": "MissingR2354",
+        "target_kind": "method"
+      }
+    },
+    "ground_truth": {
+      "model_should_accept": false,
+      "label": "negative"
+    },
+    "dataset_split": "negative",
+    "provenance": "rdp_catalog_seeded_synthetic"
+  },
+  {
+    "case_id": "java_rename_method_1_r9469_positive",
+    "language": "java",
+    "file_name": "benchmark/java/rename-method_R9469.java",
+    "source_code": "class BaseR9469 {\n    protected int baseValue() { return 1; }\n}\n\nclass HelperR9469 {\n    int apply(int value) { return value * 2; }\n}\n\nclass AccountR9469 extends BaseR9469 {\n    private int amount = 958;\n    private final HelperR9469 helper = new HelperR9469();\n\n    public int calculate(int input, int tax, int discount) {\n        int subtotal = input + tax;\n        int adjusted = subtotal - discount;\n        int total = adjusted + baseValue();\n        return total;\n    }\n\n    public int process(int value, int tax, int discount, int fee) {\n        return value + tax - discount + fee;\n    }\n\n    public int delegated(int value) { return helper.apply(value); }\n\n    public int fee(String kind) {\n        if (\"premium\".equals(kind)) { return amount * 2; }\n        return amount;\n    }\n\n    public int unusedR9469() { return -1; }\n}\n\nclass ChildR9469 extends BaseR9469 {\n    public int sharedR9469(int value) { return value + baseValue(); }\n}\n",
+    "action": {
+      "action_type": "rename_method",
+      "source_refactoring": "Rename Method",
+      "parameters": {
+        "source_file": "benchmark/java/rename-method_R9469.java",
+        "source_class": "AccountR9469",
+        "source_method": "calculate",
+        "method": "calculate",
+        "old_name": "calculate",
+        "new_name": "compute_r9469"
+      }
+    },
+    "ground_truth": {
+      "model_should_accept": true,
+      "label": "positive"
+    },
+    "dataset_split": "positive",
+    "provenance": "rdp_catalog_seeded_synthetic"
+  },
+  {
+    "case_id": "java_rename_method_1_r9469_negative",
+    "language": "java",
+    "file_name": "benchmark/java/rename-method_R9469.java",
+    "source_code": "class BaseR9469 {\n    protected int baseValue() { return 1; }\n}\n\nclass HelperR9469 {\n    int apply(int value) { return value * 2; }\n}\n\nclass AccountR9469 extends BaseR9469 {\n    private int amount = 958;\n    private final HelperR9469 helper = new HelperR9469();\n\n    public int calculate(int input, int tax, int discount) {\n        int subtotal = input + tax;\n        int adjusted = subtotal - discount;\n        int total = adjusted + baseValue();\n        return total;\n    }\n\n    public int process(int value, int tax, int discount, int fee) {\n        return value + tax - discount + fee;\n    }\n\n    public int delegated(int value) { return helper.apply(value); }\n\n    public int fee(String kind) {\n        if (\"premium\".equals(kind)) { return amount * 2; }\n        return amount;\n    }\n\n    public int unusedR9469() { return -1; }\n}\n\nclass ChildR9469 extends BaseR9469 {\n    public int sharedR9469(int value) { return value + baseValue(); }\n}\n",
+    "action": {
+      "action_type": "rename_method",
+      "source_refactoring": "Rename Method",
+      "parameters": {
+        "source_file": "benchmark/java/rename-method_R9469.java",
+        "source_class": "MissingR9469",
+        "source_method": "MissingR9469",
+        "method": "MissingR9469",
+        "old_name": "MissingR9469",
+        "new_name": "compute_r9469"
+      }
+    },
+    "ground_truth": {
+      "model_should_accept": false,
+      "label": "negative"
+    },
+    "dataset_split": "negative",
+    "provenance": "rdp_catalog_seeded_synthetic"
+  }
+]
