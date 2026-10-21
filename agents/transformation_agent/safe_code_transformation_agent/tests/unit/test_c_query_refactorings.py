@@ -4,6 +4,7 @@ from sctva.transformers.c_query_refactorings import (
 )
 from sctva.contracts import RefactoringAction
 from sctva.model_assistance.qwen import _c_context
+from sctva.validators.c_support import compare_c_static_summaries
 
 
 def test_replace_temp_with_query_extracts_only_a_pure_stable_expression():
@@ -22,6 +23,19 @@ def test_replace_temp_with_query_extracts_only_a_pure_stable_expression():
     assert metadata["status"] == "success"
     assert "static int query_square_sum_total(int left, int right)" in transformed
     assert "return query_square_sum_total(left, right) + query_square_sum_total(left, right);" in transformed
+    comparison = compare_c_static_summaries(
+        source,
+        transformed,
+        [RefactoringAction(
+            action_type="replace_temp_with_query",
+            parameters={
+                "method": "square_sum",
+                "temp_name": "total",
+                "applied_transformation_metadata": metadata,
+            },
+        )],
+    )
+    assert comparison["matched"] is True
 
 
 def test_replace_temp_with_query_refuses_a_mutated_dependency():
@@ -65,6 +79,19 @@ int run(const struct Config *config) {
     assert "static int capped_value(const struct Config *config)" in transformed
     assert "return capped_value(config);" in transformed
     assert "return query_capped_value_limit(config) + 1;" in transformed
+    comparison = compare_c_static_summaries(
+        source,
+        transformed,
+        [RefactoringAction(
+            action_type="replace_parameter_with_method_call",
+            parameters={
+                "method": "capped_value",
+                "parameter_name": "limit",
+                "applied_transformation_metadata": metadata,
+            },
+        )],
+    )
+    assert comparison["matched"] is True
 
 
 def test_replace_parameter_with_method_call_requires_explicit_rdp_query_metadata():

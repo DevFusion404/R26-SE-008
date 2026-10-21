@@ -111,6 +111,8 @@ class StructuralValidator:
         transformed_code: str,
         actions: Sequence[RefactoringAction] | None = None,
     ) -> ValidationStepResult:
+        # Compare language-specific structure, then run action-specific
+        # contracts so a high token similarity cannot hide an invalid refactor.
         start_iso = utc_now_iso()
         started = time.perf_counter()
 
@@ -856,6 +858,13 @@ class StructuralValidator:
                 target_name=str(params.get("target_name") or "").strip(),
                 target_kind=str(params.get("target_kind") or "").strip(),
                 applied_metadata=applied,
+            )
+        if language == "java":
+            return self._validate_java_dead_code(
+                original_code,
+                transformed_code,
+                method=method,
+                class_name=class_name,
             )
         return {"passed": False, "reason": "unsupported_language"}
 
@@ -3681,6 +3690,67 @@ class StructuralValidator:
             "original_function_count": original_count,
             "transformed_function_count": transformed_count,
             "expected_removed": expected_removed,
+            "checks": checks,
+        }
+
+    @staticmethod
+    def _validate_java_dead_code(
+        original: str,
+        transformed: str,
+        *,
+        method: str,
+        class_name: str,
+    ) -> Dict[str, Any]:
+        """Prove a Java private method deletion without relying on similarity."""
+
+        if not method or not class_name:
+            return {"passed": False, "reason": "missing_java_dead_code_target"}
+
+        before_class = _parse_java_class(original, class_name)
+        after_class = _parse_java_class(transformed, class_name)
+        if before_class is None or after_class is None:
+            return {"passed": False, "reason": "source_class_not_found"}
+
+        before_targets = before_class.methods_by_name.get(method, [])
+        after_targets = after_class.methods_by_name.get(method, [])
+        if len(before_targets) != 1:
+            return {"passed": False, "reason": "target_not_found_or_ambiguous"}
+
+        target = before_targets[0]
+        source_without_target = original[:target.start] + original[target.end:]
+        remaining_references = bool(
+            re.search(
+                rf"\b{re.escape(method)}\s*\(",
+                _mask_c_like(source_without_target),
+            )
+        )
+        before_other_methods = {
+            (item.name, item.start)
+            for item in before_class.methods
+            if item is not target
+        }
+        after_method_names = [item.name for item in after_class.methods]
+        remaining_method_names = [name for name, _start in before_other_methods]
+        other_methods_preserved = all(
+            after_method_names.count(name) >= remaining_method_names.count(name)
+            for name in set(remaining_method_names)
+        )
+        checks = {
+            "target_existed_before": True,
+            "target_was_private": "private" in target.modifiers,
+            "target_removed_after": not after_targets,
+            "no_required_referenced_code_removed": not remaining_references,
+            "unrelated_methods_preserved": other_methods_preserved,
+            "source_class_preserved": before_class.name == after_class.name,
+        }
+        passed = all(checks.values())
+        return {
+            "passed": passed,
+            "status": "PASS" if passed else "FAIL",
+            "language": "java",
+            "target_kind": "method",
+            "target": f"{class_name}.{method}",
+            "expected_removed": [method],
             "checks": checks,
         }
 

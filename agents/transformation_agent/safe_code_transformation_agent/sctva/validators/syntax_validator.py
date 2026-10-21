@@ -55,6 +55,8 @@ class SyntaxValidator:
         require_compilation: bool,
         timeout_seconds: int,
     ) -> ValidationStepResult:
+        # Select the language parser/compiler path and return one normalized
+        # validation step consumed by structural and rollback decisions.
         start_iso = utc_now_iso()
         started = time.perf_counter()
 
@@ -161,6 +163,8 @@ class SyntaxValidator:
         Class) are checked by the transaction coordinator in addition to this
         syntax pass.
         """
+        # Validate a Python project snapshot when a single-file parse is not
+        # enough to verify imports and cross-file syntax assumptions.
         start_iso = utc_now_iso()
         started = time.perf_counter()
         details = {

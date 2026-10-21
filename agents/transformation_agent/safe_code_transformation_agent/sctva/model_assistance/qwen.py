@@ -1147,6 +1147,8 @@ class QwenCandidateTransformer:
         *,
         generator: Optional[Callable[[str], str]] = None,
     ) -> None:
+        # Keep model loading lazy; generation settings and per-request budgets
+        # are initialized here, while _load performs expensive backend setup.
         self.settings = settings
         self._generator = generator
         self._tokenizer: Any = None
@@ -1337,6 +1339,8 @@ class QwenCandidateTransformer:
         member from the original snapshot, then carry those semantic anchors
         into target resolution against the current snapshot.
         """
+        # Recover stable semantic anchors from the original source before a
+        # previous transformation changes line numbers or target text.
 
         normalized_language = str(language or "").strip().lower()
         if normalized_language != "java" or action.action_type not in {
@@ -1517,6 +1521,8 @@ class QwenCandidateTransformer:
         current_file_name: str,
     ) -> str:
         """Build a stable training/inference representation from an RDP action."""
+        # Convert the normalized action and source into the model's full-file
+        # prompt format, including language-specific constraints.
 
         refactoring = str(action.source_refactoring or action.action_type or "").strip()
         target = json.dumps(
@@ -1565,6 +1571,8 @@ class QwenCandidateTransformer:
         action: RefactoringAction,
     ) -> QwenTargetContext | None:
         """Resolve a replaceable target from the current transformed source."""
+        # Select the language-specific target resolver so model output can be
+        # merged into one exact source range instead of replacing a whole file.
 
         normalized_language = str(language or "").strip().lower()
         if normalized_language == "python":
@@ -1587,6 +1595,8 @@ class QwenCandidateTransformer:
         previous_candidate: str = "",
     ) -> str:
         """Build a compact prompt whose output replaces one exact source range."""
+        # Build the compact target-span prompt used for faster, safer retries
+        # after a candidate fails an action checkpoint.
 
         refactoring = str(action.source_refactoring or action.action_type or "").strip()
         target = json.dumps(
@@ -2863,6 +2873,8 @@ class QwenCandidateTransformer:
         previous_candidate: str = "",
     ) -> QwenCandidate:
         """Return one candidate or a traceable non-acceptance reason."""
+        # Enforce budgets, load the configured backend, generate one candidate,
+        # and return metadata explaining either the candidate or its rejection.
 
         if not self.settings.enabled:
             return QwenCandidate(reason="QWEN_DISABLED")

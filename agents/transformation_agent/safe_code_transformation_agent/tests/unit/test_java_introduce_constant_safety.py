@@ -100,6 +100,36 @@ def test_introduce_constant_applies_only_to_real_java_numeric_literal():
     assert "return count > MAX_RETRY;" in transformed
 
 
+def test_introduce_constant_is_declared_in_the_requested_class():
+    source = (
+        "class Base {\n"
+        "    int base() { return 1; }\n"
+        "}\n"
+        "class Account {\n"
+        "    private int amount = 42;\n"
+        "}\n"
+    )
+
+    transformed, count, metadata = java_transformers.apply_introduce_constant(
+        source,
+        42,
+        "DEFAULT_AMOUNT",
+        5,
+        reference_source_code=source,
+        source_class="Account",
+    )
+
+    assert count == 1
+    assert metadata["source_class"] == "Account"
+    assert "class Base {\n    int base() { return 1; }\n}" in transformed
+    assert (
+        "class Account {\n"
+        "    private static final int DEFAULT_AMOUNT = 42;\n"
+        "\n"
+        "    private int amount = DEFAULT_AMOUNT;"
+    ) in transformed
+
+
 def test_introduce_constant_recovers_after_prior_constant_insertion_shifted_lines():
     source = (
         "public class T {\n"
