@@ -1014,8 +1014,11 @@ export default function CUQAAgentPage({ repoLoaded, repoMeta, onSendToRdp, onRep
                         <tr key={i}>
                           <td>
                             <span style={{ fontWeight: 600, fontSize: 12, color: 'var(--text-primary)' }}>{s.type}</span>
-                            {s.detected_by === 'ml' && (
+                            {s.detected_by === 'model' && (
                               <span className="cuqa-ml-tag" title={s.confidence != null ? `Found by the ML model (confidence ${Math.round(s.confidence * 100)}%)` : 'Found by the ML model'}>ML</span>
+                            )}
+                            {s.detected_by === 'rule' && (
+                              <span className="cuqa-ml-tag rule" title="Found by a rule-based detector">Rule</span>
                             )}
                           </td>
                           <td>

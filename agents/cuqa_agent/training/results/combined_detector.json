@@ -1,0 +1,913 @@
+{
+  "generated_on": "2026-10-21",
+  "model_version": "2026-10-20",
+  "modes": {
+    "rules": "rules only",
+    "hybrid": "model for its enabled smells, rules for the rest",
+    "ml": "model only",
+    "hybrid_experimental": "hybrid with the switched-off model smells turned on"
+  },
+  "smells": {
+    "long_method": {
+      "dataset": "MLCQ",
+      "smell_type": "LongMethod",
+      "model_decides_in_hybrid": true,
+      "model_trained": true,
+      "has_rule": true,
+      "samples": {
+        "all": 354
+      },
+      "positive": {
+        "all": 44
+      },
+      "rules": {
+        "all": {
+          "tp": 26,
+          "fp": 6,
+          "fn": 18,
+          "tn": 304,
+          "precision": 0.8125,
+          "recall": 0.5909090909090909,
+          "f1": 0.6842105263157896,
+          "specificity": 0.9806451612903225,
+          "accuracy": 0.9322033898305084,
+          "balanced_accuracy": 0.7857771260997067,
+          "mcc": 0.657599872423524
+        }
+      },
+      "hybrid": {
+        "all": {
+          "tp": 29,
+          "fp": 6,
+          "fn": 15,
+          "tn": 304,
+          "precision": 0.8285714285714286,
+          "recall": 0.6590909090909091,
+          "f1": 0.7341772151898734,
+          "specificity": 0.9806451612903225,
+          "accuracy": 0.940677966101695,
+          "balanced_accuracy": 0.8198680351906158,
+          "mcc": 0.7070964547647958
+        }
+      },
+      "ml": {
+        "all": {
+          "tp": 29,
+          "fp": 6,
+          "fn": 15,
+          "tn": 304,
+          "precision": 0.8285714285714286,
+          "recall": 0.6590909090909091,
+          "f1": 0.7341772151898734,
+          "specificity": 0.9806451612903225,
+          "accuracy": 0.940677966101695,
+          "balanced_accuracy": 0.8198680351906158,
+          "mcc": 0.7070964547647958
+        }
+      },
+      "hybrid_experimental": {
+        "all": {
+          "tp": 29,
+          "fp": 6,
+          "fn": 15,
+          "tn": 304,
+          "precision": 0.8285714285714286,
+          "recall": 0.6590909090909091,
+          "f1": 0.7341772151898734,
+          "specificity": 0.9806451612903225,
+          "accuracy": 0.940677966101695,
+          "balanced_accuracy": 0.8198680351906158,
+          "mcc": 0.7070964547647958
+        }
+      }
+    },
+    "feature_envy": {
+      "dataset": "MLCQ",
+      "smell_type": "FeatureEnvy",
+      "model_decides_in_hybrid": false,
+      "model_trained": true,
+      "has_rule": true,
+      "samples": {
+        "all": 353
+      },
+      "positive": {
+        "all": 12
+      },
+      "rules": {
+        "all": {
+          "tp": 2,
+          "fp": 17,
+          "fn": 10,
+          "tn": 324,
+          "precision": 0.10526315789473684,
+          "recall": 0.16666666666666666,
+          "f1": 0.12903225806451615,
+          "specificity": 0.9501466275659824,
+          "accuracy": 0.9235127478753541,
+          "balanced_accuracy": 0.5584066471163246,
+          "mcc": 0.09380155764204613
+        }
+      },
+      "hybrid": {
+        "all": {
+          "tp": 2,
+          "fp": 17,
+          "fn": 10,
+          "tn": 324,
+          "precision": 0.10526315789473684,
+          "recall": 0.16666666666666666,
+          "f1": 0.12903225806451615,
+          "specificity": 0.9501466275659824,
+          "accuracy": 0.9235127478753541,
+          "balanced_accuracy": 0.5584066471163246,
+          "mcc": 0.09380155764204613
+        }
+      },
+      "ml": {
+        "all": {
+          "tp": 0,
+          "fp": 0,
+          "fn": 12,
+          "tn": 341,
+          "precision": 0.0,
+          "recall": 0.0,
+          "f1": 0.0,
+          "specificity": 1.0,
+          "accuracy": 0.9660056657223796,
+          "balanced_accuracy": 0.5,
+          "mcc": 0.0
+        }
+      },
+      "hybrid_experimental": {
+        "all": {
+          "tp": 4,
+          "fp": 22,
+          "fn": 8,
+          "tn": 319,
+          "precision": 0.15384615384615385,
+          "recall": 0.3333333333333333,
+          "f1": 0.21052631578947367,
+          "specificity": 0.9354838709677419,
+          "accuracy": 0.9150141643059491,
+          "balanced_accuracy": 0.6344086021505376,
+          "mcc": 0.18649376740275597
+        }
+      }
+    },
+    "blob": {
+      "dataset": "MLCQ",
+      "smell_type": "LargeClass",
+      "model_decides_in_hybrid": true,
+      "model_trained": true,
+      "has_rule": true,
+      "samples": {
+        "all": 379
+      },
+      "positive": {
+        "all": 44
+      },
+      "rules": {
+        "all": {
+          "tp": 18,
+          "fp": 27,
+          "fn": 26,
+          "tn": 308,
+          "precision": 0.4,
+          "recall": 0.4090909090909091,
+          "f1": 0.40449438202247195,
+          "specificity": 0.9194029850746268,
+          "accuracy": 0.8601583113456465,
+          "balanced_accuracy": 0.664246947082768,
+          "mcc": 0.3253093553577402
+        }
+      },
+      "hybrid": {
+        "all": {
+          "tp": 27,
+          "fp": 32,
+          "fn": 17,
+          "tn": 303,
+          "precision": 0.4576271186440678,
+          "recall": 0.6136363636363636,
+          "f1": 0.5242718446601942,
+          "specificity": 0.9044776119402985,
+          "accuracy": 0.8707124010554089,
+          "balanced_accuracy": 0.7590569877883311,
+          "mcc": 0.4577971175311839
+        }
+      },
+      "ml": {
+        "all": {
+          "tp": 27,
+          "fp": 32,
+          "fn": 17,
+          "tn": 303,
+          "precision": 0.4576271186440678,
+          "recall": 0.6136363636363636,
+          "f1": 0.5242718446601942,
+          "specificity": 0.9044776119402985,
+          "accuracy": 0.8707124010554089,
+          "balanced_accuracy": 0.7590569877883311,
+          "mcc": 0.4577971175311839
+        }
+      },
+      "hybrid_experimental": {
+        "all": {
+          "tp": 27,
+          "fp": 32,
+          "fn": 17,
+          "tn": 303,
+          "precision": 0.4576271186440678,
+          "recall": 0.6136363636363636,
+          "f1": 0.5242718446601942,
+          "specificity": 0.9044776119402985,
+          "accuracy": 0.8707124010554089,
+          "balanced_accuracy": 0.7590569877883311,
+          "mcc": 0.4577971175311839
+        }
+      }
+    },
+    "data_class": {
+      "dataset": "MLCQ",
+      "smell_type": "DataClass",
+      "model_decides_in_hybrid": true,
+      "model_trained": true,
+      "has_rule": true,
+      "samples": {
+        "all": 379
+      },
+      "positive": {
+        "all": 56
+      },
+      "rules": {
+        "all": {
+          "tp": 21,
+          "fp": 18,
+          "fn": 35,
+          "tn": 305,
+          "precision": 0.5384615384615384,
+          "recall": 0.375,
+          "f1": 0.4421052631578948,
+          "specificity": 0.9442724458204335,
+          "accuracy": 0.8601583113456465,
+          "balanced_accuracy": 0.6596362229102167,
+          "mcc": 0.3728936191160305
+        }
+      },
+      "hybrid": {
+        "all": {
+          "tp": 40,
+          "fp": 17,
+          "fn": 16,
+          "tn": 306,
+          "precision": 0.7017543859649122,
+          "recall": 0.7142857142857143,
+          "f1": 0.7079646017699114,
+          "specificity": 0.9473684210526315,
+          "accuracy": 0.9129287598944591,
+          "balanced_accuracy": 0.8308270676691729,
+          "mcc": 0.6568420413990831
+        }
+      },
+      "ml": {
+        "all": {
+          "tp": 40,
+          "fp": 17,
+          "fn": 16,
+          "tn": 306,
+          "precision": 0.7017543859649122,
+          "recall": 0.7142857142857143,
+          "f1": 0.7079646017699114,
+          "specificity": 0.9473684210526315,
+          "accuracy": 0.9129287598944591,
+          "balanced_accuracy": 0.8308270676691729,
+          "mcc": 0.6568420413990831
+        }
+      },
+      "hybrid_experimental": {
+        "all": {
+          "tp": 40,
+          "fp": 17,
+          "fn": 16,
+          "tn": 306,
+          "precision": 0.7017543859649122,
+          "recall": 0.7142857142857143,
+          "f1": 0.7079646017699114,
+          "specificity": 0.9473684210526315,
+          "accuracy": 0.9129287598944591,
+          "balanced_accuracy": 0.8308270676691729,
+          "mcc": 0.6568420413990831
+        }
+      }
+    },
+    "complex_method": {
+      "dataset": "DACOS",
+      "smell_type": "ComplexMethod",
+      "model_decides_in_hybrid": false,
+      "model_trained": true,
+      "has_rule": true,
+      "samples": {
+        "all": 17229,
+        "human": 376
+      },
+      "positive": {
+        "all": 285,
+        "human": 228
+      },
+      "rules": {
+        "all": {
+          "tp": 80,
+          "fp": 13,
+          "fn": 205,
+          "tn": 16931,
+          "precision": 0.8602150537634409,
+          "recall": 0.2807017543859649,
+          "f1": 0.42328042328042326,
+          "specificity": 0.9992327667610954,
+          "accuracy": 0.987346915085031,
+          "balanced_accuracy": 0.6399672605735302,
+          "mcc": 0.48729354529629204
+        },
+        "human": {
+          "tp": 27,
+          "fp": 13,
+          "fn": 201,
+          "tn": 135,
+          "precision": 0.675,
+          "recall": 0.11842105263157894,
+          "f1": 0.2014925373134328,
+          "specificity": 0.9121621621621622,
+          "accuracy": 0.4308510638297872,
+          "balanced_accuracy": 0.5152916073968705,
+          "mcc": 0.04845981833530575
+        }
+      },
+      "hybrid": {
+        "all": {
+          "tp": 80,
+          "fp": 13,
+          "fn": 205,
+          "tn": 16931,
+          "precision": 0.8602150537634409,
+          "recall": 0.2807017543859649,
+          "f1": 0.42328042328042326,
+          "specificity": 0.9992327667610954,
+          "accuracy": 0.987346915085031,
+          "balanced_accuracy": 0.6399672605735302,
+          "mcc": 0.48729354529629204
+        },
+        "human": {
+          "tp": 27,
+          "fp": 13,
+          "fn": 201,
+          "tn": 135,
+          "precision": 0.675,
+          "recall": 0.11842105263157894,
+          "f1": 0.2014925373134328,
+          "specificity": 0.9121621621621622,
+          "accuracy": 0.4308510638297872,
+          "balanced_accuracy": 0.5152916073968705,
+          "mcc": 0.04845981833530575
+        }
+      },
+      "ml": {
+        "all": {
+          "tp": 0,
+          "fp": 0,
+          "fn": 285,
+          "tn": 16944,
+          "precision": 0.0,
+          "recall": 0.0,
+          "f1": 0.0,
+          "specificity": 1.0,
+          "accuracy": 0.9834581229322654,
+          "balanced_accuracy": 0.5,
+          "mcc": 0.0
+        },
+        "human": {
+          "tp": 0,
+          "fp": 0,
+          "fn": 228,
+          "tn": 148,
+          "precision": 0.0,
+          "recall": 0.0,
+          "f1": 0.0,
+          "specificity": 1.0,
+          "accuracy": 0.39361702127659576,
+          "balanced_accuracy": 0.5,
+          "mcc": 0.0
+        }
+      },
+      "hybrid_experimental": {
+        "all": {
+          "tp": 269,
+          "fp": 165,
+          "fn": 16,
+          "tn": 16779,
+          "precision": 0.619815668202765,
+          "recall": 0.9438596491228071,
+          "f1": 0.7482614742698193,
+          "specificity": 0.9902620396600567,
+          "accuracy": 0.9894944570201405,
+          "balanced_accuracy": 0.9670608443914319,
+          "mcc": 0.7603245058259642
+        },
+        "human": {
+          "tp": 214,
+          "fp": 145,
+          "fn": 14,
+          "tn": 3,
+          "precision": 0.596100278551532,
+          "recall": 0.9385964912280702,
+          "f1": 0.7291311754684838,
+          "specificity": 0.02027027027027027,
+          "accuracy": 0.5771276595744681,
+          "balanced_accuracy": 0.47943338074917025,
+          "mcc": -0.09672071535448433
+        }
+      }
+    },
+    "long_parameter_list": {
+      "dataset": "DACOS",
+      "smell_type": "TooManyParameters",
+      "model_decides_in_hybrid": false,
+      "model_trained": true,
+      "has_rule": true,
+      "samples": {
+        "all": 16877,
+        "human": 276
+      },
+      "positive": {
+        "all": 197,
+        "human": 140
+      },
+      "rules": {
+        "all": {
+          "tp": 52,
+          "fp": 8,
+          "fn": 145,
+          "tn": 16672,
+          "precision": 0.8666666666666667,
+          "recall": 0.2639593908629442,
+          "f1": 0.40466926070038917,
+          "specificity": 0.9995203836930455,
+          "accuracy": 0.9909344077738934,
+          "balanced_accuracy": 0.6317398872779949,
+          "mcc": 0.47547592514088244
+        },
+        "human": {
+          "tp": 0,
+          "fp": 3,
+          "fn": 140,
+          "tn": 133,
+          "precision": 0.0,
+          "recall": 0.0,
+          "f1": 0.0,
+          "specificity": 0.9779411764705882,
+          "accuracy": 0.48188405797101447,
+          "balanced_accuracy": 0.4889705882352941,
+          "mcc": -0.10635890745287926
+        }
+      },
+      "hybrid": {
+        "all": {
+          "tp": 52,
+          "fp": 8,
+          "fn": 145,
+          "tn": 16672,
+          "precision": 0.8666666666666667,
+          "recall": 0.2639593908629442,
+          "f1": 0.40466926070038917,
+          "specificity": 0.9995203836930455,
+          "accuracy": 0.9909344077738934,
+          "balanced_accuracy": 0.6317398872779949,
+          "mcc": 0.47547592514088244
+        },
+        "human": {
+          "tp": 0,
+          "fp": 3,
+          "fn": 140,
+          "tn": 133,
+          "precision": 0.0,
+          "recall": 0.0,
+          "f1": 0.0,
+          "specificity": 0.9779411764705882,
+          "accuracy": 0.48188405797101447,
+          "balanced_accuracy": 0.4889705882352941,
+          "mcc": -0.10635890745287926
+        }
+      },
+      "ml": {
+        "all": {
+          "tp": 0,
+          "fp": 0,
+          "fn": 197,
+          "tn": 16680,
+          "precision": 0.0,
+          "recall": 0.0,
+          "f1": 0.0,
+          "specificity": 1.0,
+          "accuracy": 0.9883273093559282,
+          "balanced_accuracy": 0.5,
+          "mcc": 0.0
+        },
+        "human": {
+          "tp": 0,
+          "fp": 0,
+          "fn": 140,
+          "tn": 136,
+          "precision": 0.0,
+          "recall": 0.0,
+          "f1": 0.0,
+          "specificity": 1.0,
+          "accuracy": 0.4927536231884058,
+          "balanced_accuracy": 0.5,
+          "mcc": 0.0
+        }
+      },
+      "hybrid_experimental": {
+        "all": {
+          "tp": 168,
+          "fp": 264,
+          "fn": 29,
+          "tn": 16416,
+          "precision": 0.3888888888888889,
+          "recall": 0.8527918781725888,
+          "f1": 0.534181240063593,
+          "specificity": 0.9841726618705036,
+          "accuracy": 0.9826390946258221,
+          "balanced_accuracy": 0.9184822700215463,
+          "mcc": 0.569218992658522
+        },
+        "human": {
+          "tp": 116,
+          "fp": 127,
+          "fn": 24,
+          "tn": 9,
+          "precision": 0.4773662551440329,
+          "recall": 0.8285714285714286,
+          "f1": 0.6057441253263708,
+          "specificity": 0.0661764705882353,
+          "accuracy": 0.4528985507246377,
+          "balanced_accuracy": 0.44737394957983195,
+          "mcc": -0.16218255518132024
+        }
+      }
+    },
+    "multifaceted_abstraction": {
+      "dataset": "DACOS",
+      "smell_type": "MultifacetedAbstraction",
+      "model_decides_in_hybrid": false,
+      "model_trained": true,
+      "has_rule": false,
+      "samples": {
+        "all": 2533,
+        "human": 273
+      },
+      "positive": {
+        "all": 364,
+        "human": 225
+      },
+      "rules": {
+        "all": {
+          "tp": 0,
+          "fp": 0,
+          "fn": 364,
+          "tn": 2169,
+          "precision": 0.0,
+          "recall": 0.0,
+          "f1": 0.0,
+          "specificity": 1.0,
+          "accuracy": 0.8562968811685748,
+          "balanced_accuracy": 0.5,
+          "mcc": 0.0
+        },
+        "human": {
+          "tp": 0,
+          "fp": 0,
+          "fn": 225,
+          "tn": 48,
+          "precision": 0.0,
+          "recall": 0.0,
+          "f1": 0.0,
+          "specificity": 1.0,
+          "accuracy": 0.17582417582417584,
+          "balanced_accuracy": 0.5,
+          "mcc": 0.0
+        }
+      },
+      "hybrid": {
+        "all": {
+          "tp": 0,
+          "fp": 0,
+          "fn": 364,
+          "tn": 2169,
+          "precision": 0.0,
+          "recall": 0.0,
+          "f1": 0.0,
+          "specificity": 1.0,
+          "accuracy": 0.8562968811685748,
+          "balanced_accuracy": 0.5,
+          "mcc": 0.0
+        },
+        "human": {
+          "tp": 0,
+          "fp": 0,
+          "fn": 225,
+          "tn": 48,
+          "precision": 0.0,
+          "recall": 0.0,
+          "f1": 0.0,
+          "specificity": 1.0,
+          "accuracy": 0.17582417582417584,
+          "balanced_accuracy": 0.5,
+          "mcc": 0.0
+        }
+      },
+      "ml": {
+        "all": {
+          "tp": 0,
+          "fp": 0,
+          "fn": 364,
+          "tn": 2169,
+          "precision": 0.0,
+          "recall": 0.0,
+          "f1": 0.0,
+          "specificity": 1.0,
+          "accuracy": 0.8562968811685748,
+          "balanced_accuracy": 0.5,
+          "mcc": 0.0
+        },
+        "human": {
+          "tp": 0,
+          "fp": 0,
+          "fn": 225,
+          "tn": 48,
+          "precision": 0.0,
+          "recall": 0.0,
+          "f1": 0.0,
+          "specificity": 1.0,
+          "accuracy": 0.17582417582417584,
+          "balanced_accuracy": 0.5,
+          "mcc": 0.0
+        }
+      },
+      "hybrid_experimental": {
+        "all": {
+          "tp": 287,
+          "fp": 211,
+          "fn": 77,
+          "tn": 1958,
+          "precision": 0.5763052208835341,
+          "recall": 0.7884615384615384,
+          "f1": 0.6658932714617168,
+          "specificity": 0.9027201475334256,
+          "accuracy": 0.8863008290564548,
+          "balanced_accuracy": 0.845590842997482,
+          "mcc": 0.6100645815541339
+        },
+        "human": {
+          "tp": 167,
+          "fp": 39,
+          "fn": 58,
+          "tn": 9,
+          "precision": 0.8106796116504854,
+          "recall": 0.7422222222222222,
+          "f1": 0.7749419953596287,
+          "specificity": 0.1875,
+          "accuracy": 0.6446886446886447,
+          "balanced_accuracy": 0.4648611111111111,
+          "mcc": -0.06216685349739913
+        }
+      }
+    }
+  },
+  "overall": {
+    "MLCQ_all": {
+      "rules": {
+        "micro": {
+          "tp": 67,
+          "fp": 68,
+          "fn": 89,
+          "tn": 1241,
+          "precision": 0.4962962962962963,
+          "recall": 0.42948717948717946,
+          "f1": 0.4604810996563574,
+          "specificity": 0.948051948051948,
+          "accuracy": 0.8928327645051195,
+          "balanced_accuracy": 0.6887695637695638,
+          "mcc": 0.4026256005274702
+        },
+        "macro_f1": 0.4149606073901681,
+        "macro_mcc": 0.36240110113483515,
+        "micro_f1_ci95": [
+          0.3714212076583211,
+          0.5270282466582105
+        ]
+      },
+      "hybrid": {
+        "micro": {
+          "tp": 98,
+          "fp": 72,
+          "fn": 58,
+          "tn": 1237,
+          "precision": 0.5764705882352941,
+          "recall": 0.6282051282051282,
+          "f1": 0.6012269938650306,
+          "specificity": 0.944996180290298,
+          "accuracy": 0.9112627986348123,
+          "balanced_accuracy": 0.7866006542477131,
+          "mcc": 0.5520519530704445
+        },
+        "macro_f1": 0.5238614799211238,
+        "macro_mcc": 0.47888429283427725,
+        "micro_f1_ci95": [
+          0.5304189461560611,
+          0.6650605291981322
+        ]
+      },
+      "ml": {
+        "micro": {
+          "tp": 96,
+          "fp": 55,
+          "fn": 60,
+          "tn": 1254,
+          "precision": 0.6357615894039735,
+          "recall": 0.6153846153846154,
+          "f1": 0.6254071661237786,
+          "specificity": 0.957983193277311,
+          "accuracy": 0.9215017064846417,
+          "balanced_accuracy": 0.7866839043309632,
+          "mcc": 0.5816734916344961
+        },
+        "macro_f1": 0.49160341540499475,
+        "macro_mcc": 0.45543390342376566,
+        "micro_f1_ci95": [
+          0.5538081395348837,
+          0.6855436623125302
+        ]
+      },
+      "hybrid_experimental": {
+        "micro": {
+          "tp": 100,
+          "fp": 77,
+          "fn": 56,
+          "tn": 1232,
+          "precision": 0.5649717514124294,
+          "recall": 0.6410256410256411,
+          "f1": 0.6006006006006006,
+          "specificity": 0.9411764705882353,
+          "accuracy": 0.9092150170648464,
+          "balanced_accuracy": 0.7911010558069382,
+          "mcc": 0.5510123513923681
+        },
+        "macro_f1": 0.5442349943523631,
+        "macro_mcc": 0.5020573452744547,
+        "micro_f1_ci95": [
+          0.5298397717295873,
+          0.6579668024726989
+        ]
+      }
+    },
+    "DACOS_all": {
+      "rules": {
+        "micro": {
+          "tp": 132,
+          "fp": 21,
+          "fn": 714,
+          "tn": 35772,
+          "precision": 0.8627450980392157,
+          "recall": 0.15602836879432624,
+          "f1": 0.2642642642642643,
+          "specificity": 0.9994132931020032,
+          "accuracy": 0.9799394088266601,
+          "balanced_accuracy": 0.5777208309481647,
+          "mcc": 0.36202854951457203
+        },
+        "macro_f1": 0.27598322799360414,
+        "macro_mcc": 0.32092315681239153
+      },
+      "hybrid": {
+        "micro": {
+          "tp": 132,
+          "fp": 21,
+          "fn": 714,
+          "tn": 35772,
+          "precision": 0.8627450980392157,
+          "recall": 0.15602836879432624,
+          "f1": 0.2642642642642643,
+          "specificity": 0.9994132931020032,
+          "accuracy": 0.9799394088266601,
+          "balanced_accuracy": 0.5777208309481647,
+          "mcc": 0.36202854951457203
+        },
+        "macro_f1": 0.27598322799360414,
+        "macro_mcc": 0.32092315681239153
+      },
+      "ml": {
+        "micro": {
+          "tp": 0,
+          "fp": 0,
+          "fn": 846,
+          "tn": 35793,
+          "precision": 0.0,
+          "recall": 0.0,
+          "f1": 0.0,
+          "specificity": 1.0,
+          "accuracy": 0.9769098501596659,
+          "balanced_accuracy": 0.5,
+          "mcc": 0.0
+        },
+        "macro_f1": 0.0,
+        "macro_mcc": 0.0
+      },
+      "hybrid_experimental": {
+        "micro": {
+          "tp": 724,
+          "fp": 640,
+          "fn": 122,
+          "tn": 35153,
+          "precision": 0.530791788856305,
+          "recall": 0.8557919621749409,
+          "f1": 0.6552036199095022,
+          "specificity": 0.9821194088229542,
+          "accuracy": 0.9792024891509048,
+          "balanced_accuracy": 0.9189556854989476,
+          "mcc": 0.6647243981428169
+        },
+        "macro_f1": 0.6494453285983764,
+        "macro_mcc": 0.64653602667954
+      }
+    },
+    "DACOS_human": {
+      "rules": {
+        "micro": {
+          "tp": 27,
+          "fp": 16,
+          "fn": 566,
+          "tn": 316,
+          "precision": 0.627906976744186,
+          "recall": 0.045531197301854974,
+          "f1": 0.08490566037735849,
+          "specificity": 0.9518072289156626,
+          "accuracy": 0.3708108108108108,
+          "balanced_accuracy": 0.4986692131087588,
+          "mcc": -0.006064100330654913
+        },
+        "macro_f1": 0.0671641791044776,
+        "macro_mcc": -0.019299696372524506
+      },
+      "hybrid": {
+        "micro": {
+          "tp": 27,
+          "fp": 16,
+          "fn": 566,
+          "tn": 316,
+          "precision": 0.627906976744186,
+          "recall": 0.045531197301854974,
+          "f1": 0.08490566037735849,
+          "specificity": 0.9518072289156626,
+          "accuracy": 0.3708108108108108,
+          "balanced_accuracy": 0.4986692131087588,
+          "mcc": -0.006064100330654913
+        },
+        "macro_f1": 0.0671641791044776,
+        "macro_mcc": -0.019299696372524506
+      },
+      "ml": {
+        "micro": {
+          "tp": 0,
+          "fp": 0,
+          "fn": 593,
+          "tn": 332,
+          "precision": 0.0,
+          "recall": 0.0,
+          "f1": 0.0,
+          "specificity": 1.0,
+          "accuracy": 0.3589189189189189,
+          "balanced_accuracy": 0.5,
+          "mcc": 0.0
+        },
+        "macro_f1": 0.0,
+        "macro_mcc": 0.0
+      },
+      "hybrid_experimental": {
+        "micro": {
+          "tp": 497,
+          "fp": 311,
+          "fn": 96,
+          "tn": 21,
+          "precision": 0.6150990099009901,
+          "recall": 0.8381112984822934,
+          "f1": 0.7094932191291935,
+          "specificity": 0.06325301204819277,
+          "accuracy": 0.56,
+          "balanced_accuracy": 0.4506821552652431,
+          "mcc": -0.14234160613207236
+        },
+        "macro_f1": 0.7032724320514944,
+        "macro_mcc": -0.10702337467773458
+      }
+    }
+  }
+}

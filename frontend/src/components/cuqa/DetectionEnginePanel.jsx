@@ -8,13 +8,13 @@
 
 const MODES = [
   { id: 'rules',  label: 'Rules (default)', help: 'Rule smells only. The ML findings are shown as a second opinion.' },
-  { id: 'hybrid', label: 'Hybrid',          help: 'Rule smells plus the smells the ML model finds.' },
-  { id: 'ml',     label: 'ML model',        help: 'The model replaces the rules for the smell types it learned (Java).' },
+  { id: 'hybrid', label: 'Hybrid',          help: 'The ML model decides the Java smells it learned; rules find every other smell.' },
+  { id: 'ml',     label: 'ML model only',   help: 'Only the smells the ML model finds (Java).' },
 ];
 
 export default function DetectionEnginePanel({ mode, onModeChange, modelInfo, report, loading }) {
   const smells = (report?.files || []).flatMap((f) => f.code_smells || []);
-  const mlInReport = smells.filter((s) => s.detected_by === 'ml').length;
+  const mlInReport = smells.filter((s) => s.detected_by === 'model').length;
   const ruleInReport = smells.length - mlInReport;
   const mlSummary = report?.summary?.ml_code_smells || null;
   const learned = Object.entries(modelInfo?.smells || {}).filter(([, s]) => s.enabled);
@@ -26,7 +26,8 @@ export default function DetectionEnginePanel({ mode, onModeChange, modelInfo, re
         <h5>⚙️ Rule engine <span className="tag">Java · Python · C</span></h5>
         <p>
           Static rules on the AST and code metrics, for example Long Method (over 30 lines),
-          Too Many Parameters (over 5), Deep Nesting, Magic Number, Dead Code and Large Class.
+          Too Many Parameters (over 5), Complex Method (complexity over 10), Deep Nesting, Feature Envy,
+          Message Chains, Switch Statements, Dead Code, Duplicate Code, Magic Number and Large Class.
         </p>
         <dl className="cuqa-kv">
           <dt>Smells in this report</dt><dd>{report ? ruleInReport : '—'}</dd>
@@ -43,13 +44,14 @@ export default function DetectionEnginePanel({ mode, onModeChange, modelInfo, re
         ) : (
           <>
             <p>
-              Gradient-boosted trees trained on the MLCQ dataset (expert-reviewed Java smells).
-              One model per smell; a smell is reported when its probability passes the tuned threshold.
+              Gradient-boosted trees trained on two labelled Java datasets: MLCQ (expert reviews) and
+              DACOS (human annotations). One model per smell; a smell is reported when its probability
+              passes the tuned threshold.
             </p>
             <dl className="cuqa-kv">
               <dt>Version</dt><dd>{modelInfo.model_version}</dd>
               <dt>Learned smells</dt>
-              <dd>{learned.map(([, s]) => `${s.display_name} (F1 ${s.metrics?.test_f1?.toFixed(2) ?? '—'})`).join(', ') || '—'}</dd>
+              <dd>{learned.map(([, s]) => `${s.display_name} (${s.dataset || 'MLCQ'}, test F1 ${s.metrics?.test_f1?.toFixed(2) ?? '—'})`).join(', ') || '—'}</dd>
               <dt>{mode === 'rules' ? 'Second opinion' : 'ML smells in report'}</dt>
               <dd>
                 {mode === 'rules'

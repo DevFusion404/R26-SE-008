@@ -748,6 +748,7 @@ def main() -> int:
         }
         exported[spec.smell_type] = {
             "display_name": spec.display_name,
+            "dataset": "MLCQ",
             "mlcq_name": spec.mlcq_name,
             "entity": spec.entity,
             "enabled": bool(enabled),
@@ -794,6 +795,13 @@ def main() -> int:
         "split": "80/20 by repository, random seed 42",
         "smells": exported,
     }
+    # smells trained on other datasets (train_dacos.py) live in the same file and are kept
+    if MODEL_OUT.exists():
+        previous = json.loads(MODEL_OUT.read_text(encoding="utf-8"))
+        others = {k: v for k, v in previous.get("smells", {}).items() if v.get("dataset", "MLCQ") != "MLCQ"}
+        if others:
+            payload["smells"] = {**exported, **others}
+            payload["training_data"] = previous.get("training_data", payload["training_data"])
     exported_model = SmellModel(json.loads(json.dumps(payload)))
     max_difference = 0.0
     for spec in SMELLS:

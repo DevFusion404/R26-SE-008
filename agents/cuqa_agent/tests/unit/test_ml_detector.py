@@ -66,7 +66,7 @@ class TestDetectSmells:
         found = [s for s in result["smells"] if s["type"] == "LongMethod"]
         assert [s["entity"] for s in found] == ["compute"]
         smell = found[0]
-        assert smell["detected_by"] == "ml"
+        assert smell["detected_by"] == "model"
         assert smell["severity"] == "high"
         assert 0.0 < smell["confidence"] <= 1.0
         assert smell["start_line"] == smell["line"] == 3
@@ -135,32 +135,35 @@ class TestDetectionMode:
 class TestMerge:
     RULE_LONG = {"type": "LongMethod", "entity": "compute", "line": 4, "severity": "high"}
     RULE_MAGIC = {"type": "MagicNumber", "entity": None, "line": 9, "severity": "low"}
+    RULE_ENVY = {"type": "FeatureEnvy", "entity": "total", "line": 20, "severity": "medium"}
     ML_LONG = {"type": "LongMethod", "entity": "compute", "line": 3, "start_line": 3,
-               "end_line": 40, "severity": "high", "detected_by": "ml", "confidence": 0.9}
+               "end_line": 40, "severity": "high", "detected_by": "model", "confidence": 0.9}
     ML_DATA = {"type": "DataClass", "entity": "Dto", "line": 50, "start_line": 50,
-               "end_line": 70, "severity": "low", "detected_by": "ml", "confidence": 0.7}
+               "end_line": 70, "severity": "low", "detected_by": "model", "confidence": 0.7}
 
-    def test_hybrid_folds_agreement_into_one_entry(self):
+    def test_hybrid_lets_the_model_decide_learned_types(self):
         merged = detector.merge_with_rule_smells(
             [self.RULE_LONG, self.RULE_MAGIC], [self.ML_LONG, self.ML_DATA], "hybrid"
         )
-        assert [s["type"] for s in merged] == ["LongMethod", "MagicNumber", "DataClass"]
-        assert merged[0]["detected_by"] == "rule+ml"
-        assert merged[0]["confidence"] == 0.9
-        assert merged[1]["detected_by"] == "rule"
-        assert merged[2]["detected_by"] == "ml"
+        assert [(s["type"], s["detected_by"]) for s in merged] == [
+            ("MagicNumber", "rule"), ("LongMethod", "model"), ("DataClass", "model"),
+        ]
 
-    def test_hybrid_keeps_same_named_method_outside_the_span_separate(self):
-        other = dict(self.RULE_LONG, line=200)
-        merged = detector.merge_with_rule_smells([other], [self.ML_LONG], "hybrid")
-        assert [s["detected_by"] for s in merged] == ["rule", "ml"]
-
-    def test_ml_mode_replaces_learned_types_only(self):
-        merged = detector.merge_with_rule_smells(
-            [self.RULE_LONG, self.RULE_MAGIC], [self.ML_DATA], "ml"
-        )
+    def test_hybrid_drops_a_rule_smell_the_model_did_not_confirm(self):
+        merged = detector.merge_with_rule_smells([self.RULE_LONG, self.RULE_MAGIC], [self.ML_DATA], "hybrid")
         # the model did not flag compute, so the rule's LongMethod is dropped
         assert [s["type"] for s in merged] == ["MagicNumber", "DataClass"]
+
+    def test_hybrid_keeps_rules_for_types_the_model_has_switched_off(self):
+        assert "FeatureEnvy" not in detector.learned_smell_types()
+        merged = detector.merge_with_rule_smells([self.RULE_ENVY], [], "hybrid")
+        assert [(s["type"], s["detected_by"]) for s in merged] == [("FeatureEnvy", "rule")]
+
+    def test_ml_mode_keeps_model_smells_only(self):
+        merged = detector.merge_with_rule_smells(
+            [self.RULE_LONG, self.RULE_MAGIC, self.RULE_ENVY], [self.ML_DATA], "ml"
+        )
+        assert [(s["type"], s["detected_by"]) for s in merged] == [("DataClass", "model")]
 
     def test_inputs_are_not_modified(self):
         rule = dict(self.RULE_LONG)
@@ -207,20 +210,28 @@ class TestReportIntegration:
         assert smell["category"] == "Bloaters"
         assert smell["category_priority"] == "critical"
 
-    def test_hybrid_mode_merges_into_code_smells(self):
+    def test_every_smell_is_tagged_in_rules_mode(self):
+        for source, name in ((_long_method_java(), "Calculator.java"), ("def f(a,b,c,d,e,f,g):\n    return 1\n", "a.py")):
+            report = generate_file_report(source, name, detector="rules")
+            assert report["code_smells"]
+            assert {s["detected_by"] for s in report["code_smells"]} == {"rule"}
+
+    def test_hybrid_mode_model_decides_learned_types(self):
         report = generate_file_report(_long_method_java(), "Calculator.java", detector="hybrid")
         assert report["detection_mode"] == "hybrid"
         long_methods = [s for s in report["code_smells"] if s["type"] == "LongMethod"]
-        assert len(long_methods) == 1  # rule and model agree on compute()
-        assert long_methods[0]["detected_by"] == "rule+ml"
-        assert all("detected_by" in s for s in report["code_smells"])
+        assert [(s["entity"], s["detected_by"]) for s in long_methods] == [("compute", "model")]
+        by_source = {s["type"]: s["detected_by"] for s in report["code_smells"]}
+        assert by_source["MagicNumber"] == "rule"
+        learned = detector.learned_smell_types()
+        assert all(s["detected_by"] == ("model" if s["type"] in learned else "rule")
+                   for s in report["code_smells"])
 
-    def test_ml_mode_keeps_unlearned_rule_smells(self):
+    def test_ml_mode_keeps_model_smells_only(self):
         report = generate_file_report(_long_method_java(), "Calculator.java", detector="ml")
         assert report["detection_mode"] == "ml"
-        by_source = {s["type"]: s["detected_by"] for s in report["code_smells"]}
-        assert by_source["LongMethod"] == "ml"
-        assert by_source["MagicNumber"] == "rule"
+        assert report["code_smells"]
+        assert {s["detected_by"] for s in report["code_smells"]} == {"model"}
 
     def test_environment_variable_selects_mode(self, monkeypatch):
         monkeypatch.setenv("CUQA_SMELL_DETECTOR", "hybrid")

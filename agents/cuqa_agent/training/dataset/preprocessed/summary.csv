@@ -1,0 +1,15 @@
+dataset,smell,display_name,entity,split,samples,positive,repositories,human_samples,human_positive
+MLCQ,long_method,Long Method,method,train,1813,189,328,,
+MLCQ,long_method,Long Method,method,test,354,44,78,,
+MLCQ,feature_envy,Feature Envy,method,train,1803,47,327,,
+MLCQ,feature_envy,Feature Envy,method,test,353,12,78,,
+MLCQ,blob,Blob (Large Class),class,train,1723,176,326,,
+MLCQ,blob,Blob (Large Class),class,test,379,44,87,,
+MLCQ,data_class,Data Class,class,train,1726,221,326,,
+MLCQ,data_class,Data Class,class,test,379,56,87,,
+DACOS,complex_method,Complex Method,method,train,39872,1358,8,1838.0,1045.0
+DACOS,complex_method,Complex Method,method,test,17229,285,2,376.0,228.0
+DACOS,long_parameter_list,Long Parameter List,method,train,39190,598,8,1146.0,525.0
+DACOS,long_parameter_list,Long Parameter List,method,test,16877,197,2,276.0,140.0
+DACOS,multifaceted_abstraction,Multifaceted Abstraction,class,train,5591,900,8,732.0,651.0
+DACOS,multifaceted_abstraction,Multifaceted Abstraction,class,test,2533,364,2,273.0,225.0

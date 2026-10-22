@@ -1,0 +1,87 @@
+{
+  "dataset": "DACOS (Nandani, Saad and Sharma, MSR 2023), doi:10.5281/zenodo.7570428",
+  "labelled_samples": 98517,
+  "class_snippets_parsed": 8325,
+  "sample_status": {
+    "annotated_without_smell_code": 137,
+    "class_parse_failed": 77,
+    "class_unavailable": 10,
+    "complex_method_human": 2275,
+    "complex_method_threshold": 83559,
+    "complex_method_threshold_also_human": 50,
+    "complex_method_threshold_wrong_entity": 10880,
+    "long_parameter_list_human": 1557,
+    "long_parameter_list_threshold": 83118,
+    "long_parameter_list_threshold_also_human": 41,
+    "long_parameter_list_threshold_wrong_entity": 10283,
+    "matched": 98426,
+    "method_not_in_class_file": 66,
+    "method_parse_failed": 4,
+    "method_snippet_missing": 11,
+    "multifaceted_abstraction_human": 1341,
+    "multifaceted_abstraction_threshold": 9848,
+    "multifaceted_abstraction_threshold_also_human": 66,
+    "multifaceted_abstraction_threshold_wrong_entity": 9760
+  },
+  "class_rows": 11179,
+  "method_rows": 87247,
+  "repositories": [
+    "Blankj_AndroidUtilCode",
+    "MovingBlocks_Terasology",
+    "MyCATApache_Mycat-Server",
+    "alibaba_arthas",
+    "igniterealtime_Smack",
+    "kevin-wayne_algs4",
+    "lettuce-io_lettuce-core",
+    "linlinjava_litemall",
+    "macrozheng_mall",
+    "shuzheng_zheng"
+  ],
+  "labels": {
+    "complex_method": {
+      "human": {
+        "samples": 2271,
+        "positive": 1299,
+        "negative": 972,
+        "positive_rate": 0.572,
+        "annotator_split_votes": 409
+      },
+      "threshold": {
+        "samples": 83485,
+        "positive": 378,
+        "negative": 83107,
+        "positive_rate": 0.0045
+      }
+    },
+    "long_parameter_list": {
+      "human": {
+        "samples": 1555,
+        "positive": 731,
+        "negative": 824,
+        "positive_rate": 0.4701,
+        "annotator_split_votes": 368
+      },
+      "threshold": {
+        "samples": 83044,
+        "positive": 131,
+        "negative": 82913,
+        "positive_rate": 0.0016
+      }
+    },
+    "multifaceted_abstraction": {
+      "human": {
+        "samples": 1340,
+        "positive": 1137,
+        "negative": 203,
+        "positive_rate": 0.8485,
+        "annotator_split_votes": 191
+      },
+      "threshold": {
+        "samples": 9839,
+        "positive": 579,
+        "negative": 9260,
+        "positive_rate": 0.0588
+      }
+    }
+  }
+}
