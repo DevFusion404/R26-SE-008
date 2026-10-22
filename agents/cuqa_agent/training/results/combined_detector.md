@@ -12,7 +12,7 @@ Micro = one confusion matrix over every (sample, smell) decision. Macro = mean o
 
 | Test set | Mode | Precision | Recall | Micro F1 | Micro MCC | Accuracy | Macro F1 | Macro MCC |
 |---|---|---:|---:|---:|---:|---:|---:|---:|
-| MLCQ, 4 smells | rules | 0.489 | 0.436 | 0.461 [0.37, 0.53] | 0.402 | 0.891 | 0.416 | 0.361 |
+| MLCQ, 4 smells | rules | 0.496 | 0.429 | 0.460 [0.37, 0.53] | 0.403 | 0.893 | 0.415 | 0.362 |
 | MLCQ, 4 smells | hybrid | 0.576 | 0.628 | 0.601 [0.53, 0.67] | 0.552 | 0.911 | 0.524 | 0.479 |
 | MLCQ, 4 smells | ml | 0.636 | 0.615 | 0.625 [0.55, 0.69] | 0.582 | 0.922 | 0.492 | 0.455 |
 | MLCQ, 4 smells | hybrid_experimental | 0.565 | 0.641 | 0.601 [0.53, 0.66] | 0.551 | 0.909 | 0.544 | 0.502 |
@@ -34,7 +34,7 @@ The MLCQ micro F1 interval resamples the test repositories (95%, 1000 resamples)
 | MLCQ | Long Method | 354 (44) | model | 0.684 | 0.829 | 0.659 | 0.734 |  |
 | MLCQ | Feature Envy | 353 (12) | rule | 0.129 | 0.105 | 0.167 | 0.129 | 0.211 |
 | MLCQ | Blob (Large Class) | 379 (44) | model | 0.404 | 0.458 | 0.614 | 0.524 |  |
-| MLCQ | Data Class | 379 (56) | model | 0.444 | 0.702 | 0.714 | 0.708 |  |
+| MLCQ | Data Class | 379 (56) | model | 0.442 | 0.702 | 0.714 | 0.708 |  |
 | DACOS | Complex Method (all) | 17229 (285) | rule | 0.423 | 0.860 | 0.281 | 0.423 | 0.748 |
 | DACOS | Complex Method (human) | 376 (228) | rule | 0.201 | 0.675 | 0.118 | 0.201 | 0.729 |
 | DACOS | Long Parameter List (all) | 16877 (197) | rule | 0.405 | 0.867 | 0.264 | 0.405 | 0.534 |

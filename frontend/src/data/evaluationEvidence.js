@@ -29,7 +29,7 @@ export const ML_VS_BASELINES = {
   rows: [
     { smell: 'Long Method',        rule: 0.684, threshold: 0.750, thresholdName: 'loc ≥ 30',       ml: 0.734 },
     { smell: 'Blob (Large Class)', rule: 0.404, threshold: 0.515, thresholdName: 'sloc ≥ 156',     ml: 0.524 },
-    { smell: 'Data Class',         rule: 0.444, threshold: 0.571, thresholdName: 'accessor ratio ≥ 0.52', ml: 0.708 },
+    { smell: 'Data Class',         rule: 0.442, threshold: 0.571, thresholdName: 'accessor ratio ≥ 0.52', ml: 0.708 },
     { smell: 'Feature Envy',       rule: 0.129, threshold: 0.263, thresholdName: 'calls on locals ≥ 7', ml: 0.211 },
   ],
 };

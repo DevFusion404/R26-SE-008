@@ -506,13 +506,15 @@ repositories of both datasets, in each mode (`results/combined_detector.md`).
 The rules are the CUQA rules as they run in the service. Long Method and Large
 Class come from `report_generator.py`; Feature Envy, Data Class and Complex
 Method from `java_rules.py`, which uses the Feature Envy and Data Class
-strategies of Lanza and Marinescu [3] and McCabe's complexity limit of 10 [4].
+strategies of Lanza and Marinescu [3], with the numbers PMD uses for them, and
+McCabe's complexity limit of 10 [4]. Sources for every rule are in
+`agents/cuqa_agent/RULE_SOURCES.md`.
 Only smells with labelled data are scored; Magic Number, Dead Code, Message
 Chains and the other rule-only smells are not part of these numbers.
 
 | Test set | Mode | Precision | Recall | Micro F1 | Macro F1 |
 |---|---|---:|---:|---:|---:|
-| MLCQ, 4 smells | rules | 0.489 | 0.436 | 0.461 [0.37, 0.53] | 0.416 |
+| MLCQ, 4 smells | rules | 0.496 | 0.429 | 0.460 [0.37, 0.53] | 0.415 |
 | MLCQ, 4 smells | hybrid | 0.576 | 0.628 | 0.601 [0.53, 0.67] | 0.524 |
 | DACOS human, 3 smells | rules / hybrid | 0.628 | 0.046 | 0.085 | 0.067 |
 | DACOS human, 3 smells | hybrid + switched-off smells | 0.615 | 0.838 | 0.709 | 0.703 |

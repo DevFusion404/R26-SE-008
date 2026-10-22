@@ -34,13 +34,14 @@ COMPLEX_METHOD_CC_LIMIT = 10
 DEEP_NESTING_LIMIT = 3
 
 # Lanza and Marinescu describe their thresholds in words ("few", "one third",
-# "high"). The numbers CUQA uses for them:
-FEW = 5                 # Feature Envy: foreign data used, and providers it comes from
-ONE_THIRD = 1 / 3
-DATA_CLASS_FEW = 2      # public attributes + accessors
+# "high"). CUQA uses the numbers of PMD's implementations of the same strategies
+# (rules GodClassRule and DataClassRule, pmd-java, net.sourceforge.pmd.lang.java.rule.design):
+FEW = 5                 # GodClassRule: "Few means between 2 and 5" (Lanza and Marinescu, p. 18)
+ONE_THIRD = 1 / 3       # GodClassRule / DataClassRule: "One third is a low value" (p. 17)
+DATA_CLASS_FEW = 3      # DataClassRule: public attributes + accessors
 DATA_CLASS_MANY = 5
-WMC_HIGH = 31
-WMC_VERY_HIGH = 47
+WMC_HIGH = 31           # DataClassRule
+WMC_VERY_HIGH = 47      # GodClassRule / DataClassRule (Lanza and Marinescu, p. 16)
 
 
 def foreign_data_accesses(f: dict) -> float:
